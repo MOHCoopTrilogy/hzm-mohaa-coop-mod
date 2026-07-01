@@ -127,7 +127,6 @@
 	if( level.gametype != 0 ){
 		thread coop_setup			//owns setup order: seat table -> dummies -> cannon -> seating loop
 		thread coop_giveAmmo
-		thread coop_seatCycleDebug	//HZM coop DEBUG (F5) test tool: cycle host through the seats to verify them
 	}
 
 	level.playerjeep thread PLAYER_JEEP_Drive
@@ -1272,19 +1271,11 @@ coop_playerSpawned:
 		local.player notsolid
 		//assign a PERSISTENT seat if this player has none yet (lowest free seat; seat 1 = cannon to first claimer)
 		if( local.player.flags["coop_seatIdx"] == NIL ){
-			//HZM coop DEBUG: coop_dbgForceSeat N forces the HOST ($player[1]) into seat N (e.g. a truck seat 7-16)
-			//right off the spawn - lets us test normal seating/respawn WITHOUT the F5 switcher.
-			local.forced = int( getcvar("coop_dbgForceSeat") )
-			if( local.player == $player[1] && local.forced >= 1 && local.forced <= level.coop_seatCount && level.coop_seatTaken[local.forced] == NIL ){
-				level.coop_seatTaken[local.forced] = local.player
-				local.player.flags["coop_seatIdx"] = local.forced
-			}else{
-				for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
-					if( level.coop_seatTaken[local.s] == NIL ){
-						level.coop_seatTaken[local.s] = local.player
-						local.player.flags["coop_seatIdx"] = local.s
-						local.s = level.coop_seatCount + 1		//break: seat claimed
-					}
+			for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
+				if( level.coop_seatTaken[local.s] == NIL ){
+					level.coop_seatTaken[local.s] = local.player
+					local.player.flags["coop_seatIdx"] = local.s
+					local.s = level.coop_seatCount + 1		//break: seat claimed
 				}
 			}
 		}
@@ -1388,63 +1379,3 @@ coop_playerJustRespawned:
 	local.player.flags["coop_medkits"] = 3		//HZM coop - t2l2: refill to 3 health packs on respawn
 end
 
-//=========================================================================
-// HZM coop DEBUG (F5) - test tool to cycle the host player through every seat and verify it.
-//   seat 1 = halftrack cannon, seats 2-6 = halftrack bed, seats 7-16 = truck bed.
-// F5 (bind = set coop_seatcycle 1) rides you to the NEXT seat. No noclip needed (seats are glued).
-// Cycle only - seat offsets are already baked; there is no live tuning here. Uses duckableglue so you
-// can confirm crouch works in each bed seat.
-//=========================================================================
-coop_seatCycleDebug:
-	while( level.coop_seatCount == NIL ){ waitframe }		//wait for coop_setup to build the seat table
-	setcvar "coop_seatcycle" "0"
-	level.coop_dbgSeat = 1		//host normally starts on the cannon (seat 1)
-	while( 1 ){
-		if( int(getcvar("coop_seatcycle")) == 1 ){
-			setcvar "coop_seatcycle" "0"
-			level.coop_dbgSeat = level.coop_dbgSeat + 1
-			if( level.coop_dbgSeat > level.coop_seatCount ){ level.coop_dbgSeat = 1 }
-			local.host = $player[1]
-			if( local.host != NULL ){
-				//1. if the host is on the cannon, DISMOUNT first. A turret-mounted player is pinned to the gun,
-				//   so origin/glue can't move them until released. Use the real occupancy flag (coop_inJeep).
-				if( local.host.flags["coop_inJeep"] ){
-					local.vt = level.playerjeep queryturretslotentity 0
-					if( local.vt != NULL ){
-						local.vt unlock
-						level.playerjeep attachturretslot 0 local.host
-						local.vt lock
-					}
-					local.host.flags["coop_inJeep"] = game.false
-					waitframe		//let the dismount take effect before teleporting
-				}
-				//2. release from any glued bed seat
-				local.host unglue
-				local.host notsolid
-				//3. place on the new seat
-				if( level.coop_dbgSeat == 1 ){
-					local.vt = level.playerjeep queryturretslotentity 0
-					if( local.vt != NULL ){
-						local.vt unlock
-						level.playerjeep attachturretslot 0 local.host
-						local.host perferredweapon ".30cal Machine Gun"
-						local.vt lock
-						local.host.flags["coop_inJeep"] = game.true
-					}
-					iprintlnbold "SEAT DEBUG: seat 1 (cannon)"
-				}else{
-					local.anchor = $("playerAttach" + level.coop_dbgSeat)
-					if( local.anchor != NULL ){
-						local.host origin local.anchor.origin
-						local.host duckableglue local.anchor
-						local.host notsolid		//HZM coop: F5 host stays notsolid (riders are notsolid now)
-						iprintlnbold ("SEAT DEBUG: seat " + level.coop_dbgSeat + " @ " + local.anchor.origin)
-					}else{
-						iprintlnbold ("SEAT DEBUG: seat " + level.coop_dbgSeat + " has no anchor")
-					}
-				}
-			}
-		}
-		waitframe
-	}
-end
