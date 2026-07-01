@@ -1,0 +1,267 @@
+// HZM Coop - Phase 2 Map Tester
+//=========================================================================
+// Aggressive map test: teleport patrol + officer observation + death cycle.
+// Activated by coop_maptest == "2".  Shares the same map list and transition
+// logic as Phase 1 (maptest.scr) and uses the same watchdog/clicker.
+//
+// Per-map sequence (default ~5 minutes):
+//   1. Player spawns (clicker handles click)
+//   2. god enabled - player survives all damage, AI still reacts fully
+//   3. PATROL TOUR: teleport to up to coop_maptest_waypoints info_player_deathmatch
+//      spawn entities (spread across map), dwell coop_maptest_dwell_wpt seconds each
+//      -> fires proximity spawners, alarm volumes, ambush triggers
+//   4. OBSERVE: 60s stationary at last waypoint - officer waves, ambient events
+//   5. DEATH TEST: ungod, kill player, re-emit MAPTEST_LOADED for clicker respawn
+//      click, wait 15s, verify player is alive
+//   6. Advance to next map via same stuffsrv/coop_maptest_transition path
+//
+// Greppable banners:
+//   ^~^~^ MAPTEST_LOADED <map> (<idx>/<total>)    <- clicker trigger (same as phase1)
+//   ^~^~^ MAPTEST2_WAYPOINT <map> <i>/<n> <origin>
+//   ^~^~^ MAPTEST2_OBSERVE <map>
+//   ^~^~^ MAPTEST2_DEATH_TEST <map>
+//   ^~^~^ MAPTEST2_RESPAWN_NEEDED <map>            <- clicker re-spawns player
+//   ^~^~^ MAPTEST2_DEATH_OK <map>
+//   ^~^~^ MAPTEST2_DEATH_HANG <map>
+//   ^~^~^ MAPTEST2_ADVANCE <map> -> <next>
+//   ^~^~^ MAPTEST_PHASE_END <next>                 <- watchdog auto-transition (same as phase1)
+//   ^~^~^ MAPTEST_COMPLETE                         <- watchdog stop signal (same as phase1)
+//=========================================================================
+
+coop_maptest_phase2_tick:{
+	waitthread coop_mod/main.scr::waitForMainScript
+
+	if( getcvar( "coop_maptest" ) != "2" ){
+		end
+	}
+
+	// Wait for a connected player
+	local.guard = 0
+	while( $player.size < 1 ){
+		wait 1
+		local.guard = local.guard + 1
+		if( local.guard > 120 ){
+			println "^~^~^ MAPTEST_PAUSED no player connected"
+			end
+		}
+	}
+
+	local.maps = waitthread coop_mod/maptest.scr::coop_maptest_list
+
+	local.cur = level.coop_mapname
+	if( local.cur == NIL || local.cur == "" ){
+		local.cur = getcvar( "mapname" )
+	}
+
+	local.next = ""
+	local.idx  = 0
+	for( local.i = 1; local.i <= local.maps.size; local.i++ ){
+		if( local.maps[local.i] == local.cur ){
+			local.idx  = local.i
+			if( local.i < local.maps.size ){
+				local.next = local.maps[local.i + 1]
+			}
+		}
+	}
+
+	// Emit the Phase-1-compatible banner so the existing spawn clicker fires
+	println( "^~^~^ MAPTEST_LOADED " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+	iprintlnbold( "MAPTEST2: " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+
+	if( local.next == "" ){
+		println "^~^~^ MAPTEST_COMPLETE"
+		iprintlnbold "MAPTEST COMPLETE"
+		end
+	}
+
+	$player[1] stufftext ( "seta coop_maptest_skip " + local.next )
+
+	// Wait for clicker to fire (DELAY_S = 4s) then small settle buffer
+	wait 6
+
+	// High health instead of godmode (god/ungod are console-only commands, not script events)
+	// 999999 hp means normal combat can't kill the player; only instant-kill triggers would.
+	// Guard: setting health on a dead player throws "cannot give health to dead entities".
+	if( $player[1].health > 0 ){
+		$player[1].health    = 999999
+		$player[1].maxhealth = 999999
+	}
+
+	// -----------------------------------------------------------------------
+	// PATROL TOUR
+	// -----------------------------------------------------------------------
+	// Waypoints come from the engine TARGET LIST via the $targetname syntax, NOT
+	// getentarray. getentarray only walks globals.gentities and its "classname" getter
+	// returns nothing at runtime, so every map showed NO_SPAWNS (the original
+	// info_player_deathmatch patrol never actually ran). The $ system reads the
+	// targetname hash - which DOES include the authored spawner markers - and is the
+	// exact pattern officer.scr uses ( if( $enemyspawner != NULL ){ ... $enemyspawner[k] } ).
+	// enemyspawnerdestination = open combat positions spread across the map (best for
+	// touring + tripping ambushes); fall back to enemyspawner origins, then alarmspawner.
+	// $X safely evaluates to NULL when no entity carries that targetname.
+	local.src    = ""
+	local.spawns = NIL
+	if( $enemyspawnerdestination != NULL ){
+		local.src    = "enemyspawnerdestination"
+		local.spawns = $enemyspawnerdestination
+	}
+	if( local.spawns == NIL && $enemyspawner != NULL ){
+		local.src    = "enemyspawner"
+		local.spawns = $enemyspawner
+	}
+	if( local.spawns == NIL && $alarmspawner != NULL ){
+		local.src    = "alarmspawner"
+		local.spawns = $alarmspawner
+	}
+	// AI-ONLY maps (~19 of the m-series) have no spawner markers. The coop enemy-actor
+	// array (level.coop_actorArray["german"]) is empty here because those actors only
+	// register when ACTIVATED (engaged), not at load - so with the test player parked at
+	// spawn it never populates (verified on m1l2b: empty after a 20s poll). Instant check
+	// only (no poll): use it if somehow populated, else fall through to observe-only.
+	// Touring AI-only maps reliably needs pre-extracted per-map waypoints (BSP origins).
+	if( local.spawns == NIL && level.coop_actorArray != NIL ){
+		if( level.coop_actorArray["german"] != NIL && level.coop_actorArray["german"].size > 0 ){
+			local.src    = "coop_german_actors"
+			local.spawns = level.coop_actorArray["german"]
+		}
+	}
+	// AI-ONLY maps: no runtime source above resolved. Fall back to pre-extracted
+	// per-map BSP waypoints (info_pathnode origins, ~32/map, spread across the map).
+	// These are PLAIN VECTORS, not entities, so the teleport loop uses them directly
+	// (gated by local.src_isvectors).
+	local.src_isvectors = 0
+	if( local.spawns == NIL ){
+		local.wpvecs = waitthread coop_mod/maptest_waypoints.scr::getWaypoints local.cur
+		if( local.wpvecs != NIL ){
+			local.src           = "bsp_waypoints"
+			local.spawns        = local.wpvecs
+			local.src_isvectors = 1
+		}
+	}
+	local.wpt_max = int( getcvar( "coop_maptest_waypoints" ) )
+	if( local.wpt_max < 5 ){ local.wpt_max = 20 }
+
+	local.dwell_wpt = int( getcvar( "coop_maptest_dwell_wpt" ) )
+	if( local.dwell_wpt < 3 ){ local.dwell_wpt = 8 }
+
+	if( local.spawns != NIL ){
+		println( "^~^~^ MAPTEST2_PATROL_SRC " + local.cur + " src=" + local.src + " n=" + local.spawns.size )
+		local.step = 1
+		if( local.spawns.size > local.wpt_max ){
+			local.step = int( local.spawns.size / local.wpt_max )
+			if( local.step < 1 ){ local.step = 1 }
+		}
+
+		local.wpt = 0
+		local.i   = 1
+		while( local.i <= local.spawns.size && local.wpt < local.wpt_max ){
+			// Guard: actor-array waypoints (AI-only maps) may hold entries that died
+			// mid-tour - a removed entity reads as NIL; skip those. Static spawner
+			// markers are never NIL, so this is a no-op for them.
+			if( local.spawns[local.i] != NIL ){
+				if( local.src_isvectors ){
+					local.pos = local.spawns[local.i]
+				} else {
+					local.pos = local.spawns[local.i].origin
+				}
+				// Teleport ALWAYS, even if AI downed/killed the player - the tour must keep
+				// moving. Re-assert invincibility so a live player can't be killed mid-tour.
+				// If currently dead, the set is skipped (guard avoids "cannot give health to
+				// dead entities") and the spawn-clicker heartbeat respawns them; the next
+				// waypoint restores full health. coop_dbno 0 prevents DBNO/bleed-out.
+				$player[1].origin = local.pos
+				if( $player[1].health > 0 ){
+					$player[1].health    = 999999
+					$player[1].maxhealth = 999999
+				}
+				println( "^~^~^ MAPTEST2_WAYPOINT " + local.cur + " " + local.wpt + "/" + local.wpt_max + " " + local.pos )
+				wait local.dwell_wpt
+				local.wpt = local.wpt + 1
+			}
+			local.i = local.i + local.step
+		}
+	} else {
+		println( "^~^~^ MAPTEST2_NO_SPAWNS " + local.cur + " - skipping patrol, observe only" )
+	}
+
+	// -----------------------------------------------------------------------
+	// OBSERVE: stationary at last position - officer waves, ambient events
+	// -----------------------------------------------------------------------
+	println( "^~^~^ MAPTEST2_OBSERVE " + local.cur )
+	iprintlnbold( "MAPTEST2 OBSERVE: " + local.cur )
+	wait 25
+
+	// -----------------------------------------------------------------------
+	// DEATH / RESPAWN TEST
+	// -----------------------------------------------------------------------
+	println( "^~^~^ MAPTEST2_DEATH_TEST " + local.cur )
+	iprintlnbold( "MAPTEST2 DEATH TEST: " + local.cur )
+
+	// Reset health to normal then kill (stufftext "kill" = suicide command, bypasses health)
+	$player[1].health    = 100
+	$player[1].maxhealth = 100
+	wait 0.1
+	$player[1] stufftext "kill"
+	wait 2
+
+	// Signal clicker to re-click so player can respawn from spectator
+	println( "^~^~^ MAPTEST2_RESPAWN_NEEDED " + local.cur )
+
+	// BOUNDED POLL: the spawn-clicker's mid-map respawn click intermittently misses
+	// ("SDL window not found - skipping spawn click"), so a single +15s sample
+	// false-flagged MAPTEST2_DEATH_HANG. Poll up to ~40s (20 x 2s), re-emit
+	// MAPTEST2_RESPAWN_NEEDED every ~5s so the clicker keeps retrying, and declare
+	// MAPTEST2_DEATH_OK the moment the player is alive. mohaa-script-safe: flag +
+	// counter in the while condition, no break, single-line conditions only.
+	local.alive   = 0
+	local.dtick   = 0
+	while( local.alive == 0 && local.dtick < 20 ){
+		wait 2
+		local.dtick = local.dtick + 1
+		if( $player.size > 0 && $player[1].health > 0 ){ local.alive = 1 }
+		if( local.alive == 0 && int( local.dtick / 3 ) * 3 == local.dtick ){ println( "^~^~^ MAPTEST2_RESPAWN_NEEDED " + local.cur ) }
+	}
+
+	// Verify respawn
+	if( local.alive == 1 ){
+		println( "^~^~^ MAPTEST2_DEATH_OK " + local.cur )
+	} else {
+		if( $player.size > 0 ){
+			println( "^~^~^ MAPTEST2_DEATH_HANG " + local.cur + " health=0" )
+		} else {
+			println( "^~^~^ MAPTEST2_DEATH_HANG " + local.cur + " no player" )
+		}
+	}
+
+	// Restore high health for any remaining time
+	if( $player.size > 0 ){
+		$player[1].health    = 999999
+		$player[1].maxhealth = 999999
+	}
+
+	wait 5
+
+	if( getcvar( "coop_maptest" ) != "2" ){
+		println "^~^~^ MAPTEST_PAUSED"
+		end
+	}
+	if( $player.size < 1 ){
+		println "^~^~^ MAPTEST_PAUSED no player"
+		end
+	}
+
+	// batch_limit=5: in-game transitions every 5 maps. The crash #3 cold-load overrun
+	// (loadsurfaces[24] in TIKI_LoadTikiModel, reproducible at m1l3b->m1l3c) is now FIXED
+	// in the engine (MAX_TIKI_LOAD_SURFACES 48 + bounds guard), so transitions are safe
+	// again and we get the faster cadence + transition-path coverage. The earlier
+	// batch_limit=1 workaround is no longer needed.
+	local.batch_limit = 5
+	if( int( local.idx / local.batch_limit ) * local.batch_limit == local.idx ){
+		println( "^~^~^ MAPTEST_PHASE_END " + local.next )
+		iprintlnbold( "MAPTEST PHASE END " + local.idx + ": restart for " + local.next )
+		end
+	}
+
+	println( "^~^~^ MAPTEST2_ADVANCE " + local.cur + " -> " + local.next )
+	waitthread coop_mod/maptest.scr::coop_maptest_transition local.next
+}end

@@ -1,0 +1,3586 @@
+// Officer Boss + Radio Station
+// Spawns a high-HP German officer who calls reinforcements via radio.
+// Destroying the radio stops all future reinforcements.
+// Types: 0=infantry 1=MG team 2=sniper 3=grenadiers 4=stuka fake 5=artillery
+
+// =====================================================================
+// CENTRAL OFFICER-SPAWN POLICY (keyed by level.coop_mapname)
+// =====================================================================
+// The officer hook is wired UNCONDITIONALLY in coop_mod/main.scr, so the
+// decision of WHETHER / WHEN the officer spawns must live here, not per-map.
+// Three buckets:
+//
+//   "none"     -> officer NEVER spawns. Stealth/disguise/papers missions and
+//                 pure cinematic/escort/no-combat maps. e1l4 (papers/disguise)
+//                 is the canonical case: the boss used to drop into the
+//                 truck-stop and open fire DURING the cinematic intro.
+//   "deferred" -> mission begins quiet/stealth then goes loud. The officer
+//                 stays dormant until a go-loud signal THIS file can read (a
+//                 level alarm flag set by the map script) flips. If the wait
+//                 times out, the map behaves as "none" for that session. Maps
+//                 with no readable go-loud flag are documented in
+//                 officer_spawn_policy.md and kept "none" until a follow-up
+//                 adds the hook to the MAP script (forbidden to touch here).
+//   "combat"   -> normal combat map. Officer allowed, BUT the intro/ride
+//                 timing gates AND the anchor-distance guard below still apply
+//                 so it never spawns during an intro nor on the player start.
+//
+// Unclassified maps default to "combat" so working maps keep their officer.
+// ASCII-only; compound conditions kept on one line.
+coop_officer_policy:{
+	local.m = level.coop_mapname
+
+	// ---- NONE: pure cinematic / vehicle-only maps with no go-loud combat phase ----
+	// Per user rule, NONE is reserved for pure-cinematic or pure-vehicle maps that
+	// never expose a stealth->loud combat phase the officer could respond to.
+	// t1l1 = plane-ride + barn-crash cinematic intro; vanilla SH with no readable
+	// go-loud alarm flag and no stealth structure (pure-cinematic exemption).
+	if( local.m == "t1l1" ){ end "none" }
+	// m1l3b = on-rails jeep ride (driving level); no stealth/go-loud phase, no officer (user request).
+	if( local.m == "m1l3b" ){ end "none" }
+	// m2l2b = U-boat bomb-plant + chainspawner ESCAPE set-piece; a boss fight doesn't fit a timed
+	// "get out" sequence (was MARGINAL combat-policy w/ dynamic anchor) - officer off (user request).
+	if( local.m == "m2l2b" ){ end "none" }
+	// m3l1a / m3l1b - officer removed (user request).
+	if( local.m == "m3l1a" ){ end "none" }
+	if( local.m == "m3l1b" ){ end "none" }
+
+	// ---- DEFERRED: starts quiet/stealth, goes loud on a readable alarm flag ----
+	// These stealth/disguise/papers maps set level.alarm (0 -> 1 on go-loud) in
+	// their own map scripts; officer.scr polls it without further engine changes.
+	// e1l4   = papers/disguise ship infiltration -> Ship.scr::AlarmSounded sets
+	//          level.alarm=1 + level.alarmSounded=1 when cover is blown (no map edit).
+	// m1l2a  = disguise saluting-checkpoint -> spawnalarmguy sets level.alarm=1
+	//          when a spotlight catches the player (cover blown).
+	// m1l3c  = lighthouse disguise -> radio_objective sets level.alarm=1 once all
+	//          comms equipment is destroyed (the destroy objective spawns combat AI).
+	// m2l2a  = U-boat disguise + destroy-Naxos -> global/alarm_system.scr sets
+	//          level.alarm=1 on alarm trip (no map edit). Boss ENABLED (officer-enable
+	//          batch): coop_feature_boss=1 + authored anchor in officer_positions.scr;
+	//          it now spawns at the deep-deck kreigsmarine cluster once the map goes loud.
+	// m4l0   = secret farmhouse papers raid -> trigger1 (German siege) sets
+	//          level.alarm=1. Boss ENABLED (officer-enable batch): coop_feature_boss=1 +
+	//          authored anchor; spawns at the northern enemyspawner line once loud.
+	if( local.m == "e1l4" ){ end "deferred" }
+	if( local.m == "m1l3c" ){ end "deferred" }
+	if( local.m == "m2l2a" ){ end "deferred" }
+	if( local.m == "m4l0" ){ end "deferred" }
+	if( local.m == "m6l1c" ){ end "deferred" }
+	if( local.m == "m6l3c" ){ end "deferred" }
+
+	// ---- COMBAT: combat-from-start maps previously mis-marked NONE ----
+	// m2l3 = train-station escape; map sets level.alarm=1 unconditionally at spawn
+	//        and combat is immediate (not stealth). Boss ENABLED (officer-enable batch):
+	//        coop_feature_boss=1 + authored anchor (avoids the spectator-origin TGA crash
+	//        the old SKIP guarded against, since the anchor is now deterministic).
+	// e3l4 = bunker defense / repel-the-attack from the first objective; combat from
+	//        the start (the medals/outro are only the very end). Boss ENABLED
+	//        (officer-enable batch): coop_feature_boss=1 + authored elevated-fortress anchor.
+	// m5l2b = tank map. In coop the tank auto-drives so the players are on foot and
+	//        global/ai.scr spawns infantry around them -> it warrants an officer.
+	//        Reclassified NONE->COMBAT; boss ENABLED (coop_feature_boss=1, anchor already
+	//        authored). coop_feature_paradrop stays 0 (no air drop on the tank corridor).
+	if( local.m == "m2l3" ){ end "combat" }
+	if( local.m == "e3l4" ){ end "combat" }
+	if( local.m == "m5l2b" ){ end "combat" }
+	// m1l2a = disguise/checkpoint map. Reclassified deferred->combat (user request): the
+	// spotlight go-loud trigger was unreliable, so the officer rarely appeared. Now it spawns
+	// after the intro at the authored anchor in officer_positions.scr (kept >1000u from the
+	// player start so it won't drop into the disguise/checkpoint approach).
+	if( local.m == "m1l2a" ){ end "combat" }
+
+	// ---- Default: COMBAT ----
+	end "combat"
+}end
+
+// Bounded wait for a map go-loud signal. Returns 1 if the level went loud,
+// 0 on timeout (caller then treats the map as NONE for this session). Reads
+// ONLY level globals set by the map script -- no map edits. level.alarm is the
+// shared stealth-alarm flag on m6l1c / m6l3c.
+coop_officer_wait_goloud:{
+	local.t = 0
+	while( local.t < 600 ){
+		if( level.alarm != NIL && level.alarm == 1 ){ end 1 }
+		if( level.alarmSounded != NIL && level.alarmSounded == 1 ){ end 1 }
+		if( level.alarmactive != NIL && level.alarmactive == 1 ){ end 1 }
+		wait 1
+		local.t++
+	}
+	end 0
+}end
+
+
+coop_officer_init:{
+	iprintlnbold "OFFICER: init called"
+	if( level.coop_officer != NULL && level.coop_officer_alive == 1 ){
+		iprintlnbold "OFFICER: init aborted - officer already exists"
+		end
+	}
+	iprintlnbold "OFFICER: init thread started"
+
+	// Pre-cache officer encounter models so there's no hitch on first spawn.
+	// e/t-series maps don't call coop_mod/precache.scr, so we do it here.
+	cache models/human/german_waffenss_officer.tik
+	cache models/human/german_wehrmact_officer.tik
+	cache models/human/german_waffenss_nco.tik
+	cache models/human/german_elite_gestapo.tik
+	cache models/human/german_Afrika_officer.tik
+	cache models/human/german_waffenss_shutze.tik
+	cache models/human/german_wehrmact_grenadier.tik
+	cache models/human/german_afrika_private.tik
+	cache models/miscobj/radio_military.tik
+	cache models/furniture/cardtable.tik
+
+	while( !$player ){ wait 1 }
+
+	// Side objectives (officer + radio) are registered right at map start rather than
+	// waiting for the officer to actually spawn. Threaded (not inline) with its own
+	// internal delay so it NEVER stalls the officer spawn sequence below. coop_obj_register
+	// is guarded (runs once), so the later call at officer-spawn becomes a harmless no-op.
+	// FIX 3: coop_obj_register_delayed now self-gates on the SAME officer outcome decided
+	// below (policy != "none" AND coop_feature_boss != 0), so on no-officer maps it shows
+	// nothing instead of two permanently-ACTIVE never-completable lines.
+	thread coop_mod/objectives.scr::coop_obj_register_delayed
+
+	// --- Central spawn policy (NONE / DEFERRED / COMBAT) ---
+	// Decided BEFORE the intro/ride waits so NONE maps exit instantly and never
+	// spawn a boss into a stealth/cinematic sequence (e1l4 truck-stop bug).
+	local.policy = exec coop_mod/officer.scr::coop_officer_policy
+	iprintlnbold ("OFFICER: spawn policy = " + local.policy)
+	if( local.policy == "none" ){
+		iprintlnbold "OFFICER: policy NONE - officer disabled on this map"
+		end
+	}
+	if( local.policy == "deferred" ){
+		iprintlnbold "OFFICER: policy DEFERRED - holding until the level goes loud"
+		local.wentLoud = exec coop_mod/officer.scr::coop_officer_wait_goloud
+		if( local.wentLoud != 1 ){
+			iprintlnbold "OFFICER: go-loud signal never fired - officer stays disabled this session"
+			end
+		}
+		iprintlnbold "OFFICER: level has gone loud - releasing the officer"
+	}
+
+	// Populate per-map officer config (anchor, instant_spawn, no_airstrikes, canteen, ...) NOW,
+	// before the settle waits below read level.coop_officer_instant_spawn. getAnchor only sets
+	// level vars + returns the anchor (no waits/spawns), so the later call for the value is harmless.
+	exec coop_mod/officer_positions.scr::getAnchor
+
+	// Per-map: on very short maps the officer should appear AT ONCE - skip all the intro/ride
+	// settle waits (inTruckCamera probe + the 25s combat-map settle + ridecomplete/RideOver).
+	if( level.coop_officer_instant_spawn != 1 ){
+	local.t = 0
+	while( !$player[1].inTruckCamera && local.t < 5 ){
+		wait 0.5
+		local.t += 0.5
+	}
+	if( $player[1].inTruckCamera ){
+		iprintlnbold "OFFICER: waiting for truck intro"
+		while( $player[1].inTruckCamera ){ wait 0.5 }
+		wait 2
+	} else {
+		wait 25
+	}
+
+	// m1l1 (and any scripted vehicle-ride map) keeps riding/dismounting long AFTER the
+	// truck camera is released: inTruckCamera goes false during the papers scene, before
+	// the bazooka ambush, the truck explosion, and the actual dismount. Spawning the
+	// boss/guards/waves into the truck-stop pocket then collides with the glued,
+	// animation-driven ranger actors (they pop in/out and warp to the ground). Gate on
+	// the real ride-complete flag. Bounded timeout; on maps that never set it the flag
+	// is NIL so this block is skipped and behavior is unchanged.
+	if( level.flags[ridecomplete] != NIL && level.flags[ridecomplete] == 0 ){
+		iprintlnbold "OFFICER: waiting for truck ride to complete"
+		local.rc = 0
+		while( level.flags[ridecomplete] == 0 && local.rc < 90 ){
+			wait 1
+			local.rc++
+		}
+		// Let the dismount + bazooka/explosion choreography finish settling.
+		wait 8
+	}
+
+	// Generalized intro guard: several BT/SH maps gate their scripted vehicle/
+	// cinematic intro on level.RideOver (0 during the ride, 1 once it ends) --
+	// the same role ridecomplete plays on m1l1. Honor it so a COMBAT map that
+	// carries this flag never spawns the boss mid-intro. NIL on maps that don't
+	// use it, so the block is skipped and behavior is unchanged.
+	if( level.RideOver != NIL && level.RideOver == 0 ){
+		iprintlnbold "OFFICER: waiting for scripted ride/intro (RideOver) to finish"
+		local.ro = 0
+		while( level.RideOver == 0 && local.ro < 90 ){
+			wait 1
+			local.ro++
+		}
+		wait 4
+	}
+	}	// end intro/ride settle (skipped when level.coop_officer_instant_spawn == 1)
+
+	// Find first living, non-DBNO player - retry until one exists
+	local.ref_player = NIL
+	while( local.ref_player == NIL ){
+		local.k = 1
+		while( local.ref_player == NIL && local.k <= $player.size ){
+			local.pk = $player[local.k]
+			if( local.pk != NULL ){
+				if( local.pk.health > 0 && local.pk.flags["coop_dbno_active"] != 1 ){
+					local.ref_player = local.pk
+				}
+			}
+			local.k++
+		}
+		if( local.ref_player == NIL ){
+			iprintlnbold "OFFICER: init waiting for a living player"
+			wait 1
+		}
+	}
+	iprintlnbold ("OFFICER: using player " + local.ref_player.targetname + " as reference")
+
+	if( level.coop_mapStartOrigin == NIL ){
+		level.coop_mapStartOrigin = local.ref_player.origin
+	}
+
+	iprintlnbold "OFFICER: wait complete, finding spawn"
+
+	// --- Stage 0: Try authored anchor from positions table ---
+	local.base_pos = NIL
+	local.authored = exec coop_mod/officer_positions.scr::getAnchor
+	if( local.authored != NIL ){
+		local.base_pos = local.authored
+		iprintlnbold ("OFFICER: authored anchor at " + local.base_pos)
+		if( level.coop_officer_verify_ingame == 1 ){
+			iprintlnbold "OFFICER: VERIFY_INGAME - check encounter in-game before shipping"
+		}
+	} else {
+		iprintlnbold "OFFICER: no authored anchor, using dynamic selection"
+	}
+
+	// Guard: getAnchor may have failed before setting z_tol (e.g. parse error in positions.scr)
+	if( level.coop_officer_z_tol == NIL ){
+		level.coop_officer_z_tol = 192
+	}
+
+	// --- Stage 1: Try $alarmspawner first (nav-valid authored positions) ---
+	if( local.base_pos == NIL ){
+		if( $alarmspawner != NULL ){
+			local.numAlarm = $alarmspawner.size
+			iprintlnbold ("OFFICER: " + local.numAlarm + " alarmspawner(s) on map")
+			local.bestAlarmDist = 0
+			local.k = 1
+			while( local.k <= local.numAlarm ){
+				local.alarm = $alarmspawner[local.k]
+				if( local.alarm != NULL ){
+					local.z_ref = level.coop_mapStartOrigin[2]
+					if( level.coop_officer_z_ref != NIL ){ local.z_ref = level.coop_officer_z_ref }
+					local.zdiff = local.alarm.origin[2] - local.z_ref
+					if( local.zdiff < 0 ){ local.zdiff = 0 - local.zdiff }
+					if( local.zdiff <= level.coop_officer_z_tol ){
+						local.adist = vector_length( local.alarm.origin - level.coop_mapStartOrigin )
+						if( local.adist >= 1500 && local.adist > local.bestAlarmDist ){
+							local.bestAlarmDist = local.adist
+							local.base_pos = local.alarm.origin
+						}
+					}
+				}
+				local.k++
+			}
+			if( local.base_pos != NIL ){
+				iprintlnbold ("OFFICER: alarmspawner selected at " + local.base_pos + " dist " + local.bestAlarmDist)
+			} else {
+				iprintlnbold "OFFICER: alarmspawners present but none passed filter"
+			}
+		} else {
+			iprintlnbold "OFFICER: no $alarmspawner on this map"
+		}
+	}
+
+	// --- Fallback: farthest living German enemy on same floor ---
+	if( local.base_pos == NIL ){
+		local.numCandidates = 0
+		local.enemyArray = level.coop_actorArray["german"]
+		if( local.enemyArray != NIL ){
+			local.z_ref = level.coop_mapStartOrigin[2]
+			if( level.coop_officer_z_ref != NIL ){ local.z_ref = level.coop_officer_z_ref }
+			for( local.i = 1; local.i <= local.enemyArray.size; local.i++ ){
+				local.ent = local.enemyArray[local.i]
+				if( local.ent != NULL && isAlive local.ent ){
+					local.zdiff = local.ent.origin[2] - local.z_ref
+					if( local.zdiff < 0 ){ local.zdiff = 0 - local.zdiff }
+					if( local.zdiff <= level.coop_officer_z_tol ){
+						local.cdist = vector_length( local.ent.origin - level.coop_mapStartOrigin )
+						if( local.cdist >= 1500 ){
+							local.numCandidates++
+							local.candidates[local.numCandidates] = local.ent
+							local.distances[local.numCandidates] = local.cdist
+						}
+					}
+				}
+			}
+		}
+		iprintlnbold ("OFFICER: enemy fallback candidates: " + local.numCandidates)
+
+		// Secondary fallback: if the Z filter excluded every actor (player stranded in a
+		// transition shaft far in Z from the map's AI -- m4l1 / m6l3c style on maps that
+		// lack a baked anchor), retry distance-only with no Z constraint so the boss still
+		// spawns instead of silently skipping the encounter.
+		if( local.numCandidates == 0 && local.enemyArray != NIL ){
+			iprintlnbold "OFFICER: Z filter found 0 candidates - retrying without Z constraint"
+			for( local.i = 1; local.i <= local.enemyArray.size; local.i++ ){
+				local.ent = local.enemyArray[local.i]
+				if( local.ent != NULL && isAlive local.ent ){
+					local.cdist = vector_length( local.ent.origin - level.coop_mapStartOrigin )
+					if( local.cdist >= 1500 ){
+						local.numCandidates++
+						local.candidates[local.numCandidates] = local.ent
+						local.distances[local.numCandidates] = local.cdist
+					}
+				}
+			}
+			iprintlnbold ("OFFICER: no-Z fallback candidates: " + local.numCandidates)
+		}
+
+		local.spawn_ent = NIL
+		local.bestDist = 0
+		if( local.numCandidates > 0 ){
+			local.sorted = 0
+			while( !local.sorted ){
+				local.sorted = 1
+				for( local.j = 1; local.j < local.numCandidates; local.j++ ){
+					local.next = local.j + 1
+					if( local.distances[local.j] > local.distances[local.next] ){
+						local.tmp_d = local.distances[local.j]
+						local.distances[local.j] = local.distances[local.next]
+						local.distances[local.next] = local.tmp_d
+						local.tmp_e = local.candidates[local.j]
+						local.candidates[local.j] = local.candidates[local.next]
+						local.candidates[local.next] = local.tmp_e
+						local.sorted = 0
+					}
+				}
+			}
+			local.spawn_ent = local.candidates[local.numCandidates]
+			local.bestDist = local.distances[local.numCandidates]
+		}
+
+		if( local.spawn_ent != NIL ){
+			iprintlnbold ("OFFICER: enemy fallback at " + local.spawn_ent.targetname + " " + local.spawn_ent.origin + " dist " + local.bestDist)
+			local.base_pos = local.spawn_ent.origin
+		} else {
+			// No authored anchor, no alarmspawner, no valid enemy actors -- map has no
+			// suitable spawn infrastructure. Skip the boss rather than spawning at the
+			// player's position (player-relative spawn causes a renderer crash on some
+			// maps because the model TGA is loaded the instant it enters the view frustum).
+			iprintlnbold "OFFICER: no valid spawn infrastructure - skipping boss on this map"
+			end
+		}
+	}
+
+	// --- Anchor-distance guard (never spawn on the player's start / vehicle-stop
+	// / intro location) ---
+	// The dynamic paths already require >=1500u from mapStartOrigin, but an
+	// authored anchor is trusted blindly. Enforce a hard minimum here for ALL
+	// paths so a mis-authored or too-close anchor can't drop the boss into the
+	// spawn/intro pocket (the e1l4-class failure). Below the floor, skip the
+	// boss rather than spawn on the players.
+	local.minSpawnDist = 1000
+	if( level.coop_mapStartOrigin != NIL && local.base_pos != NIL ){
+		local.startDist = vector_length( local.base_pos - level.coop_mapStartOrigin )
+		if( local.startDist < local.minSpawnDist ){
+			iprintlnbold ("OFFICER: spawn pos " + int(local.startDist) + "u from player start (< " + local.minSpawnDist + ") - skipping boss")
+			end
+		}
+	}
+
+	// Per-map feature toggle: skip the entire boss/radio encounter on maps that disable it
+	// (vehicle/rail/cinematic). Default coop_feature_boss=1 keeps AA behavior unchanged.
+	if( level.coop_feature_boss == 0 ){
+		iprintlnbold "OFFICER: boss disabled for this map (coop_feature_boss=0) - skipping"
+		end
+	}
+
+	thread coop_radio_init local.base_pos
+	iprintlnbold "OFFICER: spawn pos found, spawning"
+	thread coop_officer_spawn local.base_pos
+}end
+
+
+// Theater -> model resolver. role = "officer"|"infantry"|"elite"|"sniper"|"grenadier"|"at"|"mg"|"handler"|"dog"
+// Defaults to the exact AA WaffenSS/Wehrmacht set so AA maps are byte-identical in behavior.
+// level.coop_theater is set in officer_positions.scr::getAnchor (default "aa").
+// PRESERVED SPELLING: "german_wehrmact_*" is the lowercase 8-char game-typo form that
+// currently loads on m4l3 -- do not "correct" it.
+coop_model_for local.role:{
+	local.th = level.coop_theater
+	if( local.th == NIL ){ local.th = "aa" }
+
+	// Theater-agnostic roles (AA pak, reachable in every theater).
+	if( local.role == "dog" ){ end "models/animal/german_shepherd.tik" }
+	if( local.role == "handler" ){ end "models/human/german_hund_hundpatrol.tik" }
+
+	if( local.th == "afrika" ){
+		if( local.role == "officer" ){ end "models/human/german_Afrika_officer.tik" }
+		if( local.role == "elite" ){ end "models/human/german_afrika_private.tik" }
+		if( local.role == "grenadier" ){ end "models/human/german_afrika_grenadier_nowrap.tik" }
+		// infantry / sniper / at / mg / bodyguard fallthrough
+		end "models/human/german_afrika_private.tik"
+	}
+	if( local.th == "wehr" || local.th == "russ" ){
+		if( local.role == "officer" ){ end "models/human/german_wehrmact_officer.tik" }
+		if( local.role == "elite" ){ end "models/human/german_waffenss_shutze.tik" }
+		if( local.role == "grenadier" ){ end "models/human/german_wehrmact_grenadier.tik" }
+		end "models/human/german_waffenss_shutze.tik"
+	}
+
+	// Default theater "aa" (WaffenSS): exact current model set.
+	if( local.role == "officer" ){ end "models/human/german_waffenss_officer.tik" }
+	if( local.role == "elite" ){ end "models/human/german_elite_sentry.tik" }
+	end "models/human/german_waffenss_shutze.tik"
+}end
+
+
+// Returns a randomized officer skin TIK for the current theater. AA keeps its 4-skin pool
+// (waffenss_officer / waffenss_nco / wehrmact_officer / elite_gestapo); other theaters
+// return their single command-rank model.
+coop_officer_skin:{
+	local.th = level.coop_theater
+	if( local.th == NIL ){ local.th = "aa" }
+	if( local.th == "afrika" ){ end "models/human/german_Afrika_officer.tik" }
+	if( local.th == "wehr" || local.th == "russ" ){ end "models/human/german_wehrmact_officer.tik" }
+	// AA pool -- 4 skins all from pak0; colonel replaced with waffenss_nco (colonel is maintt-only)
+	local.r_skin = randomint 4
+	if( local.r_skin == 1 ){ end "models/human/german_waffenss_nco.tik" }
+	if( local.r_skin == 2 ){ end "models/human/german_wehrmact_officer.tik" }
+	if( local.r_skin == 3 ){ end "models/human/german_elite_gestapo.tik" }
+	end "models/human/german_waffenss_officer.tik"
+}end
+
+
+coop_officer_spawn local.pos:{
+	// Random officer skin -- theater-aware (AA keeps the original 4-skin pool).
+	local.officer_model = exec coop_mod/officer.scr::coop_officer_skin
+
+	// For authored anchors: officer spawns 100u forward from anchor; dynamic: at anchor itself
+	local.officer_pos = local.pos
+	if( level.coop_officer_anchor != NIL ){
+		local.officer_pos = local.pos + (100 0 0)
+	}
+	local.gnd = exec coop_mod/officer.scr::coop_find_ground local.officer_pos
+	if( local.gnd != NIL ){
+		local.zdiff = local.gnd[2] - local.officer_pos[2]
+		if( local.zdiff < 0 ){ local.zdiff = 0 - local.zdiff }
+		if( local.zdiff > 128 ){ local.gnd = NIL }
+	}
+	if( local.gnd == NIL ){ local.gnd = local.officer_pos }
+	local.officer = spawn local.officer_model
+	local.officer.origin = local.gnd
+	local.officer droptofloor
+	// Per-map authored facing (officer_positions.scr coop_officer_anchor_ang). Set BEFORE the
+	// bodyguards spawn (they place behind the officer relative to his facing) so both are oriented.
+	if( level.coop_officer_anchor_ang != NIL ){
+		local.officer.angles = ( 0 level.coop_officer_anchor_ang 0 )
+	}
+	local.officer.health = 1500
+	local.officer.flags["coop_actorStopPainHandler"] = 1
+	local.officer.accuracy = 85
+	local.officer gun "stg44"
+	local.officer.leash = 2048
+	local.officer.enableEnemy = 1
+	local.officer dontdropweapons
+	local.officer attackplayer
+	local.officer.nosurprise = 1
+	local.officer.nolongpain = 1
+	local.officer german
+	local.officer forceactivate
+	local.officer rendereffects "+coopboss"
+	// OFFICER tag for the cgame eagle icon. Uses "+additivedynamiclight" (RF_ADDITIVE_DLIGHT):
+	// it is NOT set by default on sentients (unlike preciseshadow, which is -> every actor
+	// AND player got the eagle), has no visual effect without an attached dynamic light,
+	// and the existing game.dll already supports the token. cgame draws the Reichsadler for
+	// any coopboss actor carrying this flag; everyone else keeps the swastika/star.
+	local.officer rendereffects "+additivedynamiclight"
+	thread coop_mark_boss local.officer
+	// Overhead marker (eagle) is drawn by cgame CG_ActorOverheadIcon (RT_SPRITE world
+	// sprite) off these flags -- no script-side billboard needed.
+	println "OFFICER: rendereffects coopboss set"
+	level.coop_officer = local.officer
+	level.coop_officer_alive = 1
+	level.coop_officer_medkit_used = 0
+	level.coop_officer_threshold_reset = 0
+	level.coop_officer_busy = 0
+	level.coop_wave_recalls = 0
+	level.coop_officer_canteens = 0
+	level.coop_officer_lastseen = level.time
+	forcemusic "action"
+	println ("OFFICER SPAWNED HP: " + local.officer.health)
+	iprintlnbold "Intel reports a High-Ranking Officer is visiting this area."
+	iprintlnbold "Be cautious of his reinforcements he brought with him."
+	// Per-map officer-spawn TUTORIAL (indexed array of short lines; off when unset).
+	if( level.coop_officer_spawn_tutorial[1] != NIL ){
+		local.stl = 1
+		while( level.coop_officer_spawn_tutorial[local.stl] != NIL ){
+			iprintlnbold level.coop_officer_spawn_tutorial[local.stl]
+			local.stl++
+		}
+	}
+	local.dist_x = int(local.pos[0])
+	local.dist_y = int(local.pos[1])
+	println ("Officer spotted at position " + local.dist_x + " " + local.dist_y)
+	local.officer playsound coop_radio_on
+	thread coop_radio_broadcast
+	thread coop_officer_combat_music	// dynamic combat music while the officer can see players
+	thread coop_officer_idle_talk	// 1-2 German campaign lines while he's still idle/unspotted
+	// Bodyguards spawn behind the officer and run to the radio to defend it (no roof drops next to the radio)
+	local.ofwd = angles_toforward local.officer.angles
+	local.guard_back = local.officer.origin - (local.ofwd * 250)
+	local.guard1_pos = local.guard_back + (0 80 0)
+	local.guard2_pos = local.guard_back + (0 -80 0)
+	thread coop_spawn_bodyguard local.guard1_pos 1
+	thread coop_spawn_bodyguard local.guard2_pos 2
+	iprintlnbold "OFFICER: spawned 2 bodyguards"
+	thread coop_officer_bodyguard_monitor
+	thread coop_officer_retreat_monitor local.officer
+	thread coop_officer_reinforcements local.officer
+	thread coop_officer_death_monitor local.officer
+	thread coop_officer_hp_logger local.officer
+	thread coop_officer_guard_radio local.officer
+	thread coop_officer_brain local.officer
+	thread coop_officer_marker
+	thread coop_mod/objectives.scr::coop_obj_register
+}end
+
+
+// Re-assert the coop boss render flag over the first ~1.5s after spawn,
+// in case the engine sets the actor's default renderfx after our spawn script runs.
+coop_mark_boss local.ent:{
+	local.n = 0
+	while( local.n < 6 && local.ent != NULL ){
+		local.ent rendereffects "+coopboss"
+		wait 0.25
+		local.n++
+	}
+}end
+
+
+coop_spawn_bodyguard local.pos local.idx:{
+	local.gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.gnd != NIL ){
+		local.bgdz = local.gnd[2] - local.pos[2]
+		if( local.bgdz < 0 ){ local.bgdz = 0 - local.bgdz }
+		if( local.bgdz > 128 ){ local.gnd = NIL }
+	}
+	if( local.gnd == NIL ){ local.gnd = local.pos }
+	local.gmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+	local.guard = spawn local.gmodel
+	local.guard.origin = local.gnd
+	local.guard droptofloor
+	local.guard.health = 800
+	local.guard.flags["coop_actorStopPainHandler"] = 1
+	local.guard.accuracy = 70
+	local.guard.leash = 2048
+	local.guard.enableEnemy = 1
+	local.guard gun "stg44"
+	local.guard.nosurprise = 1
+	local.guard forceactivate
+	local.guard rendereffects "+coopboss"
+	thread coop_mark_boss local.guard
+	thread coop_wave_glow local.guard
+	level.coop_bodyguards[local.idx] = local.guard
+	// Run to the radio and defend it alongside the officer
+	if( level.coop_radio != NULL ){
+		local.guard.movedoneradius = 96
+		local.guard runto level.coop_radio.origin
+		local.guard waittill movedone
+	}
+	local.guard attackplayer
+}end
+
+
+// Keeps the officer active (anti-stuck) and tethered near the radio whenever he is not healing/retreating.
+coop_officer_guard_radio local.officer:{
+	while( isAlive local.officer && level.coop_officer_alive == 1 ){
+		wait 2
+		if( isAlive local.officer && level.coop_officer_alive == 1 ){
+			if( level.coop_officer_busy != 1 ){
+				// keepalive: prevent the 60s think-window freeze and idle-stuck behaviour, and keep him engaging
+				local.officer forceactivate
+				local.officer.enableEnemy = 1
+				local.officer attackplayer
+				if( level.coop_radio != NULL ){
+					local.gdist = vector_length( local.officer.origin - level.coop_radio.origin )
+					if( local.gdist > 700 ){
+						level.coop_officer_busy = 1
+						local.officer.enableEnemy = 0
+						local.officer.movedoneradius = 128
+						local.officer runto level.coop_radio.origin
+						local.officer waittill movedone
+						local.officer.enableEnemy = 1
+						local.officer attackplayer
+						level.coop_officer_busy = 0
+					}
+				}
+			}
+		}
+	}
+}end
+
+
+// Announces when both of the officer's bodyguards are dead.
+// Officer self-preservation brain: tracks how long since he last saw a player and runs the
+// canteen sip (unseen 10s, +50% HP, max 3) and the conditional retreat-to-heal (<=50% HP, unseen 30s, 50% chance).
+coop_officer_brain local.officer:{
+	local.canteen_armed = 1
+	local.retreat_rolled = 0
+	while( isAlive local.officer && level.coop_officer_alive == 1 ){
+		wait 1
+		if( isAlive local.officer && level.coop_officer_alive == 1 ){
+			local.sees = 0
+			if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ local.sees = 1 }
+			if( local.sees == 1 ){
+				level.coop_officer_lastseen = level.time
+				local.canteen_armed = 1
+				local.retreat_rolled = 0
+			}
+			local.unseen = level.time - level.coop_officer_lastseen
+
+			if( level.coop_officer_busy != 1 ){
+				// Under 40% HP and out of contact: ALWAYS retreat to a health post (full heal + back to radio)
+				if( local.officer.health < 600 && local.unseen >= 8 && local.retreat_rolled == 0 ){
+					local.retreat_rolled = 1
+					iprintlnbold "Recon reports the Officer has slipped away to find a health post!"
+					thread coop_officer_medkit_retreat local.officer
+				} else {
+					// Canteen sip: guaranteed once per unseen episode when under 50% HP, small heal, max 3
+					if( local.unseen >= 6 && local.canteen_armed == 1 && level.coop_officer_canteens < 3 && local.officer.health < 750 ){
+						local.canteen_armed = 0
+						thread coop_officer_canteen local.officer
+					}
+				}
+			}
+		}
+	}
+}end
+
+
+// Officer drinks from a canteen to recover 50% of his max health (out of combat).
+coop_officer_canteen local.officer:{
+	if( level.coop_officer_busy == 1 ){ end }
+	if( !isAlive local.officer ){ end }
+	level.coop_officer_busy = 1
+	level.coop_officer_canteens++
+	local.officer playsound coop_officer_drink
+	iprintlnbold "The Officer is drinking from his canteen to recover!"
+	wait 2
+	if( isAlive local.officer && level.coop_officer_alive == 1 ){
+		local.newhp = local.officer.health + 100
+		if( local.newhp > 1500 ){ local.newhp = 1500 }
+		local.officer.health = local.newhp
+	}
+	level.coop_officer_busy = 0
+}end
+
+
+coop_officer_bodyguard_monitor:{
+	// wait for both bodyguards to be assigned
+	local.t = 0
+	while( ( level.coop_bodyguards[1] == NULL || level.coop_bodyguards[2] == NULL ) && local.t < 10 ){
+		wait 0.5
+		local.t += 0.5
+	}
+	if( level.coop_bodyguards[1] == NULL && level.coop_bodyguards[2] == NULL ){ end }
+	local.prev = 2
+	while( level.coop_officer_alive == 1 ){
+		local.alive = 0
+		if( level.coop_bodyguards[1] != NULL && isAlive level.coop_bodyguards[1] ){ local.alive++ }
+		if( level.coop_bodyguards[2] != NULL && isAlive level.coop_bodyguards[2] ){ local.alive++ }
+		if( local.alive < local.prev ){
+			// a bodyguard just died -- officer calls reinforcements
+			local.prev = local.alive
+			iprintlnbold "You eliminated one of the Officer's bodyguards! He calls for reinforcements!"
+			thread coop_reinf_call_wave_gated level.coop_officer
+		}
+		if( local.alive == 0 ){ break }
+		wait 1
+	}
+	if( level.coop_officer_alive == 1 ){
+		iprintlnbold "The Officer's bodyguards have been eliminated!"
+	}
+}end
+
+
+coop_radio_broadcast:{
+	local.snd = "coop_radio_chatter"
+	if( randomint 2 == 1 ){ local.snd = "coop_radio_chatter_2" }
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		$player[local.pi] playsound local.snd
+		local.pi++
+	}
+}end
+
+
+coop_officer_retreat_monitor local.officer:{
+	while( isAlive local.officer ){
+		local.officer waittill damage
+		if( local.officer != NULL ){
+			if( local.officer.health < 100 ){
+				if( level.coop_radio != NULL ){
+					local.officer.enableEnemy = 0
+					local.officer runto level.coop_radio.origin
+					local.officer waittill movedone
+					local.officer.enableEnemy = 1
+				}
+			}
+		}
+	}
+}end
+
+
+coop_officer_medkit_retreat local.officer:{
+	// Repeatable: re-triggered when the officer drops to poor health (re-armed after a full heal).
+	if( level.coop_officer_busy == 1 ){ end }			// already retreating/healing - don't stack another
+	if( local.officer == NULL || !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
+	level.coop_officer_busy = 1					// claim BUSY now so threshold/brain calls can't interrupt the heal
+
+	// Scan for nearest health item on this map
+	local.maxent = int(getcvar "maxentities")
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	local.ei = 0
+	local.best_pos = NIL
+	local.best_dist = 999999
+	local.far_pos = NIL
+	local.far_dist = 0
+	local.german_near = 0
+	// "behind" = away from the players, so he never rushes toward them to heal. Direction from the
+	// officer TO the nearest player (flat XY); a medkit is behind when its offset has a NEGATIVE dot.
+	local.bb_pos = NIL		// nearest medkit BEHIND
+	local.bb_dist = 999999
+	local.bf_pos = NIL		// furthest medkit BEHIND
+	local.bf_dist = 0
+	local.np = exec coop_mod/officer.scr::coop_nearest_player_pos
+	local.fx = 0
+	local.fy = 0
+	if( local.np != NIL ){
+		local.fx = local.np[0] - local.officer.origin[0]
+		local.fy = local.np[1] - local.officer.origin[1]
+	}
+	while( local.ei < local.maxent ){
+		local.e = getentbyentnum local.ei
+		if( local.e != NULL ){
+			if( local.e.classname == "Health" ){
+				local.d = vector_length( local.e.origin - local.officer.origin )
+				if( local.d < local.best_dist ){
+					local.best_dist = local.d
+					local.best_pos = local.e.origin
+				}
+				if( local.d > local.far_dist ){
+					local.far_dist = local.d
+					local.far_pos = local.e.origin
+				}
+				// is this medkit BEHIND the officer (away from the players)?
+				local.mx = local.e.origin[0] - local.officer.origin[0]
+				local.my = local.e.origin[1] - local.officer.origin[1]
+				local.dot = (local.fx * local.mx) + (local.fy * local.my)
+				if( local.np == NIL || local.dot < 0 ){
+					if( local.d < local.bb_dist ){
+						local.bb_dist = local.d
+						local.bb_pos = local.e.origin
+					}
+					if( local.d > local.bf_dist ){
+						local.bf_dist = local.d
+						local.bf_pos = local.e.origin
+					}
+				}
+			} else if( local.e.classname == "Actor" && local.e != local.officer ){
+				// count living German support near the officer (reinforcements / map allies)
+				if( isAlive local.e && local.e.team == "german" ){
+					if( vector_length( local.e.origin - local.officer.origin ) < 1500 ){ local.german_near = local.german_near + 1 }
+				}
+			}
+		}
+		local.ei++
+	}
+
+	if( local.best_pos == NIL ){
+		iprintlnbold "OFFICER MEDKIT: no health entity found on this map - retreat skipped"
+		level.coop_officer_busy = 0
+		end
+	}
+
+	// ALWAYS prefer a medkit BEHIND him (away from the players) so he retreats to heal instead of
+	// charging them. Among behind options: alone -> FURTHEST behind (safest); with support -> NEAREST
+	// behind. If nothing is behind him, fall back to the furthest overall (still avoids rushing them).
+	local.heal_pos = local.best_pos
+	if( local.bb_pos != NIL ){
+		if( local.german_near == 0 ){
+			local.heal_pos = local.bf_pos
+			iprintlnbold "Recon reports the Officer, with no support nearby, is slipping away to a distant aid post!"
+		} else {
+			local.heal_pos = local.bb_pos
+			iprintlnbold "Recon reports the Officer is falling back to a health post - stop him before he heals!"
+		}
+	} else if( local.far_pos != NIL ){
+		local.heal_pos = local.far_pos
+		iprintlnbold "Recon reports the Officer is slipping away to a health post - stop him before he heals!"
+	} else {
+		iprintlnbold "Recon reports the Officer is retreating to a health post - stop him before he heals!"
+	}
+	level.coop_officer_busy = 1
+	local.officer.enableEnemy = 0
+	local.officer.movedoneradius = 64
+	local.timer = level.time + 35
+	while( isAlive local.officer && level.coop_officer_alive == 1 && level.time < local.timer ){
+		local.officer forceactivate
+		local.officer runto local.heal_pos
+		// POLL + re-issue every 0.4s instead of `waittill movedone`. Under heavy fire the move keeps
+		// getting interrupted by pain (no cleanly-completed movedone), which HUNG this loop and left
+		// the officer standing still. Re-issuing runto each tick keeps him pushing to the medkit.
+		wait 0.4
+		if( vector_length( local.officer.origin - local.heal_pos ) < 200 ){ break }
+	}
+	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ level.coop_officer_busy = 0; end }
+
+	// reached the health post: DEFEND while healing - he shoots back (NOT invincible; players can still
+	// kill/interrupt him), while the threshold loop stays quiet (no new reinforcement calls) until full HP.
+	local.officer.enableEnemy = 1
+	local.officer forceactivate
+	local.officer attackplayer
+	local.heal_ticks = 0
+	while( isAlive local.officer && local.heal_ticks < 10 ){
+		local.new_hp = local.officer.health + 128
+		if( local.new_hp > 1500 ){ local.new_hp = 1500 }
+		local.officer.health = local.new_hp
+		wait 1
+		local.heal_ticks++
+	}
+	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
+
+	local.officer.health = 1500
+	iprintlnbold "The Officer has been fully healed! Thresholds reset!"
+	level.coop_officer_threshold_reset = 1
+	// Top priority after healing: haul straight back to the radio
+	if( level.coop_radio != NULL ){
+		local.officer.movedoneradius = 128
+		local.rtimer = level.time + 20
+		while( isAlive local.officer && level.coop_officer_alive == 1 && level.time < local.rtimer ){
+			local.officer forceactivate
+			local.officer runto level.coop_radio.origin
+			wait 0.4		// poll + re-issue (see heal-retreat loop above) - robust vs pain/path interruption
+			if( vector_length( local.officer.origin - level.coop_radio.origin ) < 200 ){ break }
+		}
+	}
+	level.coop_officer_busy = 0
+	local.officer.enableEnemy = 1
+	local.officer forceactivate
+	local.officer attackplayer
+}end
+
+
+coop_officer_reinforcements local.officer:{
+	// Per-map feature toggle: skip reinforcement waves entirely (default coop_feature_waves=1
+	// keeps AA behavior). Officer still exists/fights, just calls no waves.
+	if( level.coop_feature_waves == 0 ){
+		iprintlnbold "REINF STATE: waves disabled for this map (coop_feature_waves=0)"
+		level.coop_reinforcements_active = 0
+		end
+	}
+	iprintlnbold "REINF STATE: thread started"
+	level.coop_reinforcements_active = 1
+
+	// STATE: IDLE - poll until officer has spotted a player
+	iprintlnbold "REINF STATE: idle - waiting for first contact"
+	while( isAlive local.officer && level.coop_officer_alive == 1 ){
+		if( local.officer.enemy != NULL ){ break }
+		if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
+		wait 0.5
+	}
+	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
+
+	iprintlnbold "REINF STATE: spotted - first wave"
+	thread coop_reinf_call_wave_gated local.officer
+
+	// HP thresholds. 75% / 50% = call a reinforcement wave IN PLACE (he keeps fighting - no chained
+	// retreat-to-radio runs). POOR HEALTH (30%) = auto-call the BATTALION once + fall back to HEAL.
+	// While he is busy (retreating/healing) NO threshold fires, and nothing re-fires until a FULL heal
+	// re-arms them (coop_officer_threshold_reset, set at the end of coop_officer_medkit_retreat).
+	local.thresh75   = 1125
+	local.thresh50   = 750
+	local.thresh_poor = 450
+	local.t75_done   = 0
+	local.t50_done   = 0
+	local.poor_done  = 0
+
+	iprintlnbold "REINF STATE: active - monitoring HP thresholds"
+	while( isAlive local.officer && level.coop_officer_alive == 1 ){
+		if( level.coop_radio_destroyed == 1 ){
+			iprintlnbold "REINF STATE: radio destroyed, halting"
+			end
+		}
+		if( level.coop_officer_threshold_reset == 1 ){
+			level.coop_officer_threshold_reset = 0
+			local.t75_done  = 0
+			local.t50_done  = 0
+			local.poor_done = 0
+		}
+		// Never fire while he is retreating/healing/otherwise busy - this is the "no chain of calls
+		// before he retreats, and no reinforcement calls during healing" behavior.
+		if( level.coop_officer_busy == 1 ){
+			wait 0.2
+			continue
+		}
+		local.hp = local.officer.health
+		local.fired = 0
+		// POOR HEALTH preempts everything: battalion + heal, then quiet until fully healed.
+		if( local.fired == 0 && local.poor_done == 0 && local.hp <= local.thresh_poor ){
+			local.poor_done = 1
+			local.t50_done  = 1
+			local.t75_done  = 1
+			local.fired     = 1
+			if( level.coop_feature_battalion != 0 ){
+				iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - BATTALION called, falling back to heal")
+				thread coop_spawn_battalion
+			} else {
+				iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - reinforcements called, falling back to heal")
+				thread coop_call_reinforcements
+			}
+			thread coop_officer_medkit_retreat local.officer
+		}
+		if( local.fired == 0 && local.t50_done == 0 && local.hp <= local.thresh50 ){
+			local.t50_done = 1
+			local.t75_done = 1
+			local.fired    = 1
+			iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (50%) - reinforcement wave")
+			thread coop_call_reinforcements
+		}
+		if( local.fired == 0 && local.t75_done == 0 && local.hp <= local.thresh75 ){
+			local.t75_done = 1
+			local.fired    = 1
+			iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (75%) - reinforcement wave")
+			thread coop_call_reinforcements
+		}
+		wait 0.1
+	}
+}end
+
+
+coop_reinf_retreat_and_wave local.officer:{
+	if( level.coop_radio == NULL || level.coop_radio_destroyed == 1 ){
+		iprintlnbold "REINF STATE: no radio, calling wave in place"
+		thread coop_reinf_call_wave_gated local.officer
+		end
+	}
+	local.radio_pos = level.coop_radio.origin
+	level.coop_officer_busy = 1
+	local.officer.enableEnemy = 0
+	local.officer.movedoneradius = 64
+	local.timer = level.time + 15
+	local.break = 0
+	while( isAlive local.officer && level.coop_officer_alive == 1 && local.break == 0 && level.time < local.timer ){
+		local.officer forceactivate
+		local.officer runto local.radio_pos
+		wait 0.4		// poll + re-issue instead of waittill movedone - robust vs pain/path interruption under fire
+		if( vector_length( local.officer.origin - local.radio_pos ) < 128 ){
+			iprintlnbold "REINF STATE: reached radio, calling wave"
+			local.break = 1
+		}
+	}
+	if( !isAlive local.officer || level.coop_officer_alive != 1 ){
+		level.coop_officer_busy = 0
+		end
+	}
+	if( local.break == 0 ){ iprintlnbold "REINF STATE: retreat timeout, calling wave anyway" }
+	level.coop_officer_busy = 0
+	local.officer.enableEnemy = 1
+	thread coop_reinf_call_wave_gated local.officer
+}end
+
+
+coop_reinf_call_wave_gated local.officer:{
+	if( !(exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000) ){
+		iprintlnbold "REINF STATE: wave postponed, no sight"
+		while( isAlive local.officer && level.coop_officer_alive == 1 ){
+			wait 0.5
+			if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
+		}
+		if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
+		iprintlnbold "REINF STATE: sight restored, firing postponed wave"
+	}
+	// German radio alarm from the radio itself when reinforcements are called (loud).
+	if( level.coop_radio != NULL ){
+		local.rsnd = "coop_radio_german_reinf" + ((randomint 9) + 1)	// 1..9 - real variety (same-name aliases don't pool)
+		level.coop_radio playsound local.rsnd
+	}
+	thread coop_call_reinforcements
+}end
+
+
+coop_find_ground local.pos:{
+	local.tr = traced (local.pos + (0 0 4)) (local.pos + (0 0 -512))
+	if( local.tr["fraction"] >= 1.0 ){ end NIL }
+	end local.tr["endpos"]
+}end
+
+
+// Periodic German combat barks for a reinforcement actor. Dogs are skipped.
+// A global cooldown keeps the squad's chatter occasional (not every soldier at once).
+// CONTEXTUAL German barks: reinforcements/bodyguards only bark when they actually have
+// an enemy (local.actor.enemy = engine current-target getter) -- a shout on first
+// contact, then sparse barks during the fight, and SILENCE otherwise. No more random
+// idle chatter. Global cooldown prevents the squad from overlapping/spamming.
+coop_german_bark_loop local.actor:{
+	if( local.actor == NULL ){ end }
+	// Per-map feature toggle: contextual German VO (default coop_feature_voice=1 = AA behavior).
+	if( level.coop_feature_voice == 0 ){ end }
+	if( local.actor.model == "models/animal/german_shepherd.tik" ){ end }
+	// Only bark while the actor actually has an enemy, and cap ALL german barks to one per
+	// 12s GLOBALLY. A single hard cooldown (no contact/sustained split) so a flickering
+	// .enemy can't re-trigger "first contact" lines over and over -- that was the soldier
+	// that "wouldn't shut up" after the paradrop.
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 2
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		if( local.actor.enemy != NULL ){
+			if( level.coop_germanbark_time == NIL ){ level.coop_germanbark_time = 0 }
+			if( (level.time - level.coop_germanbark_time) >= 12 ){
+				level.coop_germanbark_time = level.time
+				local.actor playsound coop_german_bark
+			}
+		}
+	}
+}end
+
+
+coop_wave_glow local.actor:{
+	// Ensure EF_AXIS is set so the cgame overhead boss-icon draws on this actor
+	if( local.actor != NULL ){ local.actor german }
+
+	// Overhead swastika is drawn by cgame CG_ActorOverheadIcon (RT_SPRITE) off the
+	// "+coopboss" flag the wave spawners set -- no script-side billboard needed.
+
+	// Occasional situational German combat barks (skips dogs).
+	thread coop_german_bark_loop local.actor
+
+	// (Red test glow removed -- the overhead swastika icon marks reinforcements now.)
+}end
+
+
+// HZM coop - ANTI-STUCK push toward a player. Advancing AI sometimes wedges on a wall/corner because the
+// fanned-out offset destination lands behind geometry, or the path funnels them into a corner. This:
+//   (1) makes the destination WALL-SAFE: trace from the player out to the fan-offset point; if a wall is
+//       between them the offset spot is unreachable, so pull the destination back toward the player.
+//   (2) detects NO-PROGRESS (wedged): if the actor barely moved since the last advance poll, count it;
+//       after a couple of stuck polls, abandon the offset and run straight to the player's own origin
+//       (always navmesh-reachable - a player stands there) and forceactivate to force a fresh path.
+// Per-actor state is kept on writable coop_* members (never engine-reserved names). Call each advance poll.
+coop_push_toward local.actor local.target local.offdir local.lat:{
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	if( local.target == NULL ){ end }
+
+	local.want = local.target.origin + (vector_scale local.offdir local.lat)
+	local.tr   = traced (local.target.origin + (0 0 32)) (local.want + (0 0 32))
+	local.dest = local.want
+	if( local.tr["fraction"] < 1.0 ){
+		local.shorten = local.lat * local.tr["fraction"] * 0.7
+		local.dest = local.target.origin + (vector_scale local.offdir local.shorten)
+	}
+
+	local.moved = 9999
+	if( local.actor.coop_lastpos != NIL ){
+		local.moved = vector_length( local.actor.origin - local.actor.coop_lastpos )
+	}
+	if( local.moved < 24 ){
+		if( local.actor.coop_stuckcount == NIL ){ local.actor.coop_stuckcount = 0 }
+		local.actor.coop_stuckcount = local.actor.coop_stuckcount + 1
+	} else {
+		local.actor.coop_stuckcount = 0
+	}
+
+	if( local.actor.coop_stuckcount >= 2 ){
+		// wedged: head straight for the player's reachable spot + force a fresh path
+		local.dest = local.target.origin
+		local.actor forceactivate
+		local.actor.coop_stuckcount = 0
+	}
+
+	local.actor.movedoneradius = 200
+	local.actor runto local.dest
+	local.actor.coop_lastpos = local.actor.origin
+}end
+
+
+coop_wave_hunt local.actor:{
+	wait 0.5
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.actor.nosurprise = 1
+	local.actor forceactivate
+	// Per-trooper STANDOFF (how close it pushes before letting its own think fight) + a lateral FAN
+	// so the squad disperses instead of all stacking onto one player. Cover/flank roles hang back
+	// further so the native type_attack "cover" can take over (seek cover + crouch + space out).
+	local.standoff = 350
+	if( local.actor.flags["coop_role"] == "cover" ){ local.standoff = 900 }
+	if( local.actor.flags["coop_role"] == "flank" ){ local.standoff = 700 }
+	local.slot = local.actor.flags["coop_squadSlot"]
+	if( local.slot == NIL ){ local.slot = randomint 6 }
+	local.offang = ( 0 0 0 )
+	local.offang[1] = local.slot * 60
+	local.offdir = angles_toforward local.offang
+	wait 1
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	while( local.actor != NULL && isAlive local.actor ){
+		local.np = waitthread coop_mod/replace.scr::player_closestTargetable local.actor
+		if( local.np != NULL ){
+			local.nd = vector_length( local.actor.origin - local.np.origin )
+			if( local.nd > local.standoff ){
+				// advance toward an OFFSET point around the player (fan out) - wall-safe + anti-stuck
+				waitthread coop_push_toward local.actor local.np local.offdir 220
+			} else {
+				// in engagement range: let the actor's own think (cover / turret) fight from here
+				local.actor attackplayer
+				local.actor.coop_stuckcount = 0
+				local.actor.coop_lastpos = local.actor.origin
+			}
+		}
+		// POLL + re-issue (never `waittill movedone` - pain interruption under fire hangs it)
+		wait 1.5
+	}
+}end
+
+
+// Returns 1 if wave type local.t (0-7) is permitted by level.coop_wave_mask, else 0.
+// MOHAA has no bitwise AND, so test bit t via integer division/modulo:
+//   bit set  <=>  int(mask / 2^t) is odd.
+coop_wave_allowed local.t:{
+	local.mask = level.coop_wave_mask
+	if( local.mask == NIL ){ end 1 }
+	local.pow = 1
+	if( local.t == 1 ){ local.pow = 2 }
+	if( local.t == 2 ){ local.pow = 4 }
+	if( local.t == 3 ){ local.pow = 8 }
+	if( local.t == 4 ){ local.pow = 16 }
+	if( local.t == 5 ){ local.pow = 32 }
+	if( local.t == 6 ){ local.pow = 64 }
+	if( local.t == 7 ){ local.pow = 128 }
+	local.q = int( local.mask / local.pow )
+	local.half = int( local.q / 2 )
+	if( (local.q - (local.half * 2)) == 1 ){ end 1 }
+	end 0
+}end
+
+
+coop_call_reinforcements:{
+	if( level.coop_officer == NULL ){ end }
+	local.fwd = angles_toforward level.coop_officer.angles
+	if( level.coop_officer_reinf_zone != NIL ){
+		local.spawn_base = level.coop_officer_reinf_zone
+	} else {
+		local.spawn_base = level.coop_officer.origin - (local.fwd * 500)
+	}
+	local.spawn_pos = exec coop_mod/officer.scr::coop_find_ground local.spawn_base
+	if( local.spawn_pos != NIL ){
+		local.sz_diff = local.spawn_pos[2] - level.coop_officer.origin[2]
+		if( local.sz_diff < 0 ){ local.sz_diff = 0 - local.sz_diff }
+		// HZM COOP: per-map Z tolerance. Default 128 rejects reinf zones on a different
+		// floor than the officer (avoids bad spawns). Maps whose authored reinf_zone is
+		// intentionally on another level (e.g. m1l2a) set level.coop_officer_reinf_ztol
+		// high in officer_positions.scr so the zone is honored without the per-wave warning.
+		local.ztol = 128
+		if( level.coop_officer_reinf_ztol != NIL ){ local.ztol = level.coop_officer_reinf_ztol }
+		if( local.sz_diff > local.ztol ){
+			iprintlnbold ("REINF: spawn Z diff " + int(local.sz_diff) + " too large, using officer pos")
+			local.spawn_pos = NIL
+		}
+	}
+	if( local.spawn_pos == NIL ){
+		local.safe_fallback = level.coop_officer.origin + (local.fwd * -300)
+		local.spawn_pos = exec coop_mod/officer.scr::coop_find_ground local.safe_fallback
+	}
+	if( local.spawn_pos == NIL ){
+		iprintlnbold "REINF: no valid ground for spawn, aborting wave"
+		end
+	}
+	// Wave-mask reroll: only dispatch wave types whose bit is set in level.coop_wave_mask
+	// (default 255 = all 8 allowed). Reroll up to 16 times; if nothing allowed, fall back
+	// to infantry (type 1, always-safe on-foot squad). No bitwise op in MOHAA -> bit test
+	// via coop_wave_allowed (division/modulo arithmetic).
+	local.r = randomint 8
+	local.tries = 0
+	while( !(exec coop_mod/officer.scr::coop_wave_allowed local.r) && local.tries < 16 ){
+		local.r = randomint 8
+		local.tries++
+	}
+	if( !(exec coop_mod/officer.scr::coop_wave_allowed local.r) ){
+		local.r = 1
+	}
+	// Top-down strikes -- Stuka (4) AND Artillery (5) -- may ONLY be called if the officer
+	// can actually SEE a player who is OUTDOORS (open sky overhead), and must be aimed at
+	// THAT player. Never strike a player the officer can't see, and never strike when no
+	// seen player has open sky (e.g. the sub pen interior). If there's no seen-outdoor
+	// player, reroll to an on-foot infantry squad (type 1). local.strike_target carries the
+	// locked aim point into the dispatch below. Done before the dispatch so type 1 fires.
+	local.strike_target = NIL
+	if( local.r == 4 || local.r == 5 ){
+		if( level.coop_officer_no_airstrikes == 1 ){
+			// per-map: NO Stuka/Artillery on this map (e.g. interior sub-pen) -> on-foot squad instead
+			local.r = 1
+		} else {
+			local.strike_p = exec coop_mod/officer.scr::coop_officer_visible_outdoor_player
+			if( local.strike_p == NIL ){
+				local.r = 1
+			} else {
+				local.strike_target = local.strike_p.origin
+			}
+		}
+	}
+	thread coop_radio_broadcast
+	if( local.r == 0 ){
+		iprintlnbold "Recon reports the Officer has deployed an Elite Squad to hunt you down and eliminate you."
+		thread coop_spawn_elite_squad local.spawn_pos
+	}
+	if( local.r == 1 ){
+		iprintlnbold "Recon reports the Officer has deployed a Wehrmacht Squad to hunt you down and eliminate you."
+		thread coop_spawn_infantry_squad local.spawn_pos
+	}
+	if( local.r == 2 ){
+		iprintlnbold "Recon reports the Officer has deployed an Elite Sniper to hunt you down and eliminate you."
+		thread coop_spawn_sniper local.spawn_pos
+	}
+	if( local.r == 3 ){
+		iprintlnbold "Recon reports the Officer has deployed a Grenadier Squad to hunt you down and eliminate you."
+		thread coop_spawn_grenadiers local.spawn_pos
+	}
+	if( local.r == 4 ){
+		iprintlnbold "Recon reports the Officer has called in a Stuka dive bomber onto your position."
+		thread coop_stuka_attack local.strike_target
+	}
+	if( local.r == 5 ){
+		iprintlnbold "Recon reports the Officer has called in an Artillery barrage onto your position."
+		thread coop_artillery_barrage local.strike_target
+	}
+	if( local.r == 6 ){
+		iprintlnbold "Recon reports the Officer has deployed an Anti-Tank Team to hunt you down and eliminate you."
+		thread coop_spawn_at_team local.spawn_pos
+	}
+	if( local.r == 7 ){
+		iprintlnbold "Recon reports the Officer has unleashed attack dogs to hunt you down."
+		thread coop_spawn_dogs local.spawn_pos
+	}
+}end
+
+
+// Returns a SCATTERED ground position around local.anchor for the local.i-th trooper, so a
+// squad/battalion never pops in stacked inside each other (they used to spawn in a tight straight
+// line and droptofloor on top of one another). Fans them on a widening spiral (angle via
+// angles_toforward - no sin/cos needed) plus a little random jitter, then drops to floor.
+coop_spread_pos local.anchor local.i:{
+	// HARDENED (2026-06-27): the old `rad = 64 + i*24` was UNCAPPED - a 5th death battalion (idx up to
+	// 49) reached ~1240u and flung troopers into walls/void where they spawned stuck/invisible (the
+	// "missing battalions"). Now: CAP the radius (wrap the ring so it never exceeds ~360), and on each
+	// candidate REJECT spots that drop to a very different floor; retry a few jittered candidates, and
+	// fall back to the anchor itself (guaranteed valid) if all fail. Keeps squads near + reachable.
+	local.try = 0
+	while( local.try < 6 ){
+		local.ring = local.i + (local.try * 3)
+		// ring mod 6 (no % operator in MOHAA -> divide/multiply) so radius cycles 80..360, never huge
+		local.half = int( local.ring / 6 )
+		local.step = local.ring - (local.half * 6)
+		local.ang = ( 0 0 0 )
+		local.ang[1] = (local.ring * 75) + (randomint 40)	// fan + jitter the angle each ring/retry
+		local.dir = angles_toforward local.ang
+		local.rad = 80 + (local.step * 56)			// CAPPED: 80 to 360 units
+		local.p = local.anchor + (vector_scale local.dir local.rad)
+		local.p[0] = local.p[0] + ((randomint 48) - 24)
+		local.p[1] = local.p[1] + ((randomint 48) - 24)
+		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.p
+		if( local.gnd != NIL ){
+			local.zd = local.gnd[2] - local.anchor[2]
+			if( local.zd < 0 ){ local.zd = 0 - local.zd }
+			if( local.zd <= 180 ){ end local.gnd }	// good spot on roughly the same floor
+		}
+		local.try++
+	}
+	// all candidates failed -> use the anchor itself (the officer/reinf-zone spot is known navigable)
+	local.fg = exec coop_mod/officer.scr::coop_find_ground local.anchor
+	if( local.fg == NIL ){ local.fg = local.anchor }
+	end local.fg
+}end
+
+//[208] HZM coop - per-trooper PERSONALITY roll, set ONCE at spawn (no per-actor loop - the engine runs
+//the behavior). ~35% AGGRESSIVE (rush in, long leash, no first-contact freeze), ~40% COVER (native
+//type_attack "cover" = real cover-seek + crouch-at-cover + squad spacing + reload-fallback, hold at
+//range), ~25% FLANKER (cover think, the mover offsets it to a side). Only safe engine props (NO prone -
+//engine stub/crash; crouch comes for free at cover AI_DUCK nodes). Tagged coop_personality_set so the
+//hurt manager (coop_reinf_brain) can later send it to cover + canteen.
+//=========================================================================
+coop_apply_personality local.actor:{
+//=========================================================================
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	if( local.actor.flags["coop_personality_set"] == 1 ){ end }
+	local.actor.flags["coop_personality_set"] = 1
+	local.roll = randomint 100
+	// ~12% PRONE SHOOTER -- only weapongroups that actually have prone anims (bazooka/grenade/mg42/
+	// generic have none -> they fall through to a normal role). Crash-safe: a cosmetic scripted prone
+	// pose + a decoupled gun entity for the real bullets; the actor never runs the attack.scr prone
+	// loop that crashes the server.
+	if( local.roll >= 88 ){
+		local.wg = local.actor.weapongroup
+		if( local.wg == "rifle" || local.wg == "mp40" || local.wg == "mp44" || local.wg == "bar" || local.wg == "thompson" || local.wg == "vickers" || local.wg == "pistol" ){
+			local.actor.flags["coop_role"] = "prone"
+			local.actor.leash = 2048
+			thread coop_prone_shooter local.actor
+			end
+		}
+	}
+	if( local.roll < 35 ){
+		local.actor.flags["coop_role"] = "aggr"
+		local.actor.leash = 4096
+		local.actor.nosurprise = 1
+	} else if( local.roll < 75 ){
+		local.actor.flags["coop_role"] = "cover"
+		local.actor type_attack "cover"
+		local.actor.leash = 1536
+		local.actor.mindist = 400
+		local.actor.maxdist = 1600
+	} else {
+		local.actor.flags["coop_role"] = "flank"
+		local.actor type_attack "cover"
+		local.actor.leash = 2560
+	}
+}end
+
+//[209] HZM coop - CRASH-SAFE PRONE SHOOTER. The actor is locked into a cosmetic scripted prone pose
+// via anim_scripted, which suspends its normal AI think -- so it NEVER enters the attack.scr prone/
+// crouch branch that tight-spins and crashes the server (see [[attack_scr_aiprone_fix]]). The real
+// bullets come from a decoupled script_aimedstrafinggunfire pinned at the prone muzzle (the SAME proven
+// pattern as the panzerschreck gunner + the Stuka MG strafe). The actor is NOT made invincible (user:
+// not invincible). If it loses sight of every player for a while it stands up the proven safe way
+// (hard-cut idle + enableEnemy bounce + forceactivate, per the medic-kneel exit) and re-engages.
+//=========================================================================
+coop_prone_shooter local.actor:{
+//=========================================================================
+	wait 0.5
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.wg = local.actor.weapongroup
+	// lock the prone pose; enableEnemy 0 + anim_scripted stops the normal think (no attack.scr crash)
+	local.actor.enableEnemy = 0
+	local.actor anim_scripted (local.wg + "_prone_shoot")
+	// the entity that actually fires (hitscan bullets, like the Stuka MG strafe)
+	local.gun = spawn script_aimedstrafinggunfire
+	local.gun.origin = local.actor.origin + (0 0 20)
+	local.gun bulletspread 16 16
+	local.gun tracerfreq 0
+	local.gun bulletdamage 12
+	local.lostsight = 0
+	local.refresh = 0
+	while( local.actor != NULL && isAlive local.actor ){
+		// keep the gun at the prone muzzle; re-issue the pose occasionally so it doesn't revert
+		local.gun.origin = local.actor.origin + (0 0 20)
+		local.refresh++
+		if( local.refresh >= 8 ){
+			local.actor anim_scripted (local.wg + "_prone_shoot")
+			local.refresh = 0
+		}
+		local.target = waitthread coop_mod/replace.scr::player_closestTargetable local.actor
+		if( local.target != NULL && (local.actor cansee local.target) ){
+			local.lostsight = 0
+			local.gun aimtarget local.target
+			local.gun on
+			wait 1.5
+			local.gun off
+		} else {
+			local.gun off
+			local.lostsight++
+			if( local.lostsight >= 5 ){ break }	// no visible target ~4s -> stand up and re-engage
+			wait 0.75
+		}
+	}
+	// SAFE EXIT (proven medic-kneel pattern): break the scripted CLIP with a one-frame stand idle,
+	// bounce enableEnemy 0 -> 1 to force the engine out of the scripted-anim state, forceactivate.
+	local.gun off
+	local.gun remove
+	if( local.actor != NULL && isAlive local.actor ){
+		local.actor anim "idle"
+		local.actor.position = "stand"
+		local.actor.enableEnemy = 0
+		local.actor.enableEnemy = 1
+		local.actor forceactivate
+		local.actor.flags["coop_personality_set"] = 0	// let it pick up a normal role next
+		waitthread coop_apply_personality local.actor
+		local.actor attackplayer
+	}
+}end
+
+// New reinforcement type: a 10-man Battalion (mixed loadout) that spawns deep in the map
+// on/near a distant enemy and marches to protect the officer/radio.
+coop_spawn_battalion:{
+	if( level.coop_officer == NULL ){ end }
+
+	// Spawn anchor: PREFER the authored reinforcement zone - it's navmesh-verified (the normal
+	// waves spawn there and reach the players). The old "farthest living German from the officer"
+	// anchor could land the battalion in a navmesh-disconnected spot where it never reached the
+	// fight (looked like it never spawned). Falls back to farthest-German, then a directed offset.
+	local.anchor = level.coop_officer_reinf_zone
+	local.far = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.anchor == NIL && local.arr != NIL ){
+		local.i = 1
+		while( local.i <= local.arr.size ){
+			local.e = local.arr[local.i]
+			if( local.e != NULL && isAlive local.e ){
+				local.d = vector_length( local.e.origin - level.coop_officer.origin )
+				if( local.d > local.far ){
+					local.far = local.d
+					local.anchor = local.e.origin
+				}
+			}
+			local.i++
+		}
+	}
+	if( local.anchor == NIL ){
+		// fallback: 1500u from the officer, directed away from the nearest player
+		local.np = exec coop_mod/officer.scr::coop_nearest_player_pos
+		if( local.np != NIL ){
+			local.away = level.coop_officer.origin - local.np
+			local.away[2] = 0
+			local.away = vector_normalize local.away
+			local.anchor = level.coop_officer.origin + (local.away * 1500)
+		} else {
+			local.afwd = angles_toforward level.coop_officer.angles
+			local.anchor = level.coop_officer.origin - (local.afwd * 1500)
+		}
+	}
+
+	// Destination to protect: the radio if it still stands, otherwise the officer
+	local.dest = level.coop_officer.origin
+	if( level.coop_radio != NULL ){ local.dest = level.coop_radio.origin }
+
+	iprintlnbold "Recon reports the Officer has summoned a BATTALION! They are converging to protect him!"
+
+	local.n = 0
+	while( local.n < 10 ){
+		local.sgnd = exec coop_mod/officer.scr::coop_spread_pos local.anchor local.n
+
+		local.bmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+		local.b = spawn local.bmodel
+		local.b.origin = local.sgnd
+		local.b droptofloor
+		local.b.health = 120
+		local.b.flags["coop_actorStopPainHandler"] = 1
+		local.b.accuracy = 70
+		local.b.leash = 4096
+		local.b.enableEnemy = 1
+
+		// Mixed loadout across the 10 troops
+		if( local.n == 0 ){
+			local.b gun "mauser kar 98d sniper"
+			local.b.accuracy = 100
+		} else if( local.n == 1 ){
+			local.b gun "panzerschrek"
+		} else if( local.n == 2 || local.n == 3 ){
+			local.b gun "shotgun"
+		} else if( local.n == 4 || local.n == 5 ){
+			local.b gun "stg44"
+		} else if( local.n == 6 || local.n == 7 ){
+			local.b gun "mp40"
+		} else {
+			local.b gun "mauser kar 98k"
+		}
+
+		local.b rendereffects "+coopboss"
+		local.b forceactivate
+		thread coop_wave_glow local.b
+		thread coop_battalion_march local.b local.dest
+		if( local.n == 1 ){ thread coop_at_rocket_loop local.b }
+		level.coop_battalion[local.n + 1] = local.b
+		local.n++
+	}
+	thread coop_battalion_monitor
+}end
+
+
+// A battalion trooper marches to the protect-point, then holds and fights there.
+coop_battalion_march local.actor local.dest:{
+	wait 0.5
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.actor.movedoneradius = 200
+	local.actor forceactivate
+	local.actor runto local.dest
+	local.actor waittill movedone
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.actor attackplayer
+	while( local.actor != NULL && isAlive local.actor && level.coop_officer_alive == 1 ){
+		local.actor attackplayer
+		wait 3
+	}
+}end
+
+
+// Announces when the whole battalion is wiped out.
+coop_battalion_monitor:{
+	wait 2
+	while( level.coop_officer_alive == 1 ){
+		local.alive = 0
+		local.k = 1
+		while( local.k <= 10 ){
+			if( level.coop_battalion[local.k] != NULL && isAlive level.coop_battalion[local.k] ){ local.alive++ }
+			local.k++
+		}
+		if( local.alive == 0 ){ break }
+		wait 2
+	}
+	if( level.coop_officer_alive == 1 ){
+		iprintlnbold "The Battalion has been wiped out!"
+	}
+}end
+
+
+coop_spawn_elite_squad local.pos:{
+	local.i = 0
+	local.count = 0
+	local.last_pos = local.pos
+	local.sq1 = NIL
+	local.sq2 = NIL
+	local.sq3 = NIL
+	while( local.i < 3 ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
+		if( local.gnd != NIL ){
+			local.smodel = exec coop_mod/officer.scr::coop_model_for "elite"
+			local.s = spawn local.smodel
+			local.s.origin = local.gnd
+			local.s droptofloor
+			local.s.health = 100
+			local.s.accuracy = 60
+			local.s.leash = 4096
+			local.s.enableEnemy = 1
+			local.s.ammo_grenade = 3
+			local.wrand = randomint 4
+			if( local.wrand == 0 || local.wrand == 1 ){
+				local.s gun "shotgun"
+			} else if( local.wrand == 2 ){
+				local.s gun "mauser kar 98k"
+			} else {
+				local.s gun "stg44"
+			}
+			local.s attackplayer
+			local.s rendereffects "+coopboss"
+			local.s.flags["coop_squadSlot"] = local.i
+			waitthread coop_apply_personality local.s
+			thread coop_wave_hunt local.s
+			thread coop_wave_glow local.s
+			if( local.i == 0 ){ local.sq1 = local.s }
+			else if( local.i == 1 ){ local.sq2 = local.s }
+			else { local.sq3 = local.s }
+			local.count++
+			local.last_pos = local.gnd
+		}
+		local.i++
+	}
+	if( local.count > 0 ){
+		thread coop_elite_smoke_barrage local.last_pos
+		thread coop_squad_monitor local.sq1 local.sq2 local.sq3 "Elite Squad"
+	}
+	iprintlnbold ("REINF: wave elite squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+}end
+
+
+coop_squad_monitor local.a1 local.a2 local.a3 local.label:{
+	while( level.coop_officer_alive == 1 ){
+		local.allDead = 1
+		if( local.a1 != NULL && isAlive local.a1 ){ local.allDead = 0 }
+		if( local.a2 != NULL && isAlive local.a2 ){ local.allDead = 0 }
+		if( local.a3 != NULL && isAlive local.a3 ){ local.allDead = 0 }
+		if( local.allDead == 1 ){ break }
+		wait 2
+	}
+	if( level.coop_officer_alive == 0 ){ end }
+	iprintlnbold (local.label + " eliminated.")
+	// 70% chance the officer calls a fresh wave when a squad is wiped out -- max 2 such recalls
+	if( level.coop_wave_recalls == NIL ){ level.coop_wave_recalls = 0 }
+	if( level.coop_wave_recalls < 2 && randomint 10 < 7 ){
+		level.coop_wave_recalls++
+		iprintlnbold "Recon reports the Officer is calling another wave to replace his losses!"
+		thread coop_reinf_call_wave_gated level.coop_officer
+	}
+}end
+
+
+coop_elite_smoke_barrage local.pos:{
+	local.j = 0
+	while( local.j < 2 ){
+		wait (10 + randomint 8)
+
+		local.xoff = randomint 160 - 80
+		local.yoff = randomint 160 - 80
+		local.spos = local.pos
+		local.spos[0] = local.pos[0] + local.xoff
+		local.spos[1] = local.pos[1] + local.yoff
+
+		local.pop = spawn "models/fx/M18_Smoke_GrenadeExplosion.tik"
+		local.pop.origin = local.spos
+		local.pop anim start
+		local.pop notsolid
+
+		local.cloud = spawn "models/emitters/tehao_thickSmoke.tik"
+		local.cloud.origin = local.spos
+		local.cloud anim start
+		local.cloud notsolid
+
+		wait 20
+		if( local.cloud != NULL ){ local.cloud remove }
+
+		local.j++
+	}
+}end
+
+
+// Type 1: Wehrmacht Squad -- 3 infantry with mixed (working) weapons that hunt the players.
+// Replaces the old MG42 nest (scrapped: the turret gunner floated and never fired).
+coop_spawn_infantry_squad local.pos:{
+	local.i = 0
+	local.count = 0
+	local.last_pos = local.pos
+	local.s1 = NIL
+	local.s2 = NIL
+	local.s3 = NIL
+	while( local.i < 3 ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
+		if( local.gnd != NIL ){
+			local.smodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+			local.s = spawn local.smodel
+			local.s.origin = local.gnd
+			local.s droptofloor
+			local.s.health = 120
+			local.s.flags["coop_actorStopPainHandler"] = 1
+			local.s.accuracy = 65
+			local.s.leash = 4096
+			local.s.enableEnemy = 1
+			if( local.i == 0 ){
+				local.s gun "mp40"
+			} else if( local.i == 1 ){
+				local.s gun "mauser kar 98k"
+			} else {
+				local.s gun "stg44"
+			}
+			local.s attackplayer
+			local.s rendereffects "+coopboss"
+			local.s.flags["coop_squadSlot"] = local.i
+			waitthread coop_apply_personality local.s
+			thread coop_wave_hunt local.s
+			thread coop_wave_glow local.s
+			if( local.i == 0 ){ local.s1 = local.s }
+			else if( local.i == 1 ){ local.s2 = local.s }
+			else { local.s3 = local.s }
+			local.count++
+			local.last_pos = local.gnd
+		}
+		local.i++
+	}
+	if( local.count > 0 ){
+		thread coop_squad_monitor local.s1 local.s2 local.s3 "Wehrmacht Squad"
+	}
+	iprintlnbold ("REINF: wave Wehrmacht squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+}end
+
+
+// DEPRECATED (scrapped) -- floated the gunner and never fired. Kept unreferenced; do not dispatch.
+// Type 1: MG42 Nest -- real TurretGun + true MachineGunner state (turret AI fires at the gunner's enemy) + mobile spotter
+coop_spawn_mg_team local.pos:{
+	local.gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.gnd == NIL ){ local.gnd = local.pos }
+
+	// Aim the emplacement at the nearest living player (turret still auto-tracks within its arc)
+	local.yaw = 0
+	if( level.coop_officer != NULL ){ local.yaw = level.coop_officer.angles[1] }
+	local.np = NIL
+	local.best_d = 999999
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		if( $player[local.pi] != NULL && isAlive $player[local.pi] ){
+			local.d = vector_length( $player[local.pi].origin - local.gnd )
+			if( local.d < local.best_d ){
+				local.best_d = local.d
+				local.np = $player[local.pi]
+			}
+		}
+		local.pi++
+	}
+	if( local.np != NIL ){
+		local.aim_ang = vector_toangles ( local.np.origin - local.gnd )
+		local.yaw = local.aim_ang[1]
+	}
+
+	// Spawn the real MG42 emplacement
+	local.turret = spawn "models/statweapons/mg42_gun.tik"
+	local.turret.origin = local.gnd
+	local.turret droptofloor
+	local.turret.angles = (0 local.yaw 0)
+
+	// Gunner -- true MachineGunner; engine holsters his weapon, snaps him onto the turret, turret fires at his enemy
+	local.mg = spawn "models/human/german_waffenss_shutze.tik"
+	local.mg.origin = local.gnd
+	local.mg.health = 150
+	local.mg.flags["coop_actorStopPainHandler"] = 1
+	local.mg.accuracy = 80
+	local.mg.enableEnemy = 1
+	local.mg type_idle "machinegunner"
+	local.mg type_attack "machinegunner"
+	local.mg type_disguise "machinegunner"
+	local.mg type_grenade "machinegunner"
+	local.mg turret local.turret
+	local.mg rendereffects "+coopboss"
+	local.mg forceactivate
+	local.mg attackplayer
+	thread coop_wave_glow local.mg
+
+	// Spotter -- mobile mp40 guard so the nest is not a lone static target
+	local.spot_pos = local.gnd + (64 0 0)
+	local.spot_gnd = exec coop_mod/officer.scr::coop_find_ground local.spot_pos
+	if( local.spot_gnd == NIL ){ local.spot_gnd = local.gnd }
+	local.spot = spawn "models/human/german_waffenss_shutze.tik"
+	local.spot.origin = local.spot_gnd
+	local.spot droptofloor
+	local.spot.health = 120
+	local.spot.flags["coop_actorStopPainHandler"] = 1
+	local.spot.accuracy = 65
+	local.spot.leash = 2048
+	local.spot.enableEnemy = 1
+	local.spot gun "mp40"
+	local.spot attackplayer
+	local.spot rendereffects "+coopboss"
+	thread coop_wave_hunt local.spot
+	thread coop_wave_glow local.spot
+
+	thread coop_squad_monitor local.mg local.spot NIL "MG42 Nest"
+	iprintlnbold ("REINF: wave MG42 nest spawned at " + int(local.gnd[0]) + " " + int(local.gnd[1]))
+}end
+
+
+coop_spawn_sniper local.pos:{
+	// Prefer spawning on a distant enemy deep in the map (far from players); fall back to a push from the officer
+	local.sniper_pos = local.pos
+	local.got_far = 0
+	local.far = exec coop_mod/officer.scr::coop_far_spawner_anchor
+	local.np = exec coop_mod/officer.scr::coop_nearest_player_pos
+	// Per-map: when waves are forced to the reinf zone, the sniper spawns there too (sniper_pos
+	// stays = local.pos, the reinf zone) - its distant-anchor logic lands it off-map on some maps.
+	// Sniper-specific override: coop_officer_sniper_at_zone (NIL = follow waves_at_zone) lets a map
+	// keep the sniper on its distant perch even when the other waves are zoned ("all except sniper").
+	local.sniperAtZone = level.coop_officer_waves_at_zone
+	if( level.coop_officer_sniper_at_zone != NIL ){ local.sniperAtZone = level.coop_officer_sniper_at_zone }
+	if( local.sniperAtZone != 1 ){
+		if( local.far != NIL ){
+			if( local.np == NIL ){
+				local.sniper_pos = local.far
+				local.got_far = 1
+			} else {
+				if( vector_length( local.far - local.np ) > 1500 ){
+					local.sniper_pos = local.far
+					local.got_far = 1
+				}
+			}
+		}
+		if( local.got_far == 0 && level.coop_officer != NULL ){
+			local.away = angles_toforward level.coop_officer.angles
+			if( local.np != NIL ){
+				local.away = level.coop_officer.origin - local.np
+				local.away[2] = 0
+				local.away = vector_normalize local.away
+			}
+			local.far_pos = level.coop_officer.origin + (local.away * 1200)
+			local.far_gnd = exec coop_mod/officer.scr::coop_find_ground local.far_pos
+			if( local.far_gnd != NIL ){ local.sniper_pos = local.far_gnd }
+		}
+	}
+	local.gnd = exec coop_mod/officer.scr::coop_find_ground local.sniper_pos
+	if( local.gnd == NIL ){
+		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
+	}
+	if( local.gnd == NIL ){
+		iprintlnbold "REINF: wave sniper - no ground, skipped"
+		end
+	}
+	local.snmodel = exec coop_mod/officer.scr::coop_model_for "sniper"
+	local.sniper = spawn local.snmodel
+	local.sniper.origin = local.gnd
+	local.sniper droptofloor
+	local.sniper.health = 120
+	local.sniper.accuracy = 100
+	local.sniper gun "mauser kar 98d sniper"
+	local.sniper.mindist = 800
+	local.sniper.maxdist = 3500
+	local.sniper.leash = 6000
+	local.sniper.noticescale = 100
+	local.sniper.nosurprise = 1
+	local.sniper.movedoneradius = 450
+	local.sniper.enableEnemy = 1
+	local.sniper forceactivate
+	local.sniper attackplayer
+	local.sniper rendereffects "+coopboss"
+	thread coop_wave_glow local.sniper
+	thread coop_sniper_approach local.sniper
+	thread coop_squad_monitor local.sniper NIL NIL "Elite Sniper"
+	iprintlnbold ("REINF: wave sniper spawned 1 at " + int(local.gnd[0]) + " " + int(local.gnd[1]))
+}end
+
+
+// Moves the sniper to within sniping range of the nearest player (but not into close quarters), then holds and fires.
+coop_sniper_approach local.sniper:{
+	wait 0.5
+	while( local.sniper != NULL && isAlive local.sniper && level.coop_officer_alive == 1 ){
+		local.np = exec coop_mod/officer.scr::coop_nearest_player_pos
+		if( local.np != NIL ){
+			local.d = vector_length( local.np - local.sniper.origin )
+			if( local.d > 1400 ){
+				local.dir = local.np - local.sniper.origin
+				local.dir[2] = 0
+				local.dir = vector_normalize local.dir
+				local.dest = local.np - (local.dir * 1100)
+				local.dgnd = exec coop_mod/officer.scr::coop_find_ground local.dest
+				if( local.dgnd != NIL ){
+					local.sniper.movedoneradius = 256
+					local.sniper forceactivate
+					local.sniper runto local.dgnd
+					local.sniper waittill movedone
+				}
+			}
+			if( local.sniper != NULL && isAlive local.sniper ){ local.sniper attackplayer }
+		}
+		wait 3
+	}
+}end
+
+
+// Returns the origin of the living German actor farthest from the officer (deep in the map), or NIL.
+coop_far_enemy_anchor:{
+	local.anchor = NIL
+	local.far = 0
+	if( level.coop_officer == NULL ){ end NIL }
+	// Measure distance from the nearest PLAYER so reinforcements spawn well away from them
+	local.ref = exec coop_mod/officer.scr::coop_nearest_player_pos
+	if( local.ref == NIL ){ local.ref = level.coop_officer.origin }
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr != NIL ){
+		local.i = 1
+		while( local.i <= local.arr.size ){
+			local.e = local.arr[local.i]
+			if( local.e != NULL && isAlive local.e ){
+				local.d = vector_length( local.e.origin - local.ref )
+				if( local.d > local.far ){
+					local.far = local.d
+					local.anchor = local.e.origin
+				}
+			}
+			local.i++
+		}
+	}
+	end local.anchor
+}end
+
+
+// Returns the map spawn point farthest from the nearest player.
+// Priority: $enemyspawner > $alarmspawner > live actor (coop_far_enemy_anchor).
+// Use this for dog/sniper spawns so they land at authored positions, not on top of live enemies.
+coop_far_spawner_anchor:{
+	local.ref = exec coop_mod/officer.scr::coop_nearest_player_pos
+	if( local.ref == NIL && level.coop_officer != NULL ){ local.ref = level.coop_officer.origin }
+	local.anchor = NIL
+	local.best_d = 0
+
+	// --- Try $enemyspawner ---
+	if( $enemyspawner != NULL ){
+		local.ns = $enemyspawner.size
+		local.k = 1
+		while( local.k <= local.ns ){
+			local.s = $enemyspawner[local.k]
+			if( local.s != NULL ){
+				local.d = 9999
+				if( local.ref != NIL ){ local.d = vector_length( local.s.origin - local.ref ) }
+				if( local.d > local.best_d ){
+					local.best_d = local.d
+					local.anchor = local.s.origin
+				}
+			}
+			local.k++
+		}
+	}
+
+	// --- Try $alarmspawner ---
+	if( local.anchor == NIL && $alarmspawner != NULL ){
+		local.na = $alarmspawner.size
+		local.k = 1
+		while( local.k <= local.na ){
+			local.s = $alarmspawner[local.k]
+			if( local.s != NULL ){
+				local.d = 9999
+				if( local.ref != NIL ){ local.d = vector_length( local.s.origin - local.ref ) }
+				if( local.d > local.best_d ){
+					local.best_d = local.d
+					local.anchor = local.s.origin
+				}
+			}
+			local.k++
+		}
+	}
+
+	// --- Fall back to farthest live actor ---
+	if( local.anchor == NIL ){
+		local.anchor = exec coop_mod/officer.scr::coop_far_enemy_anchor
+	}
+
+	end local.anchor
+}end
+
+
+coop_spawn_grenadiers local.pos:{
+	local.i = 0
+	local.count = 0
+	local.last_pos = local.pos
+	local.g1 = NIL
+	local.g2 = NIL
+	while( local.i < 2 ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
+		if( local.gnd != NIL ){
+			local.gmodel = exec coop_mod/officer.scr::coop_model_for "grenadier"
+			local.g = spawn local.gmodel
+			local.g.origin = local.gnd
+			local.g droptofloor
+			local.g.health = 100
+			local.g.accuracy = 65
+			local.g gun "mp40"
+			local.g type_grenade "grenade"
+			local.g.ammo_grenade = 5
+			local.g.leash = 4096
+			local.g.enableEnemy = 1
+			local.g forceactivate
+			local.g attackplayer
+			local.g rendereffects "+coopboss"
+			// hunt the players (actively push in from the reinf zone like other waves - leash 1536
+			// was too short to reach a distant reinf zone, so they just stood) + scripted grenade lob
+			thread coop_wave_glow local.g
+			local.g.flags["coop_squadSlot"] = local.i
+			waitthread coop_apply_personality local.g
+			thread coop_wave_hunt local.g
+			thread coop_grenade_lob_loop local.g
+			if( local.i == 0 ){ local.g1 = local.g } else { local.g2 = local.g }
+			local.count++
+			local.last_pos = local.gnd
+		}
+		local.i++
+	}
+	if( local.count > 0 ){
+		thread coop_squad_monitor local.g1 local.g2 NIL "Grenadier Squad"
+	}
+	iprintlnbold ("REINF: wave grenadiers spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+}end
+
+
+// Type 4: Stuka flyover -- visible dive bomber via origin lerp + MG strafing + timed bomb
+// NOTE: spawn ClassName "key" "value" keyvalue syntax is NOT valid in MOHAA script.
+// All spawns use bare classname; properties set via assignment or command afterward.
+// HZM coop - SHARED AERIAL BOMBING RUN (used by BOTH the player's binoc strike AND the officer's
+// airstrike wave). A plane flies a BANKED, DIVING arc: in high+far, descends LOW over the target
+// (nose-down), drops a stick of real falling bombs, then climbs away (nose-up). Attitude (pitch+yaw)
+// follows the flight and it BANKS into the turn, so it reads like a real bomb run instead of a flat
+// slide. The whole envelope (altitude + approach length) AUTO-SCALES from the map's $world.farplane so
+// the plane stays INSIDE the fog/far-clip and is actually visible on EVERY map WITHOUT touching the fog.
+// Origin-stepped (the proven mover; runtime flypath/SplinePath is a future upgrade - see [[plane_bomber_research]]).
+//   local.target = ground impact point     local.fwd = flat approach dir (NIL = random)
+//   local.strafe = 1 to add the MG strafe   local.model = plane .tik (NIL = Allied C-47)
+coop_air_bombing_run local.target local.fwd local.strafe local.model:{
+	if( local.target == NIL ){ end }
+	if( local.model == NIL ){ local.model = "models/vehicles/p47fly.tik" }	// P-47 fighter-bomber - matches the mission's own bombing plane (global/bomber.scr default)
+	if( local.fwd == NIL ){ local.fwd = angles_toforward ( 0 (randomint 360) 0 ) }
+	local.fwd[2] = 0
+	local.fwd = vector_normalize local.fwd
+	local.fwdang = vector_toangles local.fwd
+	local.side   = angles_toleft local.fwdang
+
+	// --- per-map visible envelope from the farplane (fog end). 0/NIL = unlimited -> assume 8000. ---
+	local.fp = $world.farplane
+	if( local.fp == NIL ){ local.fp = 0 }
+	local.fpeff = local.fp
+	if( local.fpeff <= 0 ){ local.fpeff = 8000 }
+	local.budget   = local.fpeff * 0.7
+	local.alt      = local.budget * 0.45
+	if( local.alt > 1100 ){ local.alt = 1100 }
+	local.approach = local.budget * 0.55
+	if( local.approach > 2600 ){ local.approach = 2600 }
+	if( local.approach < 900 ){ local.approach = 900 }
+
+	// --- ceiling clamp: never punch a real roof (a SURF_SKY hit overhead is fine - keep alt). ---
+	local.upt = traced (local.target + (0 0 16)) (local.target + (0 0 4096))
+	if( local.upt["fraction"] < 1.0 ){
+		local.sf = local.upt["surfaceFlags"]
+		if( local.sf == NIL ){ local.sf = 0 }
+		local.q  = int( local.sf / 4 )
+		local.hb = int( local.q / 2 )
+		if( (local.q - (local.hb * 2)) != 1 ){
+			local.room = (local.upt["fraction"] * 4096) - 96
+			if( local.alt > local.room ){ local.alt = local.room }
+		}
+	}
+
+	// --- no room for a visible pass (cramped interior) -> just deliver the bombs, skip the flyover ---
+	if( local.alt < 250 ){
+		thread coop_drop_bombs local.target local.fwd 700
+		end
+	}
+
+	local.lowalt = local.alt * 0.4		// how low it dives over the target
+	local.bowamt = local.approach * 0.22	// lateral bow so the bank visibly reads
+
+	local.faroff    = vector_scale local.fwd local.approach
+	local.startp    = local.target - local.faroff
+	local.startp[2] = local.target[2] + local.alt
+	local.endp      = local.target + local.faroff
+	local.endp[2]   = local.target[2] + local.alt
+	local.span = local.endp - local.startp
+
+	local.plane = spawn script_model
+	local.plane model local.model
+	local.plane.origin = local.startp
+	local.plane.angles = local.fwdang
+	local.plane notsolid
+	if( local.strafe == 1 ){
+		local.plane playsound coop_stuka_engine
+	} else {
+		local.plane loopsound coop_c47_approach
+	}
+
+	if( local.strafe == 1 ){ thread coop_stuka_mg_strafe local.plane local.target }
+	// release the bomb stick once the plane is overhead (tied to its live position)
+	thread coop_bombrun_release local.plane local.target local.fwd local.lowalt
+
+	local.prevpos = NIL
+	local.prevyaw = NIL
+	local.i = 0
+	while( local.plane != NULL && local.i <= 70 ){
+		local.frac = local.i / 70.0
+		local.u = (2 * local.frac) - 1
+		if( local.u < 0 ){ local.u = 0 - local.u }
+		local.dip = 1 - local.u			// 1 over the target, 0 at the ends (a shallow V dive)
+
+		local.along = vector_scale local.span local.frac
+		local.pos   = local.startp + local.along
+		local.drop  = (local.alt - local.lowalt) * local.dip
+		local.pos[2] = local.target[2] + local.alt - local.drop
+		local.bowscale = local.bowamt * local.dip
+		local.bow = vector_scale local.side local.bowscale
+		local.pos = local.pos + local.bow
+
+		if( local.prevpos != NIL ){
+			local.vel = local.pos - local.prevpos
+			local.ang = vector_toangles local.vel
+			if( local.prevyaw != NIL ){
+				local.dy = local.ang[1] - local.prevyaw
+				if( local.dy > 180 ){ local.dy = local.dy - 360 }
+				if( local.dy < (0 - 180) ){ local.dy = local.dy + 360 }
+				local.roll = local.dy * 5		// bank INTO the turn
+				if( local.roll > 35 ){ local.roll = 35 }
+				if( local.roll < (0 - 35) ){ local.roll = 0 - 35 }
+				local.ang[2] = 0 - local.roll
+			}
+			local.plane.angles = local.ang
+			local.prevyaw = local.ang[1]
+		}
+		local.plane.origin = local.pos
+		local.prevpos = local.pos
+		wait 0.05
+		local.i++
+	}
+
+	if( local.plane != NULL ){
+		local.plane stoploopsound
+		local.plane delete
+	}
+}end
+
+
+// Officer (German) airstrike wave: a Stuka diving bomb run + MG strafe on a SEEN-OUTDOOR player.
+// Thin wrapper over the shared coop_air_bombing_run (German plane + strafe). target_pos is the locked
+// seen-outdoor position from coop_officer_visible_outdoor_player (never a player the officer can't see).
+coop_stuka_attack local.target_pos:{
+	if( local.target_pos == NIL ){ end }
+	local.fwd = angles_toforward level.coop_officer.angles
+	waitthread coop_air_bombing_run local.target_pos local.fwd 1 "models/vehicles/stuka_strafe.tik"
+}end
+
+
+coop_stuka_bomb_drop local.drop_pos:{
+	local.snd = spawn script_origin
+	local.snd.origin = local.drop_pos
+	local.snd playsound coop_stuka_bomb
+
+	wait 2
+
+	local.emitter = spawn "models/emitters/mortar_dirt_dustcloud.tik"
+	local.emitter.origin = local.drop_pos
+	local.emitter anim start
+	local.emitter notsolid
+	radiusdamage local.drop_pos 300 350
+	local.emitter playsound coop_stuka_hit
+
+	wait 4
+	local.emitter remove
+	local.snd remove
+}end
+
+
+coop_stuka_mg_strafe local.stuka local.aim_pos:{
+	if( local.stuka == NULL ){ end }
+
+	local.aim = spawn script_origin
+	local.aim.origin = local.aim_pos
+
+	local.gun1 = spawn script_aimedstrafinggunfire
+	local.gun1 attach local.stuka tag_barrel1
+	local.gun1 aimtarget local.aim
+	local.gun1 bulletspread 24 24
+	local.gun1 tracerfreq 1
+	local.gun1 bulletdamage 15
+	local.gun1 on
+
+	local.gun2 = spawn script_aimedstrafinggunfire
+	local.gun2 attach local.stuka tag_barrel2
+	local.gun2 aimtarget local.aim
+	local.gun2 bulletspread 24 24
+	local.gun2 tracerfreq 1
+	local.gun2 bulletdamage 15
+	local.gun2 on
+
+	wait 2
+
+	local.gun1 off
+	local.gun2 off
+	local.gun1 remove
+	local.gun2 remove
+	local.aim remove
+}end
+
+
+// Type 5: Artillery barrage -- 3 staggered impacts around target.
+// Returns the origin of the living player nearest the officer, or NIL if none.
+coop_nearest_player_pos:{
+	local.center = NIL
+	local.best_d = 999999
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		if( $player[local.pi] != NULL && isAlive $player[local.pi] ){
+			local.d = 0
+			if( level.coop_officer != NULL ){
+				local.d = vector_length( $player[local.pi].origin - level.coop_officer.origin )
+			}
+			if( local.d < local.best_d ){
+				local.best_d = local.d
+				local.center = $player[local.pi].origin
+			}
+		}
+		local.pi++
+	}
+	end local.center
+}end
+
+
+// Returns the player entity the officer has direct LOS to, or the nearest player as fallback.
+// Used for air-based attacks so they track the spotted player rather than always player 1.
+coop_officer_visible_player:{
+	local.nearest = NIL
+	local.best_d = 999999
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL && isAlive local.p ){
+			if( level.coop_officer != NULL && level.coop_officer cansee local.p ){
+				end local.p
+			}
+			if( level.coop_officer != NULL ){
+				local.d = vector_length( local.p.origin - level.coop_officer.origin )
+				if( local.d < local.best_d ){
+					local.best_d = local.d
+					local.nearest = local.p
+				}
+			}
+		}
+		local.pi++
+	}
+	end local.nearest
+}end
+
+
+// Returns 1 if local.pos has open sky overhead (outdoors), 0 if a real ceiling is
+// within 2048u. CRITICAL: on outdoor maps the up-trace HITS the sky brush (it is solid
+// to traces), so a low fraction alone reads as "indoors" everywhere the skybox is below
+// 2048u (e.g. m1l2a). So also check the hit surface for SURF_SKY (0x4) and treat a sky
+// hit as outdoors. MOHAA has no bitwise AND -> test the 0x4 bit via int div/modulo
+// (same trick as coop_wave_allowed): bit set <=> int(flags/4) is odd.
+coop_hasOpenSky local.pos:{
+	local.tr = traced (local.pos + (0 0 4)) (local.pos + (0 0 2048))
+	if( local.tr["fraction"] >= 0.9 ){ end 1 }		// nothing close overhead -> outdoors
+	local.sf = local.tr["surfaceFlags"]
+	if( local.sf == NIL ){ local.sf = 0 }
+	local.q = int( local.sf / 4 )
+	local.half = int( local.q / 2 )
+	if( (local.q - (local.half * 2)) == 1 ){ end 1 }	// hit the sky brush -> outdoors
+	end 0
+}end
+
+// Returns a player the officer can SEE *and* who is OUTDOORS (open sky overhead), else NIL.
+// NO nearest/last-resort fallback -- top-down strikes must never target a player the
+// officer can't see, and never fire when everyone seen is under a roof.
+coop_officer_visible_outdoor_player:{
+	local.found = NIL
+	if( level.coop_officer == NULL ){ end local.found }
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL && isAlive local.p ){
+			if( level.coop_officer cansee local.p ){
+				if( (exec coop_mod/officer.scr::coop_hasOpenSky local.p.origin) == 1 ){
+					local.found = local.p
+					end local.found
+				}
+			}
+		}
+		local.pi++
+	}
+	end local.found
+}end
+
+
+coop_artillery_barrage local.target_pos:{
+	// target_pos is the locked SEEN-OUTDOOR player position chosen by the reinforcement
+	// gate. The barrage lands on that spot (with per-shell scatter) and does NOT re-track to
+	// the nearest player, so it can never chase a player the officer can't see / who ducked
+	// indoors. Bail if somehow nil -- never strike blind.
+	if( local.target_pos == NIL ){ end }
+	local.i = 0
+	while( local.i < 3 ){
+		// telegraph at the locked target
+		local.center = local.target_pos
+		local.snd = spawn script_origin
+		local.snd.origin = local.center
+		local.snd playsound coop_arty_incoming
+		wait 2
+		// impact on the locked target with some scatter for variety
+		local.hit = local.target_pos
+		local.hit[0] = local.hit[0] + ( (randomint 260) - 130 )
+		local.hit[1] = local.hit[1] + ( (randomint 260) - 130 )
+		local.snd.origin = local.hit
+		local.snd playsound coop_arty_hit
+		local.emitter = spawn "models/emitters/mortar_dirt_dustcloud.tik"
+		local.emitter.origin = local.hit
+		local.emitter anim start
+		local.emitter notsolid
+		radiusdamage local.hit 200 300
+		wait 4
+		local.emitter remove
+		local.snd remove
+		wait 1
+		local.i++
+	}
+}end
+
+
+// Type 6: AT Team -- panzerschreck gunner + mp40 loader (both normal AI)
+coop_spawn_at_team local.spawn_pos:{
+	local.gnd1 = exec coop_mod/officer.scr::coop_find_ground local.spawn_pos
+	if( local.gnd1 == NIL ){ local.gnd1 = local.spawn_pos }
+	local.off2 = local.spawn_pos + (50 0 0)
+	local.gnd2 = exec coop_mod/officer.scr::coop_find_ground local.off2
+	if( local.gnd2 == NIL ){ local.gnd2 = local.gnd1 }
+
+	// AT Gunner -- panzerschreck; engages the player via normal AI
+	local.atgmodel = exec coop_mod/officer.scr::coop_model_for "at"
+	local.gunner = spawn local.atgmodel
+	local.gunner.origin = local.gnd1
+	local.gunner droptofloor
+	local.gunner health 150
+	local.gunner.accuracy = 70
+	local.gunner.leash = 4096
+	local.gunner.enableEnemy = 1
+	local.gunner gun "panzerschrek"
+	local.gunner.flags["coop_actorStopPainHandler"] = 1
+	local.gunner rendereffects "+coopboss"
+	local.gunner forceactivate
+	thread coop_wave_glow local.gunner
+	local.gunner attackplayer
+	thread coop_at_rocket_loop local.gunner
+
+	// Loader -- mp40 guard, normal AI
+	local.atlmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+	local.loader = spawn local.atlmodel
+	local.loader.origin = local.gnd2
+	local.loader droptofloor
+	local.loader health 150
+	local.loader.accuracy = 65
+	local.loader.leash = 4096
+	local.loader.enableEnemy = 1
+	local.loader gun "mp40"
+	local.loader.flags["coop_actorStopPainHandler"] = 1
+	local.loader attackplayer
+	local.loader rendereffects "+coopboss"
+	thread coop_wave_glow local.loader
+	local.loader.flags["coop_squadSlot"] = 3
+	waitthread coop_apply_personality local.loader
+	thread coop_wave_hunt local.loader
+
+	thread coop_squad_monitor local.gunner local.loader NIL "AT Team"
+	iprintlnbold ("REINF: wave AT team spawned at " + int(local.gnd1[0]) + " " + int(local.gnd1[1]))
+}end
+
+
+// Drives the panzerschreck gunner's fire: a script_aimedstrafinggunfire that launches real rocket
+// projectiles at the nearest player. Scripted actor weapon-fire is impossible (no fire command),
+// so the gunfire entity supplies the rockets. Gated on line-of-sight + min range to avoid self-blast.
+coop_at_rocket_loop local.gunner:{
+	wait 1
+	if( local.gunner == NULL || !isAlive local.gunner ){ end }
+	local.gun = spawn script_aimedstrafinggunfire
+	local.gun.origin = local.gunner.origin + (0 0 48)
+	local.gun projectile "models/projectiles/panzerschreckshell.tik"
+	local.gun firedelay 30
+	local.gun bulletspread 12 12
+	local.gun tracerfreq 0
+	while( local.gunner != NULL && isAlive local.gunner && level.coop_officer_alive == 1 ){
+		local.gun.origin = local.gunner.origin + (0 0 48)
+		local.target = NIL
+		local.best_d = 999999
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			if( $player[local.pi] != NULL && isAlive $player[local.pi] ){
+				local.d = vector_length( $player[local.pi].origin - local.gunner.origin )
+				if( local.d < local.best_d ){
+					local.best_d = local.d
+					local.target = $player[local.pi]
+				}
+			}
+			local.pi++
+		}
+		local.canfire = 0
+		if( local.target != NIL && local.best_d > 400 ){
+			if( local.gunner cansee local.target ){ local.canfire = 1 }
+		}
+		if( local.canfire == 1 ){
+			local.gun aimtarget local.target
+			local.gun off
+			local.gunner playsound coop_panzerschreck_fire
+			local.gun fire
+			wait 4
+		} else {
+			local.gun off
+			wait 1
+		}
+	}
+	local.gun off
+	local.gun remove
+}end
+
+
+// Scripted grenade lob for grenadiers -- launches real grenade projectiles at the nearest visible
+// player so grenades reliably go off (autonomous AI grenade-throwing is unreliable here).
+coop_grenade_lob_loop local.thrower:{
+	wait 1
+	if( local.thrower == NULL || !isAlive local.thrower ){ end }
+	local.gun = spawn script_aimedstrafinggunfire
+	local.gun.origin = local.thrower.origin + (0 0 48)
+	local.gun projectile "models/projectiles/steilhandgranate_ai.tik"
+	local.gun firedelay 30
+	local.gun bulletspread 30 30
+	local.gun tracerfreq 0
+	local.tcount = 3
+	while( local.thrower != NULL && isAlive local.thrower && level.coop_officer_alive == 1 ){
+		local.gun.origin = local.thrower.origin + (0 0 48)
+		local.target = NIL
+		local.best_d = 999999
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			if( $player[local.pi] != NULL && isAlive $player[local.pi] ){
+				local.d = vector_length( $player[local.pi].origin - local.thrower.origin )
+				if( local.d < local.best_d ){
+					local.best_d = local.d
+					local.target = $player[local.pi]
+				}
+			}
+			local.pi++
+		}
+		local.canthrow = 0
+		if( local.target != NIL && local.best_d > 400 && local.best_d < 1400 ){
+			if( local.thrower cansee local.target ){ local.canthrow = 1 }
+		}
+		if( local.canthrow == 1 ){
+			local.tcount++
+			if( local.tcount >= 4 ){
+				// every 4th throw is a smoke grenade -- guaranteed visible cloud at the target
+				local.tcount = 0
+				local.spos = local.target.origin
+				local.pop = spawn "models/fx/M18_Smoke_GrenadeExplosion.tik"
+				local.pop.origin = local.spos
+				local.pop anim start
+				local.pop notsolid
+				local.cloud = spawn "models/emitters/tehao_thickSmoke.tik"
+				local.cloud.origin = local.spos
+				local.cloud anim start
+				local.cloud notsolid
+				thread coop_smoke_cleanup local.pop local.cloud
+				wait 5
+			} else {
+				local.gun aimtarget local.target
+				local.gun off
+				local.gun fire
+				wait 5
+			}
+		} else {
+			local.gun off
+			wait 1
+		}
+	}
+	local.gun off
+	local.gun remove
+}end
+
+
+// Removes a thrown smoke cloud after it has lingered.
+coop_smoke_cleanup local.pop local.cloud:{
+	wait 16
+	if( local.pop != NULL ){ local.pop remove }
+	if( local.cloud != NULL ){ local.cloud remove }
+}end
+
+
+// Type 7: Attack Dogs -- 2 German shepherds + handler
+coop_spawn_dogs local.spawn_pos:{
+	// Dogs spawn well away from the players at authored map positions, then hunt in
+	local.np = exec coop_mod/officer.scr::coop_nearest_player_pos
+	local.far = exec coop_mod/officer.scr::coop_far_spawner_anchor
+	// Per-map: when waves are forced to the reinf zone, the dogs spawn there too (spawn_pos stays
+	// = the passed reinf zone) - their distant-anchor logic lands them off-map on some maps.
+	if( level.coop_officer_waves_at_zone != 1 ){
+		if( local.np != NIL ){
+			if( local.far != NIL ){
+				if( vector_length( local.far - local.np ) > vector_length( local.spawn_pos - local.np ) ){ local.spawn_pos = local.far }
+			}
+			// guarantee distance from the nearest player so they never drop on top of you
+			local.cd = vector_length( local.spawn_pos - local.np )
+			if( local.cd < 1400 ){
+				local.away = local.spawn_pos - local.np
+				local.away[2] = 0
+				if( vector_length( local.away ) < 1 ){ local.away = (1 0 0) }
+				local.away = vector_normalize local.away
+				local.try = local.np + (local.away * 1600)
+				local.try_gnd = exec coop_mod/officer.scr::coop_find_ground local.try
+				if( local.try_gnd != NIL ){ local.spawn_pos = local.try_gnd }
+			}
+		} else {
+			if( local.far != NIL ){ local.spawn_pos = local.far }
+		}
+	}
+	local.dog_pos1 = exec coop_mod/officer.scr::coop_find_ground local.spawn_pos
+	if( local.dog_pos1 == NIL ){ local.dog_pos1 = local.spawn_pos }
+	local.off2 = local.spawn_pos + (128 0 0)
+	local.dog_pos2 = exec coop_mod/officer.scr::coop_find_ground local.off2
+	if( local.dog_pos2 == NIL ){ local.dog_pos2 = local.spawn_pos }
+	local.off3 = local.spawn_pos + ( -128 0 0)
+	local.handler_pos = exec coop_mod/officer.scr::coop_find_ground local.off3
+	if( local.handler_pos == NIL ){ local.handler_pos = local.spawn_pos }
+
+	local.dog1 = spawn "models/animal/german_shepherd.tik"
+	local.dog1.origin = local.dog_pos1
+	local.dog1 droptofloor
+	local.dog1.health = 150
+	local.dog1.leash = 4096
+	local.dog1.enableEnemy = 1
+	local.dog1 rendereffects "+coopboss"
+	local.dog1 forceactivate
+	local.dog1 attackplayer
+	thread coop_wave_glow local.dog1
+	thread coop_dog_hunt local.dog1
+
+	// stagger the second dog so the pair don't run in lockstep and clip into each other
+	wait 3
+	if( level.coop_officer_alive != 1 ){ end }
+	local.dog2 = spawn "models/animal/german_shepherd.tik"
+	local.dog2.origin = local.dog_pos2
+	local.dog2 droptofloor
+	local.dog2.health = 150
+	local.dog2.leash = 4096
+	local.dog2.enableEnemy = 1
+	local.dog2 rendereffects "+coopboss"
+	local.dog2 forceactivate
+	local.dog2 attackplayer
+	thread coop_wave_glow local.dog2
+	thread coop_dog_hunt local.dog2
+
+	local.hmodel = exec coop_mod/officer.scr::coop_model_for "handler"
+	local.handler = spawn local.hmodel
+	local.handler.origin = local.handler_pos
+	local.handler droptofloor
+	local.handler health 150
+	local.handler gun "mp40"
+	local.handler.coop_actorStopPainHandler = 1
+	local.handler rendereffects "+coopboss"
+	thread coop_wave_glow local.handler
+	thread coop_wave_hunt local.handler
+
+	thread coop_squad_monitor local.dog1 local.dog2 local.handler "Attack Dogs"
+	iprintlnbold ("REINF: wave Dogs spawned at " + int(local.dog_pos1[0]) + " " + int(local.dog_pos1[1]))
+}end
+
+
+coop_dog_hunt local.dog:{
+	wait 0.5
+	if( local.dog == NULL || !isAlive local.dog ){ end }
+	local.dog.movedoneradius = 200
+	local.bark_cd = 0
+	while( local.dog != NULL && isAlive local.dog ){
+		// actively charge the nearest player (was attackplayer-only, so distant dogs just barked)
+		local.dog exec coop_mod/replace.scr::runtoClosestVisible
+		local.dog waittill movedone
+		if( local.dog == NULL || !isAlive local.dog ){ end }
+		local.dog attackplayer
+		if( local.bark_cd <= 0 ){
+			local.dog playsound dog_bark
+			local.bark_cd = 3 + (randomint 3)
+		} else {
+			local.bark_cd--
+		}
+		wait 1
+	}
+}end
+
+
+coop_officer_death_monitor local.officer:{
+	local.officer waittill death
+	level.coop_officer_alive = 0
+	level.coop_reinforcements_active = 0
+	forcemusic "success"
+	iprintlnbold "The officer has been eliminated!"
+	iprintlnbold "Plant explosives on the radio to stop reinforcements permanently!"
+	thread coop_mod/objectives.scr::coop_obj_officer_done
+	local.officer playsound coop_radio_off
+	local.dead_pos = local.officer.origin
+	thread coop_officer_death_drops local.dead_pos
+	thread coop_replacement_officer_watch
+	thread coop_radio_bomb_enable
+	// HZM COOP: per-map avenging battalion (set in officer_positions.scr). Spawns at a fixed
+	// point and rushes the players to engage. Off (NIL) on maps that don't set it.
+	if( level.coop_officer_death_battalion_pos != NIL ){
+		local.bmsg = "Enemy reinforcements are storming in to avenge the officer!"
+		if( level.coop_officer_death_battalion_hold == 1 ){ local.bmsg = "The officer's men have dug in nearby - watch for an ambush." }
+		thread coop_spawn_death_battalion level.coop_officer_death_battalion_pos level.coop_officer_death_battalion_ang local.bmsg level.coop_officer_death_battalion_hold 0
+	}
+	// optional SECOND death battalion (per-map). Seed 1 = wider scatter ring so it doesn't stack on the first.
+	if( level.coop_officer_death_battalion_pos2 != NIL ){
+		thread coop_spawn_death_battalion level.coop_officer_death_battalion_pos2 level.coop_officer_death_battalion_ang2 "" level.coop_officer_death_battalion_hold 1
+	}
+	// optional THIRD / FOURTH death battalions (per-map). Distinct seeds keep their scatter rings apart.
+	if( level.coop_officer_death_battalion_pos3 != NIL ){
+		thread coop_spawn_death_battalion level.coop_officer_death_battalion_pos3 level.coop_officer_death_battalion_ang3 "" level.coop_officer_death_battalion_hold 2
+	}
+	if( level.coop_officer_death_battalion_pos4 != NIL ){
+		thread coop_spawn_death_battalion level.coop_officer_death_battalion_pos4 level.coop_officer_death_battalion_ang4 "" level.coop_officer_death_battalion_hold 3
+	}
+	if( level.coop_officer_death_battalion_pos5 != NIL ){
+		thread coop_spawn_death_battalion level.coop_officer_death_battalion_pos5 level.coop_officer_death_battalion_ang5 "" level.coop_officer_death_battalion_hold 4
+	}
+}end
+
+
+// HZM COOP DYNAMIC COMBAT MUSIC: when the officer can SEE a player, smoothly segue the current
+// map track into a RANDOM Frontline combat track; when he loses sight for a few seconds, segue
+// back to the base track. Started at officer spawn; reverts + ends when the officer dies. Only
+// runs where the base track is known (level.coop_music_track) so it can revert cleanly.
+// HZM COOP: the officer mutters 1-2 German campaign lines while he's still idle (before he has
+// spotted any player). First-time only - it runs once at spawn; the 2nd line is skipped the moment
+// he can see a player. Positional on the officer (heard when you're near him).
+coop_officer_idle_talk:{
+	if( level.coop_officer == NULL ){ end }
+	wait 0.75
+	if( level.coop_officer == NULL || !isAlive level.coop_officer ){ end }
+	local.isnd = "coop_officer_idle" + ((randomint 4) + 1)
+	level.coop_officer playsound local.isnd
+	wait 4
+	if( level.coop_officer == NULL || !isAlive level.coop_officer ){ end }
+	// only a second line if he STILL hasn't seen a player
+	if( !(exec coop_mod/replace.scr::player_anyCanBeSeen level.coop_officer 3000) ){
+		local.isnd = "coop_officer_idle" + ((randomint 4) + 1)
+		level.coop_officer playsound local.isnd
+	}
+}end
+
+
+coop_officer_combat_music:{
+	if( level.coop_officer == NULL ){ end }
+	if( level.coop_music_track == NIL ){ end }	// base track unknown -> don't swap (can't revert)
+
+	// Combat-music pool ("roll of the dice"). Add Manor House Rally once its file is in
+	// sound/music/  (level.coop_combat_tracks[3] = "sound/music/<file>.mp3"; bump the count to 3).
+	level.coop_combat_tracks[1] = "sound/music/Sturmgeist.mp3"
+	level.coop_combat_tracks[2] = "sound/music/Halftrack.mp3"
+	level.coop_combat_tracks[3] = "sound/music/ManorHouseRally.mp3"
+	level.coop_combat_track_count = 3
+	level.coop_combatmusic_active = 0
+
+	while( level.coop_officer != NULL && level.coop_officer_alive == 1 ){
+		local.sees = 0
+		if( exec coop_mod/replace.scr::player_anyCanBeSeen level.coop_officer 3000 ){ local.sees = 1 }
+		if( local.sees == 1 ){
+			level.coop_officer_lastseen = level.time
+			if( level.coop_combatmusic_active == 0 ){
+				level.coop_combatmusic_active = 1
+				level.coop_music_saved = level.coop_music_track	// base track to revert to
+				local.pick = randomint( level.coop_combat_track_count ) + 1
+				waitthread coop_mod/replace.scr::tmsegue level.coop_combat_tracks[local.pick]
+			}
+		} else if( level.coop_combatmusic_active == 1 ){
+			if( (level.time - level.coop_officer_lastseen) > 6 ){
+				level.coop_combatmusic_active = 0
+				waitthread coop_mod/replace.scr::tmsegue level.coop_music_saved
+			}
+		}
+		wait 0.5
+	}
+
+	// officer dead/gone -> FADE the officer combat music OUT cleanly (user request) instead of the quick
+	// snap-back. Long fade to silence, a beat of quiet as the boss falls, then ease the map's base track
+	// back in. (tmvolume is whitelisted on this build, so tmfade works.)
+	if( level.coop_combatmusic_active == 1 ){
+		level.coop_combatmusic_active = 0
+		waitthread coop_mod/replace.scr::tmfade 1 0 3		// fade the officer track down to silence (~3s)
+		waitthread coop_mod/replace.scr::tmstop			// then stop it
+		wait 2							// quiet beat after the officer is killed
+		if( level.coop_music_saved != NIL ){
+			waitthread coop_mod/replace.scr::tmvolume 0
+			waitthread coop_mod/replace.scr::tmstartloop level.coop_music_saved
+			waitthread coop_mod/replace.scr::tmfade 0 1 1.5	// ease the base/ambient track back in
+		}
+	}
+}end
+
+
+// HZM COOP: an avenging battalion that spawns at a FIXED point AFTER the officer dies and
+// pushes toward the players to engage (replaces the vanilla spotlight-alarm door spawns that
+// don't fire reliably in coop). Unlike coop_spawn_battalion (which protects the live officer),
+// this is NOT gated on coop_officer_alive -- the officer is already dead.
+coop_spawn_death_battalion local.pos local.ang local.msg local.hold local.seed:{
+	if( local.pos == NIL ){ end }
+	if( local.ang == NIL ){ local.ang = 0 }
+	if( local.seed == NIL ){ local.seed = 0 }	// scatter offset: a 2nd battalion at the same spot uses a wider ring so it doesn't stack on the 1st
+	// local.hold==1 -> they GUARD the spawn area and engage on sight (ambush), no rush.
+	wait 2
+	if( local.msg != NIL && local.msg != "" ){ iprintlnbold local.msg }
+	level.coop_death_battalion_count = 0
+	local.n = 0
+	while( local.n < 10 ){
+		local.idx = local.n + (local.seed * 10)
+		local.sgnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.idx
+
+		local.bmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+		local.b = spawn local.bmodel
+		local.b.origin = local.sgnd
+		local.b droptofloor
+		local.b.angles = ( 0 local.ang 0 )
+		local.b.health = 120
+		local.b.flags["coop_actorStopPainHandler"] = 1
+		local.b.accuracy = 70
+		if( local.hold == 1 ){ local.b.leash = 768 } else { local.b.leash = 4096 }	// hold = stay near spawn
+		local.b.enableEnemy = 1
+		local.b german
+
+		// Mixed loadout
+		if( local.n == 0 || local.n == 1 ){
+			local.b gun "stg44"
+		} else if( local.n == 2 || local.n == 3 || local.n == 4 ){
+			local.b gun "mp40"
+		} else if( local.n == 5 ){
+			local.b gun "shotgun"
+		} else {
+			local.b gun "mauser kar 98k"
+		}
+
+		local.b rendereffects "+coopboss"
+		local.b forceactivate
+		thread coop_wave_glow local.b
+		local.b.flags["coop_squadSlot"] = local.n
+		if( local.hold == 1 ){
+			// dug-in ambush: seek cover but STAY near the spawn (keep the tight 768 leash). Tag it so
+			// the hurt manager (coop_reinf_brain) still covers it (canteen + fall-back-to-cover).
+			local.b type_attack "cover"
+			local.b.flags["coop_role"] = "cover"
+			local.b.flags["coop_personality_set"] = 1
+			thread coop_idle_patrol local.b
+		} else {
+			// RUSH / objective wave: force a pure PUSH role -- NO cover/flank/prone roll (those make
+			// them hang back at range; user wants objective waves to inevitably push in). The march
+			// drives them toward the players unopposed by a cover think. Still tagged coop_personality_set
+			// so the hurt manager (coop_reinf_brain) can fall them back to cover + canteen if badly hurt.
+			local.b.flags["coop_role"] = "aggr"
+			local.b.nosurprise = 1
+			local.b.flags["coop_personality_set"] = 1
+		}
+		// hold: enableEnemy + forceactivate alone makes them guard and engage on SIGHT (no march).
+		// else: actively push toward the players.
+		if( local.hold != 1 ){ thread coop_death_battalion_march local.b }
+		local.n++
+	}
+}end
+
+
+// HZM coop - IDLE LIVELINESS for dug-in (hold) death-battalion troopers: a native small-radius PATROL so
+// they pace + scan instead of standing brain-dead until shot. type_idle "patrol" controls only the IDLE
+// think - their type_attack "cover" still governs COMBAT, and the engine auto-switches idle->attack the
+// instant they spot a player (Think_Patrol -> CheckForThinkStateTransition), so this NEVER weakens their
+// reaction. A single script_origin node is relocated within a small radius of their post each cycle; the
+// engine drives + interrupts the movement (NOT a scripted runto), so it's combat-safe. lookaroundangle
+// widens the native head-scan (#3, "look around"). Combat-safe + reliable.
+coop_idle_patrol local.actor:{
+	wait ( 1 + (randomfloat 3) )		// settle after spawn + desync the squad
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.home = local.actor.origin
+	local.node = spawn script_origin
+	local.node.origin = local.home
+	local.actor.coop_patnode = local.node
+	local.actor type_idle "patrol"
+	local.actor lookaroundangle 120		// wide head-scan while idle/patrolling (engine default is 45)
+	while( local.actor != NULL && isAlive local.actor ){
+		if( local.actor.enemy == NULL ){	// only re-task while idle; combat (type_attack cover) takes over otherwise
+			local.ang = ( 0 0 0 )
+			local.ang[1] = randomint 360
+			local.dir = angles_toforward local.ang
+			local.rad = 64 + (randomint 160)	// small radius (64..224u) - they pace their post, don't wander off
+			local.dest = local.home + (vector_scale local.dir local.rad)
+			local.gnd = waitthread coop_mod/officer.scr::coop_find_ground local.dest
+			if( local.gnd != NIL ){ local.node.origin = local.gnd } else { local.node.origin = local.dest }
+			local.actor patrolpath local.node
+		}
+		wait ( 4 + (randomfloat 5) )		// re-task every ~4-9s (walk to node, scan, then a new point)
+	}
+	if( local.node != NULL ){ local.node remove }
+}end
+
+
+// One avenging/assault trooper for a RUSH (hold=0) battalion or objective wave: INEVITABLY push toward
+// the players. Even cover-role troops that hang back briefly get re-issued a runto so they close the
+// distance (user: objective waves that hang back must push in). Poll + re-issue (never waittill movedone
+// - pain hang). Dispersed by squad slot so they don't blob onto one point.
+coop_death_battalion_march local.actor:{
+	wait 0.5
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	// STORM IN. The default attack think is "turret" (stand still + shoot) - THAT is why these objective
+	// troops hung back at the shed and only trickled in. Switch them to the native "runandshoot" think
+	// (advance toward the enemy WHILE firing, then settle into cover/turret once close - actor_runandshoot.cpp).
+	// High leash so they path across the whole map; nosurprise so they don't freeze on first contact.
+	local.actor.leash = 8192
+	local.actor.nosurprise = 1
+	local.actor type_attack "runandshoot"
+	local.actor forceactivate
+	local.actor attackplayer
+	local.actor.coop_lastpos = local.actor.origin
+	local.slot = local.actor.flags["coop_squadSlot"]
+	if( local.slot == NIL ){ local.slot = randomint 6 }
+	// per-trooper jittered approach vector (used only by the anti-stuck nudge so they fan out, not conga)
+	local.offang = ( 0 0 0 )
+	local.offang[1] = (local.slot * 60) + ((randomint 50) - 25)
+	local.offdir = angles_toforward local.offang
+	local.lat = 180 + (randomint 220)
+	// WATCHDOG: let runandshoot drive the advance; only step in when a trooper has clearly WEDGED (made
+	// almost no progress since the last check) AND is still far - then nudge it toward the nearest player
+	// (wall-safe / unstick) and hand control straight back to runandshoot.
+	while( local.actor != NULL && isAlive local.actor ){
+		wait ( 2.5 + (randomfloat 1.0) )
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		local.moved = vector_length( local.actor.origin - local.actor.coop_lastpos )
+		local.actor.coop_lastpos = local.actor.origin
+		if( local.moved < 40 ){
+			local.np = waitthread coop_mod/replace.scr::player_closestTargetable local.actor
+			if( local.np != NULL ){
+				local.nd = vector_length( local.actor.origin - local.np.origin )
+				if( local.nd > 220 ){
+					waitthread coop_push_toward local.actor local.np local.offdir local.lat
+					local.actor type_attack "runandshoot"	// restore advance-fire after the runto
+					local.actor attackplayer
+				}
+			}
+		}
+	}
+}end
+
+
+coop_radio_init local.pos:{
+	// No lateral offset - pos is confirmed navigable (actor origin); trace only for floor height
+	local.table_gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.table_gnd == NIL ){ local.table_gnd = local.pos }
+	local.table = spawn script_model
+	local.table model "models/furniture/cardtable.tik"
+	local.table.origin = local.table_gnd
+	local.table droptofloor
+	local.table notsolid
+	level.coop_radio_table = local.table
+	local.radio = spawn script_model
+	local.radio model "models/miscobj/radio_military.tik"
+	local.radio.origin = local.table_gnd + (26 0 50)	// +50: sit on the table top (was 44, sat slightly low)
+	level.coop_radio = local.radio
+	level.coop_radio_destroyed = 0
+	local.radio loopsound coop_radio_loop
+	// Radio cannot be destroyed by gunfire - must use planted explosive after officer dies
+
+	// HZM COOP: optional healing canteen beside the radio, enabled PER-MAP via
+	// level.coop_officer_player_canteen (set in officer_positions.scr; default off). Used on
+	// maps where the officer ends up far from any placed medkit/canteen. item_25_healthbox.tik
+	// is a functional, RESPAWNING Health pickup (classname Health + coop itemhandler).
+	// NOTE: this also becomes the officer's nearest "health post" - coop_officer_medkit_retreat
+	// scans for the nearest classname Health entity - so he can heal here too (to full, scripted;
+	// the kit's amount is irrelevant). That's intended.
+	if( level.coop_officer_player_canteen == 1 ){
+		// A functional, respawning medkit on the FLOOR so players can heal during the officer
+		// fight (the boss can be far from the map's placed medkits). It's a plain classname
+		// Health item on the ground - reachable floor origin - so the officer's heal-retreat
+		// treats it exactly like any other map medkit (no crate, no elevation/solidity issues).
+		// Position from per-map level.coop_officer_canteen_pos (officer_positions.scr); falls
+		// back to beside the radio table if unset.
+		local.mpos = level.coop_officer_canteen_pos
+		if( local.mpos == NIL ){ local.mpos = local.table_gnd + (0 48 0) }
+		local.medkit = spawn "models/items/item_50_healthbox.tik"
+		if( local.medkit != NULL ){
+			local.medkit.origin = local.mpos
+			local.medkit droptofloor
+			local.medkit show
+			local.medkit triggerable
+			level.coop_officer_canteen = local.medkit
+		}
+	}
+}end
+
+
+// Boss healthbar SCRAPPED per user (2026-06-24) -- the on-screen bar looked bad; will
+// revisit with a different approach later. Stub kept so the spawn-time
+// `thread coop_officer_hp_logger` call stays valid. No HUD draw, no HP screen spam.
+coop_officer_hp_logger local.officer:{
+	// intentionally empty
+}end
+
+
+coop_officer_marker:{
+	// (Red test glow removed -- the overhead eagle icon marks the officer now.)
+}end
+
+
+// === OFFICER DEATH REWARDS ===
+
+// Spawns smoke grenade pickup + binoculars trigger_use at officer death position.
+coop_officer_death_drops local.dead_pos:{
+	wait 0.5
+	// Per-map feature toggles: paradrop (smoke) and binoculars reward can each be disabled.
+	// Defaults (both 1) keep AA behavior: officer drops both rewards.
+	local.do_para = 1
+	if( level.coop_feature_paradrop == 0 ){ local.do_para = 0 }
+	// HZM COOP: per-map disable of the officer's SMOKE reward ONLY (the paradrop SYSTEM stays
+	// active so a tutorial/placed smoke still works). m1l2a sets this 0 - smoke is taught at the
+	// hostage tutorial instead, so the officer shouldn't also drop one.
+	if( level.coop_officer_smoke_drop == 0 ){ local.do_para = 0 }
+	local.do_binoc = 1
+	if( level.coop_feature_binoc == 0 ){ local.do_binoc = 0 }
+
+	if( local.do_para == 1 && local.do_binoc == 1 ){
+		iprintlnbold "The officer dropped a Signal Smoke Grenade and Binoculars!"
+	} else if( local.do_para == 1 ){
+		iprintlnbold "The officer dropped a Signal Smoke Grenade!"
+	} else if( local.do_binoc == 1 ){
+		iprintlnbold "The officer dropped a pair of Binoculars!"
+	}
+
+	if( local.do_para == 1 ){
+		// Smoke grenade - offset to the left so it doesn't stack with binoculars
+		local.smoke_pos = local.dead_pos + (60 0 0)
+		// Visible smoke model + a touch trigger that GIVES the weapon via "player item"
+		// (the clean Sentient::giveItem path). We deliberately do NOT spawn the smoke as a
+		// world Weapon the player walks onto: that routes through the engine's
+		// Weapon::PickupWeapon grenade-class special-case, which strips the player's
+		// existing grenade-class weapon (the German Stielhandgranate). Giving it like the
+		// binoculars avoids that path entirely. See coop_smoke_reward_pickup below.
+		local.smoke_vis = spawn script_model
+		local.smoke_vis model "models/weapons/coop_smoke_grenade.tik"
+		local.smoke_vis.origin = local.smoke_pos
+		local.smoke_vis notsolid
+		local.smoke_vis rendereffects "+fullbright"
+		// trigger_USE (press Use to pick up), like the binoculars - not a walk-over trigger_multiple
+		local.smoke_trig = spawn trigger_use
+		local.smoke_trig.origin = local.smoke_pos
+		local.smoke_trig solid
+		local.smoke_trig setsize ( -16 -16 0) (16 16 48)
+		thread coop_smoke_reward_pickup local.smoke_trig local.smoke_vis
+		// Slight yellow glow so the pickup object is easy to spot (no smoke emitted).
+		local.smoke_glow = spawn script_model
+		local.smoke_glow model "models/fx/dummy.tik"
+		local.smoke_glow.origin = local.smoke_pos + (0 0 8)
+		local.smoke_glow light (1 0.9 0.2)
+		local.smoke_glow lightRadius 150
+		local.smoke_glow lightOn
+		local.smoke_glow notsolid
+		level.coop_smoke_beacon = local.smoke_glow
+	}
+
+	if( local.do_binoc == 1 ){
+		// Binoculars - visible pickup model + press Use to equip
+		local.binoc_pos = local.dead_pos + (0 -60 0)
+		local.binoc_vis = spawn script_model
+		local.binoc_vis model "models/items/binoculars.tik"
+		local.binoc_vis.origin = local.binoc_pos
+		local.binoc_vis notsolid
+		local.binoc_vis rendereffects "+fullbright"
+		local.binoc = spawn trigger_use
+		local.binoc.origin = local.binoc_pos
+		local.binoc solid
+		local.binoc setsize ( -12 -12 0) (12 12 40)
+		thread coop_spawn_binoc_glow local.binoc_pos
+		thread coop_binoc_wait_pickup local.binoc local.binoc_vis
+	}
+}end
+
+
+// Fired when a player presses Use on the smoke pickup trigger (trigger_use, like the binoculars).
+//
+// ROOT CAUSE of the "German grenades vanish" bug:
+// The Signal Smoke shares the engine grenade weapon_class (weapontype
+// "grenade") with the German Stielhandgranate. When the smoke was spawned as a
+// world Weapon the player walked onto, the engine picked it up through
+// Weapon::PickupWeapon (weapon.cpp). In MP gametypes that path has a
+// grenade-class special-case (the "hasclass = false" block) that forces a new
+// grenade pickup AND drives the engine's grenade weapon_class reselection,
+// which dropped the player's OTHER grenade-class weapon (the Stielhandgranate)
+// and its "grenade" ammo. Vanilla M18 + American frags avoid this because they
+// are GIVEN at spawn via Sentient::giveItem, not auto-picked-up mid-game.
+//
+// FIX: give the smoke the same clean way the binoculars are given -- a touch
+// trigger that runs "player item models/weapons/coop_smoke_grenade.tik"
+// (Sentient::giveItem). That never enters Weapon::PickupWeapon's grenade-class
+// branch, so no grenade-slot reselection is forced and the German
+// Stielhandgranate + its grenade ammo are preserved. The smoke still enters the
+// inventory as a throwable grenade-class weapon, so it can be equipped and
+// thrown exactly like a vanilla M18, and its SmokeGrenade projectile still
+// fires the engine paradrop hook (weaputils.cpp -> paradrop.scr smokeDropZone).
+coop_smoke_reward_pickup local.trig local.vis:{
+	local.trig waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.player.classname != "Player" ){ end }
+	// Defensive one-shot guard scoped to THIS trigger (so it never blocks a
+	// separate smoke reward elsewhere on the map). We remove the trigger right
+	// after, so it cannot re-fire.
+	if( local.trig == NULL || local.trig.flags["coop_smoke_taken"] == 1 ){ end }
+	local.trig.flags["coop_smoke_taken"] = 1
+	local.trig remove
+	if( local.vis != NULL ){ local.vis delete }
+	local.player item models/weapons/coop_smoke_grenade.tik
+	level.coop_paradrop_armed = 1
+	level.coop_smoke_player = local.player
+	// Remove the locator beacon now that it's been found.
+	if( level.coop_smoke_beacon != NULL ){ level.coop_smoke_beacon delete }
+	iprintlnbold (local.player.netname + " picked up the Signal Smoke!")
+	iprintlnbold "Signal Smoke ready! Equip grenades and throw - Allied paradrop falls where it hits!"
+	thread coop_smoke_hud_show
+	thread coop_smoke_owner_watch local.player	// drop it again if this owner dies before throwing it
+}end
+
+
+// Fired when a player presses Use on the binoculars trigger.
+// Gives the real binoculars weapon so it can be equipped and fired.
+coop_binoc_wait_pickup local.binoc local.binoc_vis:{
+	local.binoc waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.binoc == NULL ){ end }
+	if( local.player.classname != "Player" ){ end }
+	// Block if someone already holds it. A binoc DROPPED by a dead owner sets given=0 (see
+	// coop_binoc_owner_watch), so this re-pickup passes through.
+	if( level.coop_binoc_given == 1 ){
+		local.binoc remove
+		end
+	}
+	if( local.binoc_vis != NULL ){ local.binoc_vis delete }
+	local.binoc remove
+	if( level.coop_binoc_beacon != NULL ){ level.coop_binoc_beacon delete }	// remove the red under-glow
+	// First-ever pickup grants 3 strikes; a re-pickup (dropped, carried over) keeps the remaining
+	// count - coop_binoc_uses is a global that persists, so only initialize it when still NIL.
+	local.firstPickup = 0
+	if( level.coop_binoc_uses == NIL ){
+		local.firstPickup = 1
+		level.coop_binoc_uses = 3
+	}
+	level.coop_binoc_given = 1
+	level.coop_binoc_owner = local.player
+	local.player item weapons/coop_binoculars.tik
+	if( local.firstPickup == 1 ){
+		iprintlnbold (local.player.netname + " picked up Binoculars!")
+		// Per-map tutorial is an INDEXED array of short lines (iprintlnbold has no word-wrap).
+		if( level.coop_binoc_tutorial_msg[1] != NIL ){
+			local.tl = 1
+			while( level.coop_binoc_tutorial_msg[local.tl] != NIL ){
+				iprintlnbold level.coop_binoc_tutorial_msg[local.tl]
+				local.tl++
+			}
+		} else {
+			iprintlnbold "Equip binoculars from pistol slot, aim and fire [LMB] to call bombing runs! (3 strikes)"
+		}
+	} else {
+		iprintlnbold (local.player.netname + " recovered the Binoculars! (" + level.coop_binoc_uses + " strikes left)")
+	}
+	// Support checks in: "Give me a target / Awaiting coordinates, over." (heard by ALL players)
+	thread coop_radio_all "coop_radio_standby"
+	thread coop_binoc_update_hud local.player
+	thread coop_binoc_owner_watch local.player	// drop them again if this owner dies with strikes left
+}end
+
+
+// Removes a head-attached faction marker the moment the actor dies (detach_at_death
+// only detaches it, leaving it floating - this removes it cleanly).
+// Spawn a free-floating billboard marker and keep it parked in WORLD space directly
+// above the actor's head every tick, deleting it when the actor dies. This replaces
+// attachmodel-to-"Bip01 Head": attachmodel applies its offset in the head bone's LOCAL
+// frame (attach_use_angles=true, entity.cpp:3750), and that bone's axes aren't world-up,
+// so the marker sat off to the side. A world-space follow is position-exact and lets the
+// TIKI's own scale (0.8) define size independent of any bone quirk.
+coop_track_marker local.actor local.mdl:{
+	if( local.actor == NULL ){ end }
+	local.mk = spawn script_model
+	local.mk model local.mdl
+	local.mk notsolid
+	local.mk.origin = local.actor.origin + (0 0 80)
+	// Hold position above the head until the actor dies (or is freed).
+	while( local.actor != NULL && isAlive local.actor ){
+		local.mk.origin = local.actor.origin + (0 0 80)
+		wait 0.05
+	}
+	if( local.mk != NULL ){ local.mk delete }
+}end
+
+
+// Plays a radio-chatter alias on EVERY player so all coop players hear shared radio comms
+// (radio is "in your ear" - played on each player so each hears it at full volume).
+coop_radio_all local.alias:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){ $player[local.i] playsound local.alias }
+		local.i++
+	}
+}end
+
+// Called by the engine hook in weapon.cpp when the binoculars fire.
+// local.player = shooter, local.target = world hit point from aim trace.
+binoculars_fired local.player local.target:{
+	if( level.coop_binoc_uses == NIL ){ end }
+	if( level.coop_binoc_uses <= 0 ){ end }
+	// 10s cooldown between strikes. The C++ fire hook bypasses the weapon's
+	// firedelay bookkeeping, so enforce the gap here (silent - no countdown).
+	if( level.coop_binoc_laststrike != NIL && (level.time - level.coop_binoc_laststrike) < 10 ){ end }
+	// Sky check on the TARGET (not the player) so a doorway shot is correctly blocked.
+	// Uses coop_hasOpenSky, which treats a SURF_SKY hit as outdoors -- a plain up-trace
+	// hits the skybox brush and falsely reads "indoors" everywhere on outdoor maps.
+	if( (exec coop_mod/officer.scr::coop_hasOpenSky local.target) != 1 ){
+		thread coop_radio_all "coop_radio_standby"
+		iprintlnbold "Negative - no clear sky above target coordinates. Strike request denied."
+		end
+	}
+	level.coop_binoc_laststrike = level.time
+	// CONFIRMED (target accepted, opposite of the denial above): all players hear the call-in.
+	thread coop_radio_all "coop_radio_airstrike_req"
+	level.coop_binoc_uses = level.coop_binoc_uses - 1
+	if( level.coop_binoc_uses > 0 ){
+		iprintlnbold ("Fire mission requested... (" + level.coop_binoc_uses + " strikes remaining)")
+		thread coop_binoc_update_hud local.player
+	} else {
+		iprintlnbold "Final fire mission requested... Bombing Run expended."
+		thread coop_binoc_update_hud local.player
+		// Unequip + remove the Bombing Run weapon shortly after the final shot fires.
+		thread coop_binoc_remove_now local.player
+	}
+	// The whole cinematic (radio exchange -> plane run-in -> bombs) is sequenced so the
+	// voice lines never overlap and the bombs land only after the plane is overhead.
+	thread coop_bombing_run_sequence local.target
+}end
+
+
+// Bombing-run cinematic, sequenced so nothing overlaps:
+//   request VO -> (pause) -> HQ confirmation VO -> (pause) -> plane runs in -> bombs fall.
+coop_bombing_run_sequence local.target:{
+	// Red smoke marks the target the instant it's called (planesmokeplumered = base Pak0).
+	local.marker = spawn "models/emitters/planesmokeplumered.tik"
+	local.marker.origin = local.target
+	local.marker anim start
+	local.marker notsolid
+
+	// 1) The fire-mission request call-in is now played at the CONFIRM moment (binoculars_fired),
+	//    so all players hear it the instant the target is accepted. Wait out that ~6.3s clip plus
+	//    a natural pause before HQ replies (timing unchanged so bombs still land on cue).
+	wait 7.5
+
+	// 2) HQ radioman's confirmation back over the radio (all players). Let it play out.
+	local.rp = 1
+	while( local.rp <= $player.size ){
+		if( $player[local.rp] != NULL ){ $player[local.rp] playsound coop_radio_airstrike_resp }
+		local.rp++
+	}
+	wait 3.5
+
+	// 3) The C-47 runs in on a banked, diving arc and drops the stick (the shared bombing-run system).
+	//    Altitude/approach auto-scale from the map farplane so it stays inside the fog (fog preserved)
+	//    and is visible on every map. Allied plane, no MG strafe (strafe=0).
+	local.fwd = angles_toforward ( 0 (randomint 360) 0 )
+	waitthread coop_air_bombing_run local.target local.fwd 0 "models/vehicles/p47fly.tik"	// P-47 - same plane this mission's own bombing run uses
+
+	if( local.marker != NULL ){ local.marker delete }
+}end
+
+
+// Waits until the bombing-run plane is roughly overhead the target, then releases the
+// bomb stick. Range-gated off the plane's live position (like bomber.scr::bombdrop).
+coop_bombrun_release local.plane local.center local.fwd local.alt:{
+	// Release the instant the plane CROSSES the target along the flight axis (project the flat
+	// plane->target vector onto fwd). Radial-distance detection was wrong with the new banked run:
+	// the lateral bow means the plane is offset sideways at overhead and never gets within a small
+	// radial threshold, so bombs dropped only after the plane was deleted. Axis-projection is robust
+	// regardless of the bow: 'ahead' goes from -approach (run-in) up through 0 (over target) to +.
+	local.go = 0
+	while( local.plane != NULL && local.go == 0 ){
+		local.hd = local.plane.origin - local.center
+		local.hd[2] = 0
+		local.ahead = (local.hd[0] * local.fwd[0]) + (local.hd[1] * local.fwd[1])
+		if( local.ahead >= 0 ){ local.go = 1 }
+		wait 0.05
+	}
+	thread coop_drop_bombs local.center local.fwd local.alt
+}end
+
+
+// Walks a stick of real falling bombs along the plane's heading across the target.
+coop_drop_bombs local.center local.fwd local.alt:{
+	local.i = 0
+	while( local.i < 8 ){
+		local.offset = vector_scale local.fwd ((local.i * 130) - 450)
+		local.gx = local.center + local.offset
+		local.gx[0] = local.gx[0] + (randomint 120) - 60
+		local.gx[1] = local.gx[1] + (randomint 120) - 60
+		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.gx
+		if( local.gnd == NIL ){ local.gnd = local.gx }
+		thread coop_one_bomb local.gx local.gnd local.alt
+		wait 0.14
+		local.i++
+	}
+}end
+
+
+// One visible bomb: a us_bomb model falls from plane altitude, then explodes on impact.
+coop_one_bomb local.airpos local.gnd local.alt:{
+	local.b = spawn script_model
+	local.b model "models/ammo/us_bomb.tik"
+	local.start = local.airpos
+	local.start[2] = local.gnd[2] + local.alt
+	local.b.origin = local.start
+	local.b notsolid
+	local.b playsound coop_stuka_bomb
+	// Fall by stepping origin straight down (moveto no-ops on script_models here).
+	local.bfull = local.gnd - local.start
+	local.bdist = vector_length local.bfull
+	if( local.bdist < 1 ){ local.bdist = 1 }
+	local.bstep = 1900 * 0.05
+	local.bdelta = vector_scale local.bfull (local.bstep / local.bdist)
+	local.btrav = 0
+	while( local.b != NULL && local.btrav < local.bdist ){
+		local.b.origin = local.b.origin + local.bdelta
+		local.btrav = local.btrav + local.bstep
+		wait 0.05
+	}
+	if( local.b != NULL ){ local.b delete }
+	// Impact blast + varied detonation sound.
+	local.blast = spawn "models/emitters/explosion_bombwall.tik"
+	local.blast.origin = local.gnd
+	local.blast anim start
+	local.blast notsolid
+	local.sndroll = randomint 3
+	if( local.sndroll == 0 ){
+		local.blast playsound explo_large
+	} else if( local.sndroll == 1 ){
+		local.blast playsound explo_medium
+	} else {
+		local.blast playsound explo_close
+	}
+	radiusdamage local.gnd 600 900
+}end
+
+
+// After the final strike: force the player off the Bombing Run weapon and remove it
+// from inventory so it disappears completely and can't be re-equipped.
+coop_binoc_remove_now local.player:{
+	wait 2
+	if( local.player != NULL ){
+		// Switch off the binoculars first so the viewmodel clears, then take the item.
+		local.player useweaponclass "rifle"
+		local.player take "Bombing Run"
+	}
+	thread coop_binoc_clear_hud local.player
+	level.coop_binoc_given = 0
+	level.coop_binoc_owner = NULL
+}end
+
+
+// Devastating 10-bomb carpet run at player position.
+// === BINOCULARS / SMOKE HUD ===
+// Row above medkit/sandbag (y=-82, left bottom):
+//   Slot 50-51: Binoculars icon + strike count
+//   Slot 52-53: Smoke icon + PARADROP label
+
+// Binoc icon + strike count - shown ONLY to the owner (level.coop_binoc_owner); explicitly
+// hidden for everyone else (each ihuddraw_* targets one client, so HUD slots are per-player).
+coop_binoc_update_hud local.player:{
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL ){
+			if( level.coop_binoc_owner != NULL && local.p == level.coop_binoc_owner ){
+				ihuddraw_shader      local.p 50 "textures/hud/artillery"
+				ihuddraw_rect        local.p 50 5 -82 16 16
+				ihuddraw_align       local.p 50 left bottom
+				ihuddraw_alpha       local.p 50 1.0
+				ihuddraw_virtualsize local.p 50 1
+				ihuddraw_string      local.p 51 (level.coop_binoc_uses + "x")
+				ihuddraw_rect        local.p 51 23 -80 0 0
+				ihuddraw_align       local.p 51 left bottom
+				ihuddraw_color       local.p 51 1.0 1.0 0.0
+				ihuddraw_alpha       local.p 51 1.0
+				ihuddraw_virtualsize local.p 51 1
+			} else {
+				ihuddraw_alpha       local.p 50 0
+				ihuddraw_alpha       local.p 51 0
+			}
+		}
+		local.pi++
+	}
+}end
+
+
+// Clears binoc HUD slots for ALL players.
+coop_binoc_clear_hud local.player:{
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL ){
+			ihuddraw_alpha local.p 50 0
+			ihuddraw_alpha local.p 51 0
+		}
+		local.pi++
+	}
+}end
+
+
+// Smoke/paradrop icon - shown ONLY to the owner (level.coop_smoke_player); hidden for others.
+coop_smoke_hud_show:{
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL ){
+			if( level.coop_smoke_player != NULL && local.p == level.coop_smoke_player ){
+				ihuddraw_shader      local.p 52 "textures/hud/coop_paradrop_icon"
+				ihuddraw_rect        local.p 52 40 -82 16 16
+				ihuddraw_align       local.p 52 left bottom
+				ihuddraw_alpha       local.p 52 1.0
+				ihuddraw_virtualsize local.p 52 1
+				ihuddraw_font        local.p 53 "verdana-12"
+				ihuddraw_string      local.p 53 "PARADROP"
+				ihuddraw_rect        local.p 53 58 -78 0 0
+				ihuddraw_align       local.p 53 left bottom
+				ihuddraw_color       local.p 53 0.5 0.8 1.0
+				ihuddraw_alpha       local.p 53 1.0
+				ihuddraw_virtualsize local.p 53 1
+			} else {
+				ihuddraw_alpha       local.p 52 0
+				ihuddraw_alpha       local.p 53 0
+			}
+		}
+		local.pi++
+	}
+}end
+
+
+// Clears smoke HUD slots for ALL players.
+coop_smoke_hud_clear:{
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL ){
+			ihuddraw_alpha local.p 52 0
+			ihuddraw_alpha local.p 53 0
+		}
+		local.pi++
+	}
+}end
+
+
+// === BINOCULARS / SMOKE DROP-ON-DEATH ===
+// If the player carrying the binoculars or the signal smoke dies before using it up, the item is
+// re-dropped where they fell so a teammate (or the respawned player) can recover it. The
+// binoculars carry over their REMAINING strikes (coop_binoc_uses persists; re-pickup never resets
+// it). All server-side; the re-pickups reuse the same clean trigger_use + giveItem path.
+
+// Watches the binoc owner; drop the binocs again if he dies still holding them with strikes left.
+coop_binoc_owner_watch local.player:{
+	if( local.player == NULL ){ end }
+	local.lastpos = local.player.origin
+	while( level.coop_binoc_given == 1 && level.coop_binoc_owner == local.player ){
+		if( local.player == NULL || !(isAlive local.player) ){ break }
+		local.lastpos = local.player.origin
+		wait 0.5
+	}
+	// Only drop if HE died while still the owner with strikes remaining (NOT the normal expended
+	// path, which sets given=0 + owner=NULL + uses=0).
+	if( level.coop_binoc_owner != local.player ){ end }
+	if( level.coop_binoc_uses == NIL || level.coop_binoc_uses <= 0 ){ end }
+	level.coop_binoc_given = 0
+	level.coop_binoc_owner = NULL
+	thread coop_binoc_clear_hud NULL
+	thread coop_binoc_spawn_pickup local.lastpos
+	iprintlnbold ("The Binoculars were dropped (" + level.coop_binoc_uses + " strikes left) - a teammate can recover them.")
+}end
+
+// RED under-glow beacon for a dropped binoculars pickup (mirrors the smoke's glow so the binocs
+// are easy to spot). Stored in level.coop_binoc_beacon; deleted on pickup in coop_binoc_wait_pickup.
+coop_spawn_binoc_glow local.pos:{
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.pos + (0 0 8)
+	local.glow light (1 0 0)		// RED
+	local.glow lightRadius 150
+	local.glow lightOn
+	local.glow notsolid
+	level.coop_binoc_beacon = local.glow
+}end
+
+// Spawns a fresh binoculars trigger_use pickup at a position (death re-drop).
+coop_binoc_spawn_pickup local.pos:{
+	local.bpos = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.bpos == NIL ){ local.bpos = local.pos }
+	local.binoc_vis = spawn script_model
+	local.binoc_vis model "models/items/binoculars.tik"
+	local.binoc_vis.origin = local.bpos
+	local.binoc_vis droptofloor
+	local.binoc_vis notsolid
+	local.binoc_vis rendereffects "+fullbright"
+	local.binoc = spawn trigger_use
+	local.binoc.origin = local.binoc_vis.origin
+	local.binoc solid
+	local.binoc setsize ( -16 -16 0) (16 16 48)
+	thread coop_spawn_binoc_glow local.binoc_vis.origin
+	thread coop_binoc_wait_pickup local.binoc local.binoc_vis
+}end
+
+// Watches the smoke owner; drop the smoke again if he dies BEFORE throwing it (paradrop armed).
+coop_smoke_owner_watch local.player:{
+	if( local.player == NULL ){ end }
+	local.lastpos = local.player.origin
+	while( level.coop_paradrop_armed == 1 && level.coop_smoke_player == local.player ){
+		if( local.player == NULL || !(isAlive local.player) ){ break }
+		local.lastpos = local.player.origin
+		wait 0.5
+	}
+	// Thrown (armed -> 0) or owner changed -> no drop. Only drop if he died still holding it.
+	if( level.coop_smoke_player != local.player ){ end }
+	if( level.coop_paradrop_armed != 1 ){ end }
+	level.coop_smoke_player = NULL
+	thread coop_smoke_hud_clear
+	thread coop_smoke_spawn_pickup local.lastpos
+	iprintlnbold "The Signal Smoke was dropped - a teammate can recover it."
+}end
+
+// Spawns a fresh signal-smoke trigger_use pickup at a position (death re-drop).
+coop_smoke_spawn_pickup local.pos:{
+	local.spos = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.spos == NIL ){ local.spos = local.pos }
+	local.vis = spawn script_model
+	local.vis model "models/weapons/coop_smoke_grenade.tik"
+	local.vis.origin = local.spos
+	local.vis droptofloor
+	local.vis notsolid
+	local.vis rendereffects "+fullbright"
+	local.trig = spawn trigger_use
+	local.trig.origin = local.vis.origin
+	local.trig solid
+	local.trig setsize ( -16 -16 0) (16 16 48)
+	thread coop_smoke_redrop_pickup local.trig local.vis
+}end
+
+// Re-pickup of a dropped smoke: re-give via the clean giveItem path, re-arm, re-own, re-watch.
+coop_smoke_redrop_pickup local.trig local.vis:{
+	local.trig waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.player.classname != "Player" ){ end }
+	if( level.coop_smoke_player != NULL ){ end }	// already recovered by someone else
+	local.trig remove
+	if( local.vis != NULL ){ local.vis delete }
+	local.player item models/weapons/coop_smoke_grenade.tik
+	level.coop_paradrop_armed = 1
+	level.coop_smoke_player = local.player
+	iprintlnbold (local.player.netname + " recovered the Signal Smoke!")
+	thread coop_smoke_hud_show
+	thread coop_smoke_owner_watch local.player
+}end
+
+
+// === RADIO BOMB PLANT ===
+
+// Called when officer dies - places the red explosive indicator + plant trigger on the radio.
+coop_radio_bomb_enable:{
+	wait 1
+	if( level.coop_radio == NULL ){ end }
+	local.radio = level.coop_radio
+	local.rpos = local.radio.origin
+
+	// Red pulsing explosive indicator on the radio = "plant charges here"
+	local.pulse = spawn script_model
+	local.pulse model "models/items/pulse_explosive.tik"
+	local.pulse.origin = local.rpos + (0 0 4)
+	local.pulse notsolid
+	local.pulse anim start
+	level.coop_radio_pulse = local.pulse
+
+	iprintlnbold "The radio is exposed! Approach it and press Use to plant explosives."
+
+	local.tuse = spawn trigger_use
+	local.tuse.origin = local.rpos + (0 0 10)
+	local.tuse solid
+	local.tuse setsize ( -24 -24 -10) (24 24 60)
+	level.coop_radio_tuse = local.tuse
+
+	while( level.coop_radio_destroyed != 1 && local.tuse != NULL ){
+		local.tuse waittill trigger
+		local.planter = parm.other
+		if( local.planter == NULL ){ continue }
+		if( level.coop_radio_planting == 1 ){ continue }
+		level.coop_radio_planting = 1
+		local.tuse solid 0
+		thread coop_radio_bomb_countdown local.planter local.rpos
+		while( level.coop_radio_planting == 1 ){ wait 0.5 }
+		if( level.coop_radio_destroyed == 1 ){ end }
+		if( local.tuse != NULL ){ local.tuse solid }
+	}
+	if( local.tuse != NULL ){ local.tuse remove }
+}end
+
+
+// Plant -> armed charge appears + single stopwatch fuse (same instant) -> explosion.
+coop_radio_bomb_countdown local.planter local.rpos:{
+	iprintlnbold (local.planter.netname + " planted explosives on the radio!")
+
+	// Swap the red indicator for the armed charge the instant planting begins
+	if( level.coop_radio_pulse != NULL ){
+		level.coop_radio_pulse delete
+		level.coop_radio_pulse = NULL
+	}
+	local.charge = spawn script_model
+	local.charge model "models/items/explosive.tik"
+	local.charge.origin = local.rpos + (0 0 4)
+	local.charge notsolid
+	local.charge playsound plantbomb
+	local.charge loopsound bombtick
+	level.coop_radio_charge = local.charge
+
+	// One native stopwatch for the whole fuse, shown to every player
+	local.fuse = 8
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.pp = $player[local.pi]
+		if( local.pp != NULL ){ local.pp stopwatch local.fuse }
+		local.pi++
+	}
+	wait local.fuse
+
+	// Detonate
+	level.coop_radio_destroyed = 1
+	level.coop_radio_planting = 0
+	if( level.coop_radio_charge != NULL ){ level.coop_radio_charge stoploopsound bombtick }
+	local.radio = level.coop_radio
+	if( local.radio != NULL ){
+		local.radio stopsound
+		// Distinct metallic demolition blast for the radio charge.
+		local.radio playsound coop_radio_blast
+		local.e1 = spawn "models/emitters/explosion_bombwall.tik"
+		local.e1.origin = local.rpos
+		local.e1 notsolid
+		local.e1 anim start
+		radiusdamage local.rpos 150 200
+		level.coop_radio = NULL
+		// Remove the radio + its table; mark the wreck with FIRE + SMOKE only (no debris
+		// prop -- the rubble/table meshes read as junk, so we keep it clean like before).
+		local.radio stopsound
+		local.radio remove
+		local.rubblepos = local.rpos
+		if( level.coop_radio_table != NULL ){
+			local.rubblepos = level.coop_radio_table.origin
+			level.coop_radio_table remove
+			level.coop_radio_table = NULL
+		}
+		// Fire crackle replaces the radio static; fire + smoke FX at the wreck.
+		local.fire = spawn "models/emitters/firegood.tik"
+		local.fire.origin = local.rubblepos + (0 0 8)
+		local.fire notsolid
+		local.fire anim start
+		local.fire loopsound fire_med
+		local.smoke = spawn "models/emitters/linger_smoke.tik"
+		local.smoke.origin = local.rubblepos + (0 0 12)
+		local.smoke anim start
+		if( level.coop_radio_charge != NULL ){ level.coop_radio_charge delete }
+		if( level.coop_radio_tuse != NULL ){ level.coop_radio_tuse remove }
+	}
+
+	iprintlnbold "Radio destroyed! Reinforcements cannot be called!"
+	thread coop_mod/objectives.scr::coop_obj_radio_done
+}end
+
+
+// === REPLACEMENT OFFICER WATCH ===
+
+// After boss dies, 2 surviving German actors become replacement commanders.
+coop_replacement_officer_watch:{
+	wait 3
+	if( $actor == NULL ){ end }
+
+	local.found = 0
+	local.i = 1
+	while( local.i <= $actor.size && local.found < 2 ){
+		local.ent = $actor[local.i]
+		if( local.ent != NULL && isAlive local.ent && local.ent != level.coop_officer ){
+			if( randomint 10 < 3 ){
+				thread coop_replacement_officer_ai local.ent
+				local.found++
+			}
+		}
+		local.i++
+	}
+}end
+
+
+// Surviving enemy runs to radio to call reinforcements if they spot a player.
+coop_replacement_officer_ai local.actor:{
+	while( local.actor != NULL && isAlive local.actor ){
+		if( level.coop_radio_destroyed == 1 ){ end }
+		wait 5
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+
+		local.spotted = 0
+		local.pi = 1
+		while( local.pi <= $player.size && local.spotted == 0 ){
+			local.pp = $player[local.pi]
+			if( local.pp != NULL && local.pp.health > 0 ){
+				if( local.actor canseenoents local.pp ){
+					local.spotted = 1
+				}
+			}
+			local.pi++
+		}
+
+		if( local.spotted == 1 && level.coop_radio != NULL && level.coop_radio_destroyed != 1 ){
+			iprintlnbold "A surviving officer spotted you and is radioing for backup!"
+			local.actor.movedoneradius = 200
+			local.actor runto level.coop_radio.origin
+			local.actor waittill movedone
+			if( level.coop_radio_destroyed != 1 ){
+				thread coop_reinf_call_wave_gated local.actor
+				wait 15
+			}
+		}
+	}
+}end
+

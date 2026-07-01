@@ -1,0 +1,237 @@
+// HZM coop - player-deployable AMMO BOX.
+// - Each player may drop ONE box per MATCH. The drop flag lives on the LEVEL keyed by player entnum,
+//   so it persists across that player's respawns but resets on map change (= once per match).
+// - A deployed box can NOT be picked up or re-placed (anti-abuse) - it is a plain decorative model.
+// - Each player gets ONE refill per box (tracked on the level keyed by slot+entnum), so a player can't
+//   stand on one box to refill forever, but every squadmate still gets their single use from it.
+// - Deployed via the "Coop Ammo Box" keybind (player.scr dispatch arrayIndex 16).
+// Modeled on coop_mod/cover.scr (the sandbag deploy) + the proven ihuddraw per-client HUD pattern.
+
+//=========================================================================
+ammobox_place local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.key = local.player.entnum
+	if( level.coop_ammobox_dropped[local.key] == 1 ){
+		local.player iprint "You have already deployed your ammo box this mission!" 1
+		end
+	}
+	if( local.player.flags["coop_dbno_active"] == 1 ){ end }
+
+	// pick a spot a short distance in front of the player; shorten if a wall is closer (same trace idea
+	// as the sandbag deploy, but we don't REQUIRE a wall - an ammo box goes on open floor).
+	local.eyepos   = local.player.origin + (0 0 40)
+	local.fwd      = angles_toforward local.player.viewangles
+	local.traceend = local.eyepos + (local.fwd * 96)
+	local.result   = traced (local.eyepos) (local.traceend)
+	local.frac     = local.result["fraction"]
+	local.dist     = 64
+	if( local.frac < 1.0 ){ local.dist = (local.frac * 96) - 24 }
+	if( local.dist < 24 ){ local.dist = 24 }
+
+	local.fwdflat = local.fwd
+	local.fwdflat[2] = 0
+	local.pos = local.player.origin + (local.fwdflat * local.dist)
+
+	local.cang = ( 0 0 0 )
+	local.cang[1] = local.player.viewangles[1]
+
+	local.crate = spawn script_model
+	local.crate model "models/static/50cal_crate.tik"	// real WW2 wooden ammo crate (stenciled ".50 CAL"). Alts: 30cal_crate / 45cal_crate / miscobj/ammocrate
+	local.crate scale 2					// bigger / more visible (user) - tune 1.5..2.5
+	local.crate.origin = local.pos
+	local.crate.angles = local.cang
+	local.crate droptofloor
+	local.crate notsolid
+	// 3D drop thud from the CRATE so ALL players hear it with distance falloff (not a per-client sound)
+	local.crate playsound coop_ammobox_drop
+
+	local.slot = level.coop_ammobox_count
+	if( local.slot == NIL ){ local.slot = 0 }
+	local.slot++
+	level.coop_ammobox_count = local.slot
+	level.coop_ammobox_visual[local.slot] = local.crate
+	level.coop_ammobox_owner[local.slot]  = local.key	// entnum of the deployer (for owner pick-up via USE)
+
+	level.coop_ammobox_dropped[local.key] = 1
+	local.player iprint "Ammo box deployed - each squadmate can resupply once." 1
+}end
+
+
+// Refill a MODERATE (~half loadout) amount per weapon. Tunable live via cvar coop_ammobox_amount
+// (a PERCENT of these base amounts; default 100). All-integer math (no float/string coercion, no %).
+//=========================================================================
+ammobox_refill local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.pct = int( getcvar( "coop_ammobox_amount" ) )
+	if( local.pct <= 0 ){ local.pct = 100 }
+
+	// precompute each amount into a local (the mod's convention - avoids inline expressions as cmd args)
+	local.a = int( 20 * local.pct / 100 )
+	local.player ammo "rifle" local.a
+	local.a = int( 60 * local.pct / 100 )
+	local.player ammo "smg" local.a
+	local.a = int( 60 * local.pct / 100 )
+	local.player ammo "mg" local.a
+	local.a = int( 16 * local.pct / 100 )
+	local.player ammo "pistol" local.a
+	local.a = int( 12 * local.pct / 100 )
+	local.player ammo "shotgun" local.a
+	local.a = int( 2 * local.pct / 100 )
+	local.player ammo "grenade" local.a
+	local.a = int( 1 * local.pct / 100 )
+	local.player ammo "heavy" local.a
+}end
+
+
+// Per-client HUD: ammo-box availability icon (slot 45) + a 1/0 "available" count (slot 46).
+//=========================================================================
+ammobox_hud_monitor local.player:{
+//=========================================================================
+	local.last = 0 - 1
+
+	ihuddraw_virtualsize local.player 45 1
+	ihuddraw_align       local.player 45 left bottom
+	ihuddraw_shader      local.player 45 "textures/hud/coop_ammobox_icon"
+	ihuddraw_rect        local.player 45 76 -62 16 16
+	ihuddraw_alpha       local.player 45 1
+
+	ihuddraw_virtualsize local.player 46 1
+	ihuddraw_align       local.player 46 left bottom
+	ihuddraw_font        local.player 46 "verdana-14"
+	ihuddraw_color       local.player 46 1 1 1
+	ihuddraw_rect        local.player 46 94 -60 0 0
+	ihuddraw_alpha       local.player 46 1
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		local.key = local.player.entnum
+		local.avail = 1
+		if( level.coop_ammobox_dropped[local.key] == 1 ){ local.avail = 0 }
+		if( local.avail != local.last ){
+			ihuddraw_string local.player 46 ("" + local.avail)
+			local.last = local.avail
+		}
+		wait 0.2
+	}
+
+	ihuddraw_alpha  local.player 45 0
+	ihuddraw_alpha  local.player 46 0
+	ihuddraw_string local.player 46 ""
+}end
+
+
+// Per-client proximity + USE interaction: when near a deployed box the player hasn't used yet, show a
+// "[USE] Resupply" hint; holding USE refills them once and marks the box used for that player. (slot 47)
+//=========================================================================
+ammobox_proximity_monitor local.player:{
+//=========================================================================
+	local.hintstate = 0	// 0 = none, 1 = "[USE] resupply", 2 = "depleted"
+
+	ihuddraw_virtualsize local.player 47 1
+	ihuddraw_align       local.player 47 center bottom
+	ihuddraw_font        local.player 47 "verdana-14"
+	ihuddraw_color       local.player 47 1 1 1
+	ihuddraw_rect        local.player 47 0 -36 0 0
+	ihuddraw_alpha       local.player 47 0
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		local.f = 0
+		while( local.f < 5 ){
+			waitframe
+			local.f++
+		}
+		if( local.player == NULL || local.player.flags["coop_isActive"] != 1 ){ end }
+
+		// nearest deployed box within range
+		local.nearslot = NIL
+		local.neardist = 96
+		if( level.coop_ammobox_count != NIL ){
+			local.i = 1
+			while( local.i <= level.coop_ammobox_count ){
+				local.bx = level.coop_ammobox_visual[local.i]
+				if( local.bx != NIL && local.bx != NULL ){
+					local.d = vector_length( local.bx.origin - local.player.origin )
+					if( local.d < local.neardist ){
+						local.neardist = local.d
+						local.nearslot = local.i
+					}
+				}
+				local.i++
+			}
+		}
+
+		if( local.nearslot != NIL ){
+			local.key = local.player.entnum
+			if( level.coop_ammobox_owner[local.nearslot] == local.key ){
+				if( level.coop_ammobox_used[local.nearslot][local.key] != 1 ){
+					// OWNER, not yet resupplied: hold USE (F) to RESUPPLY (your one use), like any squadmate.
+					// This was the bug - the owner only ever got "pick up", so F instantly removed the box
+					// instead of refilling. Now you refill first, THEN can reclaim it on a second press.
+					if( local.hintstate != 1 ){
+						ihuddraw_string local.player 47 "[USE] Resupply ammo"
+						ihuddraw_alpha  local.player 47 0.85
+						local.hintstate = 1
+					}
+					if( local.player.useheld == 1 ){
+						waitthread ammobox_refill local.player
+						level.coop_ammobox_used[local.nearslot][local.key] = 1
+						local.player playsound coop_sandbag_place
+						local.player iprint "Ammo resupplied!" 1
+						ihuddraw_string local.player 47 "[USE] Pick up ammo box"
+						ihuddraw_alpha  local.player 47 0.85
+						local.hintstate = 3
+						// consume the hold so the SAME press doesn't instantly pick the box back up
+						while( local.player != NULL && local.player.useheld == 1 ){ waitframe }
+					}
+				} else {
+					// OWNER, already resupplied: hold USE (F) to pick the box back up, freeing your deploy.
+					if( local.hintstate != 3 ){
+						ihuddraw_string local.player 47 "[USE] Pick up ammo box"
+						ihuddraw_alpha  local.player 47 0.85
+						local.hintstate = 3
+					}
+					if( local.player.useheld == 1 ){
+						local.bx = level.coop_ammobox_visual[local.nearslot]
+						if( local.bx != NIL && local.bx != NULL ){ local.bx remove }
+						level.coop_ammobox_visual[local.nearslot] = NIL
+						level.coop_ammobox_owner[local.nearslot]  = NIL
+						level.coop_ammobox_dropped[local.key]     = 0
+						local.player playsound coop_ammobox_drop
+						local.player iprint "Ammo box picked up." 1
+						ihuddraw_alpha  local.player 47 0
+						local.hintstate = 0
+					}
+				}
+			} else if( level.coop_ammobox_used[local.nearslot][local.key] == 1 ){
+				if( local.hintstate != 2 ){
+					ihuddraw_string local.player 47 "Ammo box depleted (already used)"
+					ihuddraw_alpha  local.player 47 0.55
+					local.hintstate = 2
+				}
+			} else {
+				if( local.hintstate != 1 ){
+					ihuddraw_string local.player 47 "[USE] Resupply ammo"
+					ihuddraw_alpha  local.player 47 0.85
+					local.hintstate = 1
+				}
+				if( local.player.useheld == 1 ){
+					waitthread ammobox_refill local.player
+					level.coop_ammobox_used[local.nearslot][local.key] = 1
+					local.player playsound coop_sandbag_place
+					local.player iprint "Ammo resupplied!" 1
+					ihuddraw_string local.player 47 "Ammo box depleted (already used)"
+					ihuddraw_alpha  local.player 47 0.55
+					local.hintstate = 2
+				}
+			}
+		} else {
+			if( local.hintstate != 0 ){
+				ihuddraw_alpha local.player 47 0
+				local.hintstate = 0
+			}
+		}
+	}
+
+	ihuddraw_alpha local.player 47 0
+}end

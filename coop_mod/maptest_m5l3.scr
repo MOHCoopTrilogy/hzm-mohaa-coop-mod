@@ -1,0 +1,284 @@
+// HZM Coop - m5l3 Scene-Walk Tester
+//=========================================================================
+// m5l3 is a single sniper-overwatch map, NOT a multi-BSP scene rotation.
+// Standard Phase 2 spawns a player (clears replace.scr::waitForPlayer) but
+// NEVER parks them in a bino volume, so only Phase A (intro) ever runs and
+// every gameplay phase below the bino-gate (vehicle spawns, exploders, AI
+// waves, King Tiger health HUD) goes UNTESTED.
+//
+// This thread drives the bino-gate progression FROM THE OUTSIDE - it reads
+// and writes level.flags[]/level.wintime and teleports the player onto
+// $binomid/$binoleft/$binoright, re-asserting origin + health every tick so
+// AI can't knock the player off the volume. m5l3.scr is UNTOUCHED.
+//
+// It STOPS before the PHASE F win transition (objgen execs
+// global/missioncomplete.scr briefing/briefing6 = a map change); forcing the
+// real win is a separate, riskier sub-test. After observing all scenes it
+// hands back to coop_maptest_transition to advance the rotation normally.
+//
+// Gated behind coop_maptest == "2" AND coop_maptest_m5l3 == "1" (default 0),
+// and only runs on m5l3 - zero effect anywhere else.
+//
+// Hook from coop_mod/main.scr::main, beside the Phase 2 hook:
+//     if( getcvar( "coop_maptest" ) == "2" && getcvar( "coop_maptest_m5l3" ) == "1" ){
+//         thread coop_mod/maptest_m5l3.scr::coop_maptest_m5l3_walk
+//     }
+// (When coop_maptest_m5l3 is 1, launch this INSTEAD of the generic phase2
+//  tick, i.e. wrap the generic phase2 hook in an else, OR just let both run -
+//  the generic tick will patrol/observe while this drives the gate. The cfg
+//  maptest_m5l3_start.cfg sets both cvars; the recommended setup is to gate
+//  the generic phase2 tick so only this walk runs on m5l3.)
+//
+// Greppable banners (all start with ^~^~^ for the console monitor):
+//   ^~^~^ MAPTEST_LOADED m5l3 (<idx>/<total>)        <- clicker spawn trigger (shared)
+//   ^~^~^ MAPTEST3_ENT m5l3 <name> <origin|MISSING>
+//   ^~^~^ MAPTEST3_SCENE m5l3 <phase>
+//   ^~^~^ MAPTEST3_PLUNGER_GONE m5l3
+//   ^~^~^ MAPTEST3_TIGER_SPAWNED m5l3
+//   ^~^~^ MAPTEST3_TIGER_TIMEOUT m5l3
+//   ^~^~^ MAPTEST3_ARTY_READY m5l3
+//   ^~^~^ MAPTEST3_KINGTIGER_SPAWNED m5l3
+//   ^~^~^ MAPTEST3_KINGTIGER_TIMEOUT m5l3
+//   ^~^~^ MAPTEST3_ALL_SCENES_OBSERVED m5l3
+//=========================================================================
+
+coop_maptest_m5l3_walk:{
+	waitthread coop_mod/main.scr::waitForMainScript
+
+	// Re-confirm both gates and that we are actually on m5l3.
+	if( getcvar( "coop_maptest" ) != "2" ){
+		end
+	}
+	if( getcvar( "coop_maptest_m5l3" ) != "1" ){
+		end
+	}
+
+	local.cur = level.coop_mapname
+	if( local.cur == NIL || local.cur == "" ){
+		local.cur = getcvar( "mapname" )
+	}
+	if( local.cur != "m5l3" ){
+		// Not m5l3 - leave the rotation to the generic phase2 tick.
+		end
+	}
+
+	// Wait for a connected player.
+	local.guard = 0
+	while( $player.size < 1 ){
+		wait 1
+		local.guard = local.guard + 1
+		if( local.guard > 120 ){
+			println "^~^~^ MAPTEST_PAUSED no player connected"
+			end
+		}
+	}
+
+	// Resolve our slot in the shared list for the standard MAPTEST_LOADED banner
+	// (clicker fires on this) and for the eventual advance.
+	local.maps = waitthread coop_mod/maptest.scr::coop_maptest_list
+	local.next = ""
+	local.idx  = 0
+	for( local.i = 1; local.i <= local.maps.size; local.i++ ){
+		if( local.maps[local.i] == local.cur ){
+			local.idx = local.i
+			if( local.i < local.maps.size ){
+				local.next = local.maps[local.i + 1]
+			}
+		}
+	}
+
+	println( "^~^~^ MAPTEST_LOADED " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+	iprintlnbold( "MAPTEST3 m5l3 scene-walk (" + local.idx + "/" + local.maps.size + ")" )
+
+	// Let the clicker spawn the player (DELAY_S = 4s) then settle.
+	wait 6
+
+	// High health (god/ungod are console-only; 999999 hp survives normal combat).
+	if( $player[1].health > 0 ){
+		$player[1].health    = 999999
+		$player[1].maxhealth = 999999
+	}
+
+	// -----------------------------------------------------------------------
+	// ENTITY VERIFY: banner each key entity + origin (or MISSING).
+	// $X safely reads NULL when no entity carries that targetname.
+	// -----------------------------------------------------------------------
+	waitthread reportEnt local.cur "binomid"   $binomid
+	waitthread reportEnt local.cur "binoleft"  $binoleft
+	waitthread reportEnt local.cur "binoright" $binoright
+	waitthread reportEnt local.cur "obj5"      $obj5
+	waitthread reportEnt local.cur "playertank" $playertank
+	waitthread reportEnt local.cur "flak88"    $flak88
+	waitthread reportEnt local.cur "plunger"   $plunger
+
+	// Pick a bino volume to park on (mid preferred, then left, then right).
+	local.bino = NULL
+	if( $binomid != NULL ){
+		local.bino = $binomid
+	}
+	if( local.bino == NULL && $binoleft != NULL ){
+		local.bino = $binoleft
+	}
+	if( local.bino == NULL && $binoright != NULL ){
+		local.bino = $binoright
+	}
+	if( local.bino == NULL ){
+		println( "^~^~^ MAPTEST3_SCENE " + local.cur + " NO_BINO_VOLUME_ABORT" )
+		// Hand back to the rotation so the run does not stall.
+		waitthread advance local.cur local.next local.idx
+		end
+	}
+	local.binopos = local.bino.origin
+
+	// -----------------------------------------------------------------------
+	// PHASE B: park player on the bino volume -> unblocks objgen:417, fires
+	// readytosnipe + playertank dodrive + enemytankstart. Re-assert origin +
+	// health every tick so AI cannot knock the player off the volume.
+	// -----------------------------------------------------------------------
+	println( "^~^~^ MAPTEST3_SCENE " + local.cur + " B_recon" )
+	iprintlnbold( "MAPTEST3 PHASE B: bridge recon" )
+
+	local.plunger_seen = 0
+	local.tiger_seen   = 0
+	local.arty_seen    = 0
+	local.t = 0
+	// ~90s window: poll for plungergone, first tiger alive, Artillary_Ready.
+	while( local.t < 45 ){
+		waitthread parkOnBino $player[1] local.binopos
+		wait 2
+		local.t = local.t + 1
+
+		if( local.plunger_seen == 0 && level.flags[plungergone] == 1 ){
+			local.plunger_seen = 1
+			println( "^~^~^ MAPTEST3_PLUNGER_GONE " + local.cur )
+		}
+		if( local.tiger_seen == 0 && level.curvehicles > 0 ){
+			local.tiger_seen = 1
+			println( "^~^~^ MAPTEST3_TIGER_SPAWNED " + local.cur )
+		}
+		if( local.arty_seen == 0 && level.flags[Artillary_Ready] == 1 ){
+			local.arty_seen = 1
+			println( "^~^~^ MAPTEST3_ARTY_READY " + local.cur )
+		}
+	}
+
+	if( local.tiger_seen == 0 ){
+		println( "^~^~^ MAPTEST3_TIGER_TIMEOUT " + local.cur )
+	}
+
+	// -----------------------------------------------------------------------
+	// PHASE E: FORCE the King Tiger gate. m5l3.scr sets level.wintime to
+	// level.time + 500000 at init; objgen:566 needs ( level.time > level.wintime )
+	// AND a player on a bino volume AND curvehicles < 2 to set
+	// Final_Tank_Approaches -> enemytankstart escalates to spawn the King Tiger
+	// (vehicles/kingtank, 7000hp) + showhealth HUD. Collapse wintime so the
+	// time gate passes, keep the player parked, and poll for the spawn.
+	// -----------------------------------------------------------------------
+	println( "^~^~^ MAPTEST3_SCENE " + local.cur + " E_kingtiger_force" )
+	iprintlnbold( "MAPTEST3 PHASE E: forcing King Tiger" )
+	level.wintime = level.time
+
+	local.kt_seen = 0
+	local.kt_base = level.curvehicles
+	local.t = 0
+	// ~120s window for the King Tiger to spawn.
+	while( local.t < 60 && local.kt_seen == 0 ){
+		waitthread parkOnBino $player[1] local.binopos
+		// Keep the time gate satisfied in case m5l3.scr pushes wintime forward.
+		if( level.time <= level.wintime ){
+			level.wintime = level.time
+		}
+		wait 2
+		local.t = local.t + 1
+
+		if( level.flags[Final_Tank_Approaches] == 1 ){
+			local.kt_seen = 1
+			println( "^~^~^ MAPTEST3_KINGTIGER_SPAWNED " + local.cur )
+		}
+	}
+
+	if( local.kt_seen == 0 ){
+		println( "^~^~^ MAPTEST3_KINGTIGER_TIMEOUT " + local.cur )
+	}
+
+	// Observe the King Tiger / HUD for a short stationary window (still parked).
+	local.t = 0
+	while( local.t < 15 ){
+		waitthread parkOnBino $player[1] local.binopos
+		wait 2
+		local.t = local.t + 1
+	}
+
+	// -----------------------------------------------------------------------
+	// STOP before PHASE F win: do NOT let King_Tiger_Lost drive objgen:587 ->
+	// missioncomplete (that transition is owned by the rotation, not us).
+	// -----------------------------------------------------------------------
+	println( "^~^~^ MAPTEST3_ALL_SCENES_OBSERVED " + local.cur )
+	iprintlnbold( "MAPTEST3 ALL SCENES OBSERVED" )
+
+	if( getcvar( "coop_maptest" ) != "2" ){
+		println "^~^~^ MAPTEST_PAUSED"
+		end
+	}
+	if( $player.size < 1 ){
+		println "^~^~^ MAPTEST_PAUSED no player"
+		end
+	}
+
+	waitthread advance local.cur local.next local.idx
+}end
+
+
+//=========================================================================
+// Teleport the player onto a bino volume origin and re-assert invincibility.
+// Guarded so setting health on a dead player does not throw.
+//=========================================================================
+parkOnBino local.player local.pos:{
+	if( local.player == NULL || local.player == NIL ){
+		end
+	}
+	local.player.origin = local.pos
+	if( local.player.health > 0 ){
+		local.player.health    = 999999
+		local.player.maxhealth = 999999
+	}
+}end
+
+
+//=========================================================================
+// Banner an entity's origin (or MISSING). local.ent may be NULL.
+//=========================================================================
+reportEnt local.map local.name local.ent:{
+	if( local.ent == NULL || local.ent == NIL ){
+		println( "^~^~^ MAPTEST3_ENT " + local.map + " " + local.name + " MISSING" )
+		end
+	}
+	if( local.ent.size > 1 ){
+		println( "^~^~^ MAPTEST3_ENT " + local.map + " " + local.name + " " + local.ent[1].origin )
+		end
+	}
+	println( "^~^~^ MAPTEST3_ENT " + local.map + " " + local.name + " " + local.ent.origin )
+}end
+
+
+//=========================================================================
+// Hand back to the shared rotation (same phase-end + transition logic as
+// the generic phase2 tick), so the run advances normally after m5l3.
+//=========================================================================
+advance local.cur local.next local.idx:{
+	if( local.next == "" ){
+		println "^~^~^ MAPTEST_COMPLETE"
+		iprintlnbold "MAPTEST COMPLETE"
+		end
+	}
+
+	local.batch_limit = 5
+	if( int( local.idx / local.batch_limit ) * local.batch_limit == local.idx ){
+		println( "^~^~^ MAPTEST_PHASE_END " + local.next )
+		iprintlnbold( "MAPTEST PHASE END " + local.idx + ": restart for " + local.next )
+		end
+	}
+
+	println( "^~^~^ MAPTEST3_ADVANCE " + local.cur + " -> " + local.next )
+	waitthread coop_mod/maptest.scr::coop_maptest_transition local.next
+}end

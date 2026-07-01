@@ -1,0 +1,548 @@
+// coop_officer_positions.scr
+// Authored boss encounter anchors for all non-skip, non-defer maps.
+// Source of truth: OFFICER_SPAWN_TABLE_FINAL.md (2026-06-21)
+//
+// DERIVATION RULES (applied at spawn time in officer.scr):
+//   Officer spawn  = anchor + ( 100 0 0)
+//   Radio / Table  = anchor (co-located)
+//   Bodyguard 1    = anchor + ( -50  50 0)
+//   Bodyguard 2    = anchor + ( -50 -50 0)
+//   Reinf zone     = stored per-map (pre-computed: anchor - normalize(anchor-start)*500)
+//
+// FLAGS set by this file (read by officer.scr):
+//   level.coop_officer_anchor          vector  anchor origin; NIL = use dynamic selection
+//   level.coop_officer_reinf_zone      vector  authored reinf spawn zone; NIL = dynamic
+//   level.coop_officer_z_ref           float   Z reference for dynamic filter; NIL = mapStartOrigin Z
+//   level.coop_officer_z_tol           float   Z floor tolerance (default 192)
+//   level.coop_officer_verify_ingame   int     1 = needs in-game QA before ship
+//
+// PHASE 0 schema additions (read by officer.scr coop_model_for + feature guards):
+//   level.coop_theater          string  "aa"/"afrika"/"wehr"/"russ"; default "aa"
+//   level.coop_feature_boss     int     1 = spawn officer (default 1)
+//   level.coop_feature_waves    int     1 = reinforcement waves (default 1)
+//   level.coop_feature_paradrop int     1 = allied paradrop reward (default 1)
+//   level.coop_feature_binoc    int     1 = binoculars bombing-run reward (default 1)
+//   level.coop_feature_voice    int     1 = contextual German VO (default 1)
+//   level.coop_wave_mask        int     bitmask of allowed wave types 0-7 (default 255 = all)
+//
+// NOTE: exec runs in caller's context so per-map thread dispatch does not work.
+// All map data is inlined as a flat if/else-if chain inside getAnchor.
+//
+// EXCLUDED MAPS (no entry = anchor stays NIL = dynamic fallback):
+//   SKIP:           t1l1   (only true skip remaining; cinematic, feature_boss=0)
+//   MARGINAL:       m2l2b, t1l3
+//
+// OFFICER-ENABLE BATCH (2026-06-24): the following were previously SKIP / no-anchor and
+// now have authored anchors + coop_feature_boss=1 (e2l3 also fixes the header-vs-code
+// SKIP inconsistency: the boss was already live on fallback):
+//   from SKIP:      m4l0, e3l4, m2l3, m2l2a  (boss re-enabled; paradrop kept off)
+//   m5l2b:          boss re-enabled (tank auto-drives, players on foot); paradrop off
+//   bucket-C anchors authored: m1l3a, m3l3, m5l2a, m6l1b, e2l3
+
+
+getAnchor:{
+	level.coop_officer_anchor        = NIL
+	level.coop_officer_reinf_zone    = NIL
+	level.coop_officer_reinf_ztol    = NIL
+	level.coop_officer_anchor_ang    = NIL	// per-map officer facing yaw at spawn (NIL = default); also orients bodyguards placed behind him
+	level.coop_officer_player_canteen = 0
+	level.coop_officer_canteen_pos    = NIL
+	level.coop_officer_death_battalion_pos = NIL	// per-map: spawn an avenging battalion here AFTER the officer dies (NIL = off)
+	level.coop_officer_death_battalion_ang = 0	// initial facing for that battalion (yaw)
+	level.coop_officer_death_battalion_hold = 0	// 1 = they GUARD the spawn area + engage on sight (no rush)
+	level.coop_officer_death_battalion_pos2 = NIL	// optional SECOND death battalion location (NIL = off)
+	level.coop_officer_death_battalion_ang2 = 0
+	level.coop_officer_death_battalion_pos3 = NIL	// optional THIRD death battalion location (NIL = off)
+	level.coop_officer_death_battalion_ang3 = 0
+	level.coop_officer_death_battalion_pos4 = NIL	// optional FOURTH death battalion location (NIL = off)
+	level.coop_officer_death_battalion_ang4 = 0
+	level.coop_officer_death_battalion_pos5 = NIL	// optional FIFTH death battalion location (NIL = off)
+	level.coop_officer_death_battalion_ang5 = 0
+	level.coop_officer_waves_at_zone = 0	// 1 = sniper & dogs spawn at the reinf zone too (not their distant anchors)
+	level.coop_officer_sniper_at_zone = NIL	// per-map sniper override: NIL = follow waves_at_zone; 0 = keep sniper on its distant perch even when other waves are zoned ("all except sniper")
+	level.coop_officer_no_airstrikes = 0	// 1 = officer never calls Stuka (type 4) / Artillery (type 5) waves (e.g. interior maps) -> rerolls to an on-foot squad
+	level.coop_officer_instant_spawn = 0	// 1 = skip the ~30s intro/ride settle delay and spawn the officer at once (for very short maps)
+	level.coop_officer_smoke_drop    = 1	// officer drops the signal-smoke reward (per-map; 0 = off, paradrop system stays on)
+	level.coop_binoc_tutorial_msg    = NIL	// per-map binoculars-pickup tutorial (INDEXED array of short lines; NIL = default msg)
+	level.coop_officer_spawn_tutorial = NIL	// per-map officer-spawn tutorial (INDEXED array of short lines; NIL = none)
+	level.coop_officer_z_ref         = NIL
+	level.coop_officer_z_tol         = 192
+	level.coop_officer_verify_ingame = 0
+
+	// --- Phase 0 schema: theater + per-map feature toggles + wave mask ---
+	// Defaults below preserve current AA behavior exactly (all features on, all 8 wave
+	// types allowed). coop_theater defaults to "aa" and is overridden per-map below for
+	// the e/t campaigns. coop_model_for in officer.scr reads coop_theater.
+	level.coop_theater           = "aa"
+	level.coop_feature_boss      = 1
+	level.coop_feature_waves     = 1
+	level.coop_feature_paradrop  = 1
+	level.coop_feature_binoc     = 1
+	level.coop_feature_voice     = 1
+	level.coop_feature_battalion = 1
+	level.coop_wave_mask         = 255
+
+	local.m = level.coop_mapname
+
+	// --- Theater resolver (explicit per-map; no substring ops in MOHAA script) ---
+	// e1* = Afrika; e2*/e3*/t1*/t2* = Wehrmacht; t3* = Russian-theater (German garrison).
+	if( local.m == "e1l1" || local.m == "e1l2" || local.m == "e1l3" || local.m == "e1l4" ){
+		level.coop_theater = "afrika"
+	} else if( local.m == "e2l1" || local.m == "e2l2" || local.m == "e2l3" ){
+		level.coop_theater = "wehr"
+	} else if( local.m == "e3l1" || local.m == "e3l2" || local.m == "e3l3" || local.m == "e3l4" ){
+		level.coop_theater = "wehr"
+	} else if( local.m == "t1l1" || local.m == "t1l2" || local.m == "t1l3" ){
+		level.coop_theater = "wehr"
+	} else if( local.m == "t2l1" || local.m == "t2l2" || local.m == "t2l3" || local.m == "t2l4" ){
+		level.coop_theater = "wehr"
+	} else if( local.m == "t3l1" || local.m == "t3l2" ){
+		level.coop_theater = "russ"
+	}
+
+	// =====================================================================
+	// AA m-series -- ALARM tier  (HIGH confidence)
+	// =====================================================================
+
+	if( local.m == "m4l3" ){
+		level.coop_officer_anchor     = ( -263 -1066 9 )
+		level.coop_officer_reinf_zone = ( -570 -1460 17 )
+
+	} else if( local.m == "m6l2a" ){
+		level.coop_officer_anchor     = ( 1120 -2784 120 )
+		level.coop_officer_reinf_zone = ( 651 -2956 114 )
+
+	} else if( local.m == "m6l3a" ){
+		level.coop_officer_anchor     = ( -2424 -2568 -560 )
+		level.coop_officer_reinf_zone = ( -2765 -2934 -553 )
+
+	// =====================================================================
+	// AA m-series -- ENEMY tier  (MEDIUM confidence)
+	// =====================================================================
+
+	} else if( local.m == "m1l1" ){
+		// HZM COOP: relocated away from the intro truck-ambush area. The original anchor
+		// ( -1488 -2704 192 ) put the officer/radio/bodyguards right by the scripted truck
+		// set-piece, where the boss AI fixated on a scripted dying friendly and fired into
+		// the ground. New spot chosen in-game via viewpos (Z is eye-height; spawns droptofloor).
+		level.coop_officer_anchor     = ( -4533 677 506 )
+		level.coop_officer_reinf_zone = ( -5610 556 458 )
+		// Smaller map: restrict officer reinforcements to Elite Squad(0), Grenadiers(3),
+		// Stuka(4), Artillery(5). Mask 57 = bits 0+3+4+5 (1+8+16+32). Excludes Wehrmacht
+		// squad(1), Sniper(2), AT team(6), Dogs(7) - the ones that used the far-spawn calc
+		// and landed across the map. The two human waves (elite/grenadiers) spawn at
+		// coop_officer_reinf_zone above. Battalion disabled (too big for this map); the 25%
+		// trigger falls back to a normal masked wave (see officer.scr). m1l1-only.
+		level.coop_wave_mask         = 57
+		level.coop_feature_battalion = 0
+		// m1l1: officer drops nothing (no smoke, no binoculars) and shows a spawn tutorial.
+		level.coop_officer_smoke_drop = 0
+		level.coop_feature_binoc      = 0
+		level.coop_officer_spawn_tutorial[1] = "TUTORIAL: High-Ranking officers are often reported"
+		level.coop_officer_spawn_tutorial[2] = "and will call in waves of reinforcements. Defeat the"
+		level.coop_officer_spawn_tutorial[3] = "officer and destroy his radio to stop reinforcements"
+		level.coop_officer_spawn_tutorial[4] = "from entering the battlefield."
+
+	} else if( local.m == "m1l2a" ){
+		// HZM COOP: combat policy (officer spawns after intro; see officer.scr). Anchor +
+		// reinf zone chosen via in-game viewpos. The reinf zone is intentionally on a lower
+		// level (~268u below the anchor), so raise the per-map Z tolerance to honor it
+		// without the per-wave "spawn Z diff too large" console warning.
+		level.coop_officer_anchor     = ( -383 -638 38 )
+		level.coop_officer_reinf_zone = ( -781 -3161 -237 )
+		level.coop_officer_reinf_ztol = 4096
+		level.coop_officer_player_canteen = 1	// no placed medkit near the relocated boss here - add a healing canteen
+		level.coop_officer_canteen_pos    = ( -862 -344 -9 )	// on a crate, on ground the officer can actually path to for his heal-retreat
+		// HZM COOP: after the officer dies, an avenging battalion pours out here and rushes the
+		// players (the vanilla spotlight-alarm door spawns don't reliably fire in coop).
+		level.coop_officer_death_battalion_pos = ( 2926 -485 -62 )
+		level.coop_officer_death_battalion_ang = -148
+		// Tutorial map: smoke is taught at the hostage (no officer smoke drop); binoculars keep a
+		// tutorial message on pickup. Paradrop system stays active so both tutorial items work.
+		level.coop_officer_smoke_drop = 0
+		level.coop_binoc_tutorial_msg[1] = "TUTORIAL: Bombing Runs can be deployed to the"
+		level.coop_binoc_tutorial_msg[2] = "battlefield through binoculars, usually carried by"
+		level.coop_binoc_tutorial_msg[3] = "High-Ranking Officers. Deploy by swapping primary"
+		level.coop_binoc_tutorial_msg[4] = "weapons; aim and hit primary fire to call it in."
+
+	} else if( local.m == "m1l3b" ){
+		level.coop_officer_anchor     = ( -2712 7006 -6 )
+		level.coop_officer_reinf_zone = ( -2593 6520 -4 )
+
+	} else if( local.m == "m1l3a" ){
+		// OFFICER-ENABLE BATCH (bucket C): Death Factory, 8 enemyspawners, coop hook present.
+		// D-Day beach intro + level.coop_playerGlue=1, so author a deterministic anchor deep
+		// in the level rather than trusting dynamic to avoid the glued intro pocket.
+		// Lower-Z enemyspawner cluster (Z~26-58); start (3352 -6176 -88), ~6800u away.
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -3296 -3162 58 )
+		level.coop_officer_reinf_zone = ( -2296 -2978 26 )
+
+	} else if( local.m == "m1l3c" ){
+		// VERIFY_INGAME: Z=728 unusually high; confirm actor pathfinds at this elevation
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -4948 -4868 728 )
+		level.coop_officer_reinf_zone = ( -4852 -5357 775 )
+
+	} else if( local.m == "m2l1" ){
+		// Officer spawn + reinf zone re-authored from in-game viewpos (2026-06-26). Z's now match
+		// (529 / 527) so the old "spawn Z diff 176 too large" reinf fallback is gone.
+		level.coop_officer_anchor     = ( 122 -130 529 )
+		level.coop_officer_reinf_zone = ( -517 1237 527 )
+		// "All except Sniper" spawn at the reinf zone: zone the normal waves + dogs, but keep the
+		// sniper on its own distant perch (sniper_at_zone = 0 overrides waves_at_zone for him only).
+		level.coop_officer_waves_at_zone  = 1
+		level.coop_officer_sniper_at_zone = 0
+		// FOUR avenging battalions after the officer dies, dug in (hold/ambush) across the complex.
+		level.coop_officer_death_battalion_hold = 1
+		level.coop_officer_death_battalion_pos  = ( 2014 2330 529 )
+		level.coop_officer_death_battalion_ang  = -108
+		level.coop_officer_death_battalion_pos2 = ( 2981 -547 530 )
+		level.coop_officer_death_battalion_ang2 = 101
+		level.coop_officer_death_battalion_pos3 = ( 5262 322 530 )
+		level.coop_officer_death_battalion_ang3 = -127
+		level.coop_officer_death_battalion_pos4 = ( 3744 5895 18 )
+		level.coop_officer_death_battalion_ang4 = -79
+
+	} else if( local.m == "m5l1a" ){
+		level.coop_officer_anchor     = ( 1672 -2608 -32 )
+		level.coop_officer_reinf_zone = ( 2073 -2906 -30 )
+
+	} else if( local.m == "m5l1b" ){
+		level.coop_officer_anchor     = ( -2307 -4115 140 )
+		level.coop_officer_reinf_zone = ( -1957 -4473 136 )
+
+	} else if( local.m == "m5l2a" ){
+		// OFFICER-ENABLE BATCH (bucket C): A Bridge Too Far, 15 ground enemyspawners.
+		// Standard infantry map with clean authored spawn nodes; pick a distant ground
+		// spawner. Start (3320 -4144 240); anchor (2152 934 458) ~5300u away, Z within band.
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 2152 934 458 )
+		level.coop_officer_reinf_zone = ( 1288 166 194 )
+
+	} else if( local.m == "m5l2b" ){
+		// OFFICER-ENABLE BATCH: in coop the tank auto-drives, so players are on foot and
+		// global/ai.scr spawns infantry around them -> the map warrants an officer.
+		// Boss ENABLED (was 0). Paradrop stays off (no air drop on the tank corridor).
+		// Anchor (-7160 -1906 -94) is the far western enemyspawner, ~14800u from start
+		// (7632 -2544 -80) -- well past the 1000u player-start guard.
+		level.coop_feature_boss     = 1
+		level.coop_feature_paradrop = 0
+		level.coop_officer_anchor     = ( -7160 -1906 -94 )
+		level.coop_officer_reinf_zone = ( -6660 -1928 -94 )
+
+	} else if( local.m == "m5l3" ){
+		// Z_OVERRIDE: all 24 spawners 218u above player start (z_tol widened)
+		// REDUCE: tank bridge defense; no AT(6)/dogs(7), boss marginal but kept
+		level.coop_wave_mask          = 63
+		level.coop_officer_z_tol      = 250
+		level.coop_officer_anchor     = ( 429 2036 417 )
+		level.coop_officer_reinf_zone = ( 744 2424 392 )
+
+	// =====================================================================
+	// AA m-series -- AI tier  (LOW confidence)
+	// =====================================================================
+
+	} else if( local.m == "m1l2b" ){
+		// HZM COOP: anchor + reinf zone + healing medkit from in-game viewpos (2026-06-26).
+		level.coop_officer_anchor     = ( 41 1561 -175 )
+		level.coop_officer_reinf_zone = ( 1785 1222 -173 )
+		level.coop_officer_player_canteen = 1
+		level.coop_officer_canteen_pos    = ( 1144 1786 -174 )
+		// After the officer dies, a battalion digs in HERE and waits - engages the players on sight.
+		level.coop_officer_death_battalion_pos  = ( 1054 -1498 -173 )
+		level.coop_officer_death_battalion_ang  = 77
+		level.coop_officer_death_battalion_hold = 1
+		// SECOND battalion - separate ambush area.
+		level.coop_officer_death_battalion_pos2 = ( 2705 -3710 -248 )
+		level.coop_officer_death_battalion_ang2 = -131
+		// sniper + dogs spawn at the reinf zone here (their distant-anchor logic lands them off-map)
+		level.coop_officer_waves_at_zone = 1
+
+	} else if( local.m == "m2l2c" ){
+		// Officer + medkit + reinf re-authored from in-game viewpos (2026-06-26).
+		level.coop_officer_anchor     = ( 2759 -6355 -430 )
+		level.coop_officer_reinf_zone = ( 2713 -6775 -430 )
+		level.coop_officer_player_canteen = 1
+		level.coop_officer_canteen_pos    = ( 2575 -6766 -431 )
+		// Sub-pen interior: no Stuka / Artillery top-down strikes here (user request).
+		level.coop_officer_no_airstrikes  = 1
+		// Short map: officer must appear instantly, not after the ~30s settle delay (user request).
+		level.coop_officer_instant_spawn  = 1
+
+	} else if( local.m == "m3l1a" ){
+		level.coop_officer_anchor     = ( 2624 5568 -576 )
+		level.coop_officer_reinf_zone = ( 2538 5075 -572 )
+
+	} else if( local.m == "m3l1b" ){
+		// VERIFY_INGAME: only 7 ground AI in Z range; pool very thin
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 1465 -2153 -36 )
+		level.coop_officer_reinf_zone = ( 1773 -1765 -104 )
+
+	} else if( local.m == "m3l2" ){
+		// Officer + reinf + medkit re-authored from in-game viewpos (2026-06-27).
+		level.coop_officer_anchor     = ( -3198 -2651 123 )
+		level.coop_officer_reinf_zone = ( -4706 -4008 -12 )
+		// reinf zone (Z ~-12) is ~135u BELOW the officer (Z 123). The reinf Z-diff guard rejects a
+		// zone >coop_officer_reinf_ztol (default 128) from the officer's Z and falls back to spawning
+		// waves BEHIND the officer - that was the "some types spawn behind him" bug. Raise it so the
+		// zone is honored. (coop_officer_z_tol is a DIFFERENT var, for anchor ground-filtering, not this.)
+		level.coop_officer_reinf_ztol = 400
+		level.coop_officer_waves_at_zone = 1	// "all reinforcements" spawn at the reinf zone (incl. sniper/dogs)
+		level.coop_officer_player_canteen = 1
+		level.coop_officer_canteen_pos    = ( -3600 -3856 78 )	// officer heal medkit (re-placed from viewpos 2026-06-27)
+		// FOUR avenging battalions after the officer dies, each at its OWN spot (distinct rally points
+		// from in-game viewpos 2026-06-27). HOLD = 1: they dig in and guard their own area, engaging on
+		// sight (no rush) - they stay where they spawn instead of converging on one point.
+		level.coop_officer_death_battalion_hold = 1
+		level.coop_officer_death_battalion_pos  = ( -6319 -6545 -126 )
+		level.coop_officer_death_battalion_ang  = -76
+		level.coop_officer_death_battalion_pos2 = ( -3315 -6718 -273 )
+		level.coop_officer_death_battalion_ang2 = -177
+		level.coop_officer_death_battalion_pos3 = ( 3249 -4985 -92 )
+		level.coop_officer_death_battalion_ang3 = 73
+		level.coop_officer_death_battalion_pos4 = ( 3881 -4353 -67 )
+		level.coop_officer_death_battalion_ang4 = 113
+		level.coop_officer_death_battalion_pos5 = NIL
+		level.coop_officer_death_battalion_ang5 = 0
+
+	} else if( local.m == "m3l3" ){
+		// Perriers town + CHURCH battle + nebelwerfer finale (heavily scripted vanilla wave set-pieces:
+		// scene1 halftrack ambush, scene3/4 town, scene6 church wave-defense, scene7 nebelwerfers).
+		// Coop boss/reinf authored (user-provided, viewpos-verified 2026-06-30):
+		//   officer  (2228 3523 -166) facing yaw 262
+		//   reinf    (4891 2248 -216)  [wave squads attackplayer on spawn, so their noted yaw 114 isn't applied]
+		//   death battalion (post-officer-death) (2127 -2427 -182) facing -363
+		level.coop_officer_anchor     = ( 2228 3523 -166 )
+		level.coop_officer_anchor_ang = 262
+		level.coop_officer_reinf_zone = ( 4891 2248 -216 )
+		level.coop_officer_waves_at_zone = 1	// ALL reinforcements spawn at the reinf zone: sniper + dogs zoned here too (battalion + other waves already use the zone)
+		level.coop_officer_death_battalion_pos = ( 2127 -2427 -182 )
+		level.coop_officer_death_battalion_ang = -363
+
+	} else if( local.m == "m4l1" ){
+		// Z_OVERRIDE: player_start Z=-464 (entry shaft); main gameplay Z~50
+		level.coop_officer_z_ref      = 50
+		level.coop_officer_anchor     = ( -1410 -4852 -232 )
+		level.coop_officer_reinf_zone = ( -1854 -5078 -273 )
+
+	} else if( local.m == "m4l2" ){
+		level.coop_officer_anchor     = ( -4559 1852 305 )
+		level.coop_officer_reinf_zone = ( -4072 1738 308 )
+
+	} else if( local.m == "m6l1a" ){
+		level.coop_officer_anchor     = ( -801 5479 5464 )
+		level.coop_officer_reinf_zone = ( -550 5046 5463 )
+
+	} else if( local.m == "m6l1b" ){
+		// OFFICER-ENABLE BATCH (bucket C): All Roads Lead to Rome, 17 ground German AI at
+		// world Z~1760-1816. Full combat map; author a distant ground-AI anchor.
+		// Start (1360 2952 1816); anchor (-2560 -4632 1816) ~8600u away, matching Z band.
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -2560 -4632 1816 )
+		level.coop_officer_reinf_zone = ( -5629 3135 1856 )
+
+	} else if( local.m == "m6l1c" ){
+		level.coop_officer_anchor     = ( 4530 992 143 )
+		level.coop_officer_reinf_zone = ( 4030 976 136 )
+
+	} else if( local.m == "m6l2b" ){
+		level.coop_officer_anchor     = ( 5760 6036 50 )
+		level.coop_officer_reinf_zone = ( 5581 5569 52 )
+
+	} else if( local.m == "m6l3b" ){
+		level.coop_officer_anchor     = ( 416 -304 -624 )
+		level.coop_officer_reinf_zone = ( 31 -623 -615 )
+
+	} else if( local.m == "m6l3c" ){
+		// Z_OVERRIDE: player_start Z=-1256; AI cluster Z~-1016
+		level.coop_officer_z_ref      = -1024
+		level.coop_officer_z_tol      = 300
+		level.coop_officer_anchor     = ( -776 848 -1016 )
+		level.coop_officer_reinf_zone = ( -1262 779 -1110 )
+
+	} else if( local.m == "m6l3d" ){
+		// Z_OVERRIDE: AI Z=-1464 is 206u below player Z=-1258 (just over default 192)
+		level.coop_officer_z_tol      = 250
+		level.coop_officer_anchor     = ( 568 2096 -1464 )
+		level.coop_officer_reinf_zone = ( 130 1858 -1430 )
+
+	} else if( local.m == "m6l3e" ){
+		level.coop_officer_anchor     = ( -6480 -1816 -492 )
+		level.coop_officer_reinf_zone = ( -5996 -1693 -515 )
+
+	// =====================================================================
+	// BT e-series  (e1* = Afrika officer; e2/e3 = Wehrmacht officer)
+	// =====================================================================
+
+	} else if( local.m == "e1l1" ){
+		level.coop_officer_anchor     = ( 1074 -4992 180 )
+		level.coop_officer_reinf_zone = ( 709 -4650 183 )
+
+	} else if( local.m == "e1l2" ){
+		level.coop_officer_anchor     = ( 4192 4352 192 )
+		level.coop_officer_reinf_zone = ( 3707 4231 194 )
+
+	} else if( local.m == "e1l3" ){
+		level.coop_officer_anchor     = ( 1720 -960 128 )
+		level.coop_officer_reinf_zone = ( 1513 -1415 137 )
+
+	} else if( local.m == "e1l4" ){
+		level.coop_officer_anchor     = ( -5920 6224 48 )
+		level.coop_officer_reinf_zone = ( -5795 5740 50 )
+
+	} else if( local.m == "e2l1" ){
+		level.coop_officer_anchor     = ( -3338 -4322 4 )
+		level.coop_officer_reinf_zone = ( -3038 -3923 27 )
+
+	} else if( local.m == "e2l2" ){
+		level.coop_officer_anchor     = ( 2352 5456 2576 )
+		level.coop_officer_reinf_zone = ( 2520 4985 2571 )
+
+	} else if( local.m == "e2l3" ){
+		// OFFICER-ENABLE BATCH (bucket C) + INCONSISTENCY FIX: the old exclude header
+		// listed e2l3 as SKIP, but coop_feature_boss was never set to 0 -> the boss was
+		// actually live on the German-actor fallback (intent did not match behavior).
+		// Resolved per the audit by AUTHORING an anchor (preferred over disabling).
+		// e2l3 has no ai_german map entities (Germans are spawned at runtime by the level
+		// script), so anchor to the German mortar emplacement east of the village, a real
+		// German-held combat position. Start (-1688 6208 136); anchor (5483 -2312 -220)
+		// ~11100u away. VERIFY_INGAME (e-series anchors are estimates pending capture).
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_z_ref      = -220
+		level.coop_officer_z_tol      = 300
+		level.coop_officer_anchor     = ( 5483 -2312 -220 )
+		level.coop_officer_reinf_zone = ( 5716 -2591 -220 )
+
+	} else if( local.m == "e3l1" ){
+		level.coop_officer_anchor     = ( 132 5658 36 )
+		level.coop_officer_reinf_zone = ( -62 5197 36 )
+
+	} else if( local.m == "e3l2" ){
+		level.coop_officer_anchor     = ( -1180 5085 47 )
+		level.coop_officer_reinf_zone = ( -891 4677 25 )
+
+	} else if( local.m == "e3l3" ){
+		level.coop_officer_anchor     = ( 213 7093 177 )
+		level.coop_officer_reinf_zone = ( 1 6640 186 )
+
+	// =====================================================================
+	// SH t-series  (Wehrmacht officer -- France/Belgium theater)
+	// TODO(anchor-capture): all t-series anchors below are untested estimates.
+	// These maps could not run coop before Phase 2; capture in-game once integrated.
+	// =====================================================================
+
+	} else if( local.m == "t1l2" ){
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -4000 4960 32 )
+		level.coop_officer_reinf_zone = ( -3753 4525 36 )
+
+	} else if( local.m == "t2l1" ){
+		// VERIFY_INGAME: anchor Z=2096 may be elevated; re-check ground spawner
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 6368 4528 2096 )
+		level.coop_officer_reinf_zone = ( 6321 4039 2001 )
+
+	} else if( local.m == "t2l2" ){
+		// REDUCE: player drives halftrack; disable boss + paradrop (TODO vehicle surgery)
+		level.coop_feature_boss     = 0
+		level.coop_feature_paradrop = 0
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 6864 -7096 32 )
+		level.coop_officer_reinf_zone = ( 6790 -6609 119 )
+
+	} else if( local.m == "t2l3" ){
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -328 6192 96 )
+		level.coop_officer_reinf_zone = ( -348 5692 93 )
+
+	} else if( local.m == "t2l4" ){
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( -4746 3138 312 )
+		level.coop_officer_reinf_zone = ( -4526 2689 311 )
+
+	} else if( local.m == "t3l1" ){
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 456 -7876 40 )
+		level.coop_officer_reinf_zone = ( 613 -7401 33 )
+
+	} else if( local.m == "t3l2" ){
+		// REDUCE: player in T-34 entire map; disable boss + paradrop (TODO vehicle surgery)
+		level.coop_feature_boss     = 0
+		level.coop_feature_paradrop = 0
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_anchor     = ( 5483 2704 -16 )
+		level.coop_officer_reinf_zone = ( 5076 2414 -15 )
+
+	// =====================================================================
+	// SKIP-BOSS maps (no authored anchor; boss disabled per scale-out plan).
+	// Other coop features (base plumbing) still run; just no officer encounter.
+	// =====================================================================
+
+	} else if( local.m == "e3l4" ){
+		// OFFICER-ENABLE BATCH: combat-from-start bunker/fortress fight (medals + DoOutro
+		// are only the very end). Boss ENABLED (was 0). Real ai_german_wehrmact_soldier
+		// cluster sits in the elevated fortress (Z~1336-1632); anchor there. Paradrop stays
+		// off (campaign-ender). Start (320 -5632 368); anchor (-1536 4520 1336) ~10400u away.
+		level.coop_feature_boss     = 1
+		level.coop_feature_paradrop = 0
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_z_ref      = 1400
+		level.coop_officer_z_tol      = 400
+		level.coop_officer_anchor     = ( -1536 4520 1336 )
+		level.coop_officer_reinf_zone = ( -992 1952 1536 )
+
+	} else if( local.m == "m4l0" ){
+		// OFFICER-ENABLE BATCH: secret farmhouse raid. In coop the escort vehicle auto-drives
+		// so players fight on foot; 36 enemyspawners exist. Boss ENABLED (was 0). DEFERRED
+		// policy holds it until trigger1 (German siege) sets level.alarm=1. Paradrop stays
+		// off (vehicle corridor). Start (-5816 -5824 -176); anchor at the northern
+		// enemyspawner line (-3984 7320 120) ~13100u away.
+		level.coop_feature_boss     = 1
+		level.coop_feature_paradrop = 0
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_z_ref      = 100
+		level.coop_officer_z_tol      = 300
+		level.coop_officer_anchor     = ( -3984 7320 120 )
+		level.coop_officer_reinf_zone = ( -4212 7300 120 )
+
+	} else if( local.m == "t1l1" ){
+		// SKIP: long plane-ride + barn-crash cinematic intro (TODO cinematic surgery)
+		level.coop_feature_boss     = 0
+		level.coop_feature_paradrop = 0
+
+	} else if( local.m == "m2l3" ){
+		// Combat-from-start train-station escape (level.alarm=1 at spawn). Boss ENABLED.
+		// Officer + reinf re-authored from in-game viewpos (2026-06-27). Paradrop off (escape map).
+		level.coop_feature_boss     = 1
+		level.coop_feature_paradrop = 0
+		level.coop_officer_z_ref      = -446
+		level.coop_officer_z_tol      = 300
+		level.coop_officer_anchor     = ( 166 3650 -446 )
+		level.coop_officer_reinf_zone = ( 965 3868 -627 )	// lower level (~181u below anchor; within z_tol 300)
+		// "All reinforcements" spawn at the reinf zone -- incl. the sniper & dogs.
+		level.coop_officer_waves_at_zone = 1
+		// Officer healing medkit (retreats here to heal).
+		level.coop_officer_player_canteen = 1
+		level.coop_officer_canteen_pos    = ( -471 4003 -447 )
+
+	} else if( local.m == "m2l2a" ){
+		// OFFICER-ENABLE BATCH: U-boat destroyer-escort. 15 ground German AI; the combat
+		// proper is the deep deck (Z~-490). Boss ENABLED (was 0). DEFERRED policy holds it
+		// until global/alarm_system.scr sets level.alarm=1. Anchor on the distant
+		// kreigsmarine cluster. Start (-4816 -3880 -36); anchor (-2548 -6652 -488) ~3600u
+		// away. Paradrop stays off (ship interior).
+		level.coop_feature_boss     = 1
+		level.coop_feature_paradrop = 0
+		level.coop_officer_verify_ingame = 1
+		level.coop_officer_z_ref      = -488
+		level.coop_officer_z_tol      = 300
+		level.coop_officer_anchor     = ( -2548 -6652 -488 )
+		level.coop_officer_reinf_zone = ( -2276 -6708 -488 )
+
+	}
+	// Any map not listed above: anchor stays NIL -> dynamic fallback in officer.scr
+
+	end level.coop_officer_anchor
+}end

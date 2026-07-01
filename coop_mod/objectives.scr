@@ -1,0 +1,243 @@
+// Coop Side Objectives (optional / secondary)
+// chrissstrahl-style coop objective wiring, added for HZM coop.
+//
+// Wires two OPTIONAL secondary objectives into every map that runs the
+// coop officer/radio system (coop_mod/officer.scr):
+//
+//   coop_so1: "Eliminate the High-Ranking Officer"  (completes on officer death)
+//   coop_so2: "Destroy the Radio to Stop Reinforcements" (completes on radio destroy)
+//
+// These are NEVER required to finish a mission. They only drive the dedicated
+// secondary lines in the coop objectives HUD (ui/coop_objectives.urc).
+//
+// IMPORTANT - why dedicated coop_so1/coop_so2 cvars instead of the shared
+// coop_o1..coop_o8 objective slots:
+//   A trilogy-wide review found map PRIMARY objectives can fill many of the 8
+//   shared slots (m4l2 uses 7, e3l2 uses 7/8/9, m4l3 reaches 5) and completed
+//   objectives stay drawn. Using shared slots 7/8 caused both visual overlap and
+//   a hard cvar collision (e.g. e3l2/m4l2 write coop_o7/coop_o8 for their own
+//   primaries). So the side objectives live on their OWN cvars (coop_so1/coop_so2)
+//   with their OWN widgets anchored BELOW all 8 primary slots - they can never
+//   overlap or collide with any map's objectives. We also no longer call
+//   global/objectives.scr::add_objectives (which would write the shared coop_oN
+//   vars + native objective slots); these are purely the custom HUD lines.
+//
+// Status values: 1 = hidden, 2 = active (in progress), 3 = completed.
+
+//=========================================================================
+// Push one dedicated secondary line (local.so = 1 officer / 2 radio) to every
+// connected player's HUD by setting its coop_so<N> cvars directly.
+//   coop_soNd = line visible, coop_soNa = active(white) text, coop_soNs = checkbox.
+//=========================================================================
+coop_obj_push local.so local.status local.text:{
+	local.dval = 1
+	local.aval = 0
+	local.sval = 0
+	if( local.status == 2 ){			// active / in progress
+		local.aval = 1
+		local.sval = 0
+	} else if( local.status == 3 ){		// completed
+		local.aval = 0
+		local.sval = 1
+	} else {							// hidden
+		local.dval = 0
+	}
+
+	for( local.p = 1; local.p <= $player.size; local.p++ ){
+		$player[local.p] stufftext ( "set coop_so" + local.so + "d " + local.dval )
+		$player[local.p] stufftext ( "set coop_so" + local.so + "a " + local.aval )
+		$player[local.p] stufftext ( "set coop_so" + local.so + "s " + local.sval )
+		$player[local.p] stufftext ( "set coop_so" + local.so + " " + local.text )
+	}
+}end
+
+
+//=========================================================================
+// Push one dedicated secondary line to a SINGLE player's HUD (late-join /
+// respawn replay). Same cvar writes as coop_obj_push but targeted at one ent.
+//=========================================================================
+coop_obj_push_one local.ent local.so local.status local.text:{
+	if( local.ent == NULL ){ end }
+	local.dval = 1
+	local.aval = 0
+	local.sval = 0
+	if( local.status == 2 ){			// active / in progress
+		local.aval = 1
+		local.sval = 0
+	} else if( local.status == 3 ){		// completed
+		local.aval = 0
+		local.sval = 1
+	} else {							// hidden
+		local.dval = 0
+	}
+
+	local.ent stufftext ( "set coop_so" + local.so + "d " + local.dval )
+	local.ent stufftext ( "set coop_so" + local.so + "a " + local.aval )
+	local.ent stufftext ( "set coop_so" + local.so + "s " + local.sval )
+	local.ent stufftext ( "set coop_so" + local.so + " " + local.text )
+}end
+
+
+//=========================================================================
+// FIX 1 / FIX 2: re-push the CURRENT side-objective state to one player.
+// Used for late join (player connects after the reassert window) and for
+// respawn (obj_setup.cfg re-seeds coop_so* = ""/0 every spawn, and
+// obj_reset.cfg never restores them). Only acts when the side objectives
+// were actually registered for this map (honors the no-boss gating).
+//=========================================================================
+coop_obj_repush_player local.ent:{
+	if( local.ent == NULL ){ end }
+	if( level.coop_sideObjReg != 1 ){ end }
+
+	if( level.coop_sideObjOfficerDone == 1 ){
+		waitthread coop_obj_push_one local.ent 1 3 "Eliminate the High-Ranking Officer"
+	} else {
+		waitthread coop_obj_push_one local.ent 1 2 "Eliminate the High-Ranking Officer"
+	}
+	if( level.coop_sideObjRadioDone == 1 ){
+		waitthread coop_obj_push_one local.ent 2 3 "Destroy the Radio to Stop Reinforcements"
+	} else {
+		waitthread coop_obj_push_one local.ent 2 2 "Destroy the Radio to Stop Reinforcements"
+	}
+}end
+
+
+//=========================================================================
+// FIX 2 (respawn) + FIX 1 (late join): one watcher per level that re-pushes
+// the side lines to any player every time they (re)spawn. Started once from
+// coop_obj_register, so it only runs on maps that actually show the lines.
+// The short wait lets the per-player obj_setup.cfg/obj_reset.cfg (which wipe
+// coop_so*) finish first, so our re-push wins the race.
+//=========================================================================
+coop_obj_player_watcher:{
+	if( level.coop_sideObjWatcher == 1 ){
+		end
+	}
+	level.coop_sideObjWatcher = 1
+
+	while( 1 ){
+		level waittill playerspawn
+		local.sp = parm.other
+		if( local.sp != NULL ){
+			local.sp thread coop_obj_repush_delayed
+		}
+	}
+}end
+
+
+// Helper: wait out the spawn-time obj_setup.cfg reset, then re-push to self.
+coop_obj_repush_delayed:{
+	wait 1
+	waitthread coop_obj_repush_player self
+}end
+
+
+//=========================================================================
+// Register both side objectives as ACTIVE, a few seconds into the map (after each
+// player's objectives-HUD setup has run). Threaded so it never blocks the officer
+// spawn sequence.
+//=========================================================================
+coop_obj_register_delayed:{
+	wait 3
+
+	// FIX 3 (no-boss gating): the two side objectives are the officer + radio lines, so
+	// they must only be shown on maps that will actually spawn an officer. Decide the
+	// same way officer.scr::coop_officer_init does, BEFORE pushing the lines active:
+	//   policy != "none"  AND  coop_feature_boss != 0.
+	// coop_officer_policy and getAnchor are both pure (only read level.coop_mapname and
+	// set level vars) and idempotent, so calling them here is safe -- officer.scr calls
+	// them again later with the same result. On no-officer maps (t1l1, t2l2, t3l2,
+	// training, etc.) we leave the side lines hidden instead of stuck permanently ACTIVE.
+	// If the boss ever DOES spawn (e.g. a marginal map that finds infrastructure), the
+	// register call at officer.scr::coop_officer_spawn still fires and shows the lines.
+	local.policy = exec coop_mod/officer.scr::coop_officer_policy
+	if( local.policy == "none" ){
+		iprintlnbold "OBJ: side objectives gated off (officer policy NONE)"
+		end
+	}
+	// Populate level.coop_feature_boss for this map (getAnchor sets it; default 1).
+	exec coop_mod/officer_positions.scr::getAnchor
+	if( level.coop_feature_boss == 0 ){
+		iprintlnbold "OBJ: side objectives gated off (coop_feature_boss=0)"
+		end
+	}
+
+	waitthread coop_obj_register
+}end
+
+
+coop_obj_register:{
+	if( level.coop_sideObjReg == 1 ){
+		end
+	}
+	level.coop_sideObjReg = 1
+
+	waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+	waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+
+	// Re-assert a few times: a per-player obj_setup.cfg that runs slightly AFTER this
+	// initial push (spawn timing race) resets the coop_so cvars and would blank the lines.
+	thread coop_obj_reassert
+
+	// FIX 1/FIX 2: keep the lines correct for the rest of the map. The reassert loop
+	// above only covers the first ~13s, so start a permanent watcher that re-pushes the
+	// current state to any player every time they (re)spawn (covers late join AND respawn).
+	thread coop_obj_player_watcher
+}end
+
+
+//=========================================================================
+// Re-push the active side objectives a few times so a late per-player obj_setup.cfg
+// reset can't leave the HUD lines blank. Respects completion status.
+//=========================================================================
+coop_obj_reassert:{
+	local.n = 0
+	while( local.n < 5 ){
+		wait 2
+		if( level.coop_sideObjOfficerDone == 1 ){
+			waitthread coop_obj_push 1 3 "Eliminate the High-Ranking Officer"
+		} else {
+			waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+		}
+		if( level.coop_sideObjRadioDone == 1 ){
+			waitthread coop_obj_push 2 3 "Destroy the Radio to Stop Reinforcements"
+		} else {
+			waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+		}
+		local.n = local.n + 1
+	}
+}end
+
+
+//=========================================================================
+// Mark the officer side objective complete (status 3). Safe to call once.
+//=========================================================================
+coop_obj_officer_done:{
+	if( level.coop_sideObjOfficerDone == 1 ){
+		end
+	}
+	level.coop_sideObjOfficerDone = 1
+
+	if( level.coop_sideObjReg != 1 ){
+		waitthread coop_obj_register
+	}
+
+	waitthread coop_obj_push 1 3 "Eliminate the High-Ranking Officer"
+}end
+
+
+//=========================================================================
+// Mark the radio side objective complete (status 3). Safe to call once.
+//=========================================================================
+coop_obj_radio_done:{
+	if( level.coop_sideObjRadioDone == 1 ){
+		end
+	}
+	level.coop_sideObjRadioDone = 1
+
+	if( level.coop_sideObjReg != 1 ){
+		waitthread coop_obj_register
+	}
+
+	waitthread coop_obj_push 2 3 "Destroy the Radio to Stop Reinforcements"
+}end

@@ -87,7 +87,11 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 	thread addActorToArray
 
+	thread coop_tryDuplicateActor 		//[208] HZM coop - per-spawn enemy count-scaling by player count
+
 	self waittill death 				//'death' event is unregistered if an AI is killed or if they are removed
+
+	thread coop_mod/deathvox.scr::play self 1	//[208] HZM coop - varied death voice + mute native German/Italian death VO (every AI death)
 
 	waitframe 							//[200] Smithy - fixes NULL entities in array and other abnormalities
 
@@ -106,6 +110,170 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 	if (!level.coop_noDropHealth){ 						//[200] Smithy - do our own health drops if the map allows it
 		thread coop_mod/itemhandler.scr::handleHealthDrop
+	}
+
+	thread coop_mod/corpse.scr::despawn self 			//[208] HZM coop - fade + remove the body after coop_corpseLife sec (0=off)
+}end
+
+//[208] HZM coop - PER-SPAWN ENEMY COUNT-SCALING (player-count). Threaded from actorHandler for EVERY
+//actor entering the world, so it covers map-preplaced AND scripted/wave/trigger spawns at any time.
+//With 2+ players, each ENEMY (german, non-special) rolls a per-player CHANCE to spawn an exact replica
+//nearby (staggered + scattered so they don't stack). Recursion-guarded (coop_isReplica) so a clone
+//never clones again. Excludes allies, the officer, wave/special actors (coop_actorStopPainHandler -
+//these use bespoke health), and turret gunners. Capped by level.coop_aiScaleHardCap (entity budget).
+//Tunable cvars: coop_aiScale (1=on, default on; set 0 to disable), coop_aiScaleChance (0-100, def 50).
+//=========================================================================
+coop_tryDuplicateActor:{
+//=========================================================================
+	if( self == NULL ){ end }
+	if( self.flags["coop_isReplica"] == 1 ){ end }		// recursion guard FIRST: a replica never duplicates
+	if( getcvar "coop_aiScale" == "0" ){ end }			// master gate (default ON)
+	if( self.team != "german" ){ end }				// enemies only - never allies (team set synchronously)
+	// player count (with a solo-dev override: coop_aiScaleTest 1 makes a lone host scale as if 2 players)
+	local.pc = 0
+	if( $player != NULL ){ local.pc = $player.size }
+	if( getcvar "coop_aiScaleTest" == "1" && local.pc < 2 ){ local.pc = 2 }
+	if( local.pc < 2 ){ end }					// only when 2+ players (or the test override)
+
+	// let initialisePainVars finish (it stores coop_actorActualHealth + sets self.health=5000) and give a
+	// brief spawn delay so replicas never appear the same instant / on top of the original.
+	wait 0.3
+	if( self == NULL || !isAlive self ){ end }
+
+	// exclude the officer + wave/special actors (bespoke health systems) + turret gunners
+	if( self.flags["coop_actorStopPainHandler"] == 1 ){ end }
+	if( level.coop_officer != NULL && self == level.coop_officer ){ end }
+	if( self.turret != NULL ){ end }
+
+	// how many EXTRA copies to roll: scales with player count, capped by coop_maxPlayerScalar
+	local.scal = local.pc
+	if( level.coop_maxPlayerScalar != NIL && local.scal > level.coop_maxPlayerScalar ){ local.scal = level.coop_maxPlayerScalar }
+	local.maxExtra = local.scal - 1
+	if( local.maxExtra < 1 ){ end }
+
+	local.chance = int( getcvar "coop_aiScaleChance" )
+	if( local.chance <= 0 ){ local.chance = 50 }
+
+	// snapshot the original's loadout: pristine base accuracy + STORED original health (self.health is
+	// 5000 now because of the pain handler), model + gun.
+	local.omodel = self.model
+	if( local.omodel == NIL ){ end }
+	local.ogun   = self.gun
+	local.oacc   = self.flags["coop_actorAccuracy"]
+	local.ohealth = self.flags["coop_actorActualHealth"]
+	if( local.ohealth == NIL || local.ohealth <= 0 || local.ohealth >= 1000 ){ local.ohealth = 100 }
+	local.oorigin = self.origin
+	local.oangles = self.angles
+
+	local.made = 0
+	local.i = 0
+	while( local.i < local.maxExtra ){
+		// live-actor hardcap so a full lobby + duplication can't overflow the entity budget
+		if( level.coop_aiScaleHardCap != NIL && level.coop_actorArray["german"] != NIL && level.coop_actorArray["german"].size >= level.coop_aiScaleHardCap ){ break }
+		if( (randomint 100) < local.chance ){
+			thread coop_spawnReplica local.omodel local.ogun local.oacc local.ohealth local.oorigin local.oangles local.made
+			local.made++
+			wait 0.2 		// stagger successive copies so they don't pop simultaneously
+		}
+		local.i++
+	}
+}end
+
+//[208] HZM coop - spawn ONE enemy replica: same model/gun/health/base-accuracy, scattered ground pos,
+//flagged coop_isReplica (set before this thread yields so the clone's own actorHandler won't re-clone),
+//then forceactivate + attackplayer. The clone's own actorHandler still runs the full coop pipeline
+//(pain handler, accuracy scaling, array registration) - only the duplication sub-step is skipped.
+//=========================================================================
+coop_spawnReplica local.model local.gun local.acc local.health local.origin local.angles local.idx:{
+//=========================================================================
+	if( local.model == NIL ){ end }
+	local.spreadidx = local.idx + 1
+	local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.origin local.spreadidx
+	if( local.gnd == NIL ){ local.gnd = local.origin }
+	local.r = spawn local.model
+	if( local.r == NULL ){ end }
+	local.r.flags["coop_isReplica"] = 1		// CRITICAL recursion guard - set BEFORE this thread yields
+	local.r.origin = local.gnd
+	local.r droptofloor
+	local.r.angles = local.angles
+	local.r.health = local.health
+	if( local.acc != NIL ){ local.r.accuracy = local.acc }
+	if( local.gun != NIL ){ local.r gun local.gun }
+	local.r.leash = 4096
+	local.r.enableEnemy = 1
+	local.r german
+	local.r forceactivate
+	local.r attackplayer
+	// replicas behave naturally too (personality roll + cover think + hurt manager coverage)
+	waitthread coop_mod/officer.scr::coop_apply_personality local.r
+}end
+
+//[208] HZM coop - shared low-frequency REINFORCEMENT MANAGER. One loop for ALL spawned troopers (not
+//per-actor, for performance). When a personality-tagged trooper is BADLY hurt it (once) falls back to
+//cover (native type_attack "cover") and drinks from a canteen for a partial heal. Guarded against
+//dead/NULL actors. Started once from coop_mod/main.scr::main so it runs on every map.
+//=========================================================================
+coop_reinf_brain:{
+//=========================================================================
+	while( 1 ){
+		wait 1.5
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+		local.i = 1
+		while( local.i <= local.arr.size ){
+			local.a = local.arr[local.i]
+			if( local.a != NULL && isAlive local.a ){
+				if( local.a.flags["coop_personality_set"] == 1 && local.a.flags["coop_hurt_covered"] != 1 ){
+					// real HP: pain-handler troops store it in coop_actorActualHealth (self.health is the
+					// 5000 buffer); coop_actorStopPainHandler troops use self.health directly.
+					local.hp = local.a.flags["coop_actorActualHealth"]
+					if( local.hp == NIL ){ local.hp = local.a.health }
+					if( local.hp != NIL && local.hp > 0 && local.hp < 40 ){
+						local.a.flags["coop_hurt_covered"] = 1
+						local.a type_attack "cover"		// fall back to cover (native; crouches at duck nodes)
+						thread coop_trooper_canteen local.a
+					}
+				}
+				// IDLE LIVELINESS: a tagged trooper with NO current target (waiting/unaware) mutters in
+				// German now and then so they aren't dead-silent before they spot a player. Per-actor
+				// cooldown + chance + distance falloff = ambient chatter, not spam. SAFE: playsound does
+				// not change the think state, so combat reaction is unaffected.
+				if( local.a.flags["coop_personality_set"] == 1 && local.a.enemy == NULL ){
+					if( local.a.coop_idle_next == NIL || level.time >= local.a.coop_idle_next ){
+						local.a.coop_idle_next = level.time + 7 + (randomint 9)
+						if( (randomint 100) < 45 ){
+							local.r = randomint 4
+							if( local.r == 0 ){ local.a playsound coop_officer_idle1 }
+							else if( local.r == 1 ){ local.a playsound coop_officer_idle2 }
+							else if( local.r == 2 ){ local.a playsound coop_officer_idle3 }
+							else { local.a playsound coop_officer_idle4 }
+						}
+					}
+				}
+			}
+			local.i++
+		}
+	}
+}end
+
+//[208] HZM coop - a badly-hurt trooper drinks from a canteen ONCE for a partial heal, using the same
+//pass_canteen_drink anim the escort ally uses (new_generic_human.tik; auto-plays the drink sound +
+//attaches the canteen model). Threaded per-actor (rare), so the manager loop never blocks.
+//=========================================================================
+coop_trooper_canteen local.a:{
+//=========================================================================
+	if( local.a == NULL || local.a.flags["coop_drank"] == 1 ){ end }
+	local.a.flags["coop_drank"] = 1
+	wait 1
+	if( local.a == NULL || !isAlive local.a ){ end }
+	local.a upperanim pass_canteen_drink
+	wait 2.5
+	if( local.a == NULL || !isAlive local.a ){ end }
+	// partial heal, once. Heal the field that actually represents this trooper's life.
+	if( local.a.flags["coop_actorActualHealth"] != NIL ){
+		local.a.flags["coop_actorActualHealth"] = local.a.flags["coop_actorActualHealth"] + 60
+	} else {
+		local.a.health = local.a.health + 60
 	}
 }end
 
@@ -270,6 +438,10 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//[200] Smithy - don't do certain actors that use their own health systems
 	if (self.team == "american"){
 		self.flags["coop_actorStopPainHandler"] = game.true
+		end
+	}
+
+	if (self.flags["coop_actorStopPainHandler"]){
 		end
 	}
 

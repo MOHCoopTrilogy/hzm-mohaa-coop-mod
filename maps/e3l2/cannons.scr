@@ -92,10 +92,17 @@ CannonFire local.targ_name local.targ_closest_to_player: {
 		// pick an origin based on the passed-in set name
 		if ($(local.targ_name).size > 1) {
 			if (local.targ_closest_to_player) {
-				local.nearest = waitexec global/FindNearestEntity.scr $player.origin local.targ_name	//MiaCosa @chrissstrahl
-				
+				//[coop] find cannon target nearest to the closest player
+				local.cannoncp = exec coop_mod/replace.scr::player_closestTo self
+				if (local.cannoncp == NULL){ local.cannoncp = exec coop_mod/replace.scr::player_anyValid }
+				if (local.cannoncp != NULL){
+					local.nearest = waitexec global/FindNearestEntity.scr local.cannoncp.origin local.targ_name
+				}
+				else {
+					local.nearest = waitexec global/FindNearestEntity.scr self.origin local.targ_name
+				}
+
 				local.dest = local.nearest.origin
-			}
 			else {
 				local.dest = $(local.targ_name)[1 + (randomint $(local.targ_name).size)].origin
 			}
@@ -197,7 +204,129 @@ GunOrExplosive local.usable_cannon local.cannon_throb: {
 	local.turret hide
 
 	level.cannonInUse = NULL
-	self exec global/MountGunOrPlantCharge.scr self local.cannon_throb 250 100 "Modello" "maps/e3l2/Cannons.scr" "PlayerMountCannon" "PlayerDismountCannon" "SetCannonExplosives" local.usable_cannon
+
+	//[coop] chrissstrahl/opus - replaced global/MountGunOrPlantCharge.scr (SP host-only path).
+	//That global polled the bare $player array head, so only the host could mount the
+	//Modello or plant the charge. CoopGunOrChargeThink loops every active player
+	//(same pattern as coop_mod/cannonThink.scr / coop_mod/replace.scr::player_closestTo),
+	//so ANY of up to 16 players can mount the gun and ANY can plant the charge.
+	//The charge plant fires SetCannonExplosives -> throbber doUse -> Cannon#DestructionThread
+	//-> level.num_cannons_remaining-- , which is level-global and completes for everyone.
+	self thread CoopGunOrChargeThink local.usable_cannon local.cannon_throb 250 100
+}end
+
+//=========================================================================
+//[coop] per-player replacement for global/MountGunOrPlantCharge.scr
+//self                = the script $Cannon (owns playerinturret/explosiveset/turret/usable_cannon/throbber)
+//local.usable_cannon = the usable Modello entity
+//local.throbber      = the charge-plant throbbing box
+//local.gun_range     = max distance player->gun to allow mount
+//local.throb_range   = max distance player->throbber to allow charge plant
+//=========================================================================
+CoopGunOrChargeThink local.usable_cannon local.throbber local.gun_range local.throb_range: {
+//=========================================================================
+	self.coopMountPlayer = NULL
+
+	//forward of the usable cannon, used for facing checks
+	while (self && local.usable_cannon && self.turret) {
+		waitframe
+
+		//if a player is currently on the gun, only watch that player for exit
+		if (self.playerinturret == 1) {
+			local.mounted = self.coopMountPlayer
+
+			//mounted player became invalid -> force dismount
+			local.dropMount = 0
+			if (local.mounted == NULL) {
+				local.dropMount = 1
+			}
+			else if (local.mounted.health <= 0) {
+				local.dropMount = 1
+			}
+			else if (level.gametype != 0) {
+				if (local.mounted.dmteam == "spectator") {
+					local.dropMount = 1
+				}
+				else if (local.mounted.flags["coop_isActive"] != 1) {
+					local.dropMount = 1
+				}
+			}
+
+			//dismount requires a fresh use-press: the player must first RELEASE use
+			//(set when they mounted) before a new press counts, otherwise the same
+			//hold that mounted the gun would instantly dismount it.
+			if (local.dropMount == 0) {
+				if (self.coopMountArmed != 1) {
+					if (!local.mounted.useheld) {
+						self.coopMountArmed = 1
+					}
+				}
+				else if (local.mounted.useheld) {
+					local.dropMount = 1
+				}
+			}
+
+			if (local.dropMount == 1) {
+				self waitthread PlayerDismountCannon
+				wait .25
+			}
+
+			continue
+		}
+
+		//nobody on the gun yet - check every active player for mount or charge plant
+		local.acted = 0
+		for (local.i = 1; local.i <= $player.size; local.i++) {
+			local.player = $player[local.i]
+
+			//only living, non-spectator, active (non-noclip) players
+			if (local.player.health <= 0) {
+				continue
+			}
+			if (level.gametype != 0) {
+				if (local.player.dmteam == "spectator") {
+					continue
+				}
+				if (local.player.flags["coop_isActive"] != 1) {
+					continue
+				}
+				if (local.player.flags["coopDevNoclip"] != NIL) {
+					continue
+				}
+			}
+
+			//player must be holding use for any interaction
+			if (!local.player.useheld) {
+				continue
+			}
+
+			//----- try charge plant first (the objective-completing action) -----
+			if (self.noexplode == 0 && self.explosiveset == 0) {
+				if (vector_within local.player.origin local.throbber.origin local.throb_range) {
+					self.coopMountPlayer = local.player
+					self waitthread SetCannonExplosives
+					local.acted = 1
+					break
+				}
+			}
+
+			//----- otherwise try to mount the gun (flavor, any player) -----
+			if (local.usable_cannon canuse local.player) {
+				if (vector_within local.player.origin self.origin local.gun_range) {
+					self.coopMountPlayer = local.player
+					self.coopMountArmed = 0
+					self waitthread PlayerMountCannon
+					local.acted = 1
+					break
+				}
+			}
+		}
+
+		//debounce so a single use-press is not consumed twice
+		if (local.acted == 1) {
+			wait .25
+		}
+	}
 }end
 
 //=========================================================================
@@ -212,7 +341,8 @@ PlayerMountCannon: {
 	self.turret unlock
 
 	self.turret setusable 1
-	self.usable_cannon douse $player	//MiaCosa @chrissstrahl
+	//[coop] opus - use the player tracked by CoopGunOrChargeThink, not the bare $player array head
+	self.usable_cannon douse self.coopMountPlayer
 	self.turret setusable 0
 
 	self.usable_cannon lock	//MiaCosa @chrissstrahl
@@ -238,7 +368,8 @@ PlayerDismountCannon: {
 	self.turret unlock
 
 	self.turret setusable 1
-	self.usable_cannon douse $player	//MiaCosa @chrissstrahl
+	//[coop] opus - dismount the tracked mounting player, not the bare $player array head
+	self.usable_cannon douse self.coopMountPlayer
 	self.turret setusable 0
 	self.usable_cannon lock	//MiaCosa @chrissstrahl
 	self.turret lock
@@ -257,7 +388,12 @@ PlayerDismountCannon: {
 
 	local.player_detach_dist = 128
 	local.rel_pos = ((angles_toforward self.angles) * -local.player_detach_dist)
-	$player.origin = ( (self.origin[0] + local.rel_pos[0]) (self.origin[1] + local.rel_pos[1]) (self.origin[2] + 32) )	//MiaCosa @chrissstrahl
+	//[coop] opus - move the player who was actually mounted (tracked), not the bare $player array head.
+	//Guard against a NULL/dead mounter (player left or died while seated).
+	if (self.coopMountPlayer != NULL && self.coopMountPlayer.health > 0) {
+		self.coopMountPlayer.origin = ( (self.origin[0] + local.rel_pos[0]) (self.origin[1] + local.rel_pos[1]) (self.origin[2] + 32) )
+	}
+	self.coopMountPlayer = NULL
 }end
 
 //=========================================================================

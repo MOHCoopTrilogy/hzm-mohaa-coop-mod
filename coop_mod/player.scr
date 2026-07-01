@@ -20,8 +20,9 @@ manage:{
 //=========================================================================
 if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread player/manage->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	//wait for any player to join server
-	level waittill spawn
-	
+	//[BUG1] level waittill spawn does not fire in MP/coop; replaced with short wait
+	wait 0.5
+
 	//remove placeholder player - relict from singleplayer
 	waitthread removeFakePlayer
 	
@@ -125,7 +126,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 			waitthread coop_mod/main.scr::playerCountChanged local.prevPlayerCount local.playerCount
 			//[206] chrissstrahl - execute thread when player left server: coop_playerJustLeft
 			if(local.prevPlayerCount < local.playerCount){
-				thread game.main::startThread ("maps/"+level.coop_mapname+".scr::"+"coop_playerJustLeft") $world
+				thread coop_mod/main.scr::startMapCallback "coop_playerJustLeft" $world
 			}
 		}
 
@@ -193,6 +194,11 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	
 	//[203] chrissstrahl - check for coop mod install
 	thread detectCoop local.player
+
+	//chrissstrahl-style - initialise the coop objectives display cvars + the
+	//"vstr coop_obj" toggle for every player, so the bound Objectives key always
+	//works even on maps that never register a map objective.
+	local.player stufftext ( "exec ui/coop_objectives/obj_setup.cfg" )
 	
 //Host detection
 	if(!level.coop_dedicated){
@@ -510,7 +516,23 @@ playerNameCommand local.player:{
 	else if(local.arrayIndex==3){ local.player thread coop_mod/developer.scr::devcommand local.dataExtract } //call directly
 	else if(local.arrayIndex==4){ thread playerExtractedStuck local.player local.dataExtract }
 	else if(local.arrayIndex==5){ local.player thread coop_mod/developer.scr::devauth local.dataExtract } //call directly
-	else if(local.arrayIndex==6){ local.player thread coop_mod/admin.scr::admincommand local.dataExtract } //coop admin pannel
+	else if(local.arrayIndex==6){  local.player thread coop_mod/admin.scr::admincommand local.dataExtract } //coop admin pannel
+	else if(local.arrayIndex==7){  thread coop_mod/thirdperson.scr::coop_tp_toggle local.player }
+	else if(local.arrayIndex==8){  local.player thread coop_mod/medkit.scr::medkit_use local.player }
+	else if(local.arrayIndex==9){  local.player thread coop_mod/cover.scr::cover_place local.player }
+	else if(local.arrayIndex==10){ local.player thread coop_mod/developer.scr::godmode_toggle } // ===== DEBUG GOD MODE - REMOVE BEFORE RELEASE =====
+	else if(local.arrayIndex==11){ local.player iprintlnbold "Coming soon" }
+	else if(local.arrayIndex==12){ local.player iprintlnbold "Coming soon" }
+	else if(local.arrayIndex==13){ local.player iprintlnbold "Coming soon" }
+	else if(local.arrayIndex==14){ thread coop_mod/dbno.scr::dbno_enter local.player "chest" }
+	else if(local.arrayIndex==15){ local.player thread coop_mod/developer.scr::noclip_toggle } // coop noclip (script-side, bypasses the cheat gate)
+	else if(local.arrayIndex==16){ local.player thread coop_mod/ammobox.scr::ammobox_place local.player } // deploy ammo box (one per match)
+	else if(local.arrayIndex==17){ local.player thread coop_mod/developer.scr::give_all_weapons } // ===== DEBUG: give all guns =====
+	else if(local.arrayIndex==18){ local.player thread coop_mod/developer.scr::give_next_weapon "rifle" }  // DEBUG cycle rifles
+	else if(local.arrayIndex==19){ local.player thread coop_mod/developer.scr::give_next_weapon "smg" }    // DEBUG cycle SMGs
+	else if(local.arrayIndex==20){ local.player thread coop_mod/developer.scr::give_next_weapon "pistol" } // DEBUG cycle pistols
+	else if(local.arrayIndex==21){ local.player thread coop_mod/developer.scr::give_next_weapon "mg" }     // DEBUG cycle MGs
+	else if(local.arrayIndex==22){ local.player thread coop_mod/developer.scr::give_next_weapon "other" }  // DEBUG cycle shotgun/AT
 }end
 
 //[203] chrissstrahl - set player installed coop mod version number based on given data
@@ -638,7 +660,80 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		local.player.flags["coop_isActive"] = -1
 		local.player.flags["coop_iAmTruelyActive"] = 0
 		local.player.flags["coop_justSpawnedDone"] = NIL
-		
+
+		//clear DBNO state so all DBNO threads exit cleanly when entering spectator
+		if( local.player.flags["coop_dbno_active"] == 1 ){
+			local.player.flags["coop_dbno_active"] = NIL
+			local.player.flags["coop_dbno_dead"]   = NIL
+			local.player stoploopsound coop_dbno_breath1
+			local.player stoploopsound coop_dbno_breath2
+			local.player stoploopsound coop_dbno_breath3
+			ihuddraw_alpha local.player 20 0
+			ihuddraw_rect  local.player 20 0 0 0 0
+			ihuddraw_alpha local.player 27 0
+			ihuddraw_alpha local.player 28 0
+			ihuddraw_alpha local.player 29 0
+			ihuddraw_alpha local.player 31 0
+			ihuddraw_alpha local.player 32 0
+			ihuddraw_alpha local.player 33 0
+			ihuddraw_alpha local.player 34 0
+			ihuddraw_alpha local.player 35 0
+			local.player modheight "stand"
+		}
+
+		// [issue#8] Only clear HUD slots if the player previously spawned fully active
+		// (coop_everActive == 1). Skips the cleanup on the initial connect->spectator
+		// transition that happens inside manageSetup, where the client-side HUD is not
+		// yet initialised and ihuddraw_alpha/string produce "Failed execution" errors.
+		if( local.player.flags["coop_everActive"] == 1 ){
+			ihuddraw_alpha  local.player 36 0
+			ihuddraw_alpha  local.player 37 0
+			ihuddraw_alpha  local.player 38 0
+			ihuddraw_alpha  local.player 39 0
+			ihuddraw_alpha  local.player 40 0
+			ihuddraw_alpha  local.player 41 0
+			ihuddraw_alpha  local.player 42 0
+			ihuddraw_alpha  local.player 43 0
+			ihuddraw_alpha  local.player 44 0
+			ihuddraw_string local.player 37 ""
+			ihuddraw_string local.player 38 ""
+			ihuddraw_string local.player 41 ""
+			ihuddraw_string local.player 42 ""
+
+			//clear the coop bombing-run (binoc, slots 50/51) + paradrop (smoke, slots
+			//52/53) HUD icons when this player dies or goes spectator. ihuddraw state
+			//otherwise persists, so the icons would linger on a dead/spectating player.
+			ihuddraw_alpha  local.player 50 0
+			ihuddraw_alpha  local.player 51 0
+			ihuddraw_alpha  local.player 52 0
+			ihuddraw_alpha  local.player 53 0
+			ihuddraw_string local.player 51 ""
+			ihuddraw_string local.player 53 ""
+		}
+
+		//keep the objectives-toggle ('o' key) working after respawn. If the player
+		//died/spectated with the objectives hud OPEN, coop_obj is left pointing at the
+		//"remove" branch, so the first 'o' press back in-game removes an already-gone
+		//hud (looks like the key is dead). Force the hud hidden and point coop_obj at
+		//the "show" branch so the next press reliably opens it.
+		local.player stufftext ( "ui_removehud coop_objectives" )
+		local.player stufftext ( "seta coop_obj exec ui/coop_objectives/obj_add.cfg" )
+
+		//clean up third-person camera if active when entering spectator
+		if( local.player.flags["coop_thirdperson_active"] == 1 ){
+			local.tp_cam = $(local.player.flags["coop_tp_cam_name"])
+			if( local.tp_cam != NULL ){
+				local.tp_cam_off = "tpcam_spec_" + local.player.entnum
+				local.tp_cam targetname local.tp_cam_off
+				local.cu = spawn trigger_camerause target local.tp_cam_off
+				local.cu doUse local.player
+				local.cu delete
+				local.tp_cam delete
+			}
+			local.player.flags["coop_thirdperson_active"] = NIL
+			local.player.flags["coop_tp_cam_name"]        = NIL
+		}
+
 		//this is used for friendly orientation see global/friendly::playernode
 		local.player.fnum = -1 //[203] chrissstrahl - changed from -100 to -1 I think it was ment to be at -1
 		
@@ -703,13 +798,21 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 manageAliveSpawning local.player:{
 //=========================================================================
 if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread player/manageAliveSpawning->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
-//println("COOPDEBUG: manageAliveSpawning 0 for: "+local.player.targetname+" start")
 
 	/////////////////////////////////////////SETUP
 	if(	local.player.flags["coop_isActive"] == NIL){
 		waitthread manageSetup local.player
 //println("COOPDEBUG: manageAliveSpawning 1 for: "+local.player.targetname+" manageSetup")
 	}
+
+	// Stop the engine's 1s weapon-picker re-push loop unconditionally -- BEFORE the
+	// spectator early-exit below. Without this, a spectating player never reaches the
+	// old fix at the bottom of this function, so the cursor gets stuck forever and
+	// primaryfireheld never registers (cursor intercepts the click -> skipTeamAndWeaponSelect
+	// never fires -> permanent deadlock). Setting primarydmweapon here stops future pushes;
+	// the immediate burst of popmenu 0 clears any menus already stacked by the 1s loop.
+	local.player primarydmweapon "rifle"
+	local.player stufftext ( "popmenu 0;popmenu 0;popmenu 0;popmenu 0;popmenu 0;wait 60;popmenu 0" )
 
 	//isSpectator is a built-in BT bool, more efficient than checking for dmteam string
 	//force them into allies if they spawned as axis and abort current handling
@@ -730,10 +833,10 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//place at spawn or respawn, this needs to be done regardless of glueing
 	if(local.player.flags["coop_respawning"] == TRUE){
 		waitthread coop_mod/player.scr::manageAliveRespawning local.player
-		thread coop_mod/main.scr::startThread ( "maps/"+level.coop_mapname+".scr::coop_playerJustRespawned" ) (local.player)
+		thread coop_mod/main.scr::startMapCallback "coop_playerJustRespawned" (local.player)
 	}else{	
 		waitthread coop_mod/main.scr::playerPlaceAtSpawn local.player
-		thread coop_mod/main.scr::startThread ( "maps/"+level.coop_mapname+".scr::coop_playerJustSpawned" ) (local.player)
+		thread coop_mod/main.scr::startMapCallback "coop_playerJustSpawned" (local.player)
 	}
 	
 	//INVENTORY
@@ -741,6 +844,8 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	thread coop_mod/main.scr::itemGetAll
 	thread coop_mod/main.scr::playerHealth	
 	
+	// primarydmweapon + popmenu 0 now handled unconditionally above (before spectator check).
+
 	//GLUE
 	thread coop_mod/main.scr::playerGlue local.player "spawn" game.true //[202][hotfix] Smithy
 	
@@ -756,6 +861,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	local.player.flags["coop_isActive"] = 1
 //println("COOPDEBUG: manageAliveSpawning 5 for: "+local.player.targetname+" coop_isActive: 1")
 	local.player.flags["coop_isAlive"] = game.true
+	local.player.flags["coop_everActive"] = 1		// [issue#8] guard: set when HUD monitors start
 	local.player threatbias level.coop_threatbias
 	local.player solid
 	local.player american
@@ -776,6 +882,19 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//a player has joined a team and picked a weapon
 	//notify other scripts that the mission can now start
 	level.coop_playerReady = 1
+	thread coop_mod/dbno.scr::dbno_start local.player
+	thread coop_mod/thirdperson.scr::coop_thirdperson_monitor local.player
+	thread coop_mod/medkit.scr::medkit_hud_monitor local.player
+	thread coop_mod/cover.scr::cover_hud_monitor local.player
+	thread coop_mod/cover.scr::cover_proximity_monitor local.player
+	thread coop_mod/ammobox.scr::ammobox_hud_monitor local.player
+	thread coop_mod/ammobox.scr::ammobox_proximity_monitor local.player
+	thread coop_mod/ads.scr::coop_ads_monitor local.player
+	thread coop_mod/tinnitus.scr::coop_tinnitus_monitor local.player
+	thread coop_mod/tinnitus.scr::coop_injured_muffle_monitor local.player
+	// SAFETY-NET: every (re)spawn restores world SFX volume to baseline, so a DBNO death-fade or injured
+	// muffle can never leave a respawned player stuck at low/zero volume.
+	local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
 }end
 
 //[202] chrissstrahl - prevent player getting stuck at spawn
@@ -898,6 +1017,25 @@ manageDead local.player:{
 //=========================================================================
 if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread player/manageDead->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	//println("manageDead")
+	local.i = 0
+	while( local.i < 3 ){
+		waitframe
+		local.i++
+	}
+	if( local.player.flags["coop_dbno_active"] == 1 ){ end }
+
+	thread coop_mod/deathvox.scr::play local.player	//[208] HZM coop - varied death voice (random from coop_deathvox pool) on player death/down
+
+	if( local.player.flags["coop_dbno_dead"] != 1 ){
+		local.cumulative = local.player.flags["coop_dbno_cumulative"]
+		if( local.cumulative > 0 ){
+			local.player.flags["coop_dbno_active"] = 1
+			local.player healthonly 100
+			local.hitclass = waitthread coop_mod/dbno.scr::dbno_classifyHit local.player
+			thread coop_mod/dbno.scr::dbno_enter local.player local.hitclass
+			end
+		}
+	}
 	local.player.flags["coop_iAmTruelyActive"] = 0
 	if(	local.player.flags["coop_isActive"] != -2 ){
 		//[202] chrissstrahl - reset last selected spawnlocation
@@ -942,7 +1080,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		//- EACH RESPAWN:	coop_playerJustRespawned
 		//- EACH DEATH:		coop_playerJustDied
 		//- Else Where if player disconnects:	coop_playerJustLeft"
-		thread coop_mod/main.scr::startThread ( "maps/"+level.coop_mapname+".scr::coop_playerJustDied" ) (local.player)
+		thread coop_mod/main.scr::startMapCallback "coop_playerJustDied" (local.player)
 	}
 }end
 
@@ -997,6 +1135,10 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//this is used for playing current music, if the player joins mid-game
 	//i suspect we only need to have one command, because tmstart/tmloop are overwriting each other
 	if( level.coop_musicCommand != NIL ){
+		// HZM COOP: coop_musicCommand is now a single "tmstart(loop) <file>" statement
+		// (the combined "tmstop;..." form is dropped by the cgame command filter). Send
+		// tmstop separately first so a late joiner's prior track is cleared.
+		local.player stufftext "tmstop"
 		local.player stufftext ( level.coop_musicCommand )
 	}
 	//this is used to set volume of current music, if the player joins mid-game
@@ -1030,7 +1172,6 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//waitframe
 	waitthread coop_mod/main.scr::changeGameType 2 0
 	setcvar "developer" local.prevCvar
-	iprintlnbold_noloc("set3rdPerson: "+local.activate)
 }end
 
 //[202] Smithy - checks if client zero exists, if not reconnect a player

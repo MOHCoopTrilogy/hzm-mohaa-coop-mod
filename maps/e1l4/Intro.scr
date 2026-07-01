@@ -155,13 +155,29 @@ FAILEDMISSION: {
 		End
 	}
 
+	//[coop] never restart the server under the unattended map tester
+	if( getcvar("coop_maptest") == "1" || getcvar("coop_maptest") == "2" ){
+		End
+	}
+
 	level.FAILEDMISSION = 1
 	level.sirenson = 1
 	wait 2
-	
+
 	iprintln "You've blown your cover without getting on the ship!"
 	wait 3
-	
+
+	//[coop] In coop, blowing cover should not restart the whole server for all 16
+	//players. Sound the alarm (level.sirenson already set) and let the firefight play
+	//out / the level proceed; the AI is enabled and the mission becomes a loud fight
+	//rather than a server reload.
+	if(level.gametype != 0){
+		iprintln "Cover blown!"
+		level.GatePapersAccepted = 1
+		thread AIenable
+		End
+	}
+
 	iprintln "MISSION FAIL"
 
 	//[202] chrissstrahl
@@ -278,15 +294,48 @@ KillPlayerIfFailPapers: {
 	if (level.GatePapersAccepted != 1){
 		waitthread global/throbtext.scr::throbtext_off
 		waitframe
-		
-		//[202] chrissstrahl - coop compatibility
-		exec coop_mod/replace.scr::killplayer
-		
-		//[202] chrissstrahl - fail mission in coop
-		if(level.gametype != 0){
-			exec coop_mod/replace.scr::missionfailed
+
+		//[coop] Never auto-fail/restart the server under the unattended map tester:
+		//a bot cannot show papers, so KillPlayerIfFailPapers would restartMap forever.
+		//Just let the tour proceed by treating papers as accepted.
+		if( getcvar("coop_maptest") == "1" || getcvar("coop_maptest") == "2" ){
+			level.GatePapersAccepted = 1
+			thread papersAccepted
+			end
 		}
+
+		//[coop] In coop, do NOT call the server-restarting missionfailed for a papers
+		//fail: one straggler who misses the prompt would restart the map for all 16
+		//(gamestate resend -> everyone kicked back to the team menu). Instead apply a
+		//soft consequence (the killplayer shim only affects active players) and resolve
+		//the gate so the level proceeds instead of deadlocking on level.GatePapersAccepted.
+		if(level.gametype != 0){
+			exec coop_mod/replace.scr::killplayer
+			thread softPapersFail
+			end
+		}
+
+		//[202] chrissstrahl - coop compatibility (SP path)
+		exec coop_mod/replace.scr::killplayer
 	}
+}end
+
+//[coop] Soft resolution of a papers fail: punish (handled by the caller's killplayer)
+//then accept papers so the sequence advances. No server restart, no mission fail, no
+//deadlock on the level.GatePapersAccepted wait in GateGuardDialogue (line ~248).
+//============================================================
+softPapersFail: {
+//============================================================
+	if (level.GatePapersAccepted == 1){ end }
+
+	//brief beat so the killed players see the consequence before the gate resolves
+	wait 2
+
+	if (level.GatePapersAccepted == 1){ end }
+
+	//resolve the gate the same way a real papers acceptance would (sets the flag and
+	//enables the area AI), letting the level continue for the whole party.
+	thread papersAccepted
 }end
 
 //============================================================
@@ -361,11 +410,21 @@ giveDisguise: {
 		setcvar g_playermodel "Sc_AX_Ital_Inf" 
 	}
 	else {
-		//[202] Smithy - note: has_disguise is added by itemhandler.scr on spawn
-		
 		exec coop_mod/replace.scr::playsound "pickup_papers"
 		exec coop_mod/replace.scr::playsound "pickup_uniform"
 		waitthread global/items.scr::add_item "papers_level1" noMessage
+		// e1l4 sets coop_enableDisguises AFTER main.scr::main returns (which is after the
+		// first player spawn), so itemhandler::giveDisguiseOnSpawn missed the initial spawn.
+		// Apply the changeGameType-0 pattern directly to guarantee has_disguise is set.
+		waitthread coop_mod/main.scr::changeGameType 0 0
+		for (local.i = 1; local.i <= $player.size; local.i++){
+			$player[local.i].has_disguise				= game.true
+			$player[local.i].flags["coop_hasDisguise"]	= game.true
+		}
+		waitthread coop_mod/main.scr::changeGameType 2 game.ms
+		for (local.i = 1; local.i <= $player.size; local.i++){
+			thread coop_mod/itemhandler.scr::setIsDisguised $player[local.i] game.true
+		}
 	}
 }end
 

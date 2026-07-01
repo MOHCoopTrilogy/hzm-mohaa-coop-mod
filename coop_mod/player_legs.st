@@ -1347,7 +1347,7 @@ state TURRET_START
 		unarmed_idle : TURRET_TYPE "MG42"
 		unarmed_idle : default
 	}
-	
+
 	states
 	{
 		TURRET_USING			: ANIMDONE_LEGS
@@ -1361,7 +1361,7 @@ state TURRET_USING
 		unarmed_idle : TURRET_TYPE "MG42"
 		unarmed_idle : default
 	}
-	
+
 	states
 	{
 		STAND : !IS_USING_TURRET

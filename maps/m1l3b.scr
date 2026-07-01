@@ -3,7 +3,12 @@ main:{
 //=========================================================================
 	level.coop_aaMap = 1						//chrissstrahl - let global scripts know this is a AA level
 	level.coop_disableSpawnWarper	= game.true		//chrissstrahl - disable respawn warper - we need all players to spawn at a specific place
+	level.coop_dbno_disabled = 1				//[208] coop - no DBNO on the jeep ride (can't crawl/revive while glued to the moving jeep)
 	waitthread coop_mod/main.scr::main 		//chrissstrahl - start coop mod extensions
+	//[207] opt-in to per-map optional callbacks (guarded dispatch)
+	level.coop_hasCallback["coop_playerJustRespawned"] = 1
+	level.coop_hasCallback["coop_playerJustDied"] = 1
+	level.coop_hasCallback["coop_playerJustLeft"] = 1
 	
 	//chrissstrahl - setup stuff that is needed
 	if(level.gametype != 0){
@@ -162,7 +167,7 @@ friendly_message0:
 	// Get ready. We're almost there now.
 	wait 2.1
 	$oss_man say dfr_m1l3_148m_2 
-	// Remember, don’t just take out the planes, we also want to get the fuel dump and any guys on the ground.
+	// Remember, donï¿½t just take out the planes, we also want to get the fuel dump and any guys on the ground.
 	wait 5.5
 	$oss_man say dfr_m1l3_149m_2 
 	// And try to not let any of those planes get off the ground. 
@@ -708,9 +713,9 @@ plane_exploded:
 	self remove
 end
 
-stuka_fire local.i:	
+stuka_fire local.i:
 	wait 1
-	local.temp = spawn models/emitters/firegood
+	local.temp = spawn script_model model "models/emitters/firegood.tik"
 	local.tag = ("fire" + local.i)
 	//println "z:      local.tag " local.tag //[202] chrissstrahl - disabled, because we already have sufficent spam, thanks
 	local.temp.angles = (270 0 0)
@@ -1139,21 +1144,19 @@ coop_enableJeepActivation:{
 //=========================================================================
 coop_setupAttach:{
 //=========================================================================
-	//[203] chrissstrahl - @chrissstrahl @smithy - this was disabled and might can be removed
-	end
-
-
-	//chrissstrahl - spawn entities which we'll attach to the model then glue the players to
-	local.distance = -100
+	//[208] coop - RE-ENABLED. Spawns invisible seat entities attached to the jeep's "passenger0" tag.
+	//Non-gunner players are glued to these (coop_gluePassenger) so they ride along with the jeep.
+	//Z = +55 matches the known-good respawn point offset (coopPlayerRespawn = passenger0 + (-120 0 60)),
+	//so passengers sit on/around the jeep instead of sinking into the road.
 	for(local.i=2;local.i<=8;local.i++){
-		if(local.i==2){ local.offset = ( (local.distance) -10 -10) }
-		else if(local.i==3){ local.offset = ( (local.distance) 30 -10) }
-		else if(local.i==4){ local.offset = ( (local.distance) 70 -10) }
-		else if(local.i==5){ local.offset = ( (local.distance + -40) -10 -50) }
-		else if(local.i==6){ local.offset = ( (local.distance + -40) 30 -50) }
-		else if(local.i==7){ local.offset = ( (local.distance + -40) 70 -50) }
-		else{ local.offset = ( (local.distance + -80) 30 -50) } //[200] Smithy - missing 'local.' for distance - tut tut
-	
+		if(local.i==2){ local.offset = ( -100 -30 55 ) }
+		else if(local.i==3){ local.offset = ( -100 30 55 ) }
+		else if(local.i==4){ local.offset = ( -150 -30 55 ) }
+		else if(local.i==5){ local.offset = ( -150 30 55 ) }
+		else if(local.i==6){ local.offset = ( -200 -30 55 ) }
+		else if(local.i==7){ local.offset = ( -200 30 55 ) }
+		else{ local.offset = ( -250 0 55 ) }
+
 		local.ent = spawn script_model model "models/fx/dummy.tik" targetname ("playerAttach"+local.i) notsolid 1
 		waitframe
 		local.ent attach $playerjeep "passenger0" 0 ( local.offset )
@@ -1207,6 +1210,8 @@ coop_playerJustDied:{
 			local.player.flags["coop_inJeep"] = game.false
 			thread coop_jeepNotOccupied
 		}
+		//[208] coop - if they were riding as a passenger, free their seat + unglue the corpse
+		waitthread coop_freePassengerSeat local.player
 	}
 }end
 
@@ -1246,6 +1251,44 @@ coop_playerForceToJeep local.player:{
 	}
 }end
 
+//[208] coop - glue a non-gunner player to a free passenger seat trailing the jeep so they ride along
+//=========================================================================
+coop_gluePassenger local.player:{
+//=========================================================================
+	if(!local.player){ end }
+	for(local.i=2;local.i<=8;local.i++){
+		local.seat = $("playerAttach"+local.i)
+		if(!local.seat){ continue }
+		//seat is free if it has no occupant, the occupant is gone/dead, or it's already this player's seat
+		if(local.seat.coop_occupant == NIL || local.seat.coop_occupant == local.player || !isAlive local.seat.coop_occupant){
+			local.seat.coop_occupant = local.player
+			local.player.flags["coop_seatIdx"] = local.i
+
+			local.player notsolid							//don't block other players' bullets
+			local.player origin local.seat.origin
+			local.player.velocity = local.seat.velocity
+			local.player forcelegsstate CROUCH_IDLE
+			local.player glue local.seat
+			end
+		}
+	}
+}end
+
+//[208] coop - release a player's passenger seat + detach them from the jeep
+//=========================================================================
+coop_freePassengerSeat local.player:{
+//=========================================================================
+	if(!local.player){ end }
+	if(local.player.flags["coop_seatIdx"] != NIL){
+		local.seat = $("playerAttach"+local.player.flags["coop_seatIdx"])
+		if(local.seat && local.seat.coop_occupant == local.player){
+			local.seat.coop_occupant = NIL
+		}
+		local.player.flags["coop_seatIdx"] = NIL
+		local.player unglue
+	}
+}end
+
 //chrissstrahl - this handles all players that touch the trigger, regardles of who triggred it
 //=========================================================================
 coop_playerSpawned:{
@@ -1253,70 +1296,26 @@ coop_playerSpawned:{
 	$playerjeep notsolid
 	$oss_man notsolid
 	//$t209 remove
-	
-	//[206] chrissstrahl - put player into jeep if jeep is not yet occupied
-	local.player = parm.other
-	if(local.player && local.player.targetname != "world"){
-		if(local.player.dmteam != "spectator"){
-			local.player.flags["coop_inJeep"] = game.false 
-			if(!level.coop_inJeep){
-				thread coop_playerForceToJeep local.player
-			}
-		}
-	}
-	
-	end
-	
-	if (parm.other == $player[1]){ //[200] Smithy - easier way
-		$player[1].flags["coop_inJeep"] = game.false 
-	}
-	
-//COOPTEST - DEVTEST - DEVDEBUG [203] Chrisssstrahl
-//this allowes the jeep to go without a gunner
-//we want this to be so, only @smithy will have to make the jeep usable
-	for(local.i=1;local.i <= $player.size;local.i++){
-		local.player = $player[local.i]
-		if(isAlive local.player && !local.player.isSpectator){
-			level.coop_inJeep = 1
-			break
-		}
-	}
-end
-	
-	for(local.i=1;local.i <= $player.size;local.i++){
-		local.player = $player[local.i]
-		if(isAlive local.player && !local.player.isSpectator){
-			//if(local.player isTouching $coop_playerSpawn){
-				if(local.i == 1){
-					level.coop_inJeep = 1
-					if(!local.player.flags["coop_inJeep"]){
-						local.player.flags["coop_inJeep"] = game.true
 
-						local.player notsolid
-						
-						local.vturretent = $playerjeep queryturretslotentity 0
-						local.vturretent unlock
-						$playerjeep attachturretslot 0 local.player    // Attach the player to the jeep
-						local.player perferredweapon ".30cal Machine Gun"
-						local.vturretent lock
-						
-						//local.player thread coop_monitorPlayer1 //[200] Smithy - redundant
-					}
-				}
-				else{
-					//chrissstrahl - they don't need to be monitored, the coop mod does unglue on death
-					//local.player physics_off						//chrissstrahl - this will not work if player shall keep his weapon
-					local.player notsolid							//chrissstrahl - prevent players from stopping bullets of others
-					local.attach = $("playerAttach" + local.i)
-					
-					local.player origin local.attach.origin			//chrissstrahl - this might reduce the shaking
-					//local.player velocity local.attach.velocity		//chrissstrahl - this might reduce the shaking //[200] Smithy
-					local.player.velocity = local.attach.velocity 		//[200] Smithy - sometimes funcs can only be called as properties
-					local.player forcelegsstate CROUCH_IDLE
-					local.player glue local.attach
-				}
-			//}
-		}
+	//[208] coop - seat each (re)spawning player. First one to spawn mans the .30cal turret (slot 0);
+	//everyone else is glued to a passenger seat (coop_setupAttach) so they ride along with the jeep.
+	//Dead players respawn at the jeep (coop_updateSpawns pins all spawns to the "passenger0" tag), so
+	//this re-seats them automatically: turret if it's free, otherwise the next open passenger seat.
+	local.player = parm.other
+	if(!local.player){ end }
+	if(local.player.targetname == "world"){ end }
+	if(local.player.dmteam == "spectator"){ end }
+
+	//release any seat this player held before (handles respawn / re-entry cleanly)
+	waitthread coop_freePassengerSeat local.player
+	local.player.flags["coop_inJeep"] = game.false
+
+	if(!level.coop_inJeep){
+		//no gunner yet -> this player mans the turret
+		thread coop_playerForceToJeep local.player
+	}else{
+		//jeep already has a gunner -> ride along as a passenger
+		thread coop_gluePassenger local.player
 	}
 }end
 
@@ -1360,10 +1359,18 @@ coop_giveAmmo:{
 }end
 
 
+//chrissstrahl/coop - a BSP trigger entity on this map has its thread key set to
+//"stop_at_end" but no version of the SP script ever defined that label, so the engine
+//logs "Could not find label 'stop_at_end' in 'maps/m1l3b.scr'" when the trigger spawns.
+//Shipping mods (UBER-MODS) handle it as a no-op stub label; do the same here.
+stop_at_end:
+end
+
+
 //SOURCE DIALOG
 /*
 dfr_m1l2_147m_2 //Get ready. We're almost there now.
-dfr_m1l2_148m_2 //Remember, don’t just take out the planes, we also want to get the fuel dump and any guys on the ground.
+dfr_m1l2_148m_2 //Remember, donï¿½t just take out the planes, we also want to get the fuel dump and any guys on the ground.
 dfr_m1l2_149m_2 //And try to not let any of those planes get off the ground. 
 dfr_m1l2_150m_2 //Don't let that Stuka get away!
 dfr_m1l2_151m_2 //It's coming back for a strafing run, take it down!

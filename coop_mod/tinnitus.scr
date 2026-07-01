@@ -1,0 +1,102 @@
+// HZM coop - TINNITUS / MUFFLED HEARING (per-player).
+//
+// When a player takes a BIG instantaneous hit (>= coop_tinnitusMinDamage health lost in one frame - a blast
+// or a heavy burst), a high ringing tone plays (2D, fade baked into the wav) and, if coop_tinnitusMuffle is
+// on, their world SFX briefly DUCK (muffle) and ease back over coop_tinnitusTime seconds. Per-player: the
+// ring goes to that client via playlocalsound, and the s_volume duck is stuffed only to that client (same
+// idea as the cinematic sfx duck in replace.scr, but per-player). coop_tinnitus 0 = off.
+//
+// Started per spawn from player.scr::manageAliveSpawning (modeled on ads.scr::coop_ads_monitor). The
+// s_volume values are set by STRING CONCAT (no float-cvar arithmetic) to stay clear of script coercion
+// gotchas; the muffle restores to coop_tinnitusBaseVol (matches the autoexec s_volume baseline).
+
+//=========================================================================
+coop_tinnitus_monitor local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.last   = local.player.health
+	local.nextok = 0
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		if( int( getcvar( "coop_tinnitus" ) ) && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 ){
+			local.h   = local.player.health
+			local.min = int( getcvar( "coop_tinnitusMinDamage" ) )
+			if( local.min <= 0 ){ local.min = 60 }
+			if( local.h > 0 && local.last > 0 && (local.last - local.h) >= local.min && level.time >= local.nextok ){
+				local.player thread coop_tinnitus_trigger
+				local.nextok = level.time + 3		// one ring per blast (no re-trigger for 3s)
+			}
+			local.last = local.h
+		} else {
+			local.last = local.player.health
+		}
+		waitframe
+	}
+}end
+
+
+//=========================================================================
+coop_tinnitus_trigger:{
+//=========================================================================
+	// self = the player who just got rocked
+	if( self == NULL ){ end }
+
+	self playlocalsound coop_tinnitus_ring
+
+	// muffle is optional - ring-only if coop_tinnitusMuffle is 0
+	if( int( getcvar( "coop_tinnitusMuffle" ) ) == 0 ){ end }
+
+	local.dur = int( getcvar( "coop_tinnitusTime" ) )
+	if( local.dur <= 0 ){ local.dur = 4 }
+	local.step = local.dur * 0.33
+
+	// duck this client's world SFX hard, then ease back toward the baseline in a few steps
+	self stufftext "s_volume 0.55"
+	wait local.step
+	if( self == NULL ){ end }
+	self stufftext "s_volume 0.70"
+	wait local.step
+	if( self == NULL ){ end }
+	self stufftext "s_volume 0.82"
+	wait local.step
+	if( self == NULL ){ end }
+	self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+}end
+
+
+//=========================================================================
+// HZM coop - SUBTLE INJURED MUFFLE: when SEVERELY wounded (alive, not downed), the world SFX duck a little
+// (nothing intense), then restore once you heal back up. Self-calibrates "full" from the peak health seen
+// this life (handles 100/250/750 max). Yields while DOWN (dbno.scr owns the audio fade then) and restores
+// to baseline on spawn. Stuffs s_volume only on the wounded<->ok transition so it doesn't fight the
+// tinnitus ring. coop_woundMuffle 0 = off; coop_woundMuffleVol = the ducked volume; coop_woundMuffleFrac =
+// health fraction (of peak) below which it counts as "severely injured".
+//=========================================================================
+coop_injured_muffle_monitor local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.peak    = local.player.health
+	local.muffled = 0
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		if( int( getcvar( "coop_woundMuffle" ) ) && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 ){
+			local.h = local.player.health
+			if( local.h > local.peak ){ local.peak = local.h }
+			local.frac = getcvar( "coop_woundMuffleFrac" )
+			if( local.frac == "" ){ local.frac = 0.3 } else { local.frac = float( local.frac ) }
+			if( local.h > 0 && local.peak > 0 && ( local.h * 1.0 / local.peak ) < local.frac ){
+				if( local.muffled != 1 ){
+					local.player stufftext ( "s_volume " + getcvar( "coop_woundMuffleVol" ) )
+					local.muffled = 1
+				}
+			} else {
+				if( local.muffled == 1 ){
+					local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+					local.muffled = 0
+				}
+			}
+		} else {
+			// dead / downed / disabled: drop the flag so the muffle re-applies cleanly once alive again
+			local.muffled = 0
+		}
+		wait 0.5
+	}
+}end

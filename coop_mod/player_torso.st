@@ -84,12 +84,294 @@ state STAND
 		CHECK_MORTARRIFLE       	: +ATTACK_PRIMARY IS_WEAPON_ACTIVE "mainhand" "Gewehrgranate"		
 		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
 		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY !IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
+
+		// HZM coop - AIM DOWN SIGHTS: hold the dedicated ADS button (RMB by default, its own bind) to
+		// raise the weapon to the iron sights. Decoupled from secondary-fire so the native bash works
+		// again on +attacksecondary (V). Guarded so grenades, rocket launchers, the mine detector and
+		// items keep their normal secondary action; they never had an iron-sight pose anyway.
+		AIM				: COOP_ADS !IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "grenade" !IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "item" !IS_WEAPON_ACTIVE "mainhand" "Bazooka" !IS_WEAPON_ACTIVE "mainhand" "Panzerschreck" !IS_WEAPON_ACTIVE "mainhand" "PIAT" !IS_WEAPON_ACTIVE "mainhand" "Minedetector" !IS_WEAPON_ACTIVE "mainhand" "Minensuchgerat" !IS_WEAPON_ACTIVE "mainhand" "Springfield '03 Sniper" !IS_WEAPON_ACTIVE "mainhand" "KAR98 - Sniper" !IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
+
 		CHECK_SECONDARY_ATTACK		: +ATTACK_SECONDARY
 
 		// check for needing to restart the STAND state so that we can select a different 
 		// viewmodel anim (part of the viewmodel idle anim setting code)
 		STAND	: +CHECK_MOVEMENT_SPEED "mainhand"
 		STAND	: -CHECK_MOVEMENT_SPEED "mainhand"
+	}
+}
+
+//==============================================================================
+//
+// AIM DOWN SIGHTS  (HZM coop iron-sight raise)
+//
+// Entered from STAND while the secondary-fire button (RMB) is HELD. Raises the
+// weapon to the sights with the per-weapon "adsraise" viewmodel pose defined in
+// models/player/base/fps_anims_*.txt (a graceful no-op for weapons without one).
+// Firing routes through the normal primary-attack dispatch (brief hip dip, then
+// STAND re-enters AIM while RMB stays held); releasing RMB returns to STAND.
+// PURELY ADDITIVE: references only pre-existing states + the new adsraise alias.
+//
+//==============================================================================
+state AIM
+{
+	movetype legs
+
+	camera behind
+
+	entrycommands
+	{
+		// Raise the gun to the iron sights via the per-weapon "charge" aim pose (defined as <gun>_charge
+		// in models/player/base/fps_anims_*.txt). This is the RAISED pose the per-gun s_adsGunTune values
+		// were dialled against - kept so all that tuning stays valid. (Trade-off: these raise poses bake a
+		// fixed support-hand position for their original gun, so on borrowed/HD-remodelled guns the off
+		// hand can hover - that is only fully fixable with authored per-gun poses, not a tuning change.)
+		viewmodelanim charge
+	}
+
+	action
+	{
+		none				: default // no torso anim; legs drive the body
+	}
+
+	states
+	{
+		KILLED				: KILLED
+
+		VEHICLE_START			: IS_USING_VEHICLE
+		TURRET_START			: IS_USING_TURRET
+		LADDER_IDLE_LEFT		: ON_LADDER
+
+		// release the ADS button -> drop out of the sights
+		STAND				: !COOP_ADS
+
+		PUTAWAY_MAIN			: PUTAWAYMAIN
+		RAISE_WEAPON			: NEW_WEAPON
+		RELOAD_WEAPON			: RELOAD
+
+		// SEMI-AUTO (rifle/pistol/shotgun): fire while staying centered at the sights (aim-fire states).
+		ATTACK_RIFLE_PRIMARY_AIM	: +ATTACK_PRIMARY IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "rifle"
+		ATTACK_PISTOL_PRIMARY_AIM	: +ATTACK_PRIMARY IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "pistol"
+		ATTACK_SHOTGUN_PRIMARY_AIM	: +ATTACK_PRIMARY IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		// FULL-AUTO (smg/mg): normal hip dispatch - continuous fire needs the hip "fire" restart that a
+		// static aim pose can't retrigger, so full-auto fires reliably here (slight kick during a spray).
+		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY !IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
+		// HZM coop - re-assert the raised "charge" pose on movement-speed change (start/stop
+		// moving), mirroring STAND lines 97-98. Without it, starting to move swaps the view
+		// model to a movement anim and the support hand drops off the gun.
+		AIM				: +CHECK_MOVEMENT_SPEED "mainhand"
+		AIM				: -CHECK_MOVEMENT_SPEED "mainhand"
+	}
+}
+
+//==============================================================================
+// AIM-FIRE states (HZM coop) - fire while staying at the iron sights.
+// Each is a clone of the matching hip-fire ATTACK state (same 3rd-person action anims, same
+// weaponstate.scr call so firing/disguise behave identically) EXCEPT the first-person view stays in
+// the "charge" aim pose instead of the hip-fire kick. On anim-done they return to AIM while RMB is
+// held (which re-dispatches the next shot for full-auto) or to STAND when RMB is released.
+//==============================================================================
+state ATTACK_SMG_PRIMARY_AIM
+{
+	movetype legs
+
+	entrycommands
+	{
+		exec coop_mod/weaponstate.scr "ATTACK_SMG_PRIMARY"
+		viewmodelanim charge
+	}
+
+	action
+	{
+		mp40_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		mp40_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		mp40_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching"
+		mp40_stand_fire			: IS_WEAPON_ACTIVE "mainhand" "MP40"
+
+		sten_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		sten_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		sten_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II" POSITION_TYPE "crouching"
+		sten_stand_fire			: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II"
+
+		moschetto_stand_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Moschetto" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		moschetto_crouch_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Moschetto" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		moschetto_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Moschetto" POSITION_TYPE "crouching"
+		moschetto_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Moschetto"
+
+		smg_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		smg_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		smg_crouch_fire			: POSITION_TYPE "crouching"
+		smg_stand_fire			: default
+	}
+
+	states
+	{
+		STAND				: KILLED
+		// FULL-AUTO loop on WEAPON-READY (the charge aim pose has no usable anim-done). The FULLAUTO
+		// dispatch routes back here while RMB is held, so the gun keeps firing at the sights (centered).
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY +IS_WEAPON_READY_TO_FIRE "mainhand"
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: +ATTACK_PRIMARY IS_WEAPON_READY_TO_FIRE "mainhand"
+		AIM				: !ATTACK_PRIMARY COOP_ADS
+		STAND				: !ATTACK_PRIMARY
+	}
+}
+
+state ATTACK_MG_PRIMARY_AIM
+{
+	movetype legs
+
+	entrycommands
+	{
+		exec coop_mod/weaponstate.scr "ATTACK_MG_PRIMARY"
+		viewmodelanim charge
+	}
+
+	action
+	{
+		vickers_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		vickers_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		vickers_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching"
+		vickers_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier"
+
+		mp44_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "StG 44" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		mp44_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "StG 44" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		mp44_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "StG 44" POSITION_TYPE "crouching"
+		mp44_stand_fire			: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+
+		mg_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		mg_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		mg_crouch_fire			: POSITION_TYPE "crouching"
+		mg_stand_fire			: default
+	}
+
+	states
+	{
+		STAND				: KILLED
+		// FULL-AUTO loop on WEAPON-READY (see ATTACK_SMG_PRIMARY_AIM) so the BAR/StG keeps firing centered.
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY +IS_WEAPON_READY_TO_FIRE "mainhand"
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: +ATTACK_PRIMARY IS_WEAPON_READY_TO_FIRE "mainhand"
+		AIM				: !ATTACK_PRIMARY COOP_ADS
+		STAND				: !ATTACK_PRIMARY
+	}
+}
+
+state ATTACK_RIFLE_PRIMARY_AIM
+{
+	movetype legs
+
+	entrycommands
+	{
+		exec coop_mod/weaponstate.scr "ATTACK_RIFLE_PRIMARY"
+		viewmodelanim charge
+	}
+
+	action
+	{
+		enfieldl42a1_stand_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		enfieldl42a1_crouch_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		enfieldl42a1_crouch_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "crouching"
+		enfieldl42a1_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
+
+		carcano_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Carcano" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		carcano_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Carcano" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		carcano_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Carcano" POSITION_TYPE "crouching"
+		carcano_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Carcano"
+
+		delisle_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "DeLisle" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		delisle_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "DeLisle" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		delisle_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "DeLisle" POSITION_TYPE "crouching"
+		delisle_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "DeLisle"
+
+		rifle_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		rifle_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		rifle_stand_walk_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "walking"
+		rifle_crouch_fire		: POSITION_TYPE "crouching"
+		rifle_stand_fire		: default
+	}
+
+	states
+	{
+		STAND				: KILLED
+
+		ATTACK_SPRINGFIELD_RECHAMBER	: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Springfield '03 Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Gewehrgranate"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Mauser KAR 98K"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "KAR98 - Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Mosin Nagant Rifle"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "DeLisle"
+
+		AIM				: ANIMDONE_TORSO COOP_ADS
+		STAND				: ANIMDONE_TORSO
+	}
+}
+
+state ATTACK_PISTOL_PRIMARY_AIM
+{
+	movetype legs
+
+	entrycommands
+	{
+		exec coop_mod/weaponstate.scr "ATTACK_PISTOL_PRIMARY"
+		viewmodelanim charge
+	}
+
+	action
+	{
+		beretta_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		beretta_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		beretta_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "crouching"
+		beretta_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta"
+
+		pistol_silenced_stand_run_fire	: POSITION_TYPE "standing" MOVEMENT_TYPE "running" IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
+		pistol_silenced_crouch_run_fire	: POSITION_TYPE "crouching" MOVEMENT_TYPE "running" IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
+		pistol_silenced_crouch_fire	: POSITION_TYPE "crouching" IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
+		pistol_silenced_stand_fire	: IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
+
+		pistol_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		pistol_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		pistol_crouch_fire		: POSITION_TYPE "crouching"
+		pistol_stand_fire		: default
+	}
+
+	states
+	{
+		STAND				: KILLED
+		// HZM coop - FAST semi-auto re-fire while aiming: re-enter the aim-fire state directly on the next
+		// click as soon as the weapon is ready, instead of waiting for the full fire anim (ANIMDONE) to
+		// drop back to AIM first. That ANIMDONE wait was capping the ADS rate below hip; this mirrors the
+		// hip ATTACK_PISTOL_PRIMARY state's re-fire, so ADS fires exactly as fast as the hip (still gated by
+		// IS_WEAPON_READY_TO_FIRE = the weapon's natural fire delay).
+		ATTACK_PISTOL_PRIMARY_AIM	: +ATTACK_PRIMARY IS_WEAPON_READY_TO_FIRE "mainhand" COOP_ADS
+		AIM				: ANIMDONE_TORSO COOP_ADS
+		STAND				: ANIMDONE_TORSO
+	}
+}
+
+state ATTACK_SHOTGUN_PRIMARY_AIM
+{
+	movetype legs
+
+	entrycommands
+	{
+		exec coop_mod/weaponstate.scr "ATTACK_SHOTGUN_PRIMARY"
+		viewmodelanim charge
+	}
+
+	action
+	{
+		shotgun_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
+		shotgun_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		shotgun_crouch_fire		: POSITION_TYPE "crouching"
+		shotgun_stand_fire		: default
+	}
+
+	states
+	{
+		STAND				: KILLED
+		AIM				: ANIMDONE_TORSO COOP_ADS
+		STAND				: ANIMDONE_TORSO
 	}
 }
 
@@ -232,10 +514,14 @@ state CHECK_PRIMARY_ATTACK_FULLAUTO
 		STAND				: RELOAD
 		STAND				: !IS_WEAPON_READY_TO_FIRE     "mainhand"
 		
+		// HZM coop - while aiming (RMB held) keep full-auto fire in the centered aim-fire states.
+		ATTACK_SMG_PRIMARY_AIM		: COOP_ADS IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "smg"
+		ATTACK_MG_PRIMARY_AIM		: COOP_ADS IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg"
+
 		ATTACK_SMG_PRIMARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "smg"
 		ATTACK_SMG_PRIMARY		: IS_WEAPON_READY_TO_FIRE      "mainhand" "Moschetto"
 		ATTACK_MG_PRIMARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg"
-		
+
 		STAND				: !ATTACK_PRIMARY
 	}
 }
@@ -3271,7 +3557,9 @@ state TURRET_PUTAWAY
 
 state TURRET_START
 {
-	
+	// HZM coop - reverted to VANILLA (the duck/crouch + camera behind experiments made the mounted pose look
+	// broken - lying down / detached gun). Clean first-person mounted view (g_turretcameras 0). We'll redo the
+	// over-the-shoulder cam live.
 	states
 	{
 		TURRET_PUTAWAY	        	: PUTAWAYMAIN	// Basic put weapon away move.
@@ -3282,13 +3570,13 @@ state TURRET_START
 state TURRET_IDLE
 {
 	movetype anim
-	
+
 	action
 	{
 		mg42tripod_crouch_aim_straight_straight	: IS_WEAPON_ACTIVE "mainhand" "Packed MG42 Turret"
 		turret_idle				: default
 	}
-	
+
 	states
 	{
 		STAND					: !IS_USING_TURRET

@@ -1,0 +1,669 @@
+dbno_start local.player:{
+	ihuddraw_alpha local.player 20 0
+	ihuddraw_rect  local.player 20 0 0 640 480
+	ihuddraw_alpha local.player 27 0
+	ihuddraw_alpha local.player 28 0
+	ihuddraw_alpha local.player 29 0
+	ihuddraw_alpha local.player 31 0
+	ihuddraw_alpha local.player 32 0
+	ihuddraw_alpha local.player 33 0
+	ihuddraw_alpha local.player 34 0
+	ihuddraw_alpha local.player 35 0
+	ihuddraw_alpha local.player 38 0
+	ihuddraw_alpha local.player 39 0
+
+	local.player stoploopsound coop_dbno_breath1
+	local.player stoploopsound coop_dbno_breath2
+	local.player stoploopsound coop_dbno_breath3
+
+	// safety-net: make sure the cgame "downed" view flag is cleared on (re)spawn, so a player who died while
+	// downed never respawns with the bleed-out vignette/sway stuck on.
+	local.player stufftext "set coop_dbnoView 0"
+
+	local.player.flags["coop_dbno_active"]       = NIL
+	local.player.flags["coop_dbno_dead"]         = NIL
+	local.player.flags["coop_dbno_elapsed"]      = 0
+	local.player.flags["coop_dbno_timer_actual"] = 0
+	local.player.flags["coop_dbno_letgo"]        = NIL
+	local.player.flags["coop_dbno_cumulative"]   = 0
+	local.player.flags["coop_dbno_healing"]      = NIL
+	local.player.flags["coop_dbno_prev_health"]  = NIL
+	local.player.flags["coop_medkits"]               = 1
+	local.player.flags["coop_cover_placements"]      = 2
+	local.player.flags["coop_medkit_in_use"]         = NIL
+	local.player.flags["coop_medkit_prev_health"]    = NIL
+	local.player.flags["coop_medkit_refill_cooldown"] = NIL
+
+	//[208] coop - per-map override: jeep-ride levels (m1l3a/m1l3b) disable DBNO entirely - a downed
+	//player can't crawl or be revived while glued to a moving rail vehicle. Set in the map's main.
+	if( level.coop_dbno_disabled == 1 ){ end }
+
+	local.dbno_enabled = getcvar "coop_dbno"
+	if( local.dbno_enabled == "" ){ local.dbno_enabled = "1" }
+	if( local.dbno_enabled != "1" ){ end }
+
+	local.player healthonly 9999
+
+	thread dbno_monitor local.player
+}end
+
+
+dbno_classifyHit local.player:{
+	local.class = "chest"
+	local.fact_ref = local.player.fact
+	if( local.fact_ref != NIL ){
+		local.loc = local.fact_ref.location
+	}
+
+	if( local.loc != NIL ){
+		if( local.loc == 0 || local.loc == 1 || local.loc == 2 ){
+			local.class = "head"
+		}
+		if( local.loc == 7 || local.loc == 8 || local.loc == 11 || local.loc == 12 || local.loc == 15 || local.loc == 16 ){
+			local.class = "arm"
+		}
+		if( local.loc == 9 || local.loc == 10 || local.loc == 13 || local.loc == 14 || local.loc == 17 || local.loc == 18 ){
+			local.class = "leg"
+		}
+	}
+	else{
+		local.r = randomint 4
+		if( local.r == 2 ){ local.class = "arm" }
+		if( local.r == 3 ){ local.class = "leg" }
+	}
+}end local.class
+
+
+dbno_monitor local.player:{
+	local.prev_health      = local.player.health
+	local.cumulative       = 0
+	local.last_damage_time = level.time
+	local.player.flags["coop_dbno_cumulative"] = 0
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		local.curr_health  = local.player.health
+		local.frame_damage = local.prev_health - local.curr_health
+
+		if( local.frame_damage > 0 ){
+			local.cumulative       = local.cumulative + local.frame_damage
+			local.last_damage_time = level.time
+			local.player.flags["coop_dbno_cumulative"] = local.cumulative
+		}
+		else if( level.time - local.last_damage_time >= 2 ){
+			local.cumulative = 0
+			local.player.flags["coop_dbno_cumulative"] = 0
+		}
+
+		local.threshold = int( getcvar "coop_dbnoThreshold" )
+		if( local.threshold <= 0 ){ local.threshold = 250 }
+
+		if( local.cumulative >= local.threshold && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 && local.player.flags["coop_dbno_dead"] != 1 ){
+			local.cumulative = 0
+			local.player.flags["coop_dbno_cumulative"] = 0
+			local.player.flags["coop_dbno_active"] = 1
+			local.player.flags["coop_dbno_prev_health"] = local.curr_health
+			local.player healthonly 100
+
+			local.hitclass = waitthread dbno_classifyHit local.player
+
+			if( local.hitclass == "head" && getcvar "coop_dbnoHitLocation" == "1" ){
+				local.player.flags["coop_dbno_active"] = NIL
+				local.player.flags["coop_dbno_dead"]   = 1
+				local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+			}
+			else{
+				thread dbno_enter local.player local.hitclass
+			}
+		}
+
+		if( local.player.health <= 0 && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 && local.player.flags["coop_dbno_dead"] != 1 ){
+			local.hitclass = waitthread dbno_classifyHit local.player
+			if( local.hitclass == "head" && getcvar "coop_dbnoHitLocation" == "1" ){
+				local.player.flags["coop_dbno_dead"] = 1
+				end
+			}
+			local.player.flags["coop_dbno_active"] = 1
+			local.player.flags["coop_dbno_prev_health"] = 1
+			local.player healthonly 100
+			thread dbno_enter local.player local.hitclass
+		}
+
+		local.prev_health = local.player.health
+		waitframe
+	}
+}end
+
+
+dbno_enter local.player local.hitclass:{
+	// guard: if the player actually died in the frame between the monitor's check and here (the killing hit
+	// outran DBNO), don't try to set health on a corpse ("cannot give health to dead entities"). Bail out.
+	if( !isAlive local.player ){
+		local.player.flags["coop_dbno_active"] = NIL
+		local.player.flags["coop_dbno_dead"]   = 1
+		end
+	}
+	local.player health 100
+
+	local.base_timer = int( getcvar "coop_dbnoTimer" )
+	if( local.base_timer <= 0 ){ local.base_timer = 60 }
+
+	local.actual_timer = local.base_timer
+
+	if( local.hitclass == "head" ){
+		local.actual_timer = 45
+	}
+
+	local.player.flags["coop_dbno_active"]       = 1
+	local.player.flags["coop_dbno_timer_actual"] = local.actual_timer
+	local.player.flags["coop_dbno_elapsed"]      = 0
+
+	local.detail = "chest wound"
+	if( local.hitclass == "arm" ){ local.detail = "arm wound" }
+	if( local.hitclass == "leg" ){ local.detail = "leg wound" }
+
+	local.down_msg = "You are DOWN! " + local.detail + ". Bleeding out in " + local.actual_timer + "s"
+	local.player iprint local.down_msg 1
+	thread dbno_play_random_call local.player
+
+	local.msg = local.player.netname + " is down - " + local.detail + " (" + local.actual_timer + " seconds)"
+	local.maxclients = $player.size
+	local.i = 1
+	while( local.i <= local.maxclients ){
+		if( $player[local.i] && $player[local.i] != local.player ){
+			if( $player[local.i].flags["coop_isActive"] == 1 ){
+				$player[local.i] iprint local.msg 0
+			}
+		}
+		local.i++
+	}
+
+	local.player takeall
+	local.player item weapons/dbno_pistol.tik
+	local.player ammo pistol 20
+	local.player useweaponclass pistol
+	local.player.flags["coop_dbno_origin"] = local.player.origin
+
+	thread dbno_bleedout_timer local.player
+	local.player thread dbno_fade_manager
+	thread dbno_crawl_manager  local.player
+	thread dbno_revival_stub   local.player
+	thread coop_mod/medkit.scr::dbno_selfrevive local.player
+	local.player thread dbno_countdown_hud
+	local.player thread dbno_letgo_monitor
+	thread dbno_marker_manager local.player
+}end
+
+
+dbno_bleedout_timer local.player:{
+	local.timer = local.player.flags["coop_dbno_timer_actual"]
+
+	while( local.player.flags["coop_dbno_elapsed"] < local.timer && local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		wait 1
+		if( local.player.flags["coop_dbno_healing"] == 1 ){ continue }
+		local.player.flags["coop_dbno_elapsed"] = local.player.flags["coop_dbno_elapsed"] + 1
+	}
+
+	if( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		thread dbno_die local.player
+	}
+}end
+
+
+dbno_fade_manager:{
+	local.hud_slot = 20
+	local.timer    = self.flags["coop_dbno_timer_actual"]
+
+	ihuddraw_shader      self local.hud_slot "textures/mohmenu/black.tga"
+	ihuddraw_virtualsize self local.hud_slot 1
+	ihuddraw_rect        self local.hud_slot 0 0 640 480
+	ihuddraw_color       self local.hud_slot 0 0 0
+	ihuddraw_alpha       self local.hud_slot 0.3
+
+	thread dbno_heartbeat self
+
+	// HZM coop - flag this client as DOWNED so cgame forces the low-health red vignette + heavy aim SWAY while
+	// downed (the downed pistol should be genuinely hard to aim). Cleared on every exit below. Per-client,
+	// stuffed exactly like the SFX fade so it works on host + remote clients.
+	self stufftext "set coop_dbnoView 1"
+
+	// HZM coop - AUDIO FADE (option A): world SFX fade toward silence as the bleed-out timer runs, in
+	// lockstep with the black fade; music is left alone (s_musicvolume is independent). Quantized steps,
+	// stuffed only on change, to the downed client. Restored on revive below; on actual death it stays at 0
+	// and the player's next spawn restores it (player.scr safety-net), so nobody gets stuck silent.
+	local.lastVol = ""
+	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
+		local.elapsed = self.flags["coop_dbno_elapsed"]
+		local.frac    = local.elapsed * 1.0 / local.timer
+		local.alpha   = 0.3 + local.frac * 0.7
+		ihuddraw_alpha self local.hud_slot local.alpha
+
+		local.vol = "1"
+		if( local.frac >= 0.95 ){ local.vol = "0" }
+		else if( local.frac >= 0.85 ){ local.vol = "0.2" }
+		else if( local.frac >= 0.72 ){ local.vol = "0.45" }
+		else if( local.frac >= 0.55 ){ local.vol = "0.7" }
+		if( local.vol != local.lastVol ){
+			self stufftext ( "s_volume " + local.vol )
+			local.lastVol = local.vol
+		}
+		wait 0.5
+	}
+
+	// downed state ended (revived / let go / died) - clear the cgame downed flag so the vignette + sway revert
+	if( self != NULL ){ self stufftext "set coop_dbnoView 0" }
+
+	if( self != NULL && self.flags["coop_dbno_dead"] != 1 && self.flags["coop_dbno_letgo"] != 1 ){
+		// revived (not dead) - bring SFX back to the baseline
+		self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+	}
+
+	if( self.flags["coop_dbno_letgo"] != 1 ){
+		if( self.flags["coop_dbno_dead"] == 1 ){
+			ihuddraw_alpha self local.hud_slot 1.0
+			wait 1.5
+		}
+	}
+	ihuddraw_alpha self local.hud_slot 0
+}end
+
+
+dbno_heartbeat local.player:{
+	local.timer = local.player.flags["coop_dbno_timer_actual"]
+	local.stage = 0
+	local.player.flags["coop_dbno_heartbeat_active"] = 1
+
+	local.player loopsound coop_dbno_breath1
+	local.stage = 1
+
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		local.elapsed  = local.player.flags["coop_dbno_elapsed"]
+		local.progress = local.elapsed * 1.0 / local.timer
+
+		if( local.progress >= 0.75 && local.stage != 3 ){
+			local.stage = 3
+			local.player stopsound
+			local.player loopsound coop_dbno_breath3
+		}
+		else if( local.progress >= 0.4 && local.stage < 2 ){
+			local.stage = 2
+			local.player stopsound
+			local.player loopsound coop_dbno_breath2
+		}
+		waitframe
+	}
+
+	if( local.player.flags["coop_dbno_active"] != 1 ){
+		local.player stoploopsound coop_dbno_breath1
+		local.player stoploopsound coop_dbno_breath2
+		local.player stoploopsound coop_dbno_breath3
+	}
+	local.player.flags["coop_dbno_heartbeat_active"] = NIL
+}end
+
+
+dbno_crawl_manager local.player:{
+	ihuddraw_virtualsize local.player 32 1
+	ihuddraw_align       local.player 32 center center
+	ihuddraw_font        local.player 32 "verdana-12"
+	ihuddraw_color       local.player 32 1 0.6 0.0
+	ihuddraw_rect        local.player 32 0 0 0 0
+	ihuddraw_string      local.player 32 "Seek cover - movement is dangerous!"
+	ihuddraw_alpha       local.player 32 0
+
+	local.penalty_frames = 0
+	local.penalty_shown  = 0
+	local.prev_health    = local.player.health
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		local.player testplayeranim "walk_injured_forward" 1.0
+		local.player forcelegsstate CROUCH_WALK_FORWARD
+		local.player forcetorsostate CROUCH_IDLE
+		local.player modheight "prone"
+		if( vector_length( local.player.origin - local.player.flags["coop_dbno_origin"] ) > 100 ){
+			local.penalty_frames++
+			if( local.penalty_frames >= 10 ){
+				local.penalty_frames = 0
+				local.player.flags["coop_dbno_elapsed"] = local.player.flags["coop_dbno_elapsed"] + 1
+				if( local.penalty_shown == 0 ){
+					local.player iprint "Moving is accelerating your bleed-out!" 0
+					local.penalty_shown = 1
+				}
+			}
+			ihuddraw_alpha local.player 32 1
+		}
+		else{
+			local.penalty_frames = 0
+			local.penalty_shown  = 0
+			ihuddraw_alpha local.player 32 0
+		}
+		local.curr_h = local.player.health
+		if( isAlive local.player && local.curr_h < local.prev_health ){
+			local.restore = int( (local.prev_health - local.curr_h) * 0.5 )
+			local.player healthonly (local.curr_h + local.restore)
+		}
+		local.prev_health = local.player.health
+		waitframe
+	}
+	ihuddraw_alpha local.player 32 0
+	local.player modheight "stand"
+}end
+
+
+dbno_die local.player:{
+	local.player.flags["coop_dbno_dead"]   = 1
+	local.player.flags["coop_dbno_active"] = NIL
+	wait 0.1
+	local.player modheight "stand"
+
+	ihuddraw_alpha local.player 27 0
+	ihuddraw_alpha local.player 28 0
+	ihuddraw_alpha local.player 29 0
+
+	ihuddraw_alpha local.player 20 1.0
+	wait 0.5
+
+	ihuddraw_alpha local.player 20 0
+	ihuddraw_rect  local.player 20 0 0 0 0
+
+	local.player stoploopsound coop_dbno_breath1
+	local.player stoploopsound coop_dbno_breath2
+	local.player stoploopsound coop_dbno_breath3
+	ihuddraw_alpha local.player 31 0
+	ihuddraw_alpha local.player 32 0
+	ihuddraw_alpha local.player 33 0
+	ihuddraw_alpha local.player 34 0
+	ihuddraw_alpha local.player 35 0
+	local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+}end
+
+
+dbno_revival_stub local.player:{
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		waitframe
+	}
+}end
+
+
+// AI MEDIC field-revive: lift a downed player back up. Mirrors the self-revive completion
+// in medkit.scr (dbno_selfrevive) so the player ends in the SAME good state, but consumes
+// no player medkit (the medic is the aid). Called by the paradrop medic when it reaches a
+// downed teammate: thread coop_mod/dbno.scr::dbno_ai_revive <player>
+dbno_ai_revive local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_dbno_active"] != 1 ){ end }
+
+	local.player.flags["coop_dbno_letgo"]   = 1
+	local.player.flags["coop_dbno_dead"]    = 1
+	local.player.flags["coop_dbno_healing"] = NIL
+	local.player.flags["coop_dbno_active"]  = NIL
+
+	// Clear all DBNO + self-revive HUD elements (harmless if a slot wasn't drawn).
+	// Clear the DBNO HUD slots created on the way down (fade/countdown/crawl/heartbeat).
+	// Slots 34/35/38/39 are SELF-revive-only (medkit.scr) and were never created on an
+	// AI-revived player, so clearing them errored -- omitted here.
+	ihuddraw_alpha local.player 20 0
+	ihuddraw_alpha local.player 27 0
+	ihuddraw_alpha local.player 28 0
+	ihuddraw_alpha local.player 29 0
+	ihuddraw_alpha local.player 31 0
+	ihuddraw_alpha local.player 32 0
+	ihuddraw_alpha local.player 33 0
+	ihuddraw_string local.player 33 ""
+
+	local.player stoploopsound coop_dbno_breath1
+	local.player stoploopsound coop_dbno_breath2
+	local.player stoploopsound coop_dbno_breath3
+
+	local.player modheight "stand"
+	local.player forcelegsstate STAND
+	local.player health level.coop_health
+
+	wait 0.1
+	local.player takeall
+	local.inv  = local.player.flags["coop_inventoryWeapons"]
+	local.gave = 0
+	if( local.inv != NIL ){
+		local.wi = 1
+		while( local.wi <= local.inv.size ){
+			if( local.inv[local.wi] != NIL ){
+				local.player item local.inv[local.wi]
+				local.gave = 1
+			}
+			local.wi++
+		}
+	}
+	if( local.gave != 1 && level.coop_weaponLoadout != NIL ){
+		local.wi = 1
+		while( local.wi <= level.coop_weaponLoadout.size ){
+			if( level.coop_weaponLoadout[local.wi] != NIL ){
+				local.player item level.coop_weaponLoadout[local.wi]
+				local.gave = 1
+			}
+			local.wi++
+		}
+	}
+	if( local.gave != 1 ){
+		local.player item "weapons/m1_garand.tik"
+		local.player item "weapons/colt45.tik"
+		local.player item "weapons/frag_grenade.tik"
+	}
+	local.player useweaponclass rifle
+	local.player playsound coop_exhale1
+	local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )	// restore world SFX after AI revive
+
+	ihuddraw_align  local.player 33 center center
+	ihuddraw_font   local.player 33 "handle-23"
+	ihuddraw_color  local.player 33 0.4 1.0 0.4
+	ihuddraw_rect   local.player 33 0 0 0 0
+	ihuddraw_string local.player 33 "An Allied Medic revived you!"
+	ihuddraw_alpha  local.player 33 1
+	wait 3
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 33 0
+		ihuddraw_string local.player 33 ""
+	}
+}end
+
+
+dbno_countdown_hud:{
+	local.hud_slot = 27
+	local.timer    = self.flags["coop_dbno_timer_actual"]
+
+	ihuddraw_virtualsize self local.hud_slot 1
+	ihuddraw_align       self local.hud_slot center center
+	ihuddraw_alpha       self local.hud_slot 1
+	ihuddraw_font        self local.hud_slot handle-23
+	ihuddraw_color       self local.hud_slot 1 0.2 0.2
+	ihuddraw_rect        self local.hud_slot 0 -60 0 0
+	ihuddraw_string      self local.hud_slot ""
+
+	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
+		local.elapsed   = self.flags["coop_dbno_elapsed"]
+		local.remaining = local.timer - local.elapsed
+		if( local.remaining < 0 ){ local.remaining = 0 }
+		local.text = "BLEEDING OUT: " + local.remaining + "s"
+		ihuddraw_string self local.hud_slot local.text
+		wait 1
+	}
+
+	ihuddraw_alpha  self local.hud_slot 0
+	ihuddraw_string self local.hud_slot ""
+}end
+
+
+dbno_letgo_monitor:{
+	// REBORN LAYER: dedicated V keybind for medic call deferred to Phase 8.
+	// vanilla server scripts can only poll useheld / primaryfireheld / secondaryfireheld.
+	// tap-vs-hold USE (default F): tap = medic callout, hold 3s = surrender.
+	local.hud_slot       = 28
+	local.medic_cooldown = 0
+
+	ihuddraw_virtualsize self local.hud_slot 1
+	ihuddraw_string      self local.hud_slot ""
+	ihuddraw_align       self local.hud_slot center center
+	ihuddraw_font        self local.hud_slot "verdana-12"
+	ihuddraw_color       self local.hud_slot 1 1 1
+	ihuddraw_rect        self local.hud_slot 0 -30 0 0
+	ihuddraw_alpha       self local.hud_slot 1
+
+	local.hint_slot = 29
+	ihuddraw_virtualsize self local.hint_slot 1
+	local.hint_kit = self.flags["coop_medkits"]
+	if( local.hint_kit == NIL ){ local.hint_kit = 0 }
+	if( local.hint_kit >= 1 ){
+		ihuddraw_string self local.hint_slot "Tap [USE]: Medic    Hold [USE]: Self-Revive"
+	}
+	else{
+		ihuddraw_string self local.hint_slot "Tap [USE]: Medic    Hold [USE]: Give Up"
+	}
+	ihuddraw_align       self local.hint_slot left bottom
+	ihuddraw_font        self local.hint_slot "verdana-12"
+	ihuddraw_color       self local.hint_slot 1 1 1
+	ihuddraw_rect        self local.hint_slot 0 -15 0 0
+	ihuddraw_alpha       self local.hint_slot 1
+
+	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
+		if( self.useheld == 1 ){
+			local.have_kit = self.flags["coop_medkits"]
+			if( local.have_kit == NIL ){ local.have_kit = 0 }
+			local.hold_frames = 0
+
+			while( self != NULL && self.flags["coop_dbno_active"] == 1 && self.useheld == 1 ){
+				local.hold_frames++
+				// With a medkit, the USE-hold is the self-revive (medkit.scr) - do nothing here so the two
+				// never race on the same key. With NO medkit, holding USE is a deliberate give-up.
+				if( local.have_kit < 1 ){
+					if( local.hold_frames % 2 == 0 ){
+						self.flags["coop_dbno_elapsed"] = self.flags["coop_dbno_elapsed"] + 1
+					}
+					if( local.hold_frames == 20 ){
+						ihuddraw_string self local.hud_slot "Giving up..."
+					}
+					if( local.hold_frames >= 60 ){
+						ihuddraw_string self local.hud_slot ""
+						ihuddraw_alpha  self local.hud_slot 0
+						self.flags["coop_dbno_letgo"] = 1
+						self.flags["coop_dbno_active"] = NIL
+						self.flags["coop_dbno_dead"]   = 1
+						self forcelegsstate STAND
+						self stoploopsound coop_dbno_breath1
+						self stoploopsound coop_dbno_breath2
+						self stoploopsound coop_dbno_breath3
+						self playsound m1l1_death
+						ihuddraw_alpha self 20 1.0
+						wait 1.5
+						ihuddraw_alpha self 20 0
+						ihuddraw_rect  self 20 0 0 0 0
+						self damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+						end
+					}
+				}
+				waitframe
+			}
+
+			// quick TAP (released before the give-up threshold) = call for a medic, kit or no kit
+			if( local.hold_frames < 20 ){
+				if( level.time >= local.medic_cooldown ){
+					thread dbno_medic_callout self
+					local.medic_cooldown = level.time + 3
+				}
+			}
+			ihuddraw_string self local.hud_slot ""
+		}
+		waitframe
+	}
+
+	ihuddraw_alpha  self local.hud_slot 0
+	ihuddraw_string self local.hud_slot ""
+	ihuddraw_alpha  self local.hint_slot 0
+	ihuddraw_string self local.hint_slot ""
+}end
+
+
+dbno_medic_callout local.player:{
+	thread dbno_play_random_call local.player
+
+	local.msg = local.player.netname + " is calling for a medic!"
+	local.maxclients = $player.size
+	local.i = 1
+	while( local.i <= local.maxclients ){
+		if( $player[local.i] ){
+			if( $player[local.i].flags["coop_isActive"] == 1 ){
+				$player[local.i] iprintlnbold local.msg
+			}
+		}
+		local.i++
+	}
+}end
+
+
+dbno_marker_manager local.player:{
+	local.hud_label = "[DOWN] " + local.player.netname
+
+	local.medkit = spawn script_model
+	local.medkit model "models/items/item_50_healthbox.tik"
+	local.medkit notsolid
+	local.medkit scale 0.5
+	local.medkit.origin = local.player.origin + (0 0 70)
+
+	local.glow = spawn script_model
+	local.glow model "fx/dummy.tik"
+	local.glow.origin = local.player.origin
+	local.glow light (1 0 0)
+	local.glow lightRadius 200
+	local.glow lightOn
+	local.glow notsolid
+
+	local.maxclients = $player.size
+	local.i = 1
+	while( local.i <= local.maxclients ){
+		if( $player[local.i] != NULL ){
+			if( $player[local.i].flags["coop_isActive"] == 1 ){
+				if( $player[local.i] != local.player ){
+					$player[local.i] ihuddraw_virtualsize 31 1
+					$player[local.i] ihuddraw_align 31 left top
+					$player[local.i] ihuddraw_font 31 "verdana-12"
+					$player[local.i] ihuddraw_color 31 1 0.2 0.2
+					$player[local.i] ihuddraw_rect 31 10 30 0 0
+					$player[local.i] ihuddraw_alpha 31 1
+					$player[local.i] ihuddraw_string 31 local.hud_label
+				}
+			}
+		}
+		local.i++
+	}
+
+	local.spin = 0
+	wait 0.1
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		local.medkit.origin = local.player.origin + (0 0 70)
+		local.glow.origin = local.player.origin
+		local.spin = local.spin + 10
+		if( local.spin >= 360 ){ local.spin = 0 }
+		local.medkit.angles = (90 local.spin 0)
+		waitframe
+	}
+
+	if( local.medkit != NULL ){ local.medkit delete }
+	if( local.glow   != NULL ){ local.glow   delete }
+
+	local.maxclients = $player.size
+	local.i = 1
+	while( local.i <= local.maxclients ){
+		if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){
+			$player[local.i] ihuddraw_alpha 31 0
+			$player[local.i] ihuddraw_string 31 ""
+		}
+		local.i++
+	}
+}end
+
+
+dbno_play_random_call local.player:{
+	local.r = randomint 6
+	if( local.r == 0 ){ local.player playsound coop_dbno_call_01 }
+	if( local.r == 1 ){ local.player playsound coop_dbno_call_02 }
+	if( local.r == 2 ){ local.player playsound coop_dbno_call_03 }
+	if( local.r == 3 ){ local.player playsound coop_dbno_call_04 }
+	if( local.r == 4 ){ local.player playsound coop_dbno_call_05 }
+	if( local.r == 5 ){ local.player playsound coop_dbno_call_06 }
+}end

@@ -4,6 +4,12 @@
 //=========================================================================
 main: {
 //=========================================================================
+	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (must be first frame)
+	//[207] opt-in to per-map optional callbacks (guarded dispatch)
+	level.coop_hasCallback["coop_playerJustSpawned"] = 1
+	level.coop_hasCallback["coop_playerJustLeft"] = 1
+	level.coop_hasCallback["coop_playerJustRespawned"] = 1
+
 	waitexec maps/e3l3/hacks.scr
 	level.tunneltruckhealth = 500
 	exec global/auto.scr e3l3
@@ -18,12 +24,13 @@ main: {
 	exec coop_mod/replace.scr::takeAll
 	exec global/fadein.scr
 
-	level waittill spawn
+	//level waittill spawn - HZM coop
+	waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gate
 	waitthread InitLevel
 
 	if (level.startonAB41 == 1) {
 		level.AB41Ready =  1
-		thread gags/e3l3_ab41.scr::GetOnPathVehicle
+		thread maps/e3l3/e3l3_AB41.scr::GetOnPathVehicle	//[coop] chrissstrahl - corrected path (gags/e3l3_ab41.scr does not exist)
 	}
 
 	if (level.skipobj1 == 0) {
@@ -98,28 +105,33 @@ startMusic_e3l3_main: {
 //=========================================================================
 Fadein:{
 //=========================================================================
-	level.startangles = $player.viewangles	//MiaCosa @chrissstrahl
+	//[COSMETIC-1] fix: removed P1-only viewangles capture; restore uses intro facing set by replace.scr::viewangles in level_fadein
+	//level.startangles = $player[1].viewangles	//MiaCosa @chrissstrahl (P1 reference angle only) - removed: would snap P2 to P1 facing
 	//$player physics_off	//MiaCosa
 	exec coop_mod/replace.scr::physics_off
 	exec global/fadein.scr
 	waitframe
 
 	waitthread global/fadein.scr::DoFadeIn e3l3_1 e3l3_2 e3l3_3 NIL 0
-	$player.viewangles = level.startangles  //undo any mousemovment during the hud stuff
+	//exec coop_mod/replace.scr::viewangles level.startangles // removed: no longer capturing startangles above
 }end
 
 //=========================================================================
 Briefing: {
 //=========================================================================
-	if (level.skipbriefings == 0) {	//MiaCosa @chrissstrahl ändern?
-		$player playsound DFRUK_E3L3_CM3805 wait	// "Baker, this is King 6.  We're getting the hell beat out of us at Anzio.  Recon has spotted a battery of German K5 Cannons near the railroad tracks in your area."
-		$player waittill sounddone
-		$player playsound DFRUK_E3L3_CM3806 wait	// "These tubes are tough nuts to crack.  You'll have to use demolition charges right in the muzzle to spike those guns."
-		$player waittill sounddone
-		$player playsound DFRUK_E3L3_CM3807 wait	// "Be advised we've got reports of a Jerry convoy carrying ammo headed your way."
-		$player waittill sounddone
-		$player playsound DFRUK_E3L3_CM3808 wait	// "Set up a demolition ambush and stop that convoy.  Keep yourself from being spotted at all costs."
-		$player waittill sounddone
+	if (level.skipbriefings == 0) {	//MiaCosa @chrissstrahl aendern?
+		exec coop_mod/replace.scr::playsound DFRUK_E3L3_CM3805 // HZM coop - broadcast VO to all players
+		// "Baker, this is King 6..."
+		wait 4 //[COSMETIC-1] fix: replaced $player[1] waittill sounddone (hang risk if P1 dead)
+		exec coop_mod/replace.scr::playsound DFRUK_E3L3_CM3806 // HZM coop - broadcast VO to all players
+		// "These tubes are tough nuts to crack..."
+		wait 4 //[COSMETIC-1] fix: replaced $player[1] waittill sounddone
+		exec coop_mod/replace.scr::playsound DFRUK_E3L3_CM3807 // HZM coop - broadcast VO to all players
+		// "Be advised we've got reports of a Jerry convoy..."
+		wait 4 //[COSMETIC-1] fix: replaced $player[1] waittill sounddone
+		exec coop_mod/replace.scr::playsound DFRUK_E3L3_CM3808 // HZM coop - broadcast VO to all players
+		// "Set up a demolition ambush and stop that convoy..."
+		wait 4 //[COSMETIC-1] fix: replaced $player[1] waittill sounddone
 		//$player playsound DFRUK_E3L3_CM3809 wait	// "If they spot you up there, we're in real trouble.  If you run out of demo improvise."
 		//$player waittill sounddone
 	}
@@ -131,12 +143,7 @@ Briefing: {
 	if (level.skipbriefings == 0){
 		//$player playsound DFRUK_E3L3_CM3810 wait	// "King 6 out.  "	//MiaCosa @chrissstrahl
 		exec coop_mod/replace.scr::playsound DFRUK_E3L3_CM3810 wait
-$player loopsound …
-
-…
-$player loopsound …
-
-		$player waittill sounddone	//MiaCosa @chrissstrahl
+		wait 4 //[COSMETIC-1] fix: replaced $player/$player[1] waittill sounddone (hang risk if P1 dead)
 	}
 }end
 
@@ -173,7 +180,7 @@ InitLevel: {
 //=========================================================================
 InitPlayer: {
 //=========================================================================
-	$player heal 1	//MiaCosa @chrissstrahl
+	if(!level.gametype){ $player heal 1 }	//MiaCosa @chrissstrahl //[coop] guard SP-only heal hack
 	waitthread Fadein
 	waitthread ArmPlayer
 	waitthread Briefing
@@ -389,7 +396,7 @@ FindTriggerEnd:
 }end local.returntrigger
 
 //=========================================================================
-FindTriggerByTarget local.target_name:
+FindTriggerByTarget local.target_name: {
 //=========================================================================
 	for (local.i=1;local.i<$enemyspawnertrigger.size+1;local.i++){
 		if ($($enemyspawnertrigger[local.i].target) == local.target_name){
@@ -579,7 +586,13 @@ BlowGuyFromTower: {
 EmmitterCheck: {
 //=========================================================================
  	while (self && isalive self) {
-		if ($player cansee self 120 4000) {	//MiaCosa @chrissstrahl
+		local.vis = 0
+		local.vi = 1
+		while (local.vi <= $player.size){ // HZM coop - visible to ANY player
+			if ($player[local.vi] cansee self 120 4000){ local.vis = 1 }
+			local.vi++
+		}
+		if (local.vis){
 			self show
 		}
 		else {
@@ -729,3 +742,13 @@ InitFogger: {
 	level.fogcolor = $world.farplane_color
 	level.fogging = 0
 }end
+
+// stub handlers - called by coop framework on player events (silences "Could not find label" spam)
+coop_playerJustSpawned:
+end
+
+coop_playerJustLeft:
+end
+
+coop_playerJustRespawned:
+end

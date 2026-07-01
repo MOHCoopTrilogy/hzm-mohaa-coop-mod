@@ -5,6 +5,12 @@ waitexec maps/e3l2/e3l2_hacks.scr
 //=========================================================================
 main: {
 //=========================================================================
+	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (must be first frame)
+	//[207] opt-in to per-map optional callbacks (guarded dispatch)
+	level.coop_hasCallback["coop_playerJustSpawned"] = 1
+	level.coop_hasCallback["coop_playerJustLeft"] = 1
+	level.coop_hasCallback["coop_playerJustRespawned"] = 1
+
 	println "-----------------------------------------------------------"
 	println "-----------------------------------------------------------"
 	println "-----------------------------------------------------------"
@@ -34,7 +40,8 @@ main: {
 	//level.aipronechance = 55
 	//level.aicrouchchance = 65
 
-	level waittill spawn
+	//level waittill spawn - HZM coop
+	waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gate
 
 	exec global/ambience.scr e3l2
 	exec global/weather.scr
@@ -57,8 +64,7 @@ main: {
 	
 	wait 2	
 
-	//$player stufftext "tmstartloop sound/music/Kleveburg.mp3" //MiaCosa - coop compatibility
-	exec coop_mod/replace.scr::tmstartloop //MiaCosa
+	exec coop_mod/replace.scr::tmstartloop "sound/music/Kleveburg.mp3"
 	
 	thread global/music.scr::SetVolume 2
 	
@@ -79,9 +85,14 @@ main: {
 
 	//@chrissstrahl
 	if (level.warp_to_section == "TankPinDown") {
-		$player.origin = (2432 -5520 -64)
-		$player.angles = (0 90 0)
-		$player.viewangles = (0 90 0)
+		//[coop] teleport all connected players
+		local.wi = 1
+		while (local.wi <= $player.size) {
+			$player[local.wi].origin = (2432 -5520 -64)
+			$player[local.wi].angles = (0 90 0)
+			$player[local.wi].viewangles = (0 90 0)
+			local.wi++
+		}
 		$medic.origin = (2496 -5600 -64)
 		$medic.angles = (0 90 0)
 	}
@@ -95,13 +106,19 @@ main: {
 		spawn "models/human/2nd-ranger_private.tik" targetname "BarneyPinned1_warp" origin (1248 -4072 -432) angles (0 90 0)
 		spawn "models/human/2nd-ranger_private.tik" targetname "BarneyPinned2_warp" origin (1248 -4172 -432) angles (0 90 0)
 
-		$BarneyPinned1_warp.destination = $player
+		//[coop] follow closest player
+		local.bp1w = exec coop_mod/replace.scr::player_closestTo $BarneyPinned1_warp
+		if (local.bp1w == NULL){ local.bp1w = exec coop_mod/replace.scr::player_anyValid }
+		$BarneyPinned1_warp.destination = local.bp1w
 		$BarneyPinned1_warp.friendtype = 1
 		$BarneyPinned1_warp.distance = 225
 		$BarneyPinned1_warp thread global/friendly.scr::friendlythink
 		$BarneyPinned1_warp.targetname = "Barney"
 
-		$BarneyPinned2_warp.destination = $player
+		//[coop] follow closest player
+		local.bp2w = exec coop_mod/replace.scr::player_closestTo $BarneyPinned2_warp
+		if (local.bp2w == NULL){ local.bp2w = exec coop_mod/replace.scr::player_anyValid }
+		$BarneyPinned2_warp.destination = local.bp2w
 		$BarneyPinned2_warp.friendtype = 1
 		$BarneyPinned2_warp.distance = 250
 		$BarneyPinned2_warp thread global/friendly.scr::friendlythink
@@ -205,20 +222,26 @@ PlayerUseKeyThread: {
 //=========================================================================
 	level.player_use_held = 0
 	level.player_use_just_pressed = 0
-	
-	//@chrissstrahl
 
 	while (1) {
 		local.last_use_held = level.player_use_held
+		local.any_held = 0
+		local.i = 1
+		while (local.i <= $player.size) {
+			if ($player[local.i].useheld) {
+				local.any_held = 1
+			}
+			local.i++
+		}
 
-		if ($player.useheld && !local.last_use_held) {
+		if (local.any_held && !local.last_use_held) {
 			level.player_use_just_pressed = 1
 		}
 		else {
 			level.player_use_just_pressed = 0
 		}
 
-		level.player_use_held = $player.useheld
+		level.player_use_held = local.any_held
 		wait 0.1
 	}
 }end
@@ -333,7 +356,13 @@ startsniper2: {
 	$sniper2 show
 	$sniper2 ai_on
 	//$sniper2 waitexec global/enable_ai.scr
-	$sniper2 favoriteenemy $player //@chrissstrahl
+	//$sniper2 favoriteenemy $player[1] //@chrissstrahl
+	//[coop] chrissstrahl - target the closest active player instead of hard-locking player[1]
+	//(player[1] may be dead/spectating with 16 players); fall back to player[1] if none found
+	local.target = exec coop_mod/replace.scr::player_closestTo $sniper2
+	if (local.target != NULL){
+		$sniper2 favoriteenemy local.target
+	}
 }end
 
 // doWalkTo
@@ -440,3 +469,13 @@ EnableGuy: {
 	self show
 	self ai_on
 }end
+
+// stub handlers - called by coop framework on player events
+coop_playerJustSpawned:
+end
+
+coop_playerJustLeft:
+end
+
+coop_playerJustRespawned:
+end

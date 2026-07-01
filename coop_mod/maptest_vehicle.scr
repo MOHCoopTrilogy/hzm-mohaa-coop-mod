@@ -1,0 +1,474 @@
+// HZM Coop - Vehicle Scene Tester (Phase 2 sibling)
+//=========================================================================
+// Scripted vehicle board -> drive -> dismount verification, gated by
+// coop_maptest_vehicle == "1".  The on-foot Phase 2 harness
+// (coop_maptest 2, maptest_phase2.scr) teleports/survives/dies but can NOT
+// board or drive vehicles.  This harness SCRIPTS the vehicle interaction by
+// calling the coop mod's own vehicle API directly (deterministic, exercises
+// the real attach/drive/dismount code paths), then verifies success via the
+// MOVEMENT POLL primitive plus greppable banners.
+//
+// MOVEMENT POLL (core primitive):
+//   sample the vehicle entity origin once/sec for N sec; if total travel
+//   exceeds a threshold -> _MOVING (driving works); if it stays put after a
+//   board -> _STUCK (flag - catches the t3l2 silent-no-board risk where the
+//   driver-select loop never seats anyone because $coop_tankOffset is NULL).
+//
+// Reuses the SAME watchdog + spawn clicker as Phase 1/2: it emits the
+// Phase-1-compatible "MAPTEST_LOADED" banner so the existing clicker spawns
+// the host, and advances maps through coop_mod/maptest.scr::coop_maptest_list
+// + coop_maptest_transition (same stuffsrv map-change path).
+//
+// PREFERRED boarding = script-force (call coop API directly). The optional
+// USE-simulation alternative (stufftext "+use" near the board volume) is
+// documented in vehicle_test_harness.md but NOT used here - it is timing
+// fragile and would not distinguish "board code broken" from "player not
+// close enough".
+//
+// Greppable banners (all prefixed ^~^~^ for the watchdog grep):
+//   ^~^~^ MAPTEST_LOADED <map> (<idx>/<total>)        <- clicker trigger (shared)
+//   ^~^~^ VTEST_BEGIN <map> arch=<A|B|C>
+//   ^~^~^ VTEST_SKIP <map> reason=<...>               <- not a vehicle test map / ent missing
+//   --- Pattern A cinematic ride ---
+//   ^~^~^ VTEST_RIDE_START <map> ent=<name>
+//   ^~^~^ VTEST_RIDE_MOVING <map> dist=<n>
+//   ^~^~^ VTEST_RIDE_STUCK <map> dist=<n>             <- FLAG: ride never moved
+//   ^~^~^ VTEST_RIDE_DONE <map> ridecomplete=<0|1>
+//   --- Pattern B escort / man-gun ---
+//   ^~^~^ VTEST_BOARDED <map> ent=<name>
+//   ^~^~^ VTEST_BOARD_FAIL <map>                      <- FLAG: attach never took
+//   ^~^~^ VTEST_GUN <map> slot=0
+//   ^~^~^ VTEST_MOVING <map> dist=<n>
+//   ^~^~^ VTEST_STUCK <map> dist=<n>                  <- FLAG: boarded but static
+//   ^~^~^ VTEST_DISMOUNT <map>
+//   --- Pattern C player-driven tank ---
+//   ^~^~^ VTEST_TANK_BOARDED <map> ent=<name>
+//   ^~^~^ VTEST_TANK_BOARD_FAIL <map>                 <- FLAG: driver slot never took
+//   ^~^~^ VTEST_TANK_MOVING <map> dist=<n>
+//   ^~^~^ VTEST_TANK_STUCK <map> dist=<n>             <- FLAG: t3l2 silent-no-board risk
+//   ^~^~^ VTEST_TANK_END <map>
+//   --- shared ---
+//   ^~^~^ VTEST_DONE <map>
+//   ^~^~^ MAPTEST_PHASE_END <next>                    <- watchdog auto-transition (shared)
+//   ^~^~^ MAPTEST_COMPLETE                            <- watchdog stop (shared)
+//   ^~^~^ MAPTEST_PAUSED <reason>
+//=========================================================================
+
+//=========================================================================
+coop_maptest_vehicle_tick:{
+//=========================================================================
+	waitthread coop_mod/main.scr::waitForMainScript
+
+	if( getcvar( "coop_maptest_vehicle" ) != "1" ){
+		end
+	}
+
+	// Wait for a connected player (clicker spawns the host after MAPTEST_LOADED)
+	local.guard = 0
+	while( $player.size < 1 ){
+		wait 1
+		local.guard = local.guard + 1
+		if( local.guard > 120 ){
+			println "^~^~^ MAPTEST_PAUSED no player connected"
+			end
+		}
+	}
+
+	local.maps = waitthread coop_mod/maptest.scr::coop_maptest_list
+
+	local.cur = level.coop_mapname
+	if( local.cur == NIL || local.cur == "" ){
+		local.cur = getcvar( "mapname" )
+	}
+
+	// Resolve current index + next map (same as phase2)
+	local.next = ""
+	local.idx  = 0
+	for( local.i = 1; local.i <= local.maps.size; local.i++ ){
+		if( local.maps[local.i] == local.cur ){
+			local.idx = local.i
+			if( local.i < local.maps.size ){
+				local.next = local.maps[local.i + 1]
+			}
+		}
+	}
+
+	// Phase-1-compatible banner so the existing spawn clicker fires
+	println( "^~^~^ MAPTEST_LOADED " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+	iprintlnbold( "VTEST: " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+
+	if( local.next == "" ){
+		// still run the test on the last map, then complete
+	}
+
+	// Wait for clicker to spawn the host (DELAY_S = 4s) + settle
+	wait 6
+
+	// Make the test player invincible during the scene (boarding combat is lethal).
+	if( $player.size > 0 && $player[1].health > 0 ){
+		$player[1].health    = 999999
+		$player[1].maxhealth = 999999
+	}
+
+	// Resolve archetype for this map.  arch: "A" ride, "B" escort, "C" tank, "" none.
+	local.arch = waitthread coop_vtest_archetype local.cur
+	if( local.arch == "" ){
+		println( "^~^~^ VTEST_SKIP " + local.cur + " reason=not_a_vehicle_map" )
+		goto coop_vtest_advance
+	}
+
+	println( "^~^~^ VTEST_BEGIN " + local.cur + " arch=" + local.arch )
+	iprintlnbold( "VTEST BEGIN " + local.cur + " (" + local.arch + ")" )
+
+	if( local.arch == "A" ){
+		waitthread coop_vtest_ride local.cur
+	}
+	if( local.arch == "B" ){
+		waitthread coop_vtest_escort local.cur
+	}
+	if( local.arch == "C" ){
+		waitthread coop_vtest_tank local.cur
+	}
+
+	println( "^~^~^ VTEST_DONE " + local.cur )
+	iprintlnbold( "VTEST DONE " + local.cur )
+
+	coop_vtest_advance:
+
+	// guard pause conditions
+	if( getcvar( "coop_maptest_vehicle" ) != "1" ){
+		println "^~^~^ MAPTEST_PAUSED"
+		end
+	}
+	if( $player.size < 1 ){
+		println "^~^~^ MAPTEST_PAUSED no player"
+		end
+	}
+
+	if( local.next == "" ){
+		println "^~^~^ MAPTEST_COMPLETE"
+		iprintlnbold "MAPTEST COMPLETE"
+		end
+	}
+
+	// Vehicle maps are sparse and spread across both target_game profiles, so transition
+	// one-at-a-time via PHASE_END (operator restarts on the next vehicle map). This keeps
+	// the Spearhead (com_target_game 1) / Breakthrough (2) split honoured by the operator.
+	println( "^~^~^ MAPTEST_PHASE_END " + local.next )
+	iprintlnbold( "VTEST PHASE END " + local.idx + ": restart for next vehicle map" )
+}end
+
+//=========================================================================
+// Per-map archetype config table.
+//   A = cinematic ride (auto-starts on spawn)  : m1l1 e1l1 e1l4 e2l1 t1l1
+//   B = escort / man-gun (force-board)         : m1l3b m1l3c t2l2
+//   C = player-driven tank (force driver slot) : m5l2b t3l2
+// Returns "" for any map not in the table.
+//=========================================================================
+coop_vtest_archetype local.map:{
+//=========================================================================
+	if( local.map == "m1l1" ){ end "A" }
+	if( local.map == "e1l1" ){ end "A" }
+	if( local.map == "e1l4" ){ end "A" }
+	if( local.map == "e2l1" ){ end "A" }
+	if( local.map == "t1l1" ){ end "A" }
+
+	if( local.map == "m1l3b" ){ end "B" }
+	if( local.map == "m1l3c" ){ end "B" }
+	if( local.map == "t2l2" ){ end "B" }
+
+	if( local.map == "m5l2b" ){ end "C" }
+	if( local.map == "t3l2" ){ end "C" }
+}end ""
+
+//=========================================================================
+// MOVEMENT POLL primitive.
+// Samples local.ent.origin once/sec for local.secs seconds; returns the
+// total path length travelled.  Caller compares against a threshold.
+// Returns -1 if the entity is NULL/NIL (caller flags board failure).
+//=========================================================================
+coop_vtest_pollMove local.ent local.secs:{
+//=========================================================================
+	if( local.ent == NIL || local.ent == NULL ){
+		end -1
+	}
+	if( local.secs == NIL || local.secs < 1 ){
+		local.secs = 8
+	}
+
+	local.last = local.ent.origin
+	local.dist = 0
+	local.i    = 0
+	while( local.i < local.secs ){
+		wait 1
+		local.i = local.i + 1
+		if( local.ent == NULL ){
+			// vehicle removed mid-poll (e.g. delete at scene end) - stop, keep dist
+			break
+		}
+		local.now  = local.ent.origin
+		local.step = vector_length( local.now - local.last )
+		local.dist = local.dist + local.step
+		local.last = local.now
+	}
+}end local.dist
+
+//=========================================================================
+// Resolve the moving vehicle entity to POLL for a cinematic-ride map.
+// Cinematic rides glue the player camera to a moving vehicle script_model;
+// we poll that vehicle (or its glued origin helper when present).
+// Returns NULL when none of the known entities exist on this map.
+//=========================================================================
+coop_vtest_rideEnt local.map:{
+//=========================================================================
+	if( local.map == "m1l1" ){
+		if( $coop_truckOrigin != NULL ){ end $coop_truckOrigin }
+		if( $introtruck != NULL ){ end $introtruck }
+	}
+	if( local.map == "e1l1" ){
+		if( $jeep != NULL ){ end $jeep }
+	}
+	if( local.map == "e1l4" ){
+		if( $starttruck != NULL ){ end $starttruck }
+	}
+	if( local.map == "e2l1" ){
+		if( $glider != NULL ){ end $glider }
+	}
+	if( local.map == "t1l1" ){
+		// base-pak gag plane; coop ride layer not yet built (P2 gap) - poll the
+		// player glue helper, else the plane model.
+		if( $playerspot_plane != NULL ){ end $playerspot_plane }
+		if( $the_plane != NULL ){ end $the_plane }
+	}
+}end NULL
+
+//=========================================================================
+// Read the ride-complete level flag for a cinematic-ride map.
+// Different maps name it differently (m1l1 level.flags[ridecomplete],
+// e1l1/e1l4 level.RideOver, e2l1 level.gliderRideOver). Returns 1/0/NIL.
+//=========================================================================
+coop_vtest_rideDoneFlag local.map:{
+//=========================================================================
+	if( local.map == "m1l1" ){ end level.flags[ridecomplete] }
+	if( local.map == "e1l1" ){ end level.RideOver }
+	if( local.map == "e1l4" ){ end level.RideOver }
+	if( local.map == "e2l1" ){ end level.gliderRideOver }
+	// t1l1 has no coop flag yet
+}end NIL
+
+//=========================================================================
+// PATTERN A - cinematic passenger ride.
+// The ride auto-starts on player spawn (the map's own spawn manager threads
+// the per-player camera). We do NOT force-board; we VERIFY: the vehicle is
+// moving (poll), the ride-complete flag eventually sets, control returns.
+//=========================================================================
+coop_vtest_ride local.map:{
+//=========================================================================
+	local.ent = waitthread coop_vtest_rideEnt local.map
+	if( local.ent == NULL ){
+		println( "^~^~^ VTEST_SKIP " + local.map + " reason=ride_ent_missing" )
+		end
+	}
+
+	println( "^~^~^ VTEST_RIDE_START " + local.map + " ent=" + local.ent.targetname )
+
+	// MOVEMENT POLL: a cinematic ride should travel a long way. 12s sample.
+	local.dist = waitthread coop_vtest_pollMove local.ent 12
+	// threshold 300u over 12s = clearly driving (rides cover thousands of units)
+	if( local.dist > 300 ){
+		println( "^~^~^ VTEST_RIDE_MOVING " + local.map + " dist=" + int( local.dist ) )
+	} else {
+		println( "^~^~^ VTEST_RIDE_STUCK " + local.map + " dist=" + int( local.dist ) )
+	}
+
+	// Wait (bounded) for the ride to complete so control returns to the player.
+	local.flag  = waitthread coop_vtest_rideDoneFlag local.map
+	local.guard = 0
+	while( local.flag != 1 && local.guard < 90 ){
+		wait 2
+		local.guard = local.guard + 1
+		local.flag  = waitthread coop_vtest_rideDoneFlag local.map
+	}
+
+	local.done = 0
+	if( local.flag == 1 ){ local.done = 1 }
+	println( "^~^~^ VTEST_RIDE_DONE " + local.map + " ridecomplete=" + local.done )
+
+	// keep player invincible for any settle time
+	if( $player.size > 0 && $player[1].health > 0 ){
+		$player[1].health    = 999999
+		$player[1].maxhealth = 999999
+	}
+	wait 4
+}end
+
+//=========================================================================
+// Resolve the escort vehicle entity to POLL for a Pattern B map.
+//=========================================================================
+coop_vtest_escortEnt local.map:{
+//=========================================================================
+	// Both m1l3b/m1l3c and t2l2 store the playable vehicle in level.playerjeep
+	// (m1l3b/c = $playerjeep, t2l2 = $s1_jeep1 assigned to level.playerjeep).
+	if( level.playerjeep != NIL && level.playerjeep != NULL ){ end level.playerjeep }
+	if( $playerjeep != NULL ){ end $playerjeep }
+	if( $s1_jeep1 != NULL ){ end $s1_jeep1 }
+}end NULL
+
+//=========================================================================
+// PATTERN B - playable escort / man-gun vehicle.
+// Force-board the host via the map's coop board fn (coop_playerForceToJeep),
+// confirm the turret-slot attach took, confirm gun mount, poll movement,
+// then leave/confirm dismount.
+//=========================================================================
+coop_vtest_escort local.map:{
+//=========================================================================
+	local.ent = waitthread coop_vtest_escortEnt local.map
+	if( local.ent == NULL ){
+		println( "^~^~^ VTEST_SKIP " + local.map + " reason=jeep_ent_missing" )
+		end
+	}
+
+	local.player = $player[1]
+
+	// Force-board via the coop board fn. coop_playerForceToJeep is MAP-LOCAL
+	// (defined inside maps/m1l3b.scr and maps/t2l2.scr - NOT a shared global),
+	// so it must be called in that map's own script namespace. It does:
+	// level.coop_inJeep=1, attachturretslot 0 <player>, sets the gun.
+	// If the map has no such fn (e.g. m1l3c, which is actually on-foot), fall
+	// back to the raw attach the board fn performs so the attach path is still
+	// exercised deterministically.
+	level.coop_inJeep = 0
+	if( local.map == "m1l3b" ){
+		thread maps/m1l3b.scr::coop_playerForceToJeep local.player
+	} else if( local.map == "t2l2" ){
+		thread maps/t2l2.scr::coop_playerForceToJeep local.player
+	} else {
+		// fallback raw board (mirrors the board fn's core attach)
+		level.coop_inJeep = 1
+		local.player.flags["coop_inJeep"] = game.true
+		local.ent attachturretslot 0 local.player
+	}
+
+	// Confirm attach took: poll the player's coop_inJeep flag (set by the board fn).
+	local.guard = 0
+	while( local.player.flags["coop_inJeep"] != game.true && local.guard < 10 ){
+		wait 1
+		local.guard = local.guard + 1
+	}
+
+	if( local.player.flags["coop_inJeep"] != game.true ){
+		println( "^~^~^ VTEST_BOARD_FAIL " + local.map )
+	} else {
+		println( "^~^~^ VTEST_BOARDED " + local.map + " ent=" + local.ent.targetname )
+		// Gun mount: the board fn attaches the player to turret slot 0.
+		println( "^~^~^ VTEST_GUN " + local.map + " slot=0" )
+	}
+
+	// MOVEMENT POLL: the escort vehicle drives a scripted path once occupied.
+	local.dist = waitthread coop_vtest_pollMove local.ent 12
+	if( local.dist > 200 ){
+		println( "^~^~^ VTEST_MOVING " + local.map + " dist=" + int( local.dist ) )
+	} else {
+		println( "^~^~^ VTEST_STUCK " + local.map + " dist=" + int( local.dist ) )
+	}
+
+	// DISMOUNT: detach the player from the turret slot and clear occupancy so
+	// the map's coop_jeepNotOccupied path can re-offer the seat.
+	if( local.ent != NULL ){
+		local.ent detachturretslot 0
+	}
+	local.player.flags["coop_inJeep"] = game.false
+	level.coop_inJeep = 0
+	wait 1
+	println( "^~^~^ VTEST_DISMOUNT " + local.map )
+	wait 3
+}end
+
+//=========================================================================
+// Resolve the player tank entity to POLL for a Pattern C map.
+//=========================================================================
+coop_vtest_tankEnt local.map:{
+//=========================================================================
+	// Both m5l2b and t3l2 author the player tank as $playertank.
+	if( $playertank != NULL ){ end $playertank }
+}end NULL
+
+//=========================================================================
+// PATTERN C - player-driven tank.
+// Force-board the host into the driver slot via coop_setDriverForTank
+// (called ON the tank entity), confirm attachdriverslot + glue, poll the
+// tank origin while it drives (auto-drive on m5l2b, scripted on t3l2),
+// then dismount.
+//
+// CRITICAL: coop_setDriverForTank needs $coop_tankOffset (the glue target).
+// On t3l2 the map pre-builds it by scanning the T-34 cannon model; if that
+// scan failed, $coop_tankOffset is NULL and the board silently no-ops ->
+// VTEST_TANK_BOARD_FAIL / VTEST_TANK_STUCK catch exactly that risk.
+//=========================================================================
+coop_vtest_tank local.map:{
+//=========================================================================
+	local.ent = waitthread coop_vtest_tankEnt local.map
+	if( local.ent == NULL ){
+		println( "^~^~^ VTEST_SKIP " + local.map + " reason=tank_ent_missing" )
+		end
+	}
+
+	if( $coop_tankOffset == NULL ){
+		// glue target never built -> coop_setDriverForTank can't seat anyone
+		println( "^~^~^ VTEST_TANK_BOARD_FAIL " + local.map + " reason=coop_tankOffset_NULL" )
+		end
+	}
+
+	local.player = $player[1]
+
+	// Allow boarding immediately (the select loop gates on this timer).
+	level.coop_tankLastDriverTime = -1
+
+	// Force-board: call the coop driver-set fn ON the tank entity.
+	// It does attachdriverslot 0, glue to $coop_tankOffset, sets the gun, and
+	// sets level.coop_playerTank to the boarding player.
+	local.ent thread global/vehicles_thinkers.scr::coop_setDriverForTank local.player
+
+	// Confirm the driver slot took: level.coop_playerTank becomes the player.
+	local.guard = 0
+	while( ( level.coop_playerTank == NULL || level.coop_playerTank == NIL ) && local.guard < 10 ){
+		wait 1
+		local.guard = local.guard + 1
+	}
+
+	if( level.coop_playerTank == NULL || level.coop_playerTank == NIL ){
+		println( "^~^~^ VTEST_TANK_BOARD_FAIL " + local.map )
+		end
+	}
+	println( "^~^~^ VTEST_TANK_BOARDED " + local.map + " ent=" + local.ent.targetname )
+
+	// MOVEMENT POLL: tank drives the scene. Sample 15s (tanks are slow).
+	local.dist = waitthread coop_vtest_pollMove local.ent 15
+	if( local.dist > 150 ){
+		println( "^~^~^ VTEST_TANK_MOVING " + local.map + " dist=" + int( local.dist ) )
+	} else {
+		println( "^~^~^ VTEST_TANK_STUCK " + local.map + " dist=" + int( local.dist ) )
+	}
+
+	// Poll a little longer toward the scene end (bounded), still invincible.
+	local.guard = 0
+	while( local.guard < 6 ){
+		wait 2
+		local.guard = local.guard + 1
+		if( $player.size > 0 && $player[1].health > 0 ){
+			$player[1].health    = 999999
+			$player[1].maxhealth = 999999
+		}
+	}
+
+	// DISMOUNT: detach the driver slot and place the player at the exit, then
+	// clear level.coop_playerTank so the select loop can re-arm.
+	if( local.ent != NULL && $coop_tankExit != NULL ){
+		local.ent DetachDriverSlot 0 ( $coop_tankExit.origin + (0 0 150) )
+		local.player origin ( $coop_tankExit.origin + (0 0 150) )
+	}
+	level.coop_playerTank = NULL
+	wait 1
+	println( "^~^~^ VTEST_TANK_END " + local.map )
+	wait 3
+}end

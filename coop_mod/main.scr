@@ -104,6 +104,9 @@ main:{
 	//chrissstrahl - handles spawning, respawning spectator, generic stuff each frame
 	thread coop_mod/player.scr::manage
 
+	//[208] HZM coop - shared reinforcement manager (hurt -> cover + canteen for tagged troopers)
+	thread coop_mod/aihandler.scr::coop_reinf_brain
+
 	//[200] Smithy - initialises the weapon loadout array for this level - moved from itemhandler.scr
 	exec coop_mod/loadout.scr
 	
@@ -116,7 +119,33 @@ main:{
 	
 	//[200] Smithy - initialise all events we need
 	thread coop_mod/events.scr::initialiseEvents
-	
+
+	thread coop_mod/medkit.scr::coop_scan_health_entities
+	thread coop_mod/officer.scr::coop_officer_init
+	thread coop_mod/weather.scr::coop_weather_init	//[v1] dynamic rain/snow storms (theme-gated; no-op unless coop_dynWeather 1 + themed/forced)
+	// 50/50 objective binoc/smoke drop DISABLED for now (its pickup re-granted on every
+	// touch -> infinite grenades). Re-enable by uncommenting once the pickup is one-shot.
+	// thread coop_mod/objective_drop.scr::coop_objective_drop_init
+
+	// Map-rotation auto-tester. Off unless coop_maptest==1 or 2, no-op in normal play.
+	// 1 = Phase 1 load smoke test (maptest.scr), 2 = Phase 2 active patrol (maptest_phase2.scr).
+	if( getcvar( "coop_maptest" ) == "1" ){
+		thread coop_mod/maptest.scr::coop_maptest_tick
+	}
+	if( getcvar( "coop_maptest" ) == "2" && getcvar( "coop_maptest_m5l3" ) != "1" ){
+		thread coop_mod/maptest_phase2.scr::coop_maptest_phase2_tick
+	}
+	// m5l3 has no $enemyspawner tour anchors; coop_maptest_m5l3==1 runs the
+	// per-scene walk variant INSTEAD of the generic Phase 2 tick.
+	if( getcvar( "coop_maptest" ) == "2" && getcvar( "coop_maptest_m5l3" ) == "1" ){
+		thread coop_mod/maptest_m5l3.scr::coop_maptest_m5l3_walk
+	}
+	// Vehicle on-rails scene-test (Breakthrough + Spearhead vehicle maps).
+	// Independent of coop_maptest; gated by coop_maptest_vehicle==1.
+	if( getcvar( "coop_maptest_vehicle" ) == "1" ){
+		thread coop_mod/maptest_vehicle.scr::coop_maptest_vehicle_tick
+	}
+
 	//[200] Smithy - used by waitForMainScript to check if main has loaded
 	level.coop_mainScriptLoaded = game.true
 
@@ -217,6 +246,14 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 playerSpawnEvent:{
 //=========================================================================
 if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread main/playerSpawnEvent->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
+	// Kill the weapon-picker at the absolute earliest script opportunity.
+	// The engine pushes "pushmenu SelectPrimaryWeapon" every 1s while dm_primary
+	// is empty -- which is always true after a level transition. Setting it here,
+	// before manageSetup, prevents the first push from ever happening. The burst
+	// of popmenu 0 clears any that landed in the brief window before this fires.
+	self primarydmweapon "rifle"
+	self stufftext ( "popmenu 0;popmenu 0;popmenu 0;popmenu 0" )
+
 	//KEEP TRACK /////////////////////////////////////////////
 	//of when any player was active for the first time
 	if(level.coop_gameStartedAt == NIL){
@@ -225,7 +262,6 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	
 	//[203] chrissstrahl - prevents error message on a listen server
 	//when scripts are executed before player is fully spawned
-//println("COOPDEBUG: main.scr::playerSpawnEvent")
 
 //////////////////////////////[203] DETECT THE BLODY MOD RELIABLE
 	if(self.flags["coop_isActive"] == NIL){
@@ -293,16 +329,22 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	}
 	//END [201]
 
+	// Set primarydmweapon BEFORE join_team so that when the engine processes the
+	// team change, dm_primary is already filled and it never enters the
+	// "no dm_primary -> force spectator + UserSelectWeapon" 1-second re-push loop.
+	// Do NOT call pickweapon here: pickweapon -> PickWeaponEvent ->
+	// UserSelectWeapon() re-opens the weapon picker, undoing the dismissal.
+	// The playerspawn event -> manageAliveSpawning handles inventory.
+	local.player primarydmweapon "rifle"
+
 	//[200] Smithy - put here to stop spam that prevents players typing/using menu
-	local.switchDelay = getcvar "g_teamswitchdelay"  //[200] Smithy - stop switch delay intefering 
-	setcvar "g_teamswitchdelay" "0"	
+	local.switchDelay = getcvar "g_teamswitchdelay"  //[200] Smithy - stop switch delay intefering
+	setcvar "g_teamswitchdelay" "0"
 	local.player join_team "allies"
 	setcvar "g_teamswitchdelay" local.switchDelay
 
 	local.player stufftext "popmenu 0"		//close the team menu
-	local.player primarydmweapon "rifle" 	//give him a random primary gun
-	local.player pickweapon 				//make him pick it	
-	local.player stufftext "popmenu 0"		//close the weapons menu
+	local.player stufftext ( "wait 20;popmenu 0;wait 40;popmenu 0;wait 60;popmenu 0" )	//staggered dismiss to beat engine re-push
 	local.player stopfire "dual" 			//stop weapon fire bug when clicking several times
 	wait game.ms
 	
@@ -855,6 +897,17 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 		if($world == NULL){error ( "coop_mod/main.scr::startThread - NO $world FOUND - FATAL ERROR" ) 1000}
 		local.trigger doActivate local.entity
 	}
+}end
+
+//=========================================================================
+startMapCallback local.cb local.entity:{ //[207] opt-in guarded dispatch for optional per-map callbacks (stops missing-label spam)
+//=========================================================================
+	//[207] skip silently unless the current map opted in via level.coop_hasCallback[local.cb] = 1 in its main
+	if( level.coop_hasCallback[ local.cb ] != 1 ){
+		end
+	}
+
+	thread coop_mod/main.scr::startThread ( "maps/"+level.coop_mapname+".scr::"+local.cb ) local.entity
 }end
 
 //=========================================================================
@@ -1462,16 +1515,51 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 restartMap:{
 //=========================================================================
 if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread main/restartMap->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
-	local.mapname = getcvar "mapname"
-
-	//[200] chrissstrahl - i think this way it is better scalable
-	if (waitthread containsText local.mapname "$"){
-		local.mapname = waitthread cleanText local.mapname "$"
-	}else{
-		local.mapname = (local.mapname+"$")
+	// Coop maptest hardening: a mid-level mission-fail must NOT hard-restart the server
+	// during automated testing. A server restart reloads as <map>$, churns sv.serverId,
+	// and leaves the test client stuck on the MP team-select (never reaches CS_ACTIVE) -
+	// an infinite loop (root-caused on e1l4's papers gate). Suppress the reload while the
+	// Phase 1/2 tester is active so the tour can continue past any mission-fail.
+	if( getcvar( "coop_maptest" ) == "1" || getcvar( "coop_maptest" ) == "2" ){
+		println( "^~^~^ MAPTEST_RESTART_SUPPRESSED " + getcvar( "mapname" ) )
+		end
 	}
-	
-	thread loadMap local.mapname game.true
+
+	//[208] Clean coop mission RESET (timed-fail and missionfailed generally).
+	//
+	//The old path appended a "$" savepoint suffix and reloaded via loadMap ->
+	//global/missioncomplete.scr -> bsptransition. Two problems in REAL coop play:
+	// 1) the "<map>$" savepoint reload churns sv.serverId so coop clients drop
+	//    gamestate and land back on the MP team-select menu, and because every
+	//    fresh load re-arms the same fail condition it can loop forever
+	//    (root-caused on e1l4's papers gate; see e1l4_respawn_loop_rootcause.md).
+	// 2) bsptransition funnels through G_ExitLevel -> gamemap, which runs the
+	//    persistant-file archive on a live coop server and can crash silently
+	//    (see maptest.scr coop_maptest_transition notes).
+	//
+	//A genuinely clean reset reloads the CLEAN current map name (no "$") with the
+	//raw console "map <name>" command via the server builtin stuffsrv. SV_Map_f ->
+	//SV_SpawnServer(..., qfalse) touches no archive (no crash), "map" (unlike spmap)
+	//does NOT force single-player gametype, and the next load re-runs the level main
+	//-> coop_mod/main.scr::main, so every player re-joins COOP via the normal spawn
+	//flow and the timer / objectives / level state are all re-initialised from scratch.
+	//This is the same mechanism the map tester uses for a clean coop reload.
+	local.mapname = waitthread getCleanMapname ( getcvar "mapname" )
+	if( local.mapname == "" ){ local.mapname = getcvar "mapname" }
+
+	//mirror the safe-reload housekeeping done by missioncomplete / coop_maptest_transition
+	setcvar "g_scriptcheck" "0"
+	exec coop_mod/replace.scr::stopwatch 0
+	setcvar "coop_prevMapList" ( getcvar "sv_maplist" )
+	setcvar "sv_maplist" ""
+	level.coop_preventGameTypeChanges = game.true
+	if( level.coop_changeGameTypeThread ){
+		level.coop_changeGameTypeThread end
+	}
+	game.loadout = false
+
+	println( "^~^~^ COOP_MISSION_RESET " + local.mapname )
+	stuffsrv ( "map " + local.mapname )
 }end
 
 //[200] Smithy - load a map

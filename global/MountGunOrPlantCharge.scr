@@ -91,6 +91,17 @@ MountGunOrPlantCharge local.turret local.throbber local.gun_use_range local.thro
 
 
 	local.prev_time = level.time
+
+	//[coop] opus - SINGLEPLAYER path kept BYTE-IDENTICAL. In SP, level.gametype==0 and the
+	//bare $player array head is the only/host player, so the original state machine below is
+	//exactly as shipped. The coop branch (level.gametype != 0) follows in the else block and
+	//drives the SAME state machine, but selects the acting player each frame from every active
+	//player (living, non-spectator, coop_isActive, non-noclip) - mirror of cannonThink.scr /
+	//replace.scr::player_closestTo. Only the "who can interact" polling differs; the state
+	//transitions, the map get_on/get_off/place_explosives callbacks, and the level.mgopc_*
+	//completion flags are untouched.
+	if (level.gametype == 0)
+	{
 	while (self && local.turret && local.usable_cannon)
 	{
 		// maint player-press-use state:
@@ -319,6 +330,299 @@ MountGunOrPlantCharge local.turret local.throbber local.gun_use_range local.thro
 		}
 
 		waitframe
+	}
+	}
+	//[coop] opus - MULTIPLAYER path. Same state machine as SP above, but each frame the acting
+	//player is chosen from the active-player set (any of up to 16). self.player_status, the map
+	//get_on/get_off/place_explosives callbacks (self waitthread script::thread) and the
+	//level.mgopc_* flags are identical to the SP branch. Help-text uses replace.scr-style
+	//iteration just like DistanceUse.scr / cannonThink.scr.
+	else
+	{
+		//track which player is currently engaged in the gun/throbber interaction so a mounted
+		//player keeps ownership across frames (others cannot hijack while one is on the gun).
+		local.coopActor = NULL
+
+		while (self && local.turret && local.usable_cannon)
+		{
+			// pick the acting player for THIS frame:
+			//  - if a player is already mounted/engaged (status onGun or didSetThrobber) keep them
+			//    while they remain valid, so only that player can dismount.
+			//  - otherwise scan every active player and pick the first one within gun OR throbber
+			//    range (prefer one pressing use), so ANY active player can start the interaction.
+			local.actor = NULL
+
+			//keep the currently engaged player if still valid
+			if (self.player_status == "onGun" || self.player_status == "didSetThrobber")
+			{
+				if (local.coopActor != NULL && local.coopActor.health > 0 && local.coopActor.dmteam != "spectator" && local.coopActor.flags["coop_isActive"] == 1 && local.coopActor.flags["coopDevNoclip"] == NIL)
+				{
+					local.actor = local.coopActor
+				}
+			}
+
+			//no engaged player - find a candidate among all active players
+			if (local.actor == NULL)
+			{
+				local.bestUsing = NULL
+				local.bestNear = NULL
+				for (local.pi = 1; local.pi <= $player.size; local.pi++)
+				{
+					local.cand = $player[local.pi]
+					if (local.cand.health <= 0)
+						continue
+					if (local.cand.dmteam == "spectator")
+						continue
+					if (local.cand.flags["coop_isActive"] != 1)
+						continue
+					if (local.cand.flags["coopDevNoclip"] != NIL)
+						continue
+
+					//gun or throbber proximity (cheap pre-check, full facing checks happen below)
+					local.nearGun = (vector_within local.cand.origin self.origin local.gun_use_range)
+					local.nearThrob = 0
+					if (self.noexplode == 0)
+						local.nearThrob = (vector_within local.cand.origin local.throbber.origin local.throbber_use_range)
+
+					if (local.nearGun || local.nearThrob)
+					{
+						if (local.bestNear == NULL)
+							local.bestNear = local.cand
+						if (local.cand.useheld && local.bestUsing == NULL)
+							local.bestUsing = local.cand
+					}
+				}
+
+				if (local.bestUsing != NULL)
+					local.actor = local.bestUsing
+				else
+					local.actor = local.bestNear
+			}
+
+			//no eligible player this frame - reset to "away" and idle
+			if (local.actor == NULL)
+			{
+				if (self.player_status != "didSetThrobber")
+					self.player_status = "away"
+				if (local.help_text_active != "none")
+				{
+					thread global/throbtext.scr::throbtext_off
+					local.help_text_active = "none"
+				}
+				local.coopActor = NULL
+				waitframe
+				continue
+			}
+
+			local.coopActor = local.actor
+
+			// maint player-press-use state (for the selected actor):
+
+			if (local.actor.useheld != local.player_holding_use)
+			{
+				if (local.actor.useheld)
+				{
+					local.player_just_pressed_use = 1
+					local.player_just_released_use = 0
+				}
+				else
+				{
+					local.player_just_pressed_use = 0
+					local.player_just_released_use = 1
+				}
+
+				local.player_holding_use = local.actor.useheld
+			}
+			else
+			{
+				local.player_just_pressed_use = 0
+				local.player_just_released_use = 0
+			}
+
+
+			// maint player-with-gun-and-throbber state:
+
+			local.player_forward = (angles_toforward local.actor.angles)
+			local.gun_forward = (angles_toforward local.turret.angles)
+			local.gun_forward[2] = 0
+			local.gun_forward = (vector_normalize local.gun_forward)
+			local.gun_leftward = (angles_toleft local.turret.angles)
+			local.gun_leftward[2] = 0
+			local.gun_leftward = (vector_normalize local.gun_leftward)
+
+			local.gun_to_throbber =
+				((local.gun_forward * local.throbber_forward_component) +
+					(local.gun_leftward * local.throbber_leftward_component))
+			local.gun_to_throbber[2] = 0
+
+			local.throbber_origin = local.turret.origin + local.gun_to_throbber
+			local.throbber_origin[2] = local.actor.origin[2]
+
+			local.gun_to_player = (local.actor.origin - local.turret.origin)
+			local.throbber_to_player = (local.actor.origin - local.throbber_origin)
+
+			local.gun_says_use_me = (local.usable_cannon canuse local.actor)
+			local.player_facing_gun = ((vector_dot local.player_forward local.gun_forward) > 0)
+			local.can_use_gun = ((local.gun_says_use_me == 1) &&
+									local.player_facing_gun &&
+									(vector_within local.actor.origin self.origin local.gun_use_range))
+
+
+			local.player_on_side_of_throbber = ((vector_dot local.gun_to_throbber local.gun_to_player) > 0)
+			local.player_facing_throbber = ((vector_dot local.throbber_to_player local.player_forward) < 0)
+			local.can_use_throbber = ((self.noexplode == 0) &&
+										local.player_on_side_of_throbber &&
+										local.player_facing_throbber &&
+										(vector_within local.actor.origin local.throbber_origin local.throbber_use_range))
+
+			local.help_text_requested = local.help_text_active		// by default, same as before
+
+			switch (self.player_status)
+			{
+				case "away":
+					if (local.can_use_gun)
+					{
+						self.player_status = "nearGun"
+						local.help_text_requested = "gun"
+					}
+					else if (local.can_use_throbber)
+					{
+						self.player_status = "nearThrobber"
+						local.help_text_requested = "throbber"
+					}
+					else
+					{
+						local.help_text_requested = "none"
+					}
+					break
+
+				case "nearGun":
+					if ((local.takes_precedence == "throbber") && local.can_use_throbber)
+					{
+						self.player_status = "nearThrobber"
+						local.help_text_requested = "throbber"
+					}
+					else if (!(local.can_use_gun))
+					{
+						if (local.can_use_throbber)
+						{
+							self.player_status = "nearThrobber"
+							local.help_text_requested = "throbber"
+						}
+						else
+						{
+							self.player_status = "away"
+							local.help_text_requested = "none"
+						}
+					}
+					else if (local.player_just_pressed_use)
+					{
+						// get on the damn gun
+
+						self waitthread local.script_file_name::local.get_on_gun_thread_name
+
+						level.mgopc_did_mount_gun = 1
+
+						self.player_status = "onGun"
+						local.help_text_requested = "none"
+					}
+					else
+					{
+						local.help_text_requested = "gun"
+					}
+					break
+
+				case "onGun":
+					if (local.player_just_pressed_use)
+					{
+						// get off the damn gun
+
+						self waitthread local.script_file_name::local.get_off_gun_thread_name
+
+						self.player_status = "away"
+					}
+					local.help_text_requested = "none"
+					break
+
+				case "nearThrobber":
+					if ((local.takes_precedence == "gun") && local.can_use_gun)
+					{
+						self.player_status = "nearGun"
+						local.help_text_requested = "gun"
+					}
+					else if (!(local.can_use_throbber))
+					{
+						if (local.can_use_gun)
+						{
+							self.player_status = "nearGun"
+							local.help_text_requested = "gun"
+						}
+						else
+						{
+							self.player_status = "away"
+							local.help_text_requested = "none"
+						}
+					}
+					else if (local.player_just_pressed_use)
+					{
+						// set the damn explosives
+
+						self waitthread local.script_file_name::local.place_explosives_thread_name
+
+						self.player_status = "didSetThrobber"
+						level.mgopc_did_set_throbber = 1
+						local.help_text_requested = "none"
+					}
+					else
+					{
+						local.help_text_requested = "throbber"
+					}
+					break
+
+				case "didSetThrobber":
+					// no further interactions are allowed
+
+					local.help_text_requested = "none"
+					break
+			}
+
+
+			if (local.gun_name)
+			{
+				// update help text situation
+
+				if (level.mgopc_help_text_only_first_time)
+				{
+					if ((((local.help_text_requested == "throbber") && level.mgopc_did_set_throbber)) ||
+							(((local.help_text_requested == "gun") && level.mgopc_did_mount_gun)))
+						local.help_text_requested = "none"
+				}
+
+				if (local.help_text_requested != local.help_text_active)
+				{
+					switch (local.help_text_requested)
+					{
+						case "none":
+							thread global/throbtext.scr::throbtext_off
+							break
+						case "throbber":
+							local.usekey = getboundkey1 "+use"
+							local.msg = ( loc_convert_string ( "Press " + local.usekey + " to plant the explosive." ) )
+							thread global/throbtext.scr::throbtext local.msg 1000
+							break
+						case "gun":
+							local.usekey = getboundkey1 "+use"
+							local.msg = ( loc_convert_string ( "Press " + local.usekey + " to use the " + local.gun_name + "." ) )
+							thread global/throbtext.scr::throbtext local.msg 1000
+							break
+					}
+
+					local.help_text_active = local.help_text_requested
+				}
+			}
+
+			waitframe
+		}
 	}
 
 end

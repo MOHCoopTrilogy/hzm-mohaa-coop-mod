@@ -1,0 +1,577 @@
+// Allied Paradrop System
+// Triggered by officer death reward smoke grenade.
+// C-47 flies at high altitude; 5 paratroopers drop with parachutes and fight alongside players.
+// Allied actors get rendereffects "+coopboss" for the allied overhead icon in cgame.
+// Troopers visually ride the parachute during descent (script_model synced below chute).
+// Periodic voice lines add battlefield chatter.
+
+// Called by the engine hook in weaputils.cpp when a player's smoke grenade lands.
+// local.origin = world position where the smoke landed.
+smokeDropZone local.origin:{
+	if( level.coop_paradrop_active == 1 ){ end }
+	if( level.coop_paradrop_armed != 1 ){ end }
+	level.coop_paradrop_active = 1
+	level.coop_paradrop_armed = 0
+	// Clear smoke HUD + play radio call-out for all players now that it's been used
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL ){
+			ihuddraw_alpha local.p 52 0
+			ihuddraw_alpha local.p 53 0
+			local.p playsound coop_radio_paradrop
+		}
+		local.pi++
+	}
+	iprintlnbold "Signal smoke! Allied paradrop inbound!"
+	thread coop_paradrop_main local.origin
+}end
+
+
+coop_paradrop_main local.smoke_pos:{
+	iprintlnbold "C-47 inbound! Allied paratroopers dropping in!"
+
+	// Ground reference for the drop. Prefer the smoke's traced ground, but if that's far
+	// BELOW the throwing player the smoke clipped into a pit / through the map -- fall back
+	// to the player's own ground so troopers can't spawn under the world.
+	local.smoke_gnd = exec coop_mod/officer.scr::coop_find_ground local.smoke_pos
+	local.base_z = local.smoke_pos[2]
+	if( local.smoke_gnd != NIL ){ local.base_z = local.smoke_gnd[2] }
+	local.refplr = $player[1]
+	if( local.refplr != NULL && local.base_z < (local.refplr.origin[2] - 200) ){
+		local.base_z = local.refplr.origin[2]
+	}
+	// IMPORTANT: do NOT raise $world farplane -- it doubles as the FOG end distance, so
+	// inflating it erases all map fog. Instead we fly a HIGHER but still close pass that
+	// stays inside the map's native far-clip (m4l3 = 1500) for normal throws, so fog is
+	// preserved; far throws simply let the plane fade into the haze.
+	local.drop_z = local.base_z + 1050
+	local.chute_start_z = local.base_z + 950
+
+	// Persistent YELLOW drop-zone marker, parked at the (clamped) ground so it isn't
+	// buried under the map if the smoke clipped low.
+	local.dzmark = spawn "models/emitters/planesmokeplumeyellow.tik"
+	local.dzpos = local.smoke_pos
+	local.dzpos[2] = local.base_z + 8
+	local.dzmark.origin = local.dzpos
+	local.dzmark anim start
+	local.dzmark notsolid
+	thread coop_paradrop_cleanup_marker local.dzmark
+
+	// Random flight axis
+	local.fwd_ang = (0 (randomint 360) 0)
+	local.fwd = angles_toforward local.fwd_ang
+
+	local.neg_runin = 0 - 1100
+	local.c47_start = local.smoke_pos + (vector_scale local.fwd local.neg_runin)
+	local.c47_start[2] = local.drop_z
+	local.c47_end = local.smoke_pos + (vector_scale local.fwd 1100)
+	local.c47_end[2] = local.drop_z
+
+	// Fly C-47
+	thread coop_paradrop_c47 local.c47_start local.c47_end local.fwd
+
+	// Wait until plane is roughly overhead before dropping
+	wait 6
+
+	// Drop 5 paratroopers staggered along the flight path
+	level.coop_paradrop_squad[1] = NIL
+	level.coop_paradrop_squad[2] = NIL
+	level.coop_paradrop_squad[3] = NIL
+	level.coop_paradrop_squad[4] = NIL
+	level.coop_paradrop_squad[5] = NIL
+
+	local.i = 1
+	while( local.i <= 5 ){
+		// Offset each drop along the flight path + small lateral spread
+		local.path_off = vector_scale local.fwd ((local.i * 220) - 550)
+		local.lat_off = (randomint 180) - 90
+		local.drop_pos = local.smoke_pos + local.path_off
+		local.drop_pos[0] = local.drop_pos[0] + local.lat_off
+		local.drop_pos[1] = local.drop_pos[1] + ((randomint 180) - 90)
+		local.drop_pos[2] = local.chute_start_z
+		thread coop_paradrop_actor local.drop_pos local.i local.base_z
+		wait 1.5
+		local.i++
+	}
+
+	// Monitor squad survival
+	wait 12
+	thread coop_paradrop_squad_monitor
+}end
+
+
+coop_paradrop_c47 local.startpos local.endpos local.fwd:{
+	local.c47 = spawn script_model
+	local.c47 model "models/vehicles/c47fly.tik"
+	local.c47.origin = local.startpos
+	local.c47 notsolid
+	// Face the direction of travel
+	local.c47.angles = vector_toangles (local.endpos - local.startpos)
+	// Looping engine drone for the whole pass.
+	local.c47 loopsound coop_c47_approach
+	// Fly by STEPPING the origin each tick. moveto/move silently no-op on script_models
+	// here (confirmed: the C-47 never translated, so players never saw it), so we drive
+	// position directly -- the proven-reliable mover (same as the marker tracker).
+	local.full = local.endpos - local.startpos
+	local.dist = vector_length local.full
+	local.step = 230 * 0.05
+	local.delta = vector_scale local.full (local.step / local.dist)
+	local.trav = 0
+	while( local.c47 != NULL && local.trav < local.dist ){
+		local.c47.origin = local.c47.origin + local.delta
+		local.trav = local.trav + local.step
+		wait 0.05
+	}
+	if( local.c47 != NULL ){
+		local.c47 stoploopsound
+		local.c47 delete
+	}
+}end
+
+
+// Delete the drop-zone marker after the drop sequence finishes.
+coop_paradrop_cleanup_marker local.marker:{
+	wait 30
+	if( local.marker != NULL ){ local.marker delete }
+}end
+
+
+// Descend parachute with actor visually riding it, spawn live actor on landing.
+// wtype: 1=BAR, 2=Thompson, 3=Garand/Rifle, 4=Sniper, 5=Medic
+coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
+	// Land at the smoke's ground level. The drop_pos is ~1100 units up in the air, so
+	// tracing down from there (coop_find_ground only goes 512u) hits rooftops and the
+	// troopers got stuck in the sky. Use the known ground Z; the live actor droptofloors.
+	local.ground_pos = local.drop_pos
+	local.ground_pos[2] = local.base_z
+
+	// Spawn the parachute canopy.
+	local.chute = spawn script_model
+	local.chute model "models/static/parachute_actors.tik"
+	local.chute.origin = local.drop_pos
+	local.chute notsolid
+
+	// Spawn the REAL trooper actor now and ride IT down on the chute (not a throwaway
+	// dummy). It's kept INERT -- never forceactivated -- during descent so it can't run,
+	// fall, or fight in mid-air; that's the "freeze". It's activated into live AI only on
+	// touchdown. allied_airborne_soldier is in base Pak0; allied_usa_c47-paratrooper1 is
+	// in maintt/pak1 (both load under fs_game=maintt on AA maps).
+	local.actor = NIL
+	if( local.wtype == 5 ){
+		local.actor = spawn "models/human/dday_ranger_medic.tik"
+	} else if( local.wtype == 2 || local.wtype == 4 ){
+		local.actor = spawn "models/human/allied_airborne_soldier.tik"
+	} else {
+		local.actor = spawn "models/human/allied_usa_c47-paratrooper1.tik"
+	}
+	if( local.actor == NIL ){ if( local.chute != NULL ){ local.chute delete } end }
+	if( local.actor == NULL ){ if( local.chute != NULL ){ local.chute delete } end }
+	local.actor notsolid
+	local.actor.enableEnemy = 0
+	local.actor.health = 350	// base paratrooper HP (was 150; +200 per user)
+	local.actor dontdropweapons
+	local.actor.origin = local.drop_pos
+
+	// Descend by STEPPING the chute origin down each tick (moveto no-ops on script_models),
+	// dragging the inert actor 70u below the canopy center. The chute stops 70u ABOVE the
+	// ground so the rider lands AT the ground (it used to sink to ground-70 = underground).
+	local.chute_end = local.ground_pos
+	local.chute_end[2] = local.base_z + 70
+	local.cfull = local.chute_end - local.drop_pos
+	local.cdist = vector_length local.cfull
+	if( local.cdist < 1 ){ local.cdist = 1 }
+	local.cstep = 175 * 0.05
+	local.cdelta = vector_scale local.cfull (local.cstep / local.cdist)
+	local.ctrav = 0
+	while( local.chute != NULL && local.ctrav < local.cdist ){
+		local.chute.origin = local.chute.origin + local.cdelta
+		if( local.actor != NULL ){
+			local.apos = local.chute.origin
+			local.apos[2] = local.apos[2] - 70
+			local.actor.origin = local.apos
+		}
+		local.ctrav = local.ctrav + local.cstep
+		wait 0.05
+	}
+
+	// Touchdown - drop the canopy, settle the trooper, then ACTIVATE it into live AI.
+	if( local.chute != NULL ){ local.chute delete }
+	if( local.actor == NULL ){ end }
+	// Spawn well ABOVE the clamped ground so droptofloor has room to find the floor; if it
+	// STILL ends up far below (one trooper fell through thin/edge geometry), snap back to
+	// the clamped ground so troopers can't drop under the map.
+	local.land = local.ground_pos
+	local.land[2] = local.base_z + 48
+	local.actor.origin = local.land
+	local.actor droptofloor
+	if( local.actor.origin[2] < (local.base_z - 100) ){
+		local.land[2] = local.base_z + 4
+		local.actor.origin = local.land
+	}
+	local.actor solid
+	local.actor.accuracy = 65
+	local.actor.leash = 4096
+	local.actor.movedoneradius = 96
+	local.actor.enableEnemy = 1
+	// Medic (wtype 5): behaves like the other airborne -- enableEnemy ON so it engages and
+	// advances with the squad (never stands idle). Kept sturdier (health 300) so that, even
+	// while in the fight, it survives to revive/heal. Its medic loop interrupts this active
+	// AI only to tend a patient, then resumes moving/fighting.
+	if( local.wtype == 5 ){
+		local.actor.enableEnemy = 1
+		local.actor.health = 800	// medic HP (was 300; +500 per user - it must survive to revive/heal)
+	}
+
+	// Weapon assignment - American kit (no more German Mausers on allied troopers).
+	if( local.wtype == 1 ){
+		local.actor gun "bar"
+	} else if( local.wtype == 2 ){
+		// Thompson restored: human_thompson.tik is now force-loaded unconditionally in
+		// new_generic_human.tik (which allied_airborne_soldier inherits), so the SMG anims exist.
+		local.actor gun "thompson"
+	} else if( local.wtype == 3 ){
+		local.actor gun "m1 garand"
+	} else if( local.wtype == 4 ){
+		local.actor gun "springfield '03 sniper"
+		local.actor.accuracy = 90
+	} else if( local.wtype == 5 ){
+		local.actor gun "m1 garand"
+	}
+
+	// "+coopboss" (no EF_AXIS) -> cgame CG_ActorOverheadIcon draws the allied STAR
+	// sprite above this trooper's head.
+	local.actor rendereffects "+coopboss"
+	local.actor forceactivate
+
+	// Store in squad array
+	level.coop_paradrop_squad[local.wtype] = local.actor
+
+	// Landing voice + HUD notify: only ONE trooper announces, to avoid 5x overlap.
+	if( local.wtype == 1 ){
+		local.actor playsound coop_para_land
+		iprintlnbold "Allied paratroopers have landed!"
+	}
+
+	// Special medic behavior
+	if( local.wtype == 5 ){
+		thread coop_paradrop_medic local.actor
+	}
+
+	// Follow nearest player. The medic (wtype 5) runs its OWN combined loop in
+	// coop_paradrop_medic: it tends patients when there are any, and otherwise advances toward
+	// the squad exactly like coop_paradrop_follow -- so it skips the generic follow here to
+	// avoid two threads issuing competing runto commands to the same actor.
+	if( local.wtype != 5 ){ thread coop_paradrop_follow local.actor }
+	if( local.wtype == 1 || local.wtype == 3 ){
+		thread coop_paradrop_voice_loop local.actor
+	}
+	thread coop_paradrop_landing_check local.actor	// relocate near a player if it landed off-map / inaccessible
+}end
+
+
+// Sync visual model to 70 units below chute during descent
+coop_chute_sync_vis local.chute local.vis:{
+	while( local.chute != NULL && local.vis != NULL ){
+		local.p = local.chute.origin
+		local.p[2] = local.p[2] - 70
+		local.vis.origin = local.p
+		wait 0.05
+	}
+}end
+
+
+// Periodically move toward the nearest living player.
+coop_paradrop_follow local.actor:{
+	// Brief settle so the AI initialises on the nav after touchdown, then advance toward
+	// the squad/fight IMMEDIATELY instead of standing idle for the first few seconds.
+	wait 1
+	while( local.actor != NULL && isAlive local.actor ){
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+
+		local.np = NIL
+		local.nd = 9999
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.pp = $player[local.pi]
+			if( local.pp != NULL && local.pp.health > 0 ){
+				local.d = vector_length(local.actor.origin - local.pp.origin)
+				if( local.d < local.nd ){
+					local.nd = local.d
+					local.np = local.pp
+				}
+			}
+			local.pi++
+		}
+		if( local.np != NIL && local.nd > 400 && local.nd < 2000 ){
+			local.actor.movedoneradius = 256
+			local.actor runto local.np.origin
+		}
+		wait 3
+	}
+}end
+
+
+// Safety net: a paratrooper that lands off-map or in an inaccessible spot is useless - the follow
+// loop above only advances it when it's within 2000u of a player, so a far/boxed-in landing just
+// stands there forever. Shortly after landing, if the trooper is beyond follow range OR stuck
+// (far + not moving), teleport it CLOSE to (not on top of) the nearest living player on valid floor.
+coop_paradrop_landing_check local.actor:{
+	if( local.actor == NULL ){ end }
+	wait 4						// let it settle + the follow loop take a try
+	local.last_nd = 999999
+	local.stuck = 0
+	while( local.actor != NULL && isAlive local.actor ){
+		// nearest LIVING player + distance
+		local.np = NIL
+		local.nd = 999999
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.pp = $player[local.pi]
+			if( local.pp != NULL && local.pp.health > 0 ){
+				local.d = vector_length( local.actor.origin - local.pp.origin )
+				if( local.d < local.nd ){ local.nd = local.d; local.np = local.pp }
+			}
+			local.pi++
+		}
+		if( local.np == NIL ){ wait 4; continue }
+
+		// "stuck/off-map" = far from the players, NOT currently fighting (a trooper holding to shoot
+		// is fine where it is), and NOT getting meaningfully closer over time (the follow loop only
+		// advances within 2000u, and an inaccessible spot never closes the gap).
+		if( local.nd > 700 && local.actor.thinkstate != "attack" && local.nd >= (local.last_nd - 64) ){
+			local.stuck = local.stuck + 1
+		} else {
+			local.stuck = 0
+		}
+		local.last_nd = local.nd
+
+		if( local.stuck >= 2 ){		// ~8s of no progress -> regroup on the player
+			local.ang = ( 0 0 0 )
+			local.ang[1] = randomint 360
+			local.dir = angles_toforward local.ang
+			local.r = 180 + (randomint 140)		// close, not on top
+			local.dest = local.np.origin + (vector_scale local.dir local.r)
+			local.dgnd = exec coop_mod/officer.scr::coop_find_ground local.dest
+			if( local.dgnd == NIL ){ local.dgnd = local.np.origin }
+			local.actor.origin = local.dgnd
+			local.actor droptofloor
+			local.actor forceactivate
+			// (regroup is SILENT now - the repeated "stray paratrooper regrouped" print spammed the HUD)
+			local.stuck = 0
+			local.last_nd = 999999
+		}
+		wait 4
+	}
+}end
+
+
+// CONTEXTUAL combat voice: troopers only speak when they actually have an enemy
+// (local.actor.enemy is the engine's current-target getter). A callout on first
+// contact, then sparse barks while the fight lasts, "medic" flavor when hurt, and
+// SILENCE when there's nothing to fight. A global cooldown stops overlap/spam.
+coop_paradrop_voice_loop local.actor:{
+	wait 6
+	// Only speak while actually engaged, capped to one line per 12s GLOBALLY (single hard
+	// cooldown so a flickering .enemy can't re-trigger callouts repeatedly). "medic" flavor
+	// when badly hurt, otherwise a combat bark; silent when there's no enemy.
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 2
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		if( local.actor.enemy != NULL ){
+			if( level.coop_para_voicetime == NIL ){ level.coop_para_voicetime = 0 }
+			if( (level.time - level.coop_para_voicetime) >= 12 ){
+				level.coop_para_voicetime = level.time
+				if( local.actor.health < 45 ){
+					local.actor playsound coop_para_help
+				} else {
+					local.actor playsound coop_para_combat
+				}
+			}
+		}
+	}
+}end
+
+
+// Medic: actively seeks the most-wounded teammate. PRIORITY 1 revive a DOWNED (DBNO) player
+// (kneel, freeze them + go invincible for the ~3.5s tend ~= half a self-revive, then lift
+// them up); PRIORITY 2 heal a standing wounded player. PRIORITY 3 (no patient): advance with
+// the squad just like coop_paradrop_follow, so the medic is NEVER standing idle -- it moves
+// and fights alongside the other airborne until someone needs aid. Kneel = D-Day medic clip
+// (anim_scripted). Restore steps run unconditionally so a patient dying mid-tend still
+// recovers the medic.
+coop_paradrop_medic local.actor:{
+	// Kick the medic into motion the instant it lands. A freshly force-activated actor that's given
+	// NO command sits in its idle thinkstate, so it used to look dead for the first couple seconds
+	// (the loop below opened with wait 2). Short settle so the nav registers the just-landed actor,
+	// then issue an immediate runto the nearest player (enableEnemy=1 lets it fight en route); the
+	// loop then takes over patient-tending / advancing.
+	wait 0.5
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.kp = NIL
+	local.kd = 9999
+	local.ki = 1
+	while( local.ki <= $player.size ){
+		local.kpp = $player[local.ki]
+		if( local.kpp != NULL && local.kpp.health > 0 ){
+			local.kdd = vector_length(local.actor.origin - local.kpp.origin)
+			if( local.kdd < local.kd ){ local.kd = local.kdd; local.kp = local.kpp }
+		}
+		local.ki++
+	}
+	if( local.kp != NIL ){
+		local.actor.movedoneradius = 256
+		local.actor runto local.kp.origin
+	}
+
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 1
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+
+		// PRIORITY 1: a DOWNED (DBNO) teammate -> run over and REVIVE them.
+		local.down = NIL
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.pp = $player[local.pi]
+			if( local.pp != NULL && local.pp.flags["coop_dbno_active"] == 1 ){ local.down = local.pp }
+			local.pi++
+		}
+
+		if( local.down != NIL ){
+			local.dd = vector_length(local.actor.origin - local.down.origin)
+			if( local.dd > 130 ){
+				local.actor.movedoneradius = 90
+				local.actor runto local.down.origin
+			} else {
+				// Kneel and tend the downed player. Freeze the patient so they can't crawl
+				// off mid-revive; medic is invincible while it works. anim_scripted locks the
+				// kneel CLIP (medic01.skc, ~6.6s) -- forceactivate does NOT pop the scripted
+				// state, so the proven exit (see global/cabinet.scr + maps/m1l2a.scr) is used:
+				// hard-cut to a stand pose with plain anim, then toggle enableEnemy to force a
+				// thinkstate re-evaluation out of the scripted-anim state. Restore runs
+				// unconditionally so a patient who dies mid-tend still recovers the medic.
+				local.down freezecontrols 1
+				local.actor nodamage
+				local.actor lookat local.down
+				local.actor turnto local.down
+				local.actor anim_scripted coop_medic_kneel
+				local.actor playsound coop_para_help
+				wait 2.5
+				thread coop_mod/dbno.scr::dbno_ai_revive local.down
+				local.actor playsound med_kit
+				iprintlnbold "An Allied Medic revived a teammate!"
+				local.actor lookat NULL
+				// End the scripted kneel promptly: hard-cut to a stand idle for ONE frame to
+				// break the scripted-anim CLIP, then bounce enableEnemy (0 -> 1) to force the
+				// engine to leave the scripted-anim state and resume LIVE AI. We end on
+				// enableEnemy = 1 so the medic immediately goes active again (the next loop
+				// iteration moves it toward the squad); it does NOT park in idle.
+				local.actor anim "idle"
+				local.actor.enableEnemy = 0
+				local.actor.enableEnemy = 1
+				local.actor forceactivate
+				local.actor takedamage
+				local.down freezecontrols 0
+				// Brief pause so the just-revived player isn't instantly re-tended as a heal
+				// target while still low on HP; the medic resumes moving on the next iteration.
+				wait 2
+			}
+		} else {
+
+		// PRIORITY 2: find the most-wounded living player (below 70 HP) and heal them.
+		// Threshold kept low so the medic only kneels for genuinely wounded players
+		// instead of constantly re-kneeling for minor combat scratches.
+		local.target = NIL
+		local.worst = 70
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.pp = $player[local.pi]
+			if( local.pp != NULL && local.pp.health > 0 && local.pp.health < local.worst ){
+				local.worst = local.pp.health
+				local.target = local.pp
+			}
+			local.pi++
+		}
+
+		if( local.target != NIL ){
+			local.d = vector_length(local.actor.origin - local.target.origin)
+			if( local.d > 160 ){
+				local.actor.movedoneradius = 110
+				local.actor runto local.target.origin
+			} else {
+				// Kneel beside the wounded man and patch him up (medic invincible while
+				// kneeling). anim_scripted locks the kneel CLIP; ending it the proven way
+				// (hard-cut stand idle + enableEnemy toggle) makes him stand right after aid.
+				local.actor nodamage
+				local.actor lookat local.target
+				local.actor turnto local.target
+				local.actor anim_scripted coop_medic_kneel
+				local.actor playsound coop_para_help
+				wait 1.6
+				local.nh = local.target.health + 35
+				if( local.nh > 100 ){ local.nh = 100 }
+				local.target.health = local.nh
+				local.actor playsound med_kit
+				iprintlnbold ("Allied Medic patched you up! HP: " + local.nh)
+				local.actor lookat NULL
+				// End the scripted kneel promptly (see revive block above for why): break the
+				// CLIP with a one-frame idle, bounce enableEnemy 0 -> 1, end ACTIVE so the medic
+				// resumes moving/fighting on the next iteration instead of parking in idle.
+				local.actor anim "idle"
+				local.actor.enableEnemy = 0
+				local.actor.enableEnemy = 1
+				local.actor forceactivate
+				local.actor takedamage
+				// Brief pause so the heal animation clearly ends instead of immediately
+				// re-triggering; the medic resumes moving on the next iteration.
+				wait 2
+			}
+		} else {
+			// PRIORITY 3: NO patient (nobody downed, nobody wounded). Advance with the
+			// squad exactly like coop_paradrop_follow so the medic is never standing idle:
+			// run to the nearest living player when 400-2000u away. Its enableEnemy = 1
+			// also lets it engage en route, so it behaves like the other airborne.
+			local.np = NIL
+			local.nd = 9999
+			local.pi = 1
+			while( local.pi <= $player.size ){
+				local.pp = $player[local.pi]
+				if( local.pp != NULL && local.pp.health > 0 ){
+					local.d = vector_length(local.actor.origin - local.pp.origin)
+					if( local.d < local.nd ){
+						local.nd = local.d
+						local.np = local.pp
+					}
+				}
+				local.pi++
+			}
+			if( local.np != NIL && local.nd > 400 && local.nd < 2000 ){
+				local.actor.movedoneradius = 256
+				local.actor runto local.np.origin
+			}
+		}
+		}
+	}
+}end
+
+
+// Watch the squad - report when all are down.
+coop_paradrop_squad_monitor:{
+	wait 2
+	while( 1 ){
+		local.alive = 0
+		local.i = 1
+		while( local.i <= 5 ){
+			local.a = level.coop_paradrop_squad[local.i]
+			if( local.a != NULL && isAlive local.a ){
+				local.alive++
+			}
+			local.i++
+		}
+		if( local.alive == 0 ){
+			iprintlnbold "Allied paratroopers eliminated."
+			end
+		}
+		wait 5
+	}
+}end

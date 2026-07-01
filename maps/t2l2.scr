@@ -1,0 +1,1403 @@
+
+	level.script = "maps/t2l2.scr"
+	level.music = "t2l2"
+		
+	
+	exec global/camera.scr 
+	exec global/savenames.scr 
+	exec global/auto.scr
+	exec global/spotlight.scr
+
+	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (first frame, before prespawn)
+	//[207] opt-in to per-map optional callbacks (guarded dispatch)
+	level.coop_hasCallback["coop_playerJustSpawned"] = 1
+	level.coop_hasCallback["coop_playerJustDied"] = 1
+	level.coop_hasCallback["coop_playerJustLeft"] = 1
+	level.coop_hasCallback["coop_playerJustRespawned"] = 1
+	//HZM coop - jeep/halftrack-ride level: DISABLE DBNO. A downed player can't crawl/be revived while glued
+	//to the moving halftrack, and we want death -> immediate respawn straight back into the seat/turret
+	//(handled by coop_playerSpawned). Same override m1l3a/m1l3b use.
+	level.coop_dbno_disabled = 1
+
+	level waittill prespawn
+	fadeout .1 0 0 0 1
+
+	
+
+	level.dontdropweapons = 1
+	level.tempnum = 0
+	level.slowspeed = 500 //was 150 300
+	level.fastspeed = 250 //was 300 700
+	level.lookahead = 256
+	level.acceleration = 100
+	level.reversespeed = -200		
+
+	level.totalbaddies = 0
+	level.halftrack_alive = 1
+	level.flyplane = 1
+
+	//level waittill spawn - HZM coop
+	waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gate
+
+	level.truck = $s1_truck1
+	level.playerjeep = $s1_jeep1
+	$s1_jeep1 health 10000
+
+//snow
+	level.rain_speed = "150"
+	level.rain_speed_vary = "1"
+	level.rain_length = "2"
+	level.rain_width = "1"
+	level.rain_density = ".4"
+	level.rain_slant = "10" //was 250
+	level.rain_min_dist = "512"
+	level.rain_numshaders = 12
+	level.rain_shader = "textures/snow"
+
+	//$objective1 turnon
+	//$objective1 complete
+	waitthread global/objectives.scr::add_objectives 1 2 "Escort the Supply Truck to the Allied Line" 
+ 	waitthread global/objectives.scr::current_objectives 1
+	
+
+	$world farplane 2750
+	$world farplane_color (.324 .324 .351)
+	$world farplane_bias -150
+	//$player stufftext "tmstartloop sound/music/halftrack.mp3" - HZM coop
+	exec coop_mod/replace.scr::tmstartloop "sound/music/halftrack.mp3" // HZM coop - coop-safe music for all players
+	$s1_jeep1 setcollisionentity $halftrack_mask
+	//$s1_truck1 setcollisionentity $opelcollision
+	//$nebel1 setcollisionentity $
+	//$s1_jeep1 notsolid
+	//$s1_jeep1 setcollisionentity $halftrack_mask
+	//$panzer3 setcollisionentity $panzermap
+	$sdkfz setcollisionentity $halftrack_mask
+	$sdkfz2 setcollisionentity $halftrack_mask
+	$s1_truck1 thread truckhealthcheck
+	thread check_truck_death
+	thread check_jeep_death		//HZM coop - halftrack (player ride) destroyed/lost = Mission Failed -> restart, like the truck
+	
+	
+	level.enemytankspeed = 100
+	level.playertanktarget = 0
+	level.lookahead = 256
+
+	
+	
+
+	
+
+	
+	$nebel1 immune bullet
+	$nebel1 immune fast_bullet
+	$nebel1 immune bash
+	$nebel1 thread global/stationaryweapons.scr::MountedStationaryWeapon statweapons/nebelwerfer_w_d.tik
+	$nebel1_turret0 thread global/turret.scr::playerturret_proj_think_aim $nebel1 $nebelwerfer1
+	$nebel1_turret0 pitchcaps ( -30 60 0)
+	$nebel1_turret0 maxyawoffset 50
+
+
+
+
+	fadein 5 0 0 0 1
+	drawhud 2
+	//HZM coop - the halftrack ride is dangerous; make every active player tanky, not just $player[1].
+	if( level.gametype == 0 ){
+		$player fullheal
+		$player.health = 1000
+	}else{
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.pl = $player[local.i]
+			if( local.pl != NULL && local.pl.dmteam != "spectator" ){
+				local.pl fullheal
+				local.pl.health = 1000
+			}
+		}
+	}
+	//$player.maxhealth = 1000
+	//$player.health = $player.maxhealth
+	$s1_jeep1 takedamage		//HZM coop - was 'nodamage'; halftrack now fails+restarts the mission if destroyed/lost (check_jeep_death), like the supply truck
+	setcvar g_mission 2
+	level.playerjeep thread	global/vehicles_thinkers.scr::PLAYER_JEEP_CONTROLLER
+
+	//HZM coop - Pattern B seating layer (ported from m1l3b.scr). PLAYER_JEEP_CONTROLLER
+	//skips attaching $player in coop (gametype!=0), so without this layer the halftrack
+	//auto-drives empty. coop_setup loops on player spawn to seat players; coop_setupAttach
+	//pre-spawns the 16 passenger-dummy script_models the extra players are glued to.
+	if( level.gametype != 0 ){
+		thread coop_setup			//owns setup order: seat table -> dummies -> cannon -> seating loop
+		thread coop_giveAmmo
+		thread coop_seatCycleDebug	//HZM coop DEBUG (F5) test tool: cycle host through the seats to verify them
+	}
+
+	level.playerjeep thread PLAYER_JEEP_Drive
+
+///////////////////CALLING EXPLOSIONS (TRIGGERABLE)//////////////////////////////////////
+	
+	
+	$daveexplode thread triggerexplode
+
+	$daveexplode2 thread triggerexplode
+  	$daveexplode3 thread triggerexplode
+	$daveexplode4 thread triggerexplode
+	$daveexplode5 thread triggerexplode
+	//$daveexplode6 thread triggerexplode
+	$daveexplode7 thread triggerexplode
+	$daveexplode8 thread triggerexplode
+	//$daveexplode9 thread triggerexplode
+	//$daveexplode10 thread triggerexplode
+	//$daveexplode11 thread triggerexplode
+	$daveexplode12 thread triggerexplode
+	$daveexplode15 thread triggerexplode
+	$daveexplode16 thread triggerexplode
+	$daveexplode17 thread triggerexplode
+	$daveexplode18 thread triggerexplode
+	$daveexplode19 thread triggerexplode
+	$daveexplode20 thread triggerexplode
+	$daveexplode50 thread triggerexplode
+	$daveexplode51 thread triggerexplode
+	$daveexplode52 thread triggerexplode
+	$daveexplode53 thread triggerexplode
+	$daveexplode54 thread triggerexplode
+	
+	
+
+	$mogun2 maxyawoffset 120.0
+	$mogun2 pitchcaps "-20 20 0"
+	$mogun2 AIbulletspread 300 150
+
+	$thedukesgun maxyawoffset 120.0
+	$thedukesgun pitchcaps "-20 20 0"
+	$thedukesgun AIbulletspread 450 250
+	
+	$cliffbmwgag hide
+
+	$cameratrigger thread triggercamera
+	$cameratriggerb thread triggercamerab
+
+	thread gags/t2l2_camera.scr::t2l2_initcamera
+	thread global/barrel.scr::explosive_barrel
+
+	thread truck_speed_controls
+	
+	
+	//dprintln "*****Running truck thread"
+	$s1_truck1 thread global/vehicles_thinkers.scr::enemy_truck_think 2000 3 NIL NIL NIL "models/human/2nd-ranger_captain_snow.tik" 
+
+	$s1_truck1 vehicleanim idlenolights
+	$s1_truck1 vehicleanim cargo
+	//$s1_truck1 vehicleanim color_green
+	$s1_truck1 vehicleanim color_snow
+//enemy_truck_think local.hp local.passengers local.path local.trigger local.type local.guy_type local.special:
+	$s1_truck1 thread truckdrive
+
+
+//	mike's truck damage effects
+	exec gags/t2l2_supply_truck_damage.scr $s1_truck1
+
+//*** telling the AI to not drop health
+	level.nodrophealth = 1
+	
+	exec coop_mod/replace.scr::playsound dfr_t2l2_AS3003 // HZM coop - broadcast VO to all players
+//"Keep your eyes peeled Barnes!  We're not just gonna waltz out of here with their supplies.  Keep that truck covered!"[ENGLISH]
+	wait 10
+	$s1_truck1 vehicleanim idlelights
+	thread global/spotlight.scr::deadcorona $s1_truck1 "light left"
+	thread global/spotlight.scr::deadcorona $s1_truck1 "light right"
+	$s1_truck1.driver nodamage
+	exec coop_mod/replace.scr::playsound den_call_gs5912 // HZM coop - broadcast VO to all players
+//"That's our truck, attack!" [GERMAN]
+	wait 8
+	exec coop_mod/replace.scr::playsound den_call_gs5913 // HZM coop - broadcast VO to all players
+//"they've got our supplies!" [GERMAN]
+	wait 4
+	exec coop_mod/replace.scr::playsound den_call_gs5914 // HZM coop - broadcast VO to all players
+//"Stop them!" [GERMAN]
+	
+end
+
+/////////////////////////////////////MISC. THREADS////////////////////////////////////
+
+
+
+sirens:
+	//for (local.i = 1; local.i <= 7; local.i++)
+	$edsalarm thread looping_siren
+
+end
+
+
+looping_siren:
+	$edsalarm playsound m6l3c_alarm
+	wait 1.5
+	goto looping_siren
+
+end
+
+
+
+alarm:
+	
+
+	exec coop_mod/replace.scr::playsound alarm_siren // HZM coop - broadcast to all players
+
+end
+
+panzer1call:
+
+	exec coop_mod/replace.scr::playsound dfr_call_ap4361 // HZM coop - broadcast VO to all players
+//"Panzer on the left!" [ENGLISH]
+
+end
+
+watchtrucktrigger:
+	wait 6
+	exec coop_mod/replace.scr::playsound dfr_t2l2_ad4402 // HZM coop - broadcast VO to all players
+//"Cover the supply truck Barnes!" [American]
+
+
+end
+
+wobble1:
+	exec coop_mod/replace.scr::playsound halftrack_bounce03 // HZM coop - broadcast to all players
+end
+
+bmwbehind:
+	exec coop_mod/replace.scr::playsound dfr_call_ap4315 // HZM coop - broadcast VO to all players
+end
+	
+
+cliffbmw:
+	//exec gags/t2l2_motorcycle.scr::gag2 $cycle $driver "optional modelname"
+	wait 4.5
+	$cliffbmwgag show
+	exec gags/t2l2_motorcycle.scr::gag2 $cliffbmwgag $driver "models/human/german_winter_type2.tik"
+	$cliffbmwgag waittill animdone
+	$cliffbmwgag delete
+end
+
+imstuck:
+
+	exec coop_mod/replace.scr::playsound halftrack_stuck // HZM coop - broadcast to all players
+end
+
+bikeboom:
+	//dprintln "did i explode?"
+	wait 5.6
+	thread global/exploder.scr::explode 444
+	radiusdamage $damageorigin.origin 1500 400
+
+end
+
+tower1boom:
+	
+	$mogunner delete
+	$mogun2 delete
+
+end
+
+tower2boom:
+	
+	$thedukesgun delete
+	$theduke delete
+
+	
+end
+nebeller1_start:
+	waitthread nebellerSpawner 1
+	//dprintln "did it get this far?"
+	$nebeller1 thread nebellerThink
+end
+
+planesound:
+
+	exec coop_mod/replace.scr::playsound plane // HZM coop - broadcast to all players
+end
+
+bombdrop:
+
+
+	thread global/exploder.scr::explode 98
+end
+	
+mg42spawn:
+	$mg42 thread global/mg42_active.scr::mg42
+	
+	$mg42 maxyawoffset 120.0
+	$mg42 pitchcaps "-20 20 0"
+	$mg42 AIbulletspread 100 150
+end
+
+
+nebellerSpawner local.nebelIndex:
+
+	local.spawnName = "nebeller" + local.nebelIndex
+	local.nebellerSpawnerName = "nebeller" + local.nebelIndex + "_spawner"
+
+	local.origin = $(local.nebellerSpawnerName).origin
+	spawn models/human/german_winter_Artillery-Crew "targetname" (local.spawnName) "type_attack" "cover"
+
+	// Set the AI properties
+
+	$(local.spawnName).origin = local.origin	//place the guy in the correct spot
+	$(local.spawnName).mindist = 128
+	$(local.spawnName).maxdist = 1200
+	$(local.spawnName).leash = 512
+	$(local.spawnName).fixedleash = 0
+	$(local.spawnName).sight = 3072
+	$(local.spawnName).noticescale = 100
+	$(local.spawnName).hearing = 3072
+	$(local.spawnName).health = 75
+	$(local.spawnName).enemysharerange = 2048
+	$(local.spawnName).interval = 128
+	$(local.spawnName).accuracy = 40
+	$(local.spawnName) gun "MP40"
+	$(local.spawnName) dontdropweapons
+	$(local.spawnName).myNebelwerfer = "nebelwerfer" + local.nebelIndex //NOTE - THIS IS THE NAME OF THE PROJECTILE GENERATOR
+	$(local.spawnName) tether $(local.spawnName).myNebelwerfer 
+	$(local.spawnName).myRallypoint = "nebel" + local.nebelIndex + "_rally" // THIS IS THE NAME OF THE INFO_PATHNODE 
+end
+
+nebellerThink:
+	self holster
+	self.enableEnemy = 1 //0		// turn off AI
+	
+	self runto self.myRallypoint		// go to it's target
+	self waittill movedone			// wait until it's there
+	//dprintln "is he done moving?"
+	//self turnto self.myNebelwerfer
+	self thread nebelwerferFiring		// poll for proximity to player
+	self waittill death			// wait for death
+	self.myNebelwerfer turnoff
+end
+
+
+nebelwerferFiring:
+	//dprintln "nebelwerfer is firing"
+	// Transition animation to mounting the Nebelwerfer.
+
+	//self anim 21G798_Tranrun
+	//self waittill animdone
+	self.myNebelwerfer TurnOn		// start firing the projectile generator
+	
+	while (isAlive self)
+	{
+		// Animate on the Nebelwerfer -- need to keep this animation short.
+		self anim 21G800_idle
+		self waittill animdone
+		//waitframe
+	}
+end
+
+behind_us:
+	wait 2
+	exec coop_mod/replace.scr::playsound dfr_call_ap4317 // HZM coop - broadcast VO to all players
+//"Behind us!" [American]
+
+
+////////////////////////////////////NPC COUNT MANAGER////////////////////////////////////////
+end
+
+axis1delete:
+	//dprintln "axis1deleted"
+	$axis1 delete
+end
+
+//seeya3:
+//$tank.gun delete	
+//$tank delete
+
+axis2delete:
+	//dprintln "axis2deleted"
+	$axis2 delete
+
+end
+
+axis3delete:
+	//dprintln "axis3deleted"
+	$axis3 delete
+	$panzer1 delete
+	$panzer1.gun delete
+	$panzer2 delete
+	$panzer2.gun delete
+end
+
+axis4delete:
+	//dprintln "axis4deleted"
+	$axis4 delete
+	$panzer3 delete
+	$panzer3.gun delete
+end
+
+
+axis5delete:
+	//dprintln "axis5deleted"
+	$axis5 delete
+	$nebel1 delete
+end
+
+axis6delete:
+	//dprintln "axis6deleted"
+	$axis6 delete
+	$sdkfz hide
+end
+
+panzerwerferdelete:
+	dprintln "pnzrw deleted"
+	$panzerwerfer delete
+end
+
+
+axis7delete:
+	//dprintln "axis7deleted"
+	$axis7 delete
+end
+
+
+
+/////////////////////////////////ENEMY HALFTRACKS//////////////////////////////////////////
+//halftrack_drive local.halftrack local.pathname local.unloadpassengers local.speed local.acc local.nodedist local.lookahead:
+//halftrack_loadpassengers local.halftrack local.numpassengers local.panzerflag local.type1 local.type2:
+
+sdkfz:
+	exec coop_mod/replace.scr::playsound dfr_call_ap4314 // HZM coop - broadcast VO to all players
+	//"On the right, in the trees!  Take 'em out!" [ENGLISH]
+	thread global/halftrack.scr::halftrackinit $sdkfz 400 models/vehicles/halftrack_winter_d.tik
+	
+	thread global/halftrack.scr::halftrack_loadpassengers $sdkfz 1 0 "human/german_winter_type1" "human/german_winter_type1"
+
+	self thread sdkfzdead
+	self.death_thread = parm.previousthread
+
+	self thread global/halftrack.scr::halftrack_drive $sdkfz $sdkfzpath 1 185 300 40 128
+
+	self waittill drive
+	
+end
+
+sdkfzdead:
+	$sdkfz waittill death
+	waitthread global/halftrack.scr::halftrack_killed $sdkfz
+	radiusdamage ($sdkfz.origin+(0 0 256)) 348 400
+	$(sdkfz.gunner) remove
+end
+
+sdkfz2:
+	
+	 
+	
+	thread global/halftrack.scr::halftrackinit $sdkfz2 400 models/vehicles/halftrack_winter_d.tik
+	thread global/halftrack.scr::halftrack_loadpassengers $sdkfz2 1 0 "human/german_winter_type1" "human/german_winter_type1"
+
+	self thread sdkfzdead2
+	self.death_thread = parm.previousthread
+
+	self thread global/halftrack.scr::halftrack_drive $sdkfz2 $sdkfzpath2 1 100 100 128 256
+
+	self waittill drive
+	
+	exec coop_mod/replace.scr::playsound dfr_call_ap4364 // HZM coop - broadcast VO to all players
+	//"Half Track on the Left!" [ENGLISH]
+	
+end
+
+sdkfzdead2:
+	$sdkfz2 waittill death
+	waitthread global/halftrack.scr::halftrack_killed $sdkfz2
+	radiusdamage ($sdkfz2.origin+(0 0 256)) 348 400
+	$(sdkfz2.gunner) remove
+
+
+end
+
+
+	
+
+/////////////////////TANKS////////////////////////////////////////////////////////////////
+
+  	//$tank.type = 0
+
+        //$tank rendereffects "-shadow"
+
+        //$tank.start_health = 100
+
+        //$tank.health = $tank.start_health
+
+        //$tank removeondeath 0
+
+        //$tank immune bullet
+
+        //$tank immune fast_bullet
+
+        //$tank immune grenade
+
+        //$tank immune bash
+
+        //$tank.accuracy = 10
+
+
+debughealth:
+	local.hack = 0
+	local.health = self.health
+	//println ( "debughealth: " + local.health)
+	while (isalive self)
+	{
+		if (local.health != self.health)
+		{
+			//dprintlnbold "tank got hit"
+			//println ( "panzer health: " + self.health)
+			local.health = self.health
+			if (local.hack == 0)
+			{
+				local.hack = 1
+				self.health = self.start_health
+			}
+		}
+		waitframe
+	}
+	//dprintlnbold ("panzer1 just died")
+	//println ("get out is: " + $self.get_out )	
+end
+
+//panzer1/////
+
+panzer1:
+	//dprintln "STARTING panzer 1"
+	$panzer1.start_health = 800
+	$panzer1.health = $panzer1.start_health
+	//$panzer1.get_out = 0
+	$panzer1.accuracy = 50
+	$panzer1 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	$panzer1.get_out = 0
+	$panzer1 thread debughealth
+	//println ( "panzer1 health: " + $panzer1.health)
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer1
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer1 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer1 drive $panzer1path 20 50 256
+	$panzer1 waittill drive
+	$panzer1 stop
+end
+
+//panzer2/////
+
+panzer2:
+	//dprintln "STARTING panzer TANK 2"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4360 // HZM coop - broadcast VO to all players
+//"Panzer on the right!"
+	$panzer2.start_health = 400
+	$panzer2.accuracy = 75
+	$panzer2.health = $panzer2.start_health
+	$panzer2 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	$panzer2.get_out = 0
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer2
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer2 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer2 drive $panzer2path 20 50 256
+	$panzer2 waittill drive
+	$panzer2 stop
+
+end
+
+//panzer3/////
+panzer3:
+	//dprintln "STARTING panzer TANK3"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4316 // HZM coop - broadcast VO to all players
+//"On your six!"
+	$panzer3.start_health = 500
+	$panzer3 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer3
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer3 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer3 drive $panzer3path 150 100 256
+	$panzer3 waittill drive
+	$panzer3 stop
+end
+
+//panzer4/////
+panzer4:
+	//dprintln "STARTING panzer TANK4"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4362 // HZM coop - broadcast VO to all players
+//"Panzer dead ahead"
+	$panzer4 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer4
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer4 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer4 drive $panzer4path 150 100 256
+	$panzer4 waittill drive
+	$panzer4 stop
+end
+
+//panzer5/////
+panzer5:
+	//dprintln "STARTING panzer TANK5"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4362 // HZM coop - broadcast VO to all players
+//"Panzer dead ahead"
+	wait 3
+	$panzer5 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer5
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer5 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer5 drive $panzer5path 50 50 256
+	$panzer5 waittill drive
+	$panzer5 stop
+end
+
+//panzer6 (getting tired yet?)/////
+panzer6:
+	//dprintln "STARTING panzer TANK6"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4304 // HZM coop - broadcast VO to all players
+//"Enemy Spotted!"
+	$panzer6 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer6
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer6 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer6 drive $panzer6path 50 50 256
+	$panzer6 waittill drive
+	$panzer6 stop
+end
+
+panzerwerfer:
+
+	//dprintln "STARTING PANZERWERFER"
+	
+	$panzerwerfer health 600
+	$panzerwerfer thread global/vehicles_thinkers.scr::enemy_tank_think2 0 panzerwerfer
+	//level.playertanktarget = $s1_truck1
+	$panzerwerfer drive $panzerwerferpath 200 50 256
+	$panzerwerfer waittill drive
+	$panzerwerfer stop
+end
+
+panzerwerfercall:
+	exec coop_mod/replace.scr::playsound dfr_call_ap4310 // HZM coop - broadcast VO to all players
+//"They're on the right!"
+
+end
+
+//panzer7/////
+panzer7:
+	//dprintln "STARTING panzer TANK7"
+	exec coop_mod/replace.scr::playsound dfr_call_ap4309 // HZM coop - broadcast VO to all players
+//"Enemy Spotted!"
+	$panzer7 thread global/vehicles_thinkers.scr::enemy_tank_think2 0 empty_panzer_winter
+	// HZM coop - $player is an array; target closest player to the panzer
+	local.pt = exec coop_mod/replace.scr::player_closestTo $panzer7
+	if (local.pt != NULL) { level.playertanktarget = local.pt }
+	else { level.playertanktarget = exec coop_mod/replace.scr::player_anyValid } //[DEGRADED-6] fix: any valid player
+	$panzer7 thread coop_mod/replace.scr::coop_trackTankTarget // HZM coop - continuous target update
+	$panzer7 drive $panzer7path 50 50 256
+	$panzer7 waittill drive
+	$panzer7 stop
+end
+
+
+	
+
+////////////////////////////////CAMERA TRICKERY/////////////////////////////////////////////////
+savethread:
+
+		$s1_jeep1_turret0 psetviewangles (0 270 0)
+
+
+end
+
+
+
+
+triggercamera:
+	self waittill trigger
+	//dprintln "camera trigger"
+	//waitthread s1jeep_yaw
+	exec coop_mod/replace.scr::playsound halftrack_wobble1 // HZM coop - broadcast to all players
+	waitthread gags/t2l2_camera.scr::t2l2_camera
+	$s1_jeep1_turret0 psetviewangles (0 0 0)
+	//HZM coop - 's1jeep_yaw' label does not exist in this script; calling it throws + aborts the thread. Disabled.
+	//waitthread s1jeep_yaw
+end
+
+
+triggercamerab:
+	self waittill trigger
+	//dprintln "camera trigger"
+	thread gags/t2l2_camera.scr::t2l2_camerab
+
+end
+
+
+
+earthquake:
+	
+	//dprintln "earthquake trigger"
+	thread global/earthquake.scr::start .7 2 1 1
+	
+
+end
+
+
+//////////////////////////////////TRUCK DRIVING////////////////////////////////////////////
+truckdrive:
+	
+	//dprintln "TRUCK speed 255 100 256"
+	wait 9
+	self drive $truckpath1 
+	self modifydrive 255 100 256
+	self waitTill drive
+	//self stop
+	//dprintln "The truck has stopped**************"
+	//wait 3
+
+
+
+//truck switch to path2
+	
+	//dprintln "Truck path 2"
+	//dprintln "wait 3"
+	//dprintln "TRUCK speed 350 500 256"
+	self drive $truckpath_2 
+	self modifydrive 350 500 256
+	self waittill drive
+	self stop
+	wait 3
+
+
+//truck adjusting to path3
+	//dprintln "Truck Switching to 3rd path*****************"
+	//dprintln "wait 8"
+	wait 8
+	//dprintln "TRUCK speed now 265 300 256"
+	self drive $truckpath_3 
+	self modifydrive 265 300 256
+	self waittill drive
+	self stop
+	
+
+
+//truck adjusting to path4...
+	dprintln "Truck Switching to 4th path*****************"
+	//dprintln "wait 7  //7"
+	wait 5
+	//dprintln "TRUCK speed now 180 250 256"
+	self drive $truckpath4 
+	self modifydrive 180 250 256
+	self waittill drive
+	self stop
+
+//truck adjusting to new path...
+	dprintln "Truck Switching to path 5*****************"
+	dprintln "TRUCK speed now 230 270 256"
+	self drive $truckpath5 
+	self modifydrive 235 350 256
+	self waittill drive
+	self stop
+
+end
+
+//speed control trigger for the truck
+truck_speed_controls:
+	for ( local.i = 1; local.i <= $truckspeed.size; local.i++)
+	{
+		thread truckspeed local.i
+	}
+end
+
+truckspeed local.i:
+	if ($truckspeed[local.i].speed != NIL)
+		local.speed = $truckspeed[local.i].speed
+	else 
+		local.speed = level.fastspeed
+
+	if ($truckspeed[local.i].acceleration != NIL)
+		local.acceleration = $truckspeed[local.i].acceleration
+	else 
+		local.acceleration = level.acceleration
+
+	
+	println "z:      wait for trigger speedup: " local.i  " value " local.speed
+
+truckhealthcheck:
+	//if (!isAlive self)
+	//	end
+	while (self.health >= 500)
+	{
+		//dprintln "waiting for damage"
+		waitframe
+	}
+	exec coop_mod/replace.scr::playsound dfr_T2L2_ad4403 // HZM coop - broadcast VO to all players
+	//dprintln "SAY MY NAME!!!!"
+
+
+end
+
+triggerloop:
+	$truckspeed[local.i] waittill trigger
+	if (parm.other != $s1_truck1)
+	{
+		goto triggerloop
+	}
+	
+	//dprintln ("***Triggered speed up with speed: " + local.speed + " acceleration: " + local.acceleration)
+	$s1_truck1 modifydrive local.speed local.acceleration level.lookahead
+
+end
+
+
+//--------------------------
+
+//////////////////////////////////PLAYER HALFTRACK/////////////////////////////////////////
+
+PLAYER_JEEP_Drive:
+// drive Vector position, Float speed, Float acceleration, Float reach_distance, Float look_ahead, [ Vector alternate_position ]
+
+//half track first path then pausing on cliff
+
+	wait 6
+	//HZM coop - don't drive off until a gunner has boarded (or a short grace period
+	//elapses, so the ride still starts even if nobody mounts). coop_setup/coop_playerSpawned
+	//set level.coop_inJeep when a player takes the turret.
+	if( level.gametype != 0 ){
+		local.coopWaitFrames = 0
+		while( (level.coop_inJeep == NIL || level.coop_inJeep == 0) && local.coopWaitFrames < 600 ){
+			waitframe
+			local.coopWaitFrames += 1
+		}
+	}
+	self drive $jeepfirstpath 250
+	self modifydrive 250 100 256
+	self waitTill drive
+	self stop
+	
+	//HACk
+	self health 10000
+
+	//dprintln "PAUSING ON CLIFF**************"
+	self moveanim 22P100_Hafltrack_wobble
+	//wait 5
+	self waittill animdone
+	wait 10
+	
+
+
+	
+//we's about to have ourselves an accident... 
+	
+	exec coop_mod/replace.scr::playsound halftrack_bounce03 // HZM coop - broadcast to all players
+	self drive $halfdownhill 
+	self modifydrive 900 700 256
+	self waittill drive
+	self stop
+	wait 2
+
+	
+//reverse drive	
+	//dprintln "go in reverse******************"
+	self drive $halfpath2 level.reversespeed 150 200 256 //-200 -100 256
+	self waittill drive
+	self stop
+	wait 7
+
+//forward again
+	//dprintln "path GOING FORWARD"
+	self drive $halfpath3 250 
+	self modifydrive 255 100 256
+	self waittill drive
+	self stop
+end
+
+//triggered explosions
+
+triggerexplode:
+	self waittill trigger
+	//dprintln "********triggerexplode got triggered"
+	//HZM coop - SP only fired these route ambience explosions when the host ($player)
+	//touched. In coop accept ANY active player OR the player halftrack as the toucher.
+	local.validToucher = 0
+	if( level.gametype == 0 ){
+		if( parm.other == $player ){ local.validToucher = 1 }
+	}else{
+		local.toucher = parm.other
+		if( local.toucher != NULL ){
+			if( level.playerjeep != NULL && local.toucher == level.playerjeep ){ local.validToucher = 1 }
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.pl = $player[local.i]
+				if( local.pl != NULL && local.toucher == local.pl && local.pl.dmteam != "spectator" ){
+					local.validToucher = 1
+				}
+			}
+		}
+	}
+
+	if (local.validToucher == 1)
+	{
+		if (self.target != NIL)
+		{
+			exec global/model.scr self.target.origin self.target.model
+		}
+	}
+	else
+	{
+		println "**** by non-player"
+	}
+end
+
+/////////////////////////////////The supply truck takin' it////////////////////////////////////////
+
+check_truck_death:
+
+
+        if (isalive $s1_truck1)
+	$s1_truck1 waittill death 
+	//22a222_DeathTruck
+	local.offset = $s1_truck1.origin
+	local.offset[2]+=128
+	radiusdamage local.offset 200 200
+	iprintln "The Supply Truck has been Destroyed - Mission Failed."
+	wait 3
+	exec coop_mod/replace.scr::missionfailed // HZM coop - coop-safe mission fail
+
+end
+
+//=========================================================================
+// HZM coop - halftrack (player ride + spawn point) loss = Mission Failed -> clean restartMap, mirroring
+// the supply-truck fail (check_truck_death). jeep_death_watch = truck-style 'waittill death' (fires if the
+// halftrack is ever solid+damageable and destroyed); jeep_gone_watch = fires if it is removed/vanishes
+// (level.playerjeep -> NULL). Either way we restart cleanly instead of stranding players on orphaned seats.
+// jeep_fail has a once-guard so the two watchers can't double-restart.
+//=========================================================================
+check_jeep_death:
+	thread jeep_death_watch
+	thread jeep_gone_watch
+end
+
+jeep_death_watch:
+	if (isalive $s1_jeep1)
+	$s1_jeep1 waittill death
+	thread jeep_fail
+end
+
+jeep_gone_watch:
+	while( level.playerjeep != NULL ){ wait 0.5 }
+	thread jeep_fail
+end
+
+jeep_fail:
+	if( level.coop_jeepFail == 1 ){ end }
+	level.coop_jeepFail = 1
+	if( level.playerjeep != NULL ){
+		local.offset = level.playerjeep.origin
+		local.offset[2] += 128
+		radiusdamage local.offset 200 200
+	}
+	iprintln "The Halftrack has been Destroyed - Mission Failed."
+	wait 3
+	exec coop_mod/replace.scr::missionfailed // HZM coop - coop-safe mission fail -> restart
+end
+
+nolight:
+	wait 1.5
+	$s1_truck1 vehicleanim idlenolights
+	$s1_truck1.corona = 0
+end
+
+endlevel:
+	//HZM coop - coop-safe END CUTSCENE + mission end. Unglue everyone (so missioncomplete's transition is
+	//clean), then put ALL players' views on the closing camera (cuecamera broadcasts to every client), hide
+	//their bodies, hold, fade, and complete. Was: SP fadeout + missioncomplete only (no all-player cutscene).
+	if( level.gametype != 0 ){
+		waitthread coop_releaseAllFromJeep
+	}
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.dmteam != "spectator" ){
+			local.p freezecontrols 1
+			local.p hide
+		}
+	}
+	if( $watchcamerab != NULL && $t2l2camerab != NULL ){
+		$watchcamerab movetopos $t2l2camerab.origin
+		$watchcamerab watch $lookatb 0
+		$watchcamerab cut
+		cuecamera $watchcamerab
+	}
+	waitthread global/objectives.scr::add_objectives 1 3
+	wait 7
+	fadeout 9 0 0 0 1
+	exec global/missioncomplete.scr t2l3 1
+end
+
+//later...
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// HZM COOP - PATTERN B HALFTRACK SEATING (ported/adapted from m1l3b.scr 1140-1336)
+// $s1_jeep1 / level.playerjeep is the driveable halftrack. One player mans the
+// turret (slot 0); extra players are glued to passenger-dummy script_models.
+// Seat list extended from m1l3b's 8 to 16 (playerAttach2..16).
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+//=========================================================================
+coop_setup:
+//=========================================================================
+	//HZM coop - FIX: seat the players who are ALREADY present. waitForPlayer spawned them BEFORE this
+	//thread started, so the initial 'playerspawn' was missed and nobody manned the cannon (halftrack drove
+	//empty). Wait for coop_setupAttach to finish spawning the passenger dummies, then do an initial seat.
+	println "^~^~^ T2L2 coop_setup: reached (main passed waitForPlayer) - seating begins"
+	if( level.playerjeep == NULL ){
+		println "^~^~^ T2L2 coop_setup: ABORT - halftrack (level.playerjeep) is NULL"
+		end
+	}
+	level.coop_seatCount = 16		//seat 1 = cannon; 2-6 = halftrack bed; 7-16 = truck bed
+	//Spawn the passenger dummies on BOTH vehicles first (needs seat count + both vehicles), then the cannon.
+	//The game.dll DropToFloor fix runs PlaceTurret for this post-level turret so the STOCK eye-bone camera
+	//is correct (down the barrel). coop_playerSpawned mounts player 1 on it.
+	waitthread coop_setupAttach
+	level.playerjeep spawnturret 0 "vehicles/PzB41_turret.tik"
+	println ("^~^~^ T2L2 coop_setup: jeep=" + level.playerjeep + " turretSlot0=" + (level.playerjeep queryturretslotentity 0))
+	wait 1
+	//HZM coop - give the script-spawned cannon the auto-name the map's cutscenes expect ($s1_jeep1_turret0).
+	//The tik 'spawnturret' (which would auto-name it) nulls the vehicle in MP, so we script-spawn + name it here;
+	//without the name the map's turret camera-posing (savethread/triggercamera) hits a NULL listener + errors.
+	local.t0 = level.playerjeep queryturretslotentity 0
+	if( local.t0 != NULL ){ local.t0.targetname = "s1_jeep1_turret0" }
+	thread coop_playerSpawned
+	//re-seat on every (re)spawn so respawners land back in THEIR seat + late joiners get one
+	while (1){
+		level waittill playerspawn
+		thread coop_playerSpawned
+	}
+end
+
+//=========================================================================
+coop_setupAttach:
+//=========================================================================
+	//Seat table (F5-tunable). Seat 1 = halftrack cannon (turret slot 0). Seats 2-6 = HALFTRACK bed,
+	//seats 7-16 = TRUCK bed. Each seat stores its vehicle + tag + offset so the initial attach, the F5
+	//re-attach, and the save-dump all read ONE source. Seats 2-4 ride the halftrack passenger1/2/3 tags,
+	//seats 5-6 are the two EXTRA halftrack seats off passenger1/2, seats 7-16 ride the truck's passenger0.
+	//ALL offsets below are BAKED from live F5 tuning; F5 + numpad can still re-tune any bed seat (2-16).
+	for( local.i = 2; local.i <= level.coop_seatCount; local.i++ ){
+		local.ent = spawn script_model model "models/fx/dummy.tik" targetname ("playerAttach"+local.i) notsolid 1
+		waitframe
+		if( local.i <= 6 ){
+			level.coop_seatVeh[local.i] = level.playerjeep
+			if( local.i == 2 ){
+				level.coop_seatTag[local.i] = "passenger1"
+				level.coop_seatOff[local.i] = ( 28 -20 -20 )
+			}else if( local.i == 3 ){
+				level.coop_seatTag[local.i] = "passenger2"
+				level.coop_seatOff[local.i] = ( 60 16 -20 )
+			}else if( local.i == 4 ){
+				level.coop_seatTag[local.i] = "passenger3"
+				level.coop_seatOff[local.i] = ( -4 16 -24 )
+			}else if( local.i == 5 ){
+				level.coop_seatTag[local.i] = "passenger1"
+				level.coop_seatOff[local.i] = ( -40 -20 -24 )
+			}else{
+				level.coop_seatTag[local.i] = "passenger2"
+				level.coop_seatOff[local.i] = ( -84 16 -20 )
+			}
+		}else{
+			level.coop_seatVeh[local.i] = level.truck
+			level.coop_seatTag[local.i] = "passenger0"
+			//fallback grid (safety net); baked per-seat positions below override 7-16
+			local.j = local.i - 7
+			local.row = int( local.j / 3 )
+			local.col = local.j % 3
+			local.back = 0 - ( local.row * 40 )
+			local.side = -40 + ( local.col * 40 )
+			local.up = 0
+			level.coop_seatOff[local.i] = ( (local.back) (local.side) (local.up) )
+			if( local.i == 7 ){ level.coop_seatOff[local.i] = ( 12 4 -28 ) }
+			else if( local.i == 8 ){ level.coop_seatOff[local.i] = ( -24 -20 -4 ) }
+			else if( local.i == 9 ){ level.coop_seatOff[local.i] = ( -68 -20 0 ) }
+			else if( local.i == 10 ){ level.coop_seatOff[local.i] = ( -44 12 12 ) }
+			else if( local.i == 11 ){ level.coop_seatOff[local.i] = ( -116 -8 0 ) }
+			else if( local.i == 12 ){ level.coop_seatOff[local.i] = ( -148 8 0 ) }
+			else if( local.i == 13 ){ level.coop_seatOff[local.i] = ( -148 56 8 ) }
+			else if( local.i == 14 ){ level.coop_seatOff[local.i] = ( -80 12 16 ) }
+			else if( local.i == 15 ){ level.coop_seatOff[local.i] = ( -188 48 0 ) }
+			else if( local.i == 16 ){ level.coop_seatOff[local.i] = ( -32 36 4 ) }
+		}
+		if( level.coop_seatVeh[local.i] != NULL ){
+			local.ent attach level.coop_seatVeh[local.i] level.coop_seatTag[local.i] 0 ( level.coop_seatOff[local.i] )
+		}
+	}
+end
+
+//=========================================================================
+coop_jeepNotOccupied:
+//=========================================================================
+	//mark turret free; offer "press USE to enter" to any nearby player until one boards
+	if( level.playerjeep == NULL ){ end }	//HZM coop - no vehicle: don't loop on a NULL jeep (was spamming 'Cannot cast none' every frame)
+	level.coop_inJeep = 0
+	while(!level.coop_inJeep){
+		for(local.i=1;local.i <= $player.size;local.i++){
+			local.player = $player[local.i]
+			if(isAlive local.player && !local.player.isSpectator){
+				if(vector_within level.playerjeep.origin local.player.origin 1500){
+					if(local.player.useheld){
+						thread coop_playerForceToJeep local.player
+						goto stopJeepHud
+					}else if( local.player.flags["coop_hudPeTeJ"] == NIL){
+						local.player.flags["coop_hudPeTeJ"] = 1
+						local.player stufftext "ui_addhud coop_jeepEnter"
+					}
+				}else{
+					if(local.player && local.player.flags["coop_hudPeTeJ"] != NIL){
+						local.player stufftext "ui_removehud coop_jeepEnter"
+						local.player.flags["coop_hudPeTeJ"] = NIL
+					}
+				}
+			}
+		}
+		waitframe
+	}
+stopJeepHud:
+	for(local.i=1;local.i <= $player.size;local.i++){
+		local.player = $player[local.i]
+		if(local.player && local.player.flags["coop_hudPeTeJ"] != NIL){
+			local.player stufftext "ui_removehud coop_jeepEnter"
+			local.player.flags["coop_hudPeTeJ"] = NIL
+		}
+	}
+end
+
+//=========================================================================
+coop_playerJustDied:
+//=========================================================================
+	//KEEP the player's seat (coop_seatTaken/coop_seatIdx) so they respawn back into it via coop_playerSpawned.
+	//Just unglue the corpse (so the death body isn't stuck to the moving vehicle) + clear the cannon flag so
+	//the gunner re-mounts on respawn.
+	local.player = parm.other
+	if( local.player == NULL || local.player.targetname == "world" ){ end }
+	if( local.player.flags["coop_inJeep"] ){ local.player.flags["coop_inJeep"] = game.false }
+	local.player unglue
+end
+
+//=========================================================================
+coop_playerJustLeft:
+//=========================================================================
+	//free the seat of the player who left (parm.other) so a late-joiner can claim it
+	local.gone = parm.other
+	if( local.gone != NULL && local.gone.flags["coop_seatIdx"] != NIL ){
+		level.coop_seatTaken[ local.gone.flags["coop_seatIdx"] ] = NIL
+		local.gone.flags["coop_seatIdx"] = NIL
+	}
+end
+
+//=========================================================================
+coop_playerForceToJeep local.player:
+//=========================================================================
+	//put a player on the halftrack turret (slot 0)
+	level.coop_inJeep = 1
+	if(!local.player.flags["coop_inJeep"]){
+		local.player.flags["coop_inJeep"] = game.true
+
+		local.player notsolid
+
+		local.vturretent = level.playerjeep queryturretslotentity 0
+		local.vturretent unlock
+		level.playerjeep attachturretslot 0 local.player    // Attach the player to the halftrack gun
+		local.player perferredweapon ".30cal Machine Gun"
+		local.vturretent lock
+	}
+end
+
+//=========================================================================
+coop_playerSpawned:
+//=========================================================================
+	//HZM coop - player 1 mans the halftrack CANNON (turret slot 0, .30cal MG, engine-driven = fully
+	//functional); players 2+ glue into the SUPPLY TRUCK BED (stuck but free to aim/fire/CROUCH). Runs on the
+	//initial seat + every (re)spawn; coop_playerJustDied clears the gunner flag so player 1 re-mounts on respawn.
+	if( level.playerjeep == NULL ){
+		println "^~^~^ T2L2 coop_playerSpawned: ABORT - halftrack (level.playerjeep) is NULL"
+		end
+	}
+	level.coop_inJeep = 1
+	level.playerjeep notsolid
+	if( level.truck != NULL ){ level.truck notsolid }	//HZM coop - truck notsolid too, else a SOLID glued passenger blocks the (solid) truck's drive
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.player = $player[local.i]
+		if( !isAlive local.player || local.player.isSpectator ){ continue }
+		local.player notsolid
+		//assign a PERSISTENT seat if this player has none yet (lowest free seat; seat 1 = cannon to first claimer)
+		if( local.player.flags["coop_seatIdx"] == NIL ){
+			for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
+				if( level.coop_seatTaken[local.s] == NIL ){
+					level.coop_seatTaken[local.s] = local.player
+					local.player.flags["coop_seatIdx"] = local.s
+					local.s = level.coop_seatCount + 1		//break: seat claimed
+				}
+			}
+		}
+		local.seat = local.player.flags["coop_seatIdx"]
+		if( local.seat == NIL ){ continue }		//overflow: more players than seats
+		//SEAT 1 = CANNON (turret slot 0, .30cal, engine-driven)
+		if( local.seat == 1 ){
+			if( !local.player.flags["coop_inJeep"] ){
+				local.player.flags["coop_inJeep"] = game.true
+				local.vturretent = level.playerjeep queryturretslotentity 0
+				println ("^~^~^ T2L2 seat1 cannon: turretSlot0=" + local.vturretent)
+				if( local.vturretent != NULL ){
+					local.vturretent unlock
+					level.playerjeep attachturretslot 0 local.player
+					local.player perferredweapon ".30cal Machine Gun"
+					local.vturretent lock
+				}else{
+					local.player origin ( level.playerjeep.origin + ( 0 0 60 ) )
+					local.player glue level.playerjeep
+				}
+			}
+		}
+		//SEATS 2..16 = BED. duckableglue (not plain glue) so passengers can CROUCH while pinned to the seat -
+		//engine gates crouch-while-glued on the duckable flag (Entity::glue can_duck / Player::CondCrouch).
+		else{
+			local.attach = $("playerAttach" + local.seat)
+			if( local.attach != NULL ){
+				local.player origin local.attach.origin
+				local.player.velocity = local.attach.velocity
+				local.player duckableglue local.attach
+				local.player solid		//HZM coop - SOLID so bed passengers can be SHOT / take damage (halftrack + dummies are notsolid, so no crush)
+			}else{
+				println ("^~^~^ T2L2 seat" + local.seat + ": dummy playerAttach" + local.seat + " missing")
+			}
+		}
+	}
+end
+
+//=========================================================================
+coop_releaseAllFromJeep:
+//=========================================================================
+	//unglue passengers and detach the gunner at the end of the ride
+	level.coop_inJeep = 0
+	local.vturretent = level.playerjeep queryturretslotentity 0
+	if( local.vturretent != NULL ){
+		local.vturretent unlock
+		level.playerjeep detachturretslot 0 ( level.playerjeep.origin + (0 0 80) )
+	}
+	for(local.i=1;local.i <= $player.size;local.i++){
+		local.player = $player[local.i]
+		if(local.player != NULL){
+			if(local.player.flags["coop_inJeep"]){
+				local.player.flags["coop_inJeep"] = game.false
+			}
+			local.player unglue
+			local.player solid
+		}
+	}
+end
+
+//=========================================================================
+coop_giveAmmo:
+//=========================================================================
+	//keep the gunner and any armed passengers topped up
+	while(1){
+		//backup: free any seat whose occupant disconnected (SafePtr went NULL) so a late-joiner can claim it
+		if( level.coop_seatCount != NIL ){
+			for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
+				if( level.coop_seatTaken[local.s] != NIL ){
+					if( level.coop_seatTaken[local.s] == NULL ){
+						level.coop_seatTaken[local.s] = NIL
+					}
+				}
+			}
+		}
+		for(local.i=1;local.i <= $player.size;local.i++){
+			local.player = $player[local.i]
+			if( local.player != NULL && local.player.dmteam != "spectator" && local.player.health > 0 ){
+				local.player ammo rifle 100
+				local.player ammo mg 100
+				local.player ammo smg 100
+				local.player ammo pistol 100
+				local.player ammo heavy 100
+				local.player ammo grenade 100
+			}
+		}
+		wait 30
+	}
+end
+
+// stub handlers - called by coop framework on player events (player passed as parm.other)
+coop_playerJustSpawned:
+	local.player = parm.other
+	if( local.player == NULL || local.player.targetname == "world" ){ end }
+	local.player.flags["coop_medkits"] = 3		//HZM coop - t2l2: start every player with 3 usable health packs
+end
+
+coop_playerJustRespawned:
+	local.player = parm.other
+	if( local.player == NULL || local.player.targetname == "world" ){ end }
+	local.player.flags["coop_medkits"] = 3		//HZM coop - t2l2: refill to 3 health packs on respawn
+end
+
+//=========================================================================
+// HZM coop DEBUG (F5) - test tool to cycle the host player through every seat and verify it.
+//   seat 1 = halftrack cannon, seats 2-6 = halftrack bed, seats 7-16 = truck bed.
+// F5 (bind = set coop_seatcycle 1) rides you to the NEXT seat. No noclip needed (seats are glued).
+// Cycle only - seat offsets are already baked; there is no live tuning here. Uses duckableglue so you
+// can confirm crouch works in each bed seat.
+//=========================================================================
+coop_seatCycleDebug:
+	while( level.coop_seatCount == NIL ){ waitframe }		//wait for coop_setup to build the seat table
+	setcvar "coop_seatcycle" "0"
+	level.coop_dbgSeat = 1		//host normally starts on the cannon (seat 1)
+	while( 1 ){
+		if( int(getcvar("coop_seatcycle")) == 1 ){
+			setcvar "coop_seatcycle" "0"
+			level.coop_dbgSeat = level.coop_dbgSeat + 1
+			if( level.coop_dbgSeat > level.coop_seatCount ){ level.coop_dbgSeat = 1 }
+			local.host = $player[1]
+			if( local.host != NULL ){
+				//1. if the host is on the cannon, DISMOUNT first. A turret-mounted player is pinned to the gun,
+				//   so origin/glue can't move them until released. Use the real occupancy flag (coop_inJeep).
+				if( local.host.flags["coop_inJeep"] ){
+					local.vt = level.playerjeep queryturretslotentity 0
+					if( local.vt != NULL ){
+						local.vt unlock
+						level.playerjeep attachturretslot 0 local.host
+						local.vt lock
+					}
+					local.host.flags["coop_inJeep"] = game.false
+					waitframe		//let the dismount take effect before teleporting
+				}
+				//2. release from any glued bed seat
+				local.host unglue
+				local.host notsolid
+				//3. place on the new seat
+				if( level.coop_dbgSeat == 1 ){
+					local.vt = level.playerjeep queryturretslotentity 0
+					if( local.vt != NULL ){
+						local.vt unlock
+						level.playerjeep attachturretslot 0 local.host
+						local.host perferredweapon ".30cal Machine Gun"
+						local.vt lock
+						local.host.flags["coop_inJeep"] = game.true
+					}
+					iprintlnbold "SEAT DEBUG: seat 1 (cannon)"
+				}else{
+					local.anchor = $("playerAttach" + level.coop_dbgSeat)
+					if( local.anchor != NULL ){
+						local.host origin local.anchor.origin
+						local.host duckableglue local.anchor
+						local.host solid		//HZM coop - solid so the seat is damageable while testing (match live seating)
+						iprintlnbold ("SEAT DEBUG: seat " + level.coop_dbgSeat + " @ " + local.anchor.origin)
+					}else{
+						iprintlnbold ("SEAT DEBUG: seat " + level.coop_dbgSeat + " has no anchor")
+					}
+				}
+			}
+		}
+		waitframe
+	}
+end

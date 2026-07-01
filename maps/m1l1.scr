@@ -7,6 +7,8 @@ main:{
 	level.coop_aaMap = 1						//chrissstrahl - let global scripts know this is a AA level
 	level.coop_disableSpawnWarper	= game.true		//chrissstrahl - disable respawn warper
 	waitthread coop_mod/main.scr::main 		//chrissstrahl - start coop mod extensions
+	//[207] opt-in to per-map optional callbacks (guarded dispatch)
+	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 //	setcvar debug 1
 //	getcvar(debug) = getcvar (debug)
 //	println ("getcvar(debug) is " + getcvar(debug))
@@ -151,7 +153,13 @@ level waittill spawn
 	$door disconnect_paths
 
 	//chrissstrahl - made coop compatible
-	exec coop_mod/replace.scr::tmstartloop sound/music/mus_03c_suspense.mp3
+	// HZM COOP: start the intro music from a player-aware thread. This point is reached
+	// AFTER "level waittill prespawn", by which time setupCmds has already run on the host
+	// (delivering a still-NIL coop_musicCommand) AND $player is often still empty here, so
+	// the direct send hit 0 players -> intro music never reached the client. The thread
+	// below waits until a player exists, then starts it (also stores coop_musicCommand
+	// for late joiners). mus_11a later in the level works as-is (player long since present).
+	thread coop_intro_music
 
 	level.intro = getcvar(intro)
 
@@ -331,6 +339,22 @@ level waittill spawn
 }end
 
 //=========================================================================
+coop_intro_music:{
+//=========================================================================
+	// HZM COOP: wait until a player actually exists, then start the intro track. The plain
+	// exec at the call site raced player setup (command set after setupCmds ran / before
+	// $player populated), so the intro music never reached the client. tmstartloop also
+	// stores level.coop_musicCommand so any later joiner gets it via setupCmds.
+	local.guard = 0
+	while( $player.size < 1 && local.guard < 600 ){
+		waitframe
+		local.guard++
+	}
+	if( $player.size < 1 ){ end }
+	exec coop_mod/replace.scr::tmstartloop sound/music/mus_03c_suspense.mp3
+}end
+
+//=========================================================================
 walkers:{
 //=========================================================================
 	$walkerLF exec global/disable_ai.scr
@@ -445,7 +469,7 @@ truckanim local.num local.watch local.shot local.idle1 local.twitch1 local.react
 //=========================================================================
 
 	self nodamage
-	
+
 	self thread ride local.idle1 local.twitch1 local.idle2 local.twitch2
 	local.thread = parm.previousthread
 
@@ -517,7 +541,16 @@ truckanim local.num local.watch local.shot local.idle1 local.twitch1 local.react
 	if (local.num == 4){
 		self takedamage
 		self.health = 5
-		self.threatbias = 10000
+		// HZM COOP: threatbias 10000 makes this dying friendly (Pvt. Allen) the
+		// overwhelming top-priority target for EVERY enemy. In SP the scripted ambushers
+		// gun him down instantly for the dramatic death. In coop he lingers low by the
+		// truck and the persistent officer/bodyguard boss units lock onto him and fire
+		// into the ground at his position ("shooting at something you can't see") instead
+		// of the players, switching to a player only at close range. Apply the magnet in
+		// SP only; in coop he stays a normal-priority friendly so the boss AI targets players.
+		if (level.gametype == 0){
+			self.threatbias = 10000
+		}
 		self thread die_thread
 	}
 	else{

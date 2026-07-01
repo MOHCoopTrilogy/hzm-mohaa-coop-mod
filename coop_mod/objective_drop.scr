@@ -1,0 +1,165 @@
+// Objective Bonus Drop
+// ---------------------------------------------------------------------------
+// Places ONE bonus pickup at a configured objective location per mission.
+// 50/50 random: a pair of Binoculars (bombing-run weapon) OR a Signal Smoke
+// grenade (Allied paradrop signal). This REUSES the exact officer death-drop
+// mechanics: the spawned pickups are identical to coop_officer_death_drops in
+// officer.scr, and the downstream engines are untouched and fully reused:
+//   - Binoculars equip -> binoculars_fired -> coop_bombing_run_sequence (officer.scr)
+//   - Signal Smoke arm -> smokeDropZone -> coop_paradrop_main (paradrop.scr)
+//
+// HOOK: coop_objective_drop_init is threaded once from coop_mod/main.scr::main,
+// after the officer init thread. It is guarded by per-map data set in
+// coop_mod/objective_positions.scr::getObjectiveDrop.
+//
+// SAFETY: defaults OFF for any map not explicitly configured. Idempotent: only
+// one drop per mission (level.coop_objdrop_done). Does NOT modify the officer's
+// own binoc/smoke drop; the bonus pickups are consumable and independent.
+//
+// PARSE-SAFE: pure ASCII, no em-dashes/smart quotes, no bare negatives inside
+// parens (uses "0 - n"), no spawn-keyvalue args, no unknown commands.
+// ---------------------------------------------------------------------------
+
+
+coop_objective_drop_init:{
+	// Idempotent guard: never run twice on the same mission.
+	if( level.coop_objdrop_done == 1 ){ end }
+
+	// Pull per-map config. Sets:
+	//   level.coop_objdrop_enable   int     1 = place a bonus drop on this map
+	//   level.coop_objdrop_origin   vector  world position for the pickup
+	// Default OFF unless the map is explicitly listed with a real coord.
+	exec coop_mod/objective_positions.scr::getObjectiveDrop
+
+	if( level.coop_objdrop_enable != 1 ){
+		end
+	}
+	if( level.coop_objdrop_origin == NIL ){
+		// Enabled but no coord filled in yet (TODO map): stay disabled, no spawn.
+		end
+	}
+
+	// Mark done up front so two players / re-entry can never double-spawn.
+	level.coop_objdrop_done = 1
+
+	// Wait for a player to exist so HUD/messages land on someone.
+	while( !$player ){ wait 1 }
+	wait 2
+
+	local.pos = level.coop_objdrop_origin
+
+	// 50/50: randomint 2 yields 0 or 1.
+	local.pick = randomint 2
+	if( local.pick == 0 ){
+		thread coop_objdrop_spawn_smoke local.pos
+	} else {
+		thread coop_objdrop_spawn_binoc local.pos
+	}
+}end
+
+
+// Spawns the Signal Smoke pickup at local.pos. Mirrors the smoke half of
+// coop_officer_death_drops (officer.scr) exactly; on pickup it arms the same
+// paradrop path via smokeDropZone.
+coop_objdrop_spawn_smoke local.pos:{
+	iprintlnbold "Intel recovered: a Signal Smoke Grenade is stashed at the objective!"
+
+	// Visible smoke model + a touch trigger that GIVES the weapon via "player item"
+	// (Sentient::giveItem). We do NOT spawn it as a world Weapon the player walks onto:
+	// that routes through the engine's Weapon::PickupWeapon grenade-class special-case,
+	// which strips the player's German Stielhandgranate. See coop_objdrop_smoke_pickup.
+	local.smoke_vis = spawn script_model
+	local.smoke_vis model "models/weapons/coop_smoke_grenade.tik"
+	local.smoke_vis.origin = local.pos
+	local.smoke_vis notsolid
+	local.smoke_vis rendereffects "+fullbright"
+	local.smoke_trig = spawn trigger_multiple
+	local.smoke_trig.origin = local.pos
+	local.smoke_trig solid
+	local.smoke_trig setsize ( -16 -16 0) (16 16 48)
+	thread coop_objdrop_smoke_pickup local.smoke_trig local.smoke_vis
+
+	// Yellow locator glow so the pickup is easy to spot (no smoke emitted).
+	local.smoke_glow = spawn script_model
+	local.smoke_glow model "models/fx/dummy.tik"
+	local.smoke_glow.origin = local.pos + (0 0 8)
+	local.smoke_glow light (1 0.9 0.2)
+	local.smoke_glow lightRadius 150
+	local.smoke_glow lightOn
+	local.smoke_glow notsolid
+	level.coop_objdrop_beacon = local.smoke_glow
+}end
+
+
+// Spawns the Binoculars pickup at local.pos. Mirrors the binoc half of
+// coop_officer_death_drops (officer.scr): visible model + trigger_use that,
+// on Use, grants weapons/coop_binoculars.tik (bombing-run weapon).
+coop_objdrop_spawn_binoc local.pos:{
+	iprintlnbold "Intel recovered: a pair of Binoculars is stashed at the objective!"
+
+	local.binoc_vis = spawn script_model
+	local.binoc_vis model "models/items/binoculars.tik"
+	local.binoc_vis.origin = local.pos
+	local.binoc_vis notsolid
+	local.binoc_vis rendereffects "+fullbright"
+
+	local.binoc = spawn trigger_use
+	local.binoc.origin = local.pos
+	local.binoc solid
+	local.binoc setsize ( -12 -12 0) (12 12 40)
+	thread coop_objdrop_binoc_wait_pickup local.binoc local.binoc_vis
+}end
+
+
+// Smoke pickup callback (waittill trigger, so parm.other = the toucher). Arms the
+// SAME paradrop state the officer drop sets, then reuses the officer HUD helper.
+//
+// The smoke is GIVEN via "player item" (Sentient::giveItem), NOT auto-picked-up as
+// a world Weapon. The world-Weapon path runs the engine's Weapon::PickupWeapon
+// grenade-class special-case, which drives a grenade weapon_class reselection that
+// stripped the player's German Stielhandgranate + its "grenade" ammo. giveItem
+// adds the smoke cleanly with no reselection, so the German grenade is preserved.
+// The smoke is still a throwable grenade-class weapon (equip + throw fires the
+// SmokeGrenade projectile -> paradrop hook). Mirrors the binoculars pickup below.
+coop_objdrop_smoke_pickup local.trig local.vis:{
+	local.trig waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.player.classname != "Player" ){ end }
+	if( local.trig == NULL || local.trig.flags["coop_smoke_taken"] == 1 ){ end }
+	local.trig.flags["coop_smoke_taken"] = 1
+	local.trig remove
+	if( local.vis != NULL ){ local.vis delete }
+	local.player item models/weapons/coop_smoke_grenade.tik
+	level.coop_paradrop_armed = 1
+	level.coop_smoke_player = local.player
+	if( level.coop_objdrop_beacon != NULL ){ level.coop_objdrop_beacon delete }
+	iprintlnbold (local.player.netname + " picked up the Signal Smoke!")
+	iprintlnbold "Signal Smoke ready! Equip grenades and throw - Allied paradrop falls where it hits!"
+	thread coop_mod/officer.scr::coop_smoke_hud_show
+}end
+
+
+// Binoculars pickup callback. Mirrors coop_binoc_wait_pickup (officer.scr):
+// grants the bombing-run weapon and initialises strike counter + HUD via the
+// existing officer helpers. Shares the same level.coop_binoc_* state so the
+// officer drop and this drop can never double-grant.
+coop_objdrop_binoc_wait_pickup local.binoc local.binoc_vis:{
+	local.binoc waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.binoc == NULL ){ end }
+	if( local.binoc_vis != NULL ){ local.binoc_vis delete }
+	// Boolean flag avoids NIL comparison on first pickup (same as officer path).
+	if( level.coop_binoc_given == 1 ){
+		local.binoc remove
+		end
+	}
+	level.coop_binoc_given = 1
+	local.binoc remove
+	level.coop_binoc_uses = 3
+	level.coop_binoc_owner = local.player
+	local.player item weapons/coop_binoculars.tik
+	iprintlnbold (local.player.netname + " picked up Binoculars!")
+	iprintlnbold "Equip binoculars from pistol slot, aim and fire [LMB] to call bombing runs! (3 strikes)"
+	local.player playsound coop_radio_standby
+	thread coop_mod/officer.scr::coop_binoc_update_hud local.player
+}end

@@ -148,15 +148,30 @@ StartJumpThread: {
 	thread global/throbtext.scr::throbtext_off
 	thread global/throbtext.scr::throbtext local.msg 0
 
-	while ( $player.useheld == 0 ){
+	//[coop] chrissstrahl - accept the use-key from ANY active player, not just the host,
+	//and abort only if no player is alive to jump (otherwise the ride would deadlock when
+	//player[1] is dead/spectating). $player[i].useheld is the per-player use-button state.
+	level.ab41jump_pressed = 0
+	while ( level.ab41jump_pressed == 0 ){
+		level.ab41alive_count = 0
+		for (local.i = 1; local.i <= $player.size; local.i++){
+			local.p = $player[local.i]
+			if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
+				level.ab41alive_count++
+				if (local.p.useheld){
+					level.ab41jump_pressed = 1
+				}
+			}
+		}
+		if (level.ab41alive_count == 0){
+			//no living player remains to jump - let the fail path handle it downstream
+			thread global/throbtext.scr::throbtext_off
+			End
+		}
 		waitframe
 	}
 
 	thread global/throbtext.scr::throbtext_off
-
-	if ( $player.health <= 0 ){		//MiaCosa @chrissstrahl
-		End
-	}
 
 	level.playerjumped = 1
 	$AB41 notsolid
@@ -170,8 +185,12 @@ StartJumpThread: {
 	$AB41.mg42 unlock
 	$AB41.minigun unlock
 
-	// Get out
-	$AB41 douse $player
+	// Get out (the boarded occupant is the host-seat; douse over all players is harmless)
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		if ($player[local.i] != NULL){
+			$AB41 douse $player[local.i]
+		}
+	}
 
 	// Relock them so we can't get back in
 	$AB41.mg42 setusable 0
@@ -181,9 +200,16 @@ StartJumpThread: {
 	$AB41.minigun lock
 	waitframe
 
-	// Set location and orientation above the AB
-	$player.origin = $AB41.origin + ( 0 100 150 )		//MiaCosa @chrissstrahl
-	$player.viewangles = "0 270 0"
+	//[coop] chrissstrahl - lift EVERY active player clear of the AB41 (occupant + ride-alongs)
+	//so the imminent explosion does not catch them; fan the teleport out instead of host-only.
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		local.p = $player[local.i]
+		if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
+			local.zoff = 150 + (local.i * 8)
+			local.p.origin = $AB41.origin + ( 0 100 local.zoff )
+			local.p.viewangles = "0 270 0"
+		}
+	}
 
 	thread EndCrates
 	thread MoveTruck
@@ -218,8 +244,13 @@ FinishJumpThread: {
 	
 	//if($player istouching $AB41.collisionent)
 	if( level.playerjumped == 0 ){
-		//	$player normal_damage 100
-		$player damage $world 5000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0		//MiaCosa @chrissstrahl
+		//[coop] chrissstrahl - punish all riders who failed to jump, not just host
+		for (local.i = 1; local.i <= $player.size; local.i++){
+			local.p = $player[local.i]
+			if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
+				local.p damage $world 5000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0		//MiaCosa @chrissstrahl
+			}
+		}
 	}
 
 	// Show the destroyed, animating AB41
@@ -252,7 +283,8 @@ FinishJumpThread: {
 
 	thread LeftSideExplosion
 	thread RightSideExplosion
-	$player nodamage		//MiaCosa @chrissstrahl
+	//$player nodamage		//MiaCosa @chrissstrahl
+	exec coop_mod/replace.scr::nodamage		//[coop] chrissstrahl - protect all players during the scripted finale
 }end
 
 //=========================================================================
@@ -460,7 +492,7 @@ EndCrates: {
 		}
 		waitframe
 	}
-]end
+}end
 
 //=========================================================================
 MoveTruck:{
@@ -482,8 +514,15 @@ checkthrobstop: {
 	local.msg = loc_convert_string( "Press " + local.usekey + " to switch weapons.")
 	thread global/throbtext.scr::throbtext local.msg 5
 
-	while ( $player.secondaryfireheld == 0 ) {		//MiaCosa @chrissstrahl
+	// HZM coop - break when ANY player presses secondary fire ($player is an array)
+	local.anyFire = 0
+	while (!local.anyFire){
 		waitframe
+		local.i = 1
+		while (local.i <= $player.size){
+			if ($player[local.i].secondaryfireheld){ local.anyFire = 1 }
+			local.i++
+		}
 	}
 
 	wait 2.0

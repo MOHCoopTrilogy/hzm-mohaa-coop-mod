@@ -42,8 +42,8 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 		level waittill prespawn
 		end
 	}
-	level waittill prespawn
-	waitframe //[204] chrissstrahl - maybe this helps a bit...
+	//[BUG1] level waittill prespawn does not fire in MP/coop; replaced with short wait
+	wait 0.5
 	end
 
 	//this does not really work out yet
@@ -558,22 +558,64 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 		end
 	}
 
-	//[200] chrissstrahl - added stop command
-	local.command = "tmstop;tmstartloop "
-	//[200] end
-
-	local.command += local.file
+	// HZM COOP: must send "tmstop" and "tmstartloop <file>" as SEPARATE stufftext
+	// statements. A combined "tmstop;tmstartloop <file>" is silently DROPPED by the cgame
+	// server-command filter (cg_servercmds_filter.cpp::CG_IsStatementAllowed): it reads
+	// "tmstop;tmstartloop" as one token (no space before ';'), truncates to "tmstop", loses
+	// the tmstartloop verb, then rejects the <file> as an unknown command -> whole statement
+	// blocked -> music never starts on the client. Separate statements each pass the filter.
+	local.command = "tmstartloop " + local.file
 
 	//[206] chrissstrahl - made code more compact
 	for (local.i = 1;local.i <= $player.size;local.i++){
 		local.player =  $player[local.i]
+		local.player stufftext "tmstop"
 		local.player stufftext ( local.command )
 	}
 	if( level.gametype == 0 ){ end }
-	
+
+	// Store ONLY the single start statement; setupCmds sends "tmstop" separately before it.
 	level.coop_musicCommand = local.command
+	level.coop_music_track = local.file	// HZM COOP: remember the BASE track so the officer combat-music segue can revert to it
 	//level.coop_musicCommandLoop = local.command
 	//level.coop_musicCommandLoopIndx++
+}end
+
+
+// HZM COOP DYNAMIC MUSIC ===================================================
+// (tmvolume already exists further below and sends "tmvolume <v>" to all players via stufftext;
+// the engine's tmvolume command is whitelisted in the cgame filter. tmfade/tmsegue build the
+// smooth track segue on top of it.)
+//=========================================================================
+
+// tmfade: ramp triggered-music volume from local.vlo to local.vhi over local.vdur seconds.
+//=========================================================================
+tmfade local.vlo local.vhi local.vdur:{
+//=========================================================================
+	if( local.vdur == NIL || local.vdur <= 0 ){ local.vdur = 0.6 }
+	local.steps = 8
+	local.delta = (local.vhi - local.vlo) / local.steps
+	local.vol   = local.vlo
+	local.i = 0
+	while( local.i < local.steps ){
+		waitthread coop_mod/replace.scr::tmvolume local.vol
+		local.vol = local.vol + local.delta
+		wait (local.vdur / local.steps)
+		local.i++
+	}
+	waitthread coop_mod/replace.scr::tmvolume local.vhi
+}end
+
+// tmsegue: smoothly cross over to local.file - fade current track out, switch, fade new in.
+// (One triggered-music channel = no true overlap crossfade; this is fade-through-dip.)
+//=========================================================================
+tmsegue local.file:{
+//=========================================================================
+	if( local.file == NIL ){ end }
+	waitthread coop_mod/replace.scr::tmfade 1 0 0.5
+	waitthread coop_mod/replace.scr::tmvolume 0			// ensure the new track starts silent
+	waitthread coop_mod/replace.scr::tmstartloop local.file
+	waitthread coop_mod/replace.scr::tmfade 0 1 0.7
 }end
 
 
@@ -588,21 +630,20 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 		end
 	}
 	
-	//[202] chrissstrahl - added stop command ability
-	if(local.stop){
-		local.command = "tmstop;tmstart "
-	}else{
-		local.command = "tmstart "
-	}
-	local.command += local.file
+	// HZM COOP: send as SEPARATE statements - a combined "tmstop;tmstart <file>" is dropped
+	// by the cgame server-command filter (see tmstartloop above for the full explanation).
+	local.command = "tmstart " + local.file
 
 	//[206] chrissstrahl - made code more compact
 	for (local.i = 1;local.i <= $player.size;local.i++){
 		local.player = $player[local.i]
+		if(local.stop){
+			local.player stufftext "tmstop"
+		}
 		local.player stufftext ( local.command )
 	}
 	if( level.gametype == 0 ){ end }
-	
+
 	//register, so players entering later will also have that adjusted/send
 	level.coop_musicCommand = local.command
 	//level.coop_musicCommandIndx++
@@ -631,6 +672,41 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	//register, so players entering later will also have that adjusted/send
 	level.coop_musicCommandVol = local.command
 	//level.coop_musicCommandVolIndx++
+}end
+
+//Per-client CVAR setter - stuffs "<cvar> <val>" to every connected player. Used for cinematic
+//audio mixing (s_volume effects, s_ambientvolume bed, s_musicvolume). All coop players get it.
+//=========================================================================
+coop_setClientCvar local.cvar local.val:{
+//=========================================================================
+	if( local.cvar == NIL || local.val == NIL ){ end }
+	local.command = local.cvar + " "
+	local.command += local.val
+	for (local.i = 1;local.i <= $player.size;local.i++){
+		local.player = $player[local.i]
+		if( local.player != NULL ){ local.player stufftext ( local.command ) }
+	}
+}end
+
+//coop_cvarFade: smoothly ramp a per-client cvar from vlo to vhi over vdur seconds (24 steps =
+//smooth, not jarring). vlo/vhi are FROM/TO, so a fade-DOWN passes vlo > vhi. Triggered MUSIC plays
+//through s_musicVolume x tmvolume, so fading s_volume/s_ambientvolume leaves the track audible.
+//=========================================================================
+coop_cvarFade local.cvar local.vlo local.vhi local.vdur:{
+//=========================================================================
+	if( local.cvar == NIL ){ end }
+	if( local.vdur == NIL || local.vdur <= 0 ){ local.vdur = 3 }
+	local.steps = 24
+	local.delta = (local.vhi - local.vlo) / local.steps
+	local.vol = local.vlo
+	local.i = 0
+	while( local.i < local.steps ){
+		waitthread coop_mod/replace.scr::coop_setClientCvar local.cvar local.vol
+		local.vol = local.vol + local.delta
+		wait (local.vdur / local.steps)
+		local.i++
+	}
+	waitthread coop_mod/replace.scr::coop_setClientCvar local.cvar local.vhi
 }end
 
 //[202] chrissstrahl
@@ -1778,6 +1854,22 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	self runto local.player
 }end
 
+//[208] HZM coop - like runtoClosest but the actor runs to the nearest player it has LINE OF SIGHT to
+//(player_closestTargetable = closest player that canseenoents this actor; falls back to the nearest
+//player overall when NONE are visible, so it still advances to make contact). Used by spawned ENEMY
+//waves/dogs so they push toward who they can actually see, not the nearest body behind a wall.
+//Friendly-follow callers deliberately keep plain runtoClosest (go to the nearest player regardless).
+//=========================================================================
+runtoClosestVisible:{
+//=========================================================================
+	if( self == NIL || self == NULL ){
+		error ( "coop_mod/replace.scr::runtoClosestVisible - Needs to be executed by a actor" ) 1000
+		end
+	}
+	local.player = exec coop_mod/replace.scr::player_closestTargetable self
+	self runto local.player
+}end
+
 //ORIGIN
 //=========================================================================
 origin local.ent:{
@@ -2682,5 +2774,69 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	for (local.i = 1; local.i <= $player.size; local.i++){
 		local.player = $player[local.i]
 		local.player takedamage
+	}
+}end
+
+// NOTSOLID — replaces $player notsolid in cinematics
+//=========================================================================
+notsolid:{
+//=========================================================================
+	if (level.gametype == 0){ $player notsolid; end }
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		$player[local.i] notsolid
+	}
+}end
+
+// NOCLIP — replaces $player noclip in cinematics
+//=========================================================================
+noclip:{
+//=========================================================================
+	if (level.gametype == 0){ $player noclip; end }
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		$player[local.i] noclip
+	}
+}end
+
+// USEWEAPON — replaces $player use "WeaponName" after weapon is in inventory
+//=========================================================================
+useWeapon local.weaponName:{
+//=========================================================================
+	if (local.weaponName == NIL){ end }
+	if (level.gametype == 0){ $player use local.weaponName; end }
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		local.player = $player[local.i]
+		if (local.player.health > 0 && local.player.dmteam != "spectator"){
+			local.player use local.weaponName
+		}
+	}
+}end
+
+// USEWEAPONCLASS — replaces $player useweaponclass
+//=========================================================================
+useWeaponClass local.class:{
+//=========================================================================
+	if (local.class == NIL){ end }
+	if (level.gametype == 0){ $player useweaponclass local.class; end }
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		local.player = $player[local.i]
+		if (local.player.health > 0 && local.player.dmteam != "spectator"){
+			local.player useweaponclass local.class
+		}
+	}
+}end
+
+// COOP_TRACKTANKTARGET — continuous tank targeting thread; call as: $panzer thread coop_mod/replace.scr::coop_trackTankTarget
+// Keeps level.playertanktarget updated to the closest valid player while self is alive.
+//=========================================================================
+coop_trackTankTarget:{
+//=========================================================================
+	while (self && self.health > 0){
+		local.pt = exec coop_mod/replace.scr::player_closestTargetable self
+		if (local.pt != NULL){ level.playertanktarget = local.pt }
+		else{
+			local.pt = exec coop_mod/replace.scr::player_anyValid
+			if (local.pt != NULL){ level.playertanktarget = local.pt }
+		}
+		wait 0.5
 	}
 }end

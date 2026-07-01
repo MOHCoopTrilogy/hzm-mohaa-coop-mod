@@ -125,6 +125,13 @@ main:{ // MACKEY MAY HAVE BEEN HERE, YOU BE THE JUDGE
 
 	thread explosivespulse
 	thread follow_the_friend
+	//chrissstrahl/coop - RE-ENABLED 2026-06-26 as a runto-MARCH (was a teleport warp that skipped
+	//the lead-traversal enemy-spawn triggers + false-fired on the papers route under the room). The
+	//new version WALKS him to the interrogation (triggers fire) and is Z-gated so the lower papers
+	//route can't trip it. See m1l2a-coop-notes memory.
+	if( level.gametype != 0 ){ thread coop_escort_rescue_fix }
+	if( level.gametype != 0 ){ thread coop_grilloLeadKeeper }	//chrissstrahl/coop - un-stick Grillo's lead if the officer fight drops him out of it
+	if( level.gametype != 0 ){ thread coop_tutorial_smoke }		//chrissstrahl/coop - tutorial Signal Smoke at the hostage
 	$flak88a_d hide
 	$flak88b_d hide
 //		$chairclip delete
@@ -338,11 +345,22 @@ getsniper:{
 	if ($playersniper){
 		$playersniper delete
 		level.flags[sniper] = 1
-		$player take weapons/KAR98.tik
-		$player item weapons/springfield.tik
-
-		$player ammo rifle 1000
-		$player useweaponclass rifle
+		//chrissstrahl - give weapon to all players in coop
+		if( level.gametype == 0 ){
+			$player take weapons/KAR98.tik
+			$player item weapons/springfield.tik
+			$player ammo rifle 1000
+			$player useweaponclass rifle
+		}else{
+			local.wcj = 1
+			while (local.wcj <= $player.size){
+				$player[local.wcj] take weapons/KAR98.tik
+				$player[local.wcj] item weapons/springfield.tik
+				$player[local.wcj] ammo rifle 1000
+				$player[local.wcj] exec coop_mod/replace.scr::useWeaponClass "rifle"
+				local.wcj++
+			}
+		}
 	}
 }end
 
@@ -423,6 +441,56 @@ follow_the_friend:{
 	while (isalive level.friendly1){
 		set_objective_pos level.friendly1.origin
 		waitframe
+	}
+}end
+
+//=========================================================================
+coop_escort_rescue_fix:{
+//=========================================================================
+	// HZM COOP: in coop the SAS Agent (level.friendly1) deprioritizes the interrogation room
+	// in his friendtype-4 lead order and heads for the explosives instead, so the "rescue the
+	// hostage" barbwire (spawnclip at 2205 3222 110, despawns only when friendly1 comes within
+	// 250) never clears. The room IS navmesh-reachable (he reaches the explosives right next to
+	// it). WATCHDOG: when a player waits AT the interrogation room (close horizontally AND at the
+	// room's height -- NOT the papers route that runs under it) and the agent hasn't come, MARCH
+	// him there with a normal runto (NO teleport -> the lead-traversal enemy-spawn triggers still
+	// fire), then hand him back to his lead. Retries if a march doesn't land him in range.
+	if( level.gametype == 0 ){ end }	// single-player leads fine; coop-only workaround
+
+	local.wire   = ( 2205 3222 110 )	// the "rescue the hostage" barbwire spawnclip location
+	local.dwell  = 0
+	while( 1 ){
+		wait 1
+		if( level.flags["flagthread9"] ){ end }		// finale running -- stop
+		if( level.friendly1 == NULL || !(isalive level.friendly1) ){ local.dwell = 0; continue }
+		// if the agent reached the wire on his own, nothing to do
+		if( vector_length( level.friendly1.origin - local.wire ) < 280 ){ end }
+		// don't fight a scripted scene -- only act while he is actively LEADING
+		if( level.friendly1.friendtype != 4 ){ local.dwell = 0; continue }
+		// is a living player waiting AT the interrogation room? require both proximity AND a
+		// matching height -- the papers route runs UNDER the room (much lower z), so the z-gate
+		// keeps this from firing down there.
+		local.waiting = 0
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p != NULL && isalive local.p ){
+				local.zd = local.p.origin[2] - local.wire[2]
+				if( local.zd < 0 ){ local.zd = 0 - local.zd }
+				if( (vector_length( local.p.origin - local.wire ) < 500) && (local.zd < 160) ){
+					local.waiting = 1
+				}
+			}
+		}
+		if( local.waiting ){ local.dwell++ } else { local.dwell = 0 }
+		if( local.dwell >= 5 ){
+			iprintlnbold "The SAS Agent moves up to the interrogation."
+			level.friendly1.friendtype = -1
+			wait 0.5
+			level.friendly1 runto local.wire		// vector runto -> he WALKS, triggers fire
+			level.friendly1 waittill movedone
+			level.friendly1.friendtype = 4			// resume the native lead
+			local.dwell = 0
+		}
 	}
 }end
 
@@ -599,7 +667,8 @@ osslife:
 	iprintlnbold "The SAS Agent was killed. You failed the mission."
 //	fadeout 3 0 0 0 1
 	wait 3
-	missionfailed
+	// HZM coop
+	if (level.gametype == 0){ missionfailed } else{ exec coop_mod/replace.scr::missionfailed }
 end
 
 setupfriendly:
@@ -1131,7 +1200,7 @@ end
 restartai:{
 //=========================================================================
 	iprintlnbold_noloc ( "this was disabled by chrissstrahl" ) //chrissstrahl - reason: because!
-	end//chrissstrahl
+	end //chrissstrahl
 	
 	local.health = self.health
 	local.playerhealth = $player.health
@@ -1537,6 +1606,14 @@ end
 flagthread6:
 //	self.friendtype = 1
 //	level.flags[playerchoice] = 0
+	//chrissstrahl/coop - the rescue-vs-skip decision relies on a player hitting the $decision1
+	//trigger in time; in MP that's unreliable and the block below falls through to SKIP
+	//(playerchoice 2) whenever the agent isn't within 800u of a player -- so the SAS Agent
+	//bypasses the interrogation room. In coop, force the RESCUE path so the hostage scene runs.
+	if (level.gametype != 0 && level.flags[playerchoice] == -1){
+		level.flags[playerchoice] = 1
+		println "coop: forcing playerchoice 1 (rescue the hostage)"
+	}
 	if (level.flags[playerchoice] == -1)
 	{
 		//if (vector_length (self.origin - $player.origin) > 800) //chrissstrahl
@@ -2454,6 +2531,58 @@ coop_forceGrilloToFollow local.object local.tries:{
 	level.friendly1.friendtype = local.friendtype
 }end
 
+//[coop] chrissstrahl/coop - keep Grillo leading through the officer fight
+//=========================================================================
+// HZM COOP: un-stick Grillo's friendtype-4 lead. The officer boss fight (and
+// OpenMOHAA nav failsafes) can knock him out of his lead loop so he just
+// stands while players move on, deadlocking the flak finale (you never reach
+// the flak to plant explosives, so coop_endingFailsafe never even starts).
+// While he is actively LEADING (friendtype 4), not in combat, and the nearest
+// player has moved beyond his leash without him closing the gap for several
+// seconds, run him to that player (reusing the proven, runto-based
+// coop_forceGrilloToFollow -- NO teleport, so traversal triggers still fire)
+// so the native lead resumes. Hands off once the finale scene is running.
+//=========================================================================
+coop_grilloLeadKeeper:{
+//=========================================================================
+	if( level.friendly1 == NULL ){ end }
+	local.lastpos = level.friendly1.origin
+	local.stuck = 0
+	while( level.friendly1 != NULL && isalive level.friendly1 ){
+		wait 1
+		if( level.flags["flagthread9"] ){ end }		// finale scene running -- hands off
+		if( level.friendly1 == NULL || !(isalive level.friendly1) ){ end }
+
+		local.moved = vector_length( level.friendly1.origin - local.lastpos )
+		local.lastpos = level.friendly1.origin
+
+		// only act while he is actively LEADING and not fighting
+		if( level.friendly1.friendtype != 4 || level.friendly1.thinkstate == "attack" ){
+			local.stuck = 0
+			continue
+		}
+
+		local.player = waitthread coop_mod/replace.scr::player_closestTo level.friendly1
+		if( !(local.player) ){ local.stuck = 0; continue }
+
+		// stranded: even the NEAREST player is past his leash and he isn't closing it
+		local.dist = vector_length( level.friendly1.origin - local.player.origin )
+		if( local.moved < 24 && local.dist > level.friendly1.leashvalue ){
+			local.stuck = local.stuck + 1
+		} else {
+			local.stuck = 0
+		}
+
+		if( local.stuck >= 8 ){
+			if( getcvar(debug) == "1" ){ println "********** coop_grilloLeadKeeper: Grillo stuck while leading - kicking toward player" }
+			waitthread coop_forceGrilloToFollow local.player 3
+			level.thread["coop_forceGrilloToFollow"] = NULL	// clear lock so a later kick can run
+			local.stuck = 0
+			if( level.friendly1 != NULL ){ local.lastpos = level.friendly1.origin }
+		}
+	}
+}end
+
 //[202][hotfix] Smithy - only check for the player that is being followed
 //=========================================================================
 friendchoice2:{
@@ -3075,6 +3204,11 @@ gotexplosives:{
 	level.explosivecount = 20
 	level.flags[explosives] = 1
 
+	//chrissstrahl/coop - FORCED GO-LOUD: grabbing the explosives trips the alarm. Grillo calls
+	//out, a klaxon sounds in the spotlight area, and the vanilla alarm responders (which the coop
+	//spotlight-detect never triggers on its own) pour out of the door spawners at the players.
+	if( level.gametype != 0 ){ thread coop_forceGoLoud }
+
 	thread newobjective
 	waitthread global/objectives.scr::add_objectives 3 3 "Steal explosives from the fortress." $explosive[1].origin
 	waitthread global/objectives.scr::add_objectives 4 2 "Use explosives to escape." $explosives100.origin
@@ -3133,6 +3267,7 @@ spawnenemies:{
 //=========================================================================
 spawnalarmguy:{
 //=========================================================================
+	level.alarm = 1 //chrissstrahl - coop officer go-loud signal (cover blown: alarm responders spawning)
 	local.ent = spawn human/German_afrika_private
 	level.currentenemies++
 
@@ -3158,6 +3293,167 @@ checkenemydeath:{
 //=========================================================================
 	self waittill death
 	level.currentenemies--
+}end
+
+//=========================================================================
+// HZM COOP: forced go-loud after the explosives are taken. The vanilla door
+// responders (spawnalarmguy -> $enemyspawner1/2 -> run at the players) are
+// normally gated behind the spotlight-alarm detection, which doesn't fire in
+// coop. This scripts the alarm ourselves: Grillo shouts, a klaxon sounds at the
+// spotlights, and a burst of responders pours out of the doors. One-shot.
+//=========================================================================
+coop_forceGoLoud:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( level.flags["coop_goLoud"] ){ end }
+	level.flags["coop_goLoud"] = 1
+
+	// make sure the spawn caps exist (spawnenemies may never have set them in coop)
+	if( level.maxenemies == NIL ){
+		if( game.skill == "hard" ){ level.maxenemies = 6 } else { level.maxenemies = 4 }
+	}
+	if( level.currentenemies == NIL ){ level.currentenemies = 0 }
+
+	// On-screen full-alert announcement
+	iprintlnbold "The town has been put on full alert, expect reinforcement waves!"
+
+	// localized klaxon at the spotlight area
+	thread coop_goLoud_alarm
+
+	// Battalion at the authored viewpoint (same spot as the officer-death one), rushing the
+	// players. Vector literal + bare angle are set into locals first (safe), then passed.
+	local.bpos = ( 2926 -485 -62 )
+	local.bang = -148
+	thread coop_mod/officer.scr::coop_spawn_death_battalion local.bpos local.bang ""
+
+	// pour responders out of the door spawners ($enemyspawner1/2) at the players, replenishing
+	// to maxenemies until a total burst has been sent (then the firefight tapers as they die)
+	local.spawned = 0
+	while( local.spawned < 16 ){
+		while( (level.currentenemies < level.maxenemies) && (local.spawned < 16) ){
+			thread spawnalarmguy
+			local.spawned++
+			wait 0.8
+		}
+		wait 4
+	}
+}end
+
+//=========================================================================
+// HZM COOP TUTORIAL: a workable Signal Smoke pickup in the interrogation room, placed when the
+// hostage is reached. Uses the EXACT officer-reward give mechanic (Sentient::giveItem via
+// "player item" - NOT a world Weapon pickup, so the player's German grenade isn't stripped).
+//=========================================================================
+coop_tutorial_smoke:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+
+	local.spos = ( 1950 3035 -432 )
+	// Appear when a player REACHES the hostage room (proximity - reliable; the flags[hostage]
+	// rescue flag doesn't always set in coop, which is why the smoke wasn't spawning).
+	local.near = 0
+	while( local.near == 0 ){
+		wait 0.5
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( $player[local.i] != NULL && isalive $player[local.i] ){
+				if( vector_length( $player[local.i].origin - local.spos ) < 500 ){ local.near = 1 }
+			}
+		}
+	}
+
+	local.vis = spawn script_model
+	local.vis model "models/weapons/coop_smoke_grenade.tik"
+	local.vis.origin = local.spos
+	local.vis droptofloor
+	local.vis.angles = ( 0 -78 0 )
+	local.vis notsolid
+	local.vis rendereffects "+fullbright"
+	local.gpos = local.vis.origin		// settled (floor) position - align glow + trigger to it
+
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.gpos + (0 0 8)
+	local.glow light (1 0.9 0.2)
+	local.glow lightRadius 150
+	local.glow lightOn
+	local.glow notsolid
+	level.coop_tutorial_smoke_beacon = local.glow
+
+	// trigger_USE (press Use to pick up), like the binoculars - not a walk-over trigger_multiple
+	local.trig = spawn trigger_use
+	local.trig.origin = local.gpos
+	local.trig solid
+	local.trig setsize ( -24 -24 0) (24 24 64)
+	thread coop_tutorial_smoke_pickup local.trig local.vis
+}end
+
+//=========================================================================
+coop_tutorial_smoke_pickup local.trig local.vis:{
+//=========================================================================
+	local.trig waittill trigger
+	local.player = parm.other
+	if( local.player == NULL || local.player.classname != "Player" ){ end }
+	if( local.trig == NULL || local.trig.flags["coop_smoke_taken"] == 1 ){ end }
+	local.trig.flags["coop_smoke_taken"] = 1
+	local.trig remove
+	if( local.vis != NULL ){ local.vis delete }
+	local.player item models/weapons/coop_smoke_grenade.tik
+	level.coop_paradrop_armed = 1
+	level.coop_smoke_player = local.player
+	if( level.coop_tutorial_smoke_beacon != NULL ){ level.coop_tutorial_smoke_beacon delete }
+	// Split into short lines - iprintlnbold has no word-wrap; one long string runs off-screen.
+	iprintlnbold "TUTORIAL: Paratroopers can be deployed to the"
+	iprintlnbold "battlefield through Smoke Signals, usually carried"
+	iprintlnbold "by High-Ranking Officers. Deploy by swapping grenade"
+	iprintlnbold "types. Place it in an open area - try the courtyard."
+	thread coop_mod/officer.scr::coop_smoke_hud_show
+	thread coop_mod/officer.scr::coop_smoke_owner_watch local.player	// re-drop on death before use
+}end
+
+//=========================================================================
+// Positional klaxon at the spotlight cluster (~785 2048 200) for the go-loud.
+// 3D loopsound -> audible mainly around the spotlights, not map-wide. Deleting
+// the emitter stops the loop.
+//=========================================================================
+coop_goLoud_alarm:{
+//=========================================================================
+	// MULTIPLE emitters across the alerted zone. A single source back at the spotlights was too
+	// far / in a different PVS from the player at explosives pickup, so it got culled (the sound
+	// + loopsound method are proven fine - same recipe as the audible C-47 + radio loops). Both
+	// spawn doors + the spotlight cluster guarantee one is always near the player, with falloff.
+	local.n = 0
+	if( $enemyspawner1 != NULL ){ local.p = $enemyspawner1.origin + (0 0 32); thread coop_alarm_emitter local.p 0; local.n++ }
+	if( $enemyspawner2 != NULL ){ local.p = $enemyspawner2.origin + (0 0 32); thread coop_alarm_emitter local.p 0; local.n++ }
+	local.p = ( 785 2048 80 )
+	thread coop_alarm_emitter local.p 0
+	local.n++
+	// levelwide bed (PVS-bypass) so a roaming second coop player can never be in a dead spot
+	thread coop_alarm_emitter local.p 1
+	println ("^~^~^ ALARM emitters started: " + local.n + " + levelwide bed")
+}end
+
+//=========================================================================
+// One alarm emitter. Uses dummy.tik: INVISIBLE but has a modelindex, so the entity is networked
+// (a loopsound follows normal PVS rules - it needs a modelindex to be sent, but the model need
+// not be visible). radio_military worked for audio but its model corrupted the opeltruck models;
+// dummy.tik is used all over the mod for light glows with no such issue. NO timeout - the town
+// stays on alert (loops until the level ends / map transition cleans it up).
+//=========================================================================
+coop_alarm_emitter local.pos local.wide:{
+//=========================================================================
+	local.siren = spawn script_model
+	local.siren model "models/fx/dummy.tik"
+	local.siren.origin = local.pos
+	local.siren droptofloor
+	local.siren notsolid
+	if( local.wide == 1 ){
+		// 'levelwide' min-dist (10000) makes the engine send this entity to EVERY client
+		// regardless of PVS -> guarantees every coop player hears it (a quiet, constant bed with
+		// no falloff). The positional emitters below add localized loudness near the sources.
+		local.siren loopsound coop_alarm_siren 0.4 levelwide
+	} else {
+		local.siren loopsound coop_alarm_siren		// full-volume positional with distance falloff
+	}
 }end
 
 //=========================================================================

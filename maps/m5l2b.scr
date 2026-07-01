@@ -5,7 +5,7 @@
 main:{
 //============================================================================
 	level.coop_aaMap = 1					//Pasted by Criminal for coop comp. - let global scripts know this is a AA level
-	level.coop_debugSpawn = 1 				//Pasted by Criminal for coop comp. - enable spawnpoint debug (make visible)
+	level.coop_debugSpawn = 0 				//Pasted by Criminal for coop comp. - enable spawnpoint debug (make visible)
 	waitthread coop_mod/main.scr::main     //Pasted by Criminal for coop comp. - start coop mod extensions
 	
 	//chrissstrahl - prevent ai from crouching and proneing
@@ -39,9 +39,87 @@ main:{
 	level.fastspeed = 300
 	level.slowspeed = 160
 
-	$playertank waitthread global/vehicles_thinkers.scr::players_tank $playertank_trigger
-	$playertank vehiclespeed level.fastspeed
-	level.currently_fast = 1
+	// Vehicle control: SP uses the interactive players_tank thinker (blocking waitthread).
+	// Coop: inline setup replicates only the non-blocking portion of players_tank
+	// (entity scan, level.playertanktarget, removeondeath, turret nodamage, health),
+	// then threads player_tank_health for damage monitoring and optional human boarding,
+	// sets level.coop_playerTank = $playertank so BSP trigger validators and level_end
+	// recognise the tank as the activator, and threads coop_autoDriveTank to move it.
+	if( level.gametype == 0 ){
+		$playertank waitthread global/vehicles_thinkers.scr::players_tank $playertank_trigger
+		$playertank vehiclespeed level.fastspeed
+		level.currently_fast = 1
+	}
+	if( level.gametype != 0 ){
+		// Non-blocking coop tank setup: replicate only the setup portion of
+		// players_tank without the blocking coop_selectDriverForTank loop.
+
+		// --- replicate players_tank setup block (vehicles_thinkers.scr lines 4-48) ---
+
+		// Attach $coop_tankOffset and $coop_tankExit to the cannon subpart if not present.
+		// (Equivalent to the entity-scan loop in players_tank coop block.)
+		level.coop_tankLastDriverTime = -1
+		if( $coop_tankOffset == NULL ){
+			local.maxentities = int(getcvar("maxentities"))
+			local.kcIdx = 0
+			coop_tank_setup_scan:
+			if( local.kcIdx < local.maxentities ){
+				local.kcEnt = getentbyentnum local.kcIdx
+				if( local.kcEnt != NULL ){
+					if( local.kcEnt.model != NIL ){
+						if( local.kcEnt.model == "models/vehicles/kingcannon.tik" ){
+							local.kcEnt attachmodel "statweapons/mg42_bipod_nonstatic.tik" "connect" 1 "coop_tankOffset" 0 -1 -1 -1 -1 (0 -65 10)
+							local.kcEnt attachmodel "statweapons/mg42_bipod_nonstatic.tik" "connect" 1 "coop_tankExit" 0 -1 -1 -1 -1 (25 -10 0)
+							waitframe
+							local.kcIdx = local.maxentities
+						}
+					}
+				}
+				local.kcIdx += 1
+				goto coop_tank_setup_scan
+			}
+		}
+
+		// Hide shadow, set up level.playertanktarget (a script_origin 80 units above the
+		// tank glued to it) so enemy flaks and tanks have a valid aim target.
+		$playertank rendereffects "-shadow"
+		local.tankParent = spawn script_origin
+		local.tankParent.origin = $playertank.origin
+		level.playertanktarget = spawn script_origin
+		level.playertanktarget.origin = ($playertank.origin + (0 0 80))
+		level.playertanktarget bind local.tankParent
+		local.tankParent glue $playertank
+
+		// Make tank persistent and nodamage its turret guns.
+		$playertank removeondeath 0
+		if( $playertank.target ){
+			$playertank.collisionent = $playertank.target
+		}
+		local.tankGun0 = $playertank QueryTurretSlotEntity 0
+		local.tankGun1 = $playertank QueryTurretSlotEntity 1
+		if( local.tankGun0 ){ local.tankGun0 nodamage }
+		if( local.tankGun1 ){ local.tankGun1 nodamage }
+
+		// Give the tank lots of health in coop.
+		// Then start player_tank_health as a background thread: it launches
+		// coop_selectDriverForTank (so players can optionally board), fires
+		// playertank_pain for damage sounds, and waits for tank death to
+		// trigger the mission-failed sequence.
+		$playertank.health = 5000
+		$playertank thread global/vehicles_thinkers.scr::player_tank_health
+
+		// --- end players_tank replication ---
+
+		// Set coop state variables used by the rest of the script.
+		// level.coop_playerTank: compared against parm.other in every BSP trigger
+		// (speedup, slowdown, s2, s9, s10, s15, s20) to validate the tank as the
+		// activator, and checked by level_end to allow only the tank to finish the map.
+		level.coop_playerTank = $playertank
+
+		$playertank vehiclespeed level.fastspeed
+		level.currently_fast = 1
+		thread coop_autoDriveTank
+	}
 
 	local.flaks[0] = $flak88_1
 	local.flaks[1] = $flak88_2
@@ -467,6 +545,35 @@ get_random_entry local.entries:{
 	//println "result: " local.result
 	local.entries[local.entry] = NIL
 }end local.result
+
+
+//chrissstrahl - auto-drives the King Tiger in coop when no human driver is seated
+//The tank drives itself along the BSP-defined waypoint path ($playertank_trigger).
+//level.coop_playerTank is already set to $playertank before this thread starts,
+//so BSP trigger validators (speedup/slowdown/s2/s9/s10/s15/s20) accept the tank
+//as the activator, and level_end accepts the tank touching the finish trigger.
+//If the tank is already being driven by a human (level.coop_playerTank != $playertank),
+//this thread exits and lets the human driver proceed normally.
+//============================================================================
+coop_autoDriveTank:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+
+	// Wait until the level has fully spawned before starting the drive.
+	level waittill spawn
+
+	// If a human took over (level.coop_playerTank was changed by coop_setDriverForTank),
+	// yield control to them and stop auto-driving.
+	if( level.coop_playerTank != $playertank ){ end }
+
+	println "coop_autoDriveTank: starting auto-drive of King Tiger"
+
+	// Drive the tank along its pre-defined waypoint chain at fast speed.
+	// drive_path is defined in this script: self drive path speed 30 200 lookahead
+	$playertank waitthread drive_path $playertank_trigger level.fastspeed
+
+	println "coop_autoDriveTank: King Tiger reached end of path"
+}end
 
 
 //chrissstrahl - executes the actual teleportation of the brothers in arms

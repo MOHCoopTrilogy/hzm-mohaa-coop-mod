@@ -1,0 +1,238 @@
+// HZM Coop - Map Rotation Auto-Tester
+//=========================================================================
+// Purpose: load every coop-integrated map in order, pause on each long
+// enough for load/init console output to flush, then advance to the next.
+// This is a LOAD-TIME smoke test: it surfaces parse errors, failed compiles,
+// missing precache assets, anchor/spawn placement errors and waitForPlayer
+// hangs that all fire during map load + coop init. It does NOT exercise
+// gameplay (officer combat, waves, paradrop) - those need a human playing.
+//
+// Completely gated behind the cvar coop_maptest (default 0 / off), so it has
+// ZERO effect on normal play. Hooked from coop_mod/main.scr::main:
+//     if(getcvar("coop_maptest") == "1"){ thread coop_mod/maptest.scr::coop_maptest_tick }
+//
+// Start it:   exec coop_mod/cfg/maptest_start.cfg   (sets cvars + loads first map)
+// Stop it:    exec coop_mod/cfg/maptest_stop.cfg    (or: seta coop_maptest 0)
+// Tune dwell: seta coop_maptest_dwell <seconds>     (default 20)
+//
+// Greppable banner lines (all start with ^~^~^ so the console monitor catches
+// them and frames each map's output):
+//     ^~^~^ MAPTEST_LOADED <map> (<idx>/<total>)
+//     ^~^~^ MAPTEST_ADVANCE <map> -> <next>
+//     ^~^~^ MAPTEST_COMPLETE
+//     ^~^~^ MAPTEST_PAUSED   (cvar turned off mid-run)
+//
+// If rotation STALLS on a map (no MAPTEST_ADVANCE after the dwell), that map's
+// main.scr aborted before reaching the hook (an early parse/compile error) or
+// never got a player - which is itself the finding. To resume by hand, the
+// next map is printed each tick; just: map <next>
+//=========================================================================
+
+coop_maptest_tick:{
+	// Ensure coop init is done (so level.coop_mapname is set) before we read it.
+	waitthread coop_mod/main.scr::waitForMainScript
+
+	// Re-confirm we are actually meant to be running (cvar may have been cleared).
+	if( getcvar( "coop_maptest" ) != "1" ){
+		end
+	}
+
+	// Wait for a connected player - coop must be active for the transition to work.
+	// We advance with the coop mod's own server-side mission transition
+	// (exec global/missioncomplete.scr <next> -> bsptransition), NOT map/devmap/ui_startdmmap:
+	// devmap loads single-player (Continue screen), "map" didn't change the running coop
+	// server, and ui_startdmmap only works from the menu. missioncomplete keeps coop mode.
+	local.guard = 0
+	while( $player.size < 1 ){
+		wait 1
+		local.guard = local.guard + 1
+		if( local.guard > 120 ){
+			// No player after 2 minutes - give up quietly so we don't spin forever.
+			println "^~^~^ MAPTEST_PAUSED no player connected"
+			end
+		}
+	}
+
+	// ----- ordered list of coop-integrated maps -----
+	local.maps = waitthread coop_maptest_list
+
+	// current map name (fall back to the mapname cvar if the coop var is unset)
+	local.cur = level.coop_mapname
+	if( local.cur == NIL || local.cur == "" ){
+		local.cur = getcvar( "mapname" )
+	}
+
+	// find current map in the list and pick the next one
+	local.next = ""
+	local.idx = 0
+	for( local.i = 1; local.i <= local.maps.size; local.i++ ){
+		if( local.maps[local.i] == local.cur ){
+			local.idx = local.i
+			if( local.i < local.maps.size ){
+				local.next = local.maps[local.i + 1]
+			}
+		}
+	}
+
+	println( "^~^~^ MAPTEST_LOADED " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+	iprintlnbold( "MAPTEST: " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
+
+	// end of list (or map not found) -> stop here
+	if( local.next == "" ){
+		println "^~^~^ MAPTEST_COMPLETE"
+		iprintlnbold "MAPTEST COMPLETE"
+		end
+	}
+
+	// expose the next map name for reference (manual advance = set ui_dmmap <name>;
+	// exec coop_mod/start_server.cfg)
+	$player[1] stufftext ( "seta coop_maptest_skip " + local.next )
+
+	// dwell - long enough for init + console flush; clamp to something sane
+	local.dwell = int( getcvar( "coop_maptest_dwell" ) )
+	if( local.dwell < 5 ){
+		local.dwell = 20
+	}
+	wait local.dwell
+
+	// allow a mid-run stop
+	if( getcvar( "coop_maptest" ) != "1" ){
+		println "^~^~^ MAPTEST_PAUSED"
+		end
+	}
+	if( $player.size < 1 ){
+		println "^~^~^ MAPTEST_PAUSED no player"
+		end
+	}
+
+	// Phase boundary: restart server every N maps to prevent cumulative gamestate overflow.
+	// Configstrings accumulate across map transitions; after ~20-24 maps the gamestate
+	// packet can overflow (Issue #16).  With the MAX_MSGLEN=131072 engine fix (Issue #14)
+	// the overflow no longer occurs, so coop_maptest_batch can be set to 999 to skip all
+	// phase ends for a full-rotation audit.  Default 5 for conservative single-player test.
+	local.batch_limit = int( getcvar( "coop_maptest_batch" ) )
+	if( local.batch_limit < 1 ){ local.batch_limit = 5 }
+	if( int( local.idx / local.batch_limit ) * local.batch_limit == local.idx ){
+		println( "^~^~^ MAPTEST_PHASE_END " + local.next )
+		iprintlnbold( "MAPTEST PHASE END " + local.idx + ": restart for " + local.next )
+		end
+	}
+
+	println( "^~^~^ MAPTEST_ADVANCE " + local.cur + " -> " + local.next )
+	waitthread coop_maptest_transition local.next
+}end
+
+
+//=========================================================================
+// Clean server-side transition to an arbitrary coop map.
+//
+// We change maps with the RAW console command  map <next>  (issued via the
+// server-side script builtin "stuffsrv"), NOT leveltransition/bsptransition/
+// the script "map" command. Reason:
+//   leveltransition, bsptransition AND the script "map" command all funnel
+//   through G_BeginIntermission -> G_ExitLevel, which ALWAYS emits
+//   gamemap "<next>" (g_main.cpp:1959/1964). gamemap -> SV_GameMap_f sets
+//   bTransition = (sv.state == SS_GAME) which is TRUE on a running coop server,
+//   so it runs SV_ArchivePersistantFile (write then read). The read happens
+//   AFTER the next map's coop main.scr has populated game.Vars(), and the
+//   persistant-data restore then crashes silently (no Com_Error -> nothing
+//   logged) -- this was the m1l1->m1l2a crash.
+//   The raw console "map" command -> SV_Map_f -> SV_SpawnServer(..., qfalse):
+//   bTransition is hardcoded false, so NO archive is touched and there is no
+//   crash. Coop is preserved because "map" (unlike "spmap"/"spdevmap") does
+//   NOT force g_gametype to single-player, and the next map re-runs coop init.
+//=========================================================================
+coop_maptest_transition local.next:{
+	// g_scriptcheck must be OFF: on a map load the engine (g_main.cpp::G_ArchivePersistant)
+	// finds coop's game.* script vars non-empty and, if g_scriptcheck is on, Com_Error(ERR_DROP)
+	// "game variables being cleared" -> the server drops (looks like a crash). With it off it
+	// just clears them and continues. Force it off every transition in case something re-enables it.
+	setcvar "g_scriptcheck" "0"
+	exec coop_mod/replace.scr::stopwatch 0
+	setcvar "coop_prevMapList" ( getcvar "sv_maplist" )
+	setcvar "sv_maplist" ""
+	// Stop any pending coop gametype flip so it can't race the restart.
+	level.coop_preventGameTypeChanges = game.true
+	if( level.coop_changeGameTypeThread ){
+		level.coop_changeGameTypeThread end
+	}
+	game.loadout = false
+	// Raw console map change: SV_Map_f, no SV_ArchivePersistantFile, no crash.
+	stuffsrv ( "map " + local.next )
+}end
+
+
+//=========================================================================
+// The ordered rotation list. Only coop-integrated maps that run
+// coop_mod/main.scr::main (so this tick actually fires and can advance).
+// Vehicle / cinematic t-maps that aren't integrated are intentionally absent.
+//=========================================================================
+coop_maptest_list:{
+	// AA m-series (baseline first)
+	local.m[1]  = "m4l3"
+	local.m[2]  = "m1l1"
+	local.m[3]  = "m1l2a"
+	local.m[4]  = "m1l2b"
+	local.m[5]  = "m1l3a"
+	local.m[6]  = "m1l3b"
+	local.m[7]  = "m1l3c"
+	local.m[8]  = "m2l1"
+	local.m[9]  = "m2l2a"
+	local.m[10] = "m2l2b"
+	local.m[11] = "m2l2c"
+	local.m[12] = "m2l3"
+	local.m[13] = "m3l1a"
+	local.m[14] = "m3l1b"
+	local.m[15] = "m3l2"	// re-added: issue#9 fix deployed (new_generic_human.tik m3l2 force-load block)
+	local.m[16] = "m3l3"
+	local.m[17] = "m4l0"
+	local.m[18] = "m4l1"
+	local.m[19] = "m4l2"
+	local.m[20] = "m5l1a"
+	local.m[21] = "m5l1b"
+	local.m[22] = "m5l2a"
+	// m5l2b re-added: Issue #14 engine fix deployed (MAX_MSGLEN=131072 in rebuilt openmohaa.exe);
+	// same basis as m6l1c re-add. Was skipped for "vehicle-heavy BSP exceeds MAX_MSGLEN (49152)".
+	// Single linear coop_autoDriveTank scene; touring via its 4 $enemyspawner markers.
+	local.m[23] = "m5l2b"
+	local.m[24] = "m5l3"
+	local.m[25] = "m6l1a"
+	local.m[26] = "m6l1b"
+	// m6l1c re-added: Issue #14 engine fix deployed (MAX_MSGLEN=131072 in rebuilt openmohaa.exe)
+	local.m[27] = "m6l1c"
+	local.m[28] = "m6l2a"
+	local.m[29] = "m6l2b"
+	local.m[30] = "m6l3a"	// PHASE_END fires here (idx=30, batch_limit=5)
+	local.m[31] = "m6l3b"
+	local.m[32] = "m6l3c"
+	local.m[33] = "m6l3d"
+	local.m[34] = "m6l3e"
+	// Spearhead e-series
+	local.m[35] = "e1l1"	// PHASE_END fires here (idx=35)
+	local.m[36] = "e1l2"
+	local.m[37] = "e1l3"
+	local.m[38] = "e1l4"
+	local.m[39] = "e2l1"
+	local.m[40] = "e2l2"	// PHASE_END fires here (idx=40)
+	local.m[41] = "e2l3"
+	local.m[42] = "e3l1"
+	local.m[43] = "e3l2"
+	local.m[44] = "e3l3"	// Issue #18 fixed: VehicleBase actor-key no-ops + OpenSlotsByModel NULL guard (game.dll 2026-06-25)
+	local.m[45] = "e3l4"	// PHASE_END fires here (idx=45, batch_limit=5)
+	// Spearhead t-series. Their BSPs live in mainta/pak1.pk3 (Spearhead paks) which mount only under
+	// com_target_game=1, so they CANNOT be toured in the same session as the m/e Breakthrough rotation
+	// (com_target_game=2). Launch them with the dedicated Spearhead profile:
+	//   coop_mod/cfg/maptest_start_sh.cfg + com_target_game 1 (see spearhead_test_setup.md).
+	// Listed here so the next-map / coop_maptest_transition logic resolves them in that profile.
+	local.m[46] = "t1l1"
+	local.m[47] = "t1l2"
+	local.m[48] = "t1l3"
+	local.m[49] = "t2l1"
+	local.m[50] = "t2l2"	// PHASE_END fires here (idx=50)
+	local.m[51] = "t2l3"
+	local.m[52] = "t2l4"
+	local.m[53] = "t3l1"
+	local.m[54] = "t3l2"
+
+	end local.m
+}end

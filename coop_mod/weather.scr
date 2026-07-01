@@ -1,0 +1,259 @@
+//=========================================================================
+// HZM coop - DYNAMIC WEATHER (v1): random rain / snow storms that build, hold, and clear, theme-gated per
+// map. Drives the engine's level.rain_* precipitation, which CG_RainGlobal (cgame) renders in a box around
+// each player AND sky-gates per column (SURF_SKY up-trace) - so it works on maps with no rain brush and
+// never falls into interiors / under roofs. Threaded once per map from main.scr::main (lazy: the cycle
+// waits before it does anything, so it never fights map init).
+//
+//   coop_dynWeather 1/0               = master on/off
+//   coop_weatherForce ""/rain/snow/off = OVERRIDE the per-map theme (set "rain" to test on any map)
+//   coop_weatherStartStorm 1          = open straight into a storm (testing; skips the first clear wait)
+//   coop_dynWeatherChance 0.6         = chance a clear period turns into a storm
+//   coop_dynWeatherClearMin/Max       = seconds of clear weather between storms
+//   coop_dynWeatherStormMin/Max       = seconds a storm holds at full intensity
+//   coop_dynWeatherMax 0.45           = peak rain density
+//   coop_dynWeatherThunder 1          = thunder rumble during rain storms
+//
+// Theme is decided by (1) coop_weatherForce override, else (2) level.coop_weatherTheme if a map set it,
+// else "none" (no weather). So weather only appears where it's been explicitly classified - rain never on
+// snow maps, snow never elsewhere, nothing on desert/indoor maps.
+//=========================================================================
+
+coop_weather_init:{
+	if( int( getcvar "coop_dynWeather" ) != 1 ){ end }
+	level.coop_weatherActive   = 0
+	level.coop_weatherStorming = 0	// 1 only during a build->hold->fade storm; gates dynamics + sound loops
+	level.coop_rainSndEnt      = NULL	// lazily-spawned levelwide rain-ambience emitter
+	level.rain_density     = 0
+	level.coop_rainDensity = 0	// readable density mirror (see coop_weather_ramp)
+	thread coop_weather_watch
+}end
+
+//=========================================================================
+// Re-checks the theme LIVE every few seconds, so setting coop_weatherForce in the console takes effect
+// without a map reload (the old one-shot read meant a console change after map load did nothing). Starts
+// the storm cycle when a theme turns on, stops it (clears rain) when it turns off.
+coop_weather_watch:{
+	while( 1 ){
+		local.theme = waitthread coop_weather_theme
+		if( local.theme == "none" ){
+			if( level.coop_weatherActive != 0 ){
+				level.coop_weatherActive   = 0
+				level.coop_weatherStorming = 0
+				level.rain_density     = 0
+				level.coop_rainDensity = 0
+				println( "^~^~^ WEATHER off" )
+			}
+		} else {
+			if( level.coop_weatherActive != 1 ){
+				level.coop_weatherActive = 1
+				waitthread coop_weather_setProfile local.theme	// baseline look (static shader + safe defaults)
+				thread coop_weather_cycle local.theme
+				println( "^~^~^ WEATHER on theme=" + local.theme )
+			}
+		}
+		wait 3
+	}
+}end
+
+//=========================================================================
+coop_weather_theme:{
+	local.f = getcvar "coop_weatherForce"
+	if( local.f == "rain" ){ end "rain" }
+	if( local.f == "snow" ){ end "snow" }
+	if( local.f == "off" ){ end "none" }
+
+	if( level.coop_weatherTheme == "rain" ){ end "rain" }
+	if( level.coop_weatherTheme == "snow" ){ end "snow" }
+	end "none"
+}end
+
+//=========================================================================
+// BASELINE precip look per theme (set once when a theme turns on). The engine's own rain defaults are
+// speed 2048 / length 90 (cg_nature.cpp) - FAST, LONG, near-vertical streaks; snow is the opposite (slow,
+// short, fat, drifting). This just seeds safe starting values + the shader; while a storm is actually
+// falling, coop_weather_dynamics CONTINUOUSLY varies speed/slant/length/width (gusts + intensity scaling)
+// off the same cvars, so the rain is never uniform. Tune the cvars live - dynamics picks them up each gust.
+coop_weather_setProfile local.theme:{
+	level.rain_numshaders = 0
+	level.rain_min_dist   = 1400
+
+	if( local.theme == "snow" ){
+		level.rain_speed      = waitthread coop_weather_cvar "coop_snowSpeed"     150
+		level.rain_speed_vary = waitthread coop_weather_cvar "coop_snowSpeedVary" 60
+		level.rain_slant      = waitthread coop_weather_cvar "coop_snowSlant"     20
+		level.rain_length     = waitthread coop_weather_cvar "coop_snowLength"    5
+		level.rain_width      = waitthread coop_weather_cvar "coop_snowWidth"     3
+		level.rain_shader     = "textures/coop_snow"
+	} else {
+		level.rain_speed      = waitthread coop_weather_cvar "coop_rainSpeed"     2048
+		level.rain_speed_vary = waitthread coop_weather_cvar "coop_rainSpeedVary" 400
+		level.rain_slant      = waitthread coop_weather_cvar "coop_rainSlant"     80
+		level.rain_length     = waitthread coop_weather_cvar "coop_rainLength"    80
+		level.rain_width      = waitthread coop_weather_cvar "coop_rainWidth"     1
+		level.rain_shader     = "textures/coop_rain"
+	}
+}end
+
+//=========================================================================
+// Read a cvar as a float, falling back to local.def when it's missing/empty/<=0 (so an unregistered cvar
+// never zeroes out the look). Used by the precip profile so the values are live-tunable from console.
+coop_weather_cvar local.name local.def:{
+	local.v = getcvar local.name
+	if( local.v == "" ){ end local.def }
+	local.v = float( local.v )
+	if( local.v <= 0 ){ end local.def }
+	end local.v
+}end
+
+//=========================================================================
+coop_weather_cycle local.theme:{
+	local.maxd = float( getcvar "coop_dynWeatherMax" )
+	if( local.maxd <= 0 ){ local.maxd = 0.45 }
+
+	local.first = 1
+	while( level.coop_weatherActive == 1 ){
+		// CLEAR period (skipped on the very first pass if coop_weatherStartStorm is set, for testing)
+		if( local.first == 1 && int( getcvar "coop_weatherStartStorm" ) == 1 ){
+			local.first = 0
+		} else {
+			local.first = 0
+			level.rain_density     = 0
+			level.coop_rainDensity = 0
+
+			local.cmin = float( getcvar "coop_dynWeatherClearMin" )
+			if( local.cmin < 5 ){ local.cmin = 180 }
+			local.cmax = float( getcvar "coop_dynWeatherClearMax" )
+			if( local.cmax < local.cmin ){ local.cmax = local.cmin + 180 }
+			wait ( local.cmin + randomfloat( local.cmax - local.cmin ) )
+			if( level.coop_weatherActive != 1 ){ break }
+
+			local.chance = float( getcvar "coop_dynWeatherChance" )
+			if( local.chance <= 0 ){ local.chance = 0.6 }
+			if( randomfloat( 1 ) > local.chance ){ continue }
+		}
+
+		// BUILD -> STORM -> FADE
+		println( "^~^~^ WEATHER storm start (theme=" + local.theme + " peak=" + local.maxd + ")" )
+		level.coop_weatherStorming = 1
+		thread coop_weather_dynamics local.theme local.maxd	// live-vary speed/slant/length/width (gusts)
+		thread coop_weather_sound    local.theme local.maxd	// rain/wind loop, volume tracks density
+		waitthread coop_weather_ramp 0 local.maxd 18
+
+		if( local.theme == "rain" && int( getcvar "coop_dynWeatherThunder" ) == 1 ){
+			thread coop_weather_thunder
+		}
+
+		local.smin = float( getcvar "coop_dynWeatherStormMin" )
+		if( local.smin < 5 ){ local.smin = 70 }
+		local.smax = float( getcvar "coop_dynWeatherStormMax" )
+		if( local.smax < local.smin ){ local.smax = local.smin + 150 }
+		wait ( local.smin + randomfloat( local.smax - local.smin ) )
+
+		waitthread coop_weather_ramp local.maxd 0 14
+		level.coop_weatherStorming = 0	// ends the dynamics + sound loops (they fade/stop themselves)
+		level.thunder = 0
+	}
+	level.coop_weatherStorming = 0
+	level.rain_density     = 0	// stopped (weather turned off) -> ensure clear
+	level.coop_rainDensity = 0
+}end
+
+//=========================================================================
+coop_weather_ramp local.from local.to local.dur:{
+	local.steps = 20
+	local.i = 0
+	while( local.i <= local.steps ){
+		local.d = local.from + ( local.to - local.from ) * local.i / local.steps
+		level.rain_density    = local.d
+		level.coop_rainDensity = local.d	// readable mirror (level.rain_density is a write-only engine prop)
+		wait ( local.dur / local.steps )
+		local.i++
+	}
+	level.rain_density    = local.to
+	level.coop_rainDensity = local.to
+}end
+
+//=========================================================================
+// Thunder rumble while a rain storm holds (sound only in v1; visual lightning flash is v2). Plays the base
+// "thunder" alias to the connected players at random intervals; stops when the storm fades out.
+coop_weather_thunder:{
+	level.thunder = 1
+	while( level.coop_rainDensity > 0.05 ){
+		wait ( 6 + randomfloat( 16 ) )
+		if( level.coop_rainDensity > 0.05 && $player != NULL ){
+			$player playsound thunder
+		}
+	}
+}end
+
+//=========================================================================
+// DYNAMIC look: while a storm falls, continuously re-vary the streak speed / slant / length / width so the
+// rain is never uniform. Two layers of variation: (1) INTENSITY - heavier rain (higher density) = longer +
+// faster + more driving streaks; (2) GUSTS - a random multiplier each step so no two moments look alike.
+// Reads the same coop_rain*/coop_snow* cvars as the baseline, so live console edits flow straight in.
+coop_weather_dynamics local.theme local.peak:{
+	if( local.peak <= 0 ){ local.peak = 0.45 }
+
+	while( level.coop_weatherStorming == 1 && level.coop_weatherActive == 1 ){
+		if( local.theme == "snow" ){
+			local.baseLen   = waitthread coop_weather_cvar "coop_snowLength" 5
+			local.baseSpd   = waitthread coop_weather_cvar "coop_snowSpeed"  150
+			local.baseSlant = waitthread coop_weather_cvar "coop_snowSlant"  20
+			local.baseW     = waitthread coop_weather_cvar "coop_snowWidth"  3
+		} else {
+			local.baseLen   = waitthread coop_weather_cvar "coop_rainLength" 80
+			local.baseSpd   = waitthread coop_weather_cvar "coop_rainSpeed"  2048
+			local.baseSlant = waitthread coop_weather_cvar "coop_rainSlant"  80
+			local.baseW     = waitthread coop_weather_cvar "coop_rainWidth"  1
+		}
+
+		local.dfrac = level.coop_rainDensity / local.peak	// 0 (clear) .. 1 (peak downpour)
+		if( local.dfrac > 1 ){ local.dfrac = 1 }
+		if( local.dfrac < 0 ){ local.dfrac = 0 }
+		local.dscale = 0.55 + local.dfrac * 0.6		// 0.55 drizzle .. 1.15 downpour
+
+		local.gust = 0.7 + randomfloat( 0.6 )		// 0.7 .. 1.3, re-rolled each step
+
+		// length + speed both vary AROUND the base (gust) AND scale with intensity (downpour = longer/faster);
+		// slant gusts side to side. Wide ranges on purpose so it visibly reads as "different degrees".
+		level.rain_length = local.baseLen   * local.dscale * local.gust
+		level.rain_speed  = local.baseSpd   * ( 0.75 + local.dfrac * 0.35 ) * local.gust
+		level.rain_slant  = local.baseSlant * local.gust
+		level.rain_width  = local.baseW
+
+		wait ( 1.2 + randomfloat( 2.8 ) )		// re-gust every ~1.2-4.0s
+	}
+}end
+
+//=========================================================================
+// RAIN AMBIENCE: a level-wide looping rain hiss (reusing the ship's Amb_t3l1_RainExt track via the
+// coop_rain_ext alias) whose volume tracks storm intensity, so it fades up as the rain builds and out as it
+// clears. Played on a single position-independent emitter ("levelwide" loops ignore the emitter's origin).
+// Rain only (snow is silent for now). coop_rainVolume = peak loudness.
+coop_weather_sound local.theme local.peak:{
+	if( local.theme != "rain" ){ end }
+	if( local.peak <= 0 ){ local.peak = 0.45 }
+
+	if( level.coop_rainSndEnt == NULL ){
+		level.coop_rainSndEnt = spawn script_model
+		level.coop_rainSndEnt model "fx/dummy.tik"
+		level.coop_rainSndEnt notsolid
+	}
+
+	local.maxvol = float( getcvar "coop_rainVolume" )
+	if( local.maxvol <= 0 ){ local.maxvol = 0.85 }
+
+	while( level.coop_weatherStorming == 1 && level.coop_weatherActive == 1 ){
+		local.dfrac = level.coop_rainDensity / local.peak
+		if( local.dfrac > 1 ){ local.dfrac = 1 }
+		if( local.dfrac < 0 ){ local.dfrac = 0 }
+		local.vol = 0.12 + local.dfrac * local.maxvol		// faint at drizzle, full in a downpour
+		level.coop_rainSndEnt loopsound coop_rain_ext local.vol "levelwide"
+		wait 1.5
+	}
+
+	if( level.coop_rainSndEnt != NULL ){
+		level.coop_rainSndEnt stoploopsound
+	}
+}end
