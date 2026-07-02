@@ -19,6 +19,13 @@
 	//(handled by coop_playerSpawned). Same override m1l3a/m1l3b use.
 	level.coop_dbno_disabled = 1
 
+	//HZM coop: vehicle-ride map - remove the deployable sandbag cover + ammo box (no HUD, no deploy). Riders
+	//are on scripted rails, so placing barricades/ammo boxes makes no sense here. Gated in player.scr/cover.scr/ammobox.scr.
+	level.coop_noDeployables = 1
+
+	//HZM coop: vehicle-ride map - also remove the health-pack (medkit) system (no HUD, no use action, no grant).
+	level.coop_noMedkit = 1
+
 	level waittill prespawn
 	fadeout .1 0 0 0 1
 
@@ -181,7 +188,7 @@
 	
 	
 	//dprintln "*****Running truck thread"
-	$s1_truck1 thread global/vehicles_thinkers.scr::enemy_truck_think 2000 3 NIL NIL NIL "models/human/2nd-ranger_captain_snow.tik" 
+	$s1_truck1 thread global/vehicles_thinkers.scr::enemy_truck_think 10000 3 NIL NIL NIL "models/human/2nd-ranger_captain_snow.tik" 		//HZM coop: truck HP 2000->10000 (matches halftrack) so the ride survives the reinforcement firefights
 
 	$s1_truck1 vehicleanim idlenolights
 	$s1_truck1 vehicleanim cargo
@@ -756,7 +763,7 @@ coop_seatShield local.lo local.hi:
 		local.p = $player[local.i]
 		if( local.p != NULL && local.p.flags["coop_seatIdx"] != NIL ){
 			local.s = local.p.flags["coop_seatIdx"]
-			if( local.s >= local.lo && local.s <= local.hi ){ local.p notsolid }
+			if( local.s >= local.lo && local.s <= local.hi ){ local.p solid }
 		}
 	}
 	thread coop_seatUnshield local.lo local.hi
@@ -771,11 +778,12 @@ coop_seatUnshield local.lo local.hi:
 			local.p = $player[local.i]
 			if( local.p != NULL && local.p.flags["coop_seatIdx"] != NIL && local.p.health > 0 ){
 				local.s = local.p.flags["coop_seatIdx"]
-				if( local.s >= local.lo && local.s <= local.hi ){ local.p notsolid }
+				if( local.s >= local.lo && local.s <= local.hi ){ local.p solid }
 			}
 		}
 	}
 end
+
 
 //////////////////////////////////TRUCK DRIVING////////////////////////////////////////////
 truckdrive:
@@ -1109,10 +1117,95 @@ coop_setup:
 	local.t0 = level.playerjeep queryturretslotentity 0
 	if( local.t0 != NULL ){ local.t0.targetname = "s1_jeep1_turret0" }
 	thread coop_playerSpawned
+	//HZM coop - RIDE REINFORCEMENTS: spawn hand-placed enemy groups as the vehicles drive past their spots.
+	thread coop_t2l2_reinforce
 	//re-seat on every (re)spawn so respawners land back in THEIR seat + late joiners get one
 	while (1){
 		level waittill playerspawn
 		thread coop_playerSpawned
+	}
+end
+
+//=========================================================================
+// HZM coop - RIDE REINFORCEMENTS (t2l2): spawn 2-3 German troopers at hand-placed spots (level-designer
+// viewpos marks) to keep the truck/halftrack riders engaged along the route. Each group spawns the FIRST
+// time a ride vehicle drives within local.radius of that spot (fresh, not idle-killed from afar), then
+// behaves like every other coop german via coop_spawnReplica: droptofloor (so the standing eye-height Z is
+// snapped to the terrain) + german + forceactivate + attackplayer + cover/personality. Model/gun/health are
+// copied from a LIVE map german so the reinforcements match the map's own enemies exactly (fallback baked in).
+// Disable with coop_t2l2_reinf 0.
+//=========================================================================
+coop_t2l2_reinforce:
+	if( getcvar( "coop_t2l2_reinf" ) == "0" ){ end }
+	level.coop_reinfOrg[1]  = ( -2757 5052 1713 )		level.coop_reinfYaw[1]  = 205
+	level.coop_reinfOrg[2]  = ( -4865 5709 1601 )		level.coop_reinfYaw[2]  = 318
+	level.coop_reinfOrg[3]  = ( -2198 6852 1848 )		level.coop_reinfYaw[3]  = 337
+	level.coop_reinfOrg[4]  = ( -6253 361 1396 )		level.coop_reinfYaw[4]  = 59
+	level.coop_reinfOrg[5]  = ( -4523 1386 1279 )		level.coop_reinfYaw[5]  = 17
+	level.coop_reinfOrg[6]  = ( -2833 -942 1265 )		level.coop_reinfYaw[6]  = 102
+	level.coop_reinfOrg[7]  = ( -4190 3392 1922 )		level.coop_reinfYaw[7]  = 145
+	level.coop_reinfOrg[8]  = ( -556 6635 1919 )		level.coop_reinfYaw[8]  = 270
+	level.coop_reinfOrg[9]  = ( -4260 -54 1314 )		level.coop_reinfYaw[9]  = 178
+	level.coop_reinfOrg[10] = ( -4173 4107 1583 )		level.coop_reinfYaw[10] = 135
+	level.coop_reinfOrg[11] = ( -5310 5355 1637 )		level.coop_reinfYaw[11] = 350
+	level.coop_reinfOrg[12] = ( -1809 5011 1922 )		level.coop_reinfYaw[12] = 36
+	level.coop_reinfOrg[13] = ( 922 5976 1930 )			level.coop_reinfYaw[13] = 233
+	level.coop_reinfCount = 13
+	local.radius = 2200
+	while( 1 ){
+		local.veh = level.truck
+		if( local.veh == NULL ){ local.veh = level.playerjeep }
+		if( local.veh != NULL ){
+			local.i = 1
+			while( local.i <= level.coop_reinfCount ){
+				if( level.coop_reinfDone[local.i] != 1 ){
+					local.delta = local.veh.origin - level.coop_reinfOrg[local.i]
+					local.d = vector_length( local.delta )
+					if( local.d < local.radius ){
+						level.coop_reinfDone[local.i] = 1
+						local.extra = randomint 2
+						local.n = local.extra + 2
+						thread coop_t2l2_spawnGroup level.coop_reinfOrg[local.i] level.coop_reinfYaw[local.i] local.n
+					}
+				}
+				local.i++
+			}
+		}
+		wait 0.5
+	}
+end
+
+//=========================================================================
+coop_t2l2_spawnGroup local.origin local.yaw local.count:
+	//copy a live map german's MODEL + health so the reinforcements LOOK like the map's own enemies. The GUN
+	//is NOT copied (a copied AT trooper could bring a panzerschreck that one-shots the vehicle/riders); each
+	//gets a standard German rifle/SMG instead - see the per-spawn loadout below.
+	local.model = NIL
+	local.health = 100
+	local.arr = level.coop_actorArray[ "german" ]
+	if( local.arr != NIL ){
+		local.k = 1
+		while( local.k <= local.arr.size ){
+			local.ref = local.arr[local.k]
+			if( local.ref != NULL && isAlive local.ref && local.ref.model != NIL ){
+				local.model = local.ref.model
+				local.rh = local.ref.flags["coop_actorActualHealth"]
+				if( local.rh != NIL && local.rh > 0 && local.rh < 1000 ){ local.health = local.rh }
+				local.k = local.arr.size + 1
+			}
+			local.k++
+		}
+	}
+	if( local.model == NIL ){ local.model = "models/human/german_waffenss_shutze.tik" }
+	local.ang = ( 0 local.yaw 0 )
+	local.j = 0
+	while( local.j < local.count ){
+		//NO panzerschrecks on our spawns - each gets a standard German rifle or SMG (mix of Kar98 / MP40)
+		local.g = "mp40"
+		if( (randomint 2) == 0 ){ local.g = "mauser kar 98k" }
+		thread coop_mod/aihandler.scr::coop_spawnReplica local.model local.g NIL local.health local.origin local.ang local.j
+		local.j++
+		wait 0.15
 	}
 end
 
@@ -1268,7 +1361,32 @@ coop_playerSpawned:
 	for( local.i = 1; local.i <= $player.size; local.i++ ){
 		local.player = $player[local.i]
 		if( !isAlive local.player || local.player.isSpectator ){ continue }
+		//HZM coop DEBUG: coop_dbgNoSeat 1 spawns the HOST unseated (free) for level design - skip seating so a
+		//normal `noclip` flies. Workflow: set coop_dbgNoSeat 1 ; kill -> respawn free -> noclip -> viewpos. Set 0 + kill to ride again.
+		if( local.player == $player[1] && getcvar("coop_dbgNoSeat") == "1" ){ continue }
 		local.player notsolid
+		//HZM coop TEST: coop_dbgForceSeat N RE-SEATS the host to seat N on EVERY (re)spawn, so you can cycle
+		//seats live: set the cvar in console, then die to respawn into that seat. Releases the old seat/cannon
+		//first. 0 = normal (lowest-free below). Applies to the host ($player[1]) only.
+		if( local.player == $player[1] ){
+			local.forced = int( getcvar("coop_dbgForceSeat") )
+			if( local.forced >= 1 && local.forced <= level.coop_seatCount && local.player.flags["coop_seatIdx"] != local.forced ){
+				if( local.player.flags["coop_inJeep"] ){
+					local.vt = level.playerjeep queryturretslotentity 0
+					if( local.vt != NULL ){
+						local.vt unlock
+						level.playerjeep attachturretslot 0 local.player
+						local.vt lock
+					}
+					local.player.flags["coop_inJeep"] = NIL
+				}
+				local.player unglue
+				local.old = local.player.flags["coop_seatIdx"]
+				if( local.old != NIL ){ level.coop_seatTaken[local.old] = NIL }
+				level.coop_seatTaken[local.forced] = local.player
+				local.player.flags["coop_seatIdx"] = local.forced
+			}
+		}
 		//assign a PERSISTENT seat if this player has none yet (lowest free seat; seat 1 = cannon to first claimer)
 		if( local.player.flags["coop_seatIdx"] == NIL ){
 			for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
@@ -1306,7 +1424,15 @@ coop_playerSpawned:
 				local.player origin local.attach.origin
 				local.player.velocity = local.attach.velocity
 				local.player duckableglue local.attach
-				local.player notsolid		//HZM coop: riders stay NOTSOLID (protected cargo). Solid riders die to ride/world physics while glued to a fast scripted vehicle - reverted.
+				//HZM coop TEST: coop_riderSolid gates rider solidity to isolate whether the truck stutter is
+					//collision-related. 1 (default) = SOLID (riders take enemy bullet/explosion damage; ride/crush
+					//handled engine-side). 0 = NOTSOLID (protected cargo). Flip live: set coop_riderSolid 0/1 then respawn.
+					if( getcvar("coop_riderSolid") == "0" ){
+						local.player notsolid
+					}
+					else{
+						local.player solid
+					}
 			}else{
 				println ("^~^~^ T2L2 seat" + local.seat + ": dummy playerAttach" + local.seat + " missing")
 			}
@@ -1354,9 +1480,9 @@ coop_giveAmmo:
 		for(local.i=1;local.i <= $player.size;local.i++){
 			local.player = $player[local.i]
 			if( local.player != NULL && local.player.dmteam != "spectator" && local.player.health > 0 ){
-				local.player ammo rifle 100
+				local.player ammo rifle 120
 				local.player ammo mg 100
-				local.player ammo smg 100
+				local.player ammo smg 320		//HZM coop: ~10 mags of MP40 (32/mag) on the ride
 				local.player ammo pistol 100
 				local.player ammo heavy 100
 				local.player ammo grenade 100
@@ -1370,12 +1496,12 @@ end
 coop_playerJustSpawned:
 	local.player = parm.other
 	if( local.player == NULL || local.player.targetname == "world" ){ end }
-	local.player.flags["coop_medkits"] = 3		//HZM coop - t2l2: start every player with 3 usable health packs
+	local.player.flags["coop_medkits"] = 0		//HZM coop - t2l2: medkit system removed on this ride map (level.coop_noMedkit)
 end
 
 coop_playerJustRespawned:
 	local.player = parm.other
 	if( local.player == NULL || local.player.targetname == "world" ){ end }
-	local.player.flags["coop_medkits"] = 3		//HZM coop - t2l2: refill to 3 health packs on respawn
+	local.player.flags["coop_medkits"] = 0		//HZM coop - t2l2: medkit system removed on this ride map (level.coop_noMedkit)
 end
 
