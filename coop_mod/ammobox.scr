@@ -1,9 +1,14 @@
 // HZM coop - player-deployable AMMO BOX.
 // - Each player may drop ONE box per MATCH. The drop flag lives on the LEVEL keyed by player entnum,
 //   so it persists across that player's respawns but resets on map change (= once per match).
-// - A deployed box can NOT be picked up or re-placed (anti-abuse) - it is a plain decorative model.
-// - Each player gets ONE refill per box (tracked on the level keyed by slot+entnum), so a player can't
-//   stand on one box to refill forever, but every squadmate still gets their single use from it.
+// - DROP-ONLY: once placed, a box can NEVER be picked back up (not even by its owner) - the USE
+//   action only ever triggers a refill. The crate is a plain notsolid script_model, so the script
+//   branch was the ONLY pick-up path; it has been removed (2026-07-05).
+// - Each player gets TWO refills per box (live-tunable via cvar coop_ammobox_refills, default 2).
+//   Counts are tracked per box + per player on the level: coop_ammobox_uses[boxslot][entnum].
+//   entnum = the client slot number (stable for the whole connection, unlike the 1-indexed $player
+//   array position, which shifts when someone disconnects). A quick reconnect reuses the slot, so
+//   counts survive reconnect-farming - same keying the drop limit (coop_ammobox_dropped) already uses.
 // - Deployed via the "Coop Ammo Box" keybind (player.scr dispatch arrayIndex 16).
 // Modeled on coop_mod/cover.scr (the sandbag deploy) + the proven ihuddraw per-client HUD pattern.
 
@@ -52,10 +57,10 @@ ammobox_place local.player:{
 	local.slot++
 	level.coop_ammobox_count = local.slot
 	level.coop_ammobox_visual[local.slot] = local.crate
-	level.coop_ammobox_owner[local.slot]  = local.key	// entnum of the deployer (for owner pick-up via USE)
+	level.coop_ammobox_owner[local.slot]  = local.key	// entnum of the deployer (informational only - a placed box is drop-only, never reclaimable)
 
 	level.coop_ammobox_dropped[local.key] = 1
-	local.player iprint "Ammo box deployed - each squadmate can resupply once." 1
+	local.player iprint "Ammo box deployed - each squadmate can resupply from it twice." 1
 }end
 
 
@@ -122,8 +127,10 @@ ammobox_hud_monitor local.player:{
 }end
 
 
-// Per-client proximity + USE interaction: when near a deployed box the player hasn't used yet, show a
-// "[USE] Resupply" hint; holding USE refills them once and marks the box used for that player. (slot 47)
+// Per-client proximity + USE interaction: when near a deployed box, show a "[USE] Resupply" hint;
+// each USE press refills the player once and bumps their per-box count (max coop_ammobox_refills,
+// default 2). At the limit the hint flips to "depleted" and a USE press only shows a deny message.
+// A placed box can NEVER be picked back up (drop-only) - there is no owner special case. (slot 47)
 //=========================================================================
 ammobox_proximity_monitor local.player:{
 //=========================================================================
@@ -164,51 +171,27 @@ ammobox_proximity_monitor local.player:{
 
 		if( local.nearslot != NIL ){
 			local.key = local.player.entnum
-			if( level.coop_ammobox_owner[local.nearslot] == local.key ){
-				if( level.coop_ammobox_used[local.nearslot][local.key] != 1 ){
-					// OWNER, not yet resupplied: hold USE (F) to RESUPPLY (your one use), like any squadmate.
-					// This was the bug - the owner only ever got "pick up", so F instantly removed the box
-					// instead of refilling. Now you refill first, THEN can reclaim it on a second press.
-					if( local.hintstate != 1 ){
-						ihuddraw_string local.player 47 "[USE] Resupply ammo"
-						ihuddraw_alpha  local.player 47 0.85
-						local.hintstate = 1
-					}
-					if( local.player.useheld == 1 ){
-						waitthread ammobox_refill local.player
-						level.coop_ammobox_used[local.nearslot][local.key] = 1
-						local.player playsound coop_sandbag_place
-						local.player iprint "Ammo resupplied!" 1
-						ihuddraw_string local.player 47 "[USE] Pick up ammo box"
-						ihuddraw_alpha  local.player 47 0.85
-						local.hintstate = 3
-						// consume the hold so the SAME press doesn't instantly pick the box back up
-						while( local.player != NULL && local.player.useheld == 1 ){ waitframe }
-					}
-				} else {
-					// OWNER, already resupplied: hold USE (F) to pick the box back up, freeing your deploy.
-					if( local.hintstate != 3 ){
-						ihuddraw_string local.player 47 "[USE] Pick up ammo box"
-						ihuddraw_alpha  local.player 47 0.85
-						local.hintstate = 3
-					}
-					if( local.player.useheld == 1 ){
-						local.bx = level.coop_ammobox_visual[local.nearslot]
-						if( local.bx != NIL && local.bx != NULL ){ local.bx remove }
-						level.coop_ammobox_visual[local.nearslot] = NIL
-						level.coop_ammobox_owner[local.nearslot]  = NIL
-						level.coop_ammobox_dropped[local.key]     = 0
-						local.player playsound coop_ammobox_drop
-						local.player iprint "Ammo box picked up." 1
-						ihuddraw_alpha  local.player 47 0
-						local.hintstate = 0
-					}
-				}
-			} else if( level.coop_ammobox_used[local.nearslot][local.key] == 1 ){
+
+			// this player's refill count on THIS box so far (NIL-safe read - NIL arithmetic poisons expressions)
+			local.n = level.coop_ammobox_uses[local.nearslot][local.key]
+			if( local.n == NIL ){ local.n = 0 }
+
+			// refills each player gets per box - live-tunable, same recipe as coop_ammobox_amount
+			local.maxn = int( getcvar( "coop_ammobox_refills" ) )
+			if( local.maxn <= 0 ){ local.maxn = 2 }
+
+			if( local.n >= local.maxn ){
+				// this player has exhausted THIS box: deny. No pick-up path exists (drop-only).
 				if( local.hintstate != 2 ){
-					ihuddraw_string local.player 47 "Ammo box depleted (already used)"
+					ihuddraw_string local.player 47 "Ammo box depleted (no resupplies left for you)"
 					ihuddraw_alpha  local.player 47 0.55
 					local.hintstate = 2
+				}
+				if( local.player.useheld == 1 ){
+					local.msg = ( "No resupply - you already used this ammo box " + local.maxn + " times." )
+					local.player iprint local.msg 1
+					// consume the hold so the deny message doesn't repeat every poll
+					while( local.player != NULL && local.player.useheld == 1 ){ waitframe }
 				}
 			} else {
 				if( local.hintstate != 1 ){
@@ -218,12 +201,18 @@ ammobox_proximity_monitor local.player:{
 				}
 				if( local.player.useheld == 1 ){
 					waitthread ammobox_refill local.player
-					level.coop_ammobox_used[local.nearslot][local.key] = 1
+					local.n++
+					level.coop_ammobox_uses[local.nearslot][local.key] = local.n
 					local.player playsound coop_sandbag_place
-					local.player iprint "Ammo resupplied!" 1
-					ihuddraw_string local.player 47 "Ammo box depleted (already used)"
-					ihuddraw_alpha  local.player 47 0.55
-					local.hintstate = 2
+					local.msg = ( "Ammo resupplied! (" + local.n + " of " + local.maxn + ")" )
+					local.player iprint local.msg 1
+					if( local.n >= local.maxn ){
+						ihuddraw_string local.player 47 "Ammo box depleted (no resupplies left for you)"
+						ihuddraw_alpha  local.player 47 0.55
+						local.hintstate = 2
+					}
+					// consume the hold: ONE press = ONE refill (a held USE must not chain refills)
+					while( local.player != NULL && local.player.useheld == 1 ){ waitframe }
 				}
 			}
 		} else {

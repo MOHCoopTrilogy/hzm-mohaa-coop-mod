@@ -1,6 +1,13 @@
 //=========================================================================
 GetOnPathVehicle: {
 //=========================================================================
+	//[208] HZM coop - the player who used the trigger boards as gunner. parm.other is a
+	//STALE GLOBAL (only set on events like playerspawn - see itemhandler.scr:66), NOT the
+	//activator, so it handed attachturretslot a garbage entity = crash. player_closestTo
+	//self (the board trigger) is the coop-standard way to get the user (cannonThink.scr:19).
+	local.rider = waitthread coop_mod/replace.scr::player_closestTo self
+	if (local.rider == NULL) { local.rider = $player[1] }
+	if (local.rider == NULL) { end }  //no valid player - do not touch the turrets
 	level.AB41Ready = 1
 	if ( level.AB41Ready ==  1 ){
 		thread maps/e3l3/cleanup.scr::cleanup1
@@ -20,19 +27,33 @@ GetOnPathVehicle: {
 		$AB41.mg42 = $AB41 queryturretslotentity 0
 		$AB41.minigun = $AB41 queryturretslotentity 1
 
-		//unlock the turret, mini turret, and the base-to-turret connection
+		//[208] HZM coop - NOTE the vanilla var names are backwards: slot 0 = ab_turret_main
+		//= the TOP 20mm CANNON (panzerIV shell); slot 1 = ab_turret_mini = the MG.
+		//Player 1 (the rider) mans the CANNON (slot 0).
 		$AB41 unlock		//MiaCosa @chrissstrahl
-		$AB41.mg42 unlock
+		$AB41.mg42 unlock  //slot 0 = cannon
 
-		// Dont unlock the minigun, or we will get in it first
-		$AB41.minigun unlock
+		//[208] HZM coop - seat the rider on the cannon BEFORE unlocking the MG. Vanilla's own
+		//warning ('Dont unlock the minigun, or we will get in it first') is real: unlocking
+		//slot 1 while the player holds Use on the trigger auto-boards them into the MG, so
+		//they never reach the cannon. AttachTurretSlot is the explicit seat ('douse' no-ops).
+		if ($AB41.mg42 != NULL) {
+			$AB41 attachturretslot 0 local.rider  //slot 0 = cannon
+			local.rider.flags["coop_inAB41"] = game.true
+		}
 
-		//prep to move the AB41
-		$AB41.mg42 setusable 1
-		$AB41 douse $player
-		$AB41.mg42 setusable 0
-
-		//$AB41 attachturretslot 0 $player
+		//only now, and only for a second player, open the MG (slot 1)
+		for (local.ri = 1; local.ri <= $player.size; local.ri++) {
+			local.rp = $player[local.ri]
+			if (local.rp == NULL || local.rp == local.rider) { continue }
+			if (!(isalive local.rp) || local.rp.dmteam == "spectator") { continue }
+			if ($AB41.minigun != NULL) {
+				$AB41.minigun unlock  //slot 1 = MG
+				$AB41 attachturretslot 1 local.rp
+				local.rp.flags["coop_inAB41"] = game.true
+			}
+			break //only one MG seat
+		}
 
 		$AB41 lock
 		$AB41.mg42 lock
@@ -185,12 +206,15 @@ StartJumpThread: {
 	$AB41.mg42 unlock
 	$AB41.minigun unlock
 
-	// Get out (the boarded occupant is the host-seat; douse over all players is harmless)
+	//[208] HZM coop - eject occupants from both turret slots to a spot ABOVE the AB41
+	//(its origin during the jump is midair/underground, which clipped the exiting player).
+	local.ejectPos = $AB41.origin + ( 0 0 96 )
+	$AB41 detachturretslot 0 local.ejectPos
+	$AB41 detachturretslot 1 local.ejectPos
 	for (local.i = 1; local.i <= $player.size; local.i++){
-		if ($player[local.i] != NULL){
-			$AB41 douse $player[local.i]
-		}
+		if ($player[local.i] != NULL){ $player[local.i].flags["coop_inAB41"] = NIL }
 	}
+	waitframe //let the detach settle before we move anyone
 
 	// Relock them so we can't get back in
 	$AB41.mg42 setusable 0
@@ -201,12 +225,19 @@ StartJumpThread: {
 	waitframe
 
 	//[coop] chrissstrahl - lift EVERY active player clear of the AB41 (occupant + ride-alongs)
-	//so the imminent explosion does not catch them; fan the teleport out instead of host-only.
+	//so the imminent explosion does not catch them. [208] HZM coop - trace DOWN to solid floor
+	//so nobody ends up clipped in the ground; fan out sideways so players do not stack.
 	for (local.i = 1; local.i <= $player.size; local.i++){
 		local.p = $player[local.i]
 		if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
-			local.zoff = 150 + (local.i * 8)
-			local.p.origin = $AB41.origin + ( 0 100 local.zoff )
+			local.xoff = ( local.i - 1 ) * 40
+			local.xoff = local.xoff - 20
+			local.top = $AB41.origin + ( local.xoff 100 220 )
+			local.bot = local.top - ( 0 0 4096 )
+			local.floor = trace local.top local.bot 1
+			if ( local.floor != local.top ){ local.p.origin = local.floor + ( 0 0 8 ) }
+			else { local.p.origin = $AB41.origin + ( local.xoff 100 160 ) }
+			local.p.velocity = ( 0 0 0 )
 			local.p.viewangles = "0 270 0"
 		}
 	}
@@ -249,6 +280,18 @@ FinishJumpThread: {
 			local.p = $player[local.i]
 			if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
 				local.p damage $world 5000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0		//MiaCosa @chrissstrahl
+			}
+		}
+	}
+
+	//[208] HZM coop - anyone still behind the ride (walled-off tunnel) joins at the landing zone
+	if ($AB41LandingSpot != NULL) {
+		for (local.wi = 1; local.wi <= $player.size; local.wi++) {
+			local.wp = $player[local.wi]
+			if (local.wp == NULL || !(isalive local.wp)) { continue }
+			if (vector_length(local.wp.origin - $AB41LandingSpot.origin) > 2500) {
+				local.wp.origin = $AB41LandingSpot.origin
+				local.wp.velocity = ( 0 0 0 )
 			}
 		}
 	}

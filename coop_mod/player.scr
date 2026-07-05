@@ -834,11 +834,28 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	if(local.player.flags["coop_respawning"] == TRUE){
 		waitthread coop_mod/player.scr::manageAliveRespawning local.player
 		thread coop_mod/main.scr::startMapCallback "coop_playerJustRespawned" (local.player)
-	}else{	
+	}else{
 		waitthread coop_mod/main.scr::playerPlaceAtSpawn local.player
 		thread coop_mod/main.scr::startMapCallback "coop_playerJustSpawned" (local.player)
 	}
-	
+
+	//[209] HZM coop - DBNO corpse-revive override: a medkit revive landed on this player after
+	//they were shot dead while downed (dbno.scr::dbno_corpse_revive). Getting up exactly where
+	//they fell IS the feature, so this warp applies regardless of which placement branch ran
+	//above and regardless of the spawn-warper cvars. One-shot flag.
+	if( local.player.flags["coop_dbno_reviveWarp"] == 1 ){
+		local.player.flags["coop_dbno_reviveWarp"] = NIL
+		thread coop_mod/main.scr::playerMakeSolidAsap local.player
+		local.player.flags["coop_lastRespawn"] = level.time
+		local.player origin ( local.player.flags["coop_respawnOrigin"] )
+		if(local.player.flags["coop_respawnAngle"] != 0){
+			local.player thread coop_mod/main.scr::playerFace ( 0 local.player.flags["coop_respawnAngle"] 0 )
+		}
+	}
+
+	//[209] HZM coop - spawn protection window for human players (coop_spawnProtect seconds, default 8)
+	thread spawnProtection local.player
+
 	//INVENTORY
 	waitthread coop_mod/itemhandler.scr::managePlayerInventory
 	thread coop_mod/main.scr::itemGetAll
@@ -994,6 +1011,37 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		thread coop_mod/main.scr::playerPlaceAtSpawn local.player
 	}
 	local.player.flags["coop_respawning"] = FALSE
+}end
+
+
+//[209] HZM coop - spawn protection: brief invulnerability window after every human spawn or
+//respawn so players are not shot the moment they materialize. coop_spawnProtect = seconds
+//(default 8, 0 = off). Re-arming (fast respawn cycles) just extends the window; damage is
+//restored only when the latest window expires, and only on a living player.
+//=========================================================================
+spawnProtection local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.secs = getcvar "coop_spawnProtect"
+	if( local.secs == "" ){ local.secs = 8 }
+	local.secs = int( local.secs )
+	if( local.secs <= 0 ){ end }
+
+	local.player.flags["coop_spawnProtUntil"] = level.time + local.secs
+	if( local.player.flags["coop_spawnProtOn"] == 1 ){ end }
+	local.player.flags["coop_spawnProtOn"] = 1
+	local.player nodamage
+	local.player iprint ( "Spawn protection: " + local.secs + " seconds" ) 0
+
+	while( local.player != NULL && isAlive local.player && level.time < local.player.flags["coop_spawnProtUntil"] ){
+		wait 0.25
+	}
+	if( local.player != NULL ){
+		local.player.flags["coop_spawnProtOn"] = 0
+		if( isAlive local.player ){
+			local.player takedamage
+		}
+	}
 }end
 
 

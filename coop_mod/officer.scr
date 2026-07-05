@@ -1110,6 +1110,12 @@ coop_push_toward local.actor local.target local.offdir local.lat:{
 coop_wave_hunt local.actor:{
 	wait 0.5
 	if( local.actor == NULL || !isAlive local.actor ){ end }
+	//[209] register on the level-wide wave roster so allied AI (paratroopers) can be handed
+	//these as enemies - waves are player-locked and never shoot AI, so the damage-driven
+	//notice path stays silent without this (see paradrop.scr follow loop + fgame attackentity)
+	if( level.coop_wave_count == NIL ){ level.coop_wave_count = 0 }
+	level.coop_wave_count++
+	level.coop_wave_actors[level.coop_wave_count] = local.actor
 	local.actor.nosurprise = 1
 	local.actor forceactivate
 	// Per-trooper STANDOFF (how close it pushes before letting its own think fight) + a lateral FAN
@@ -1972,6 +1978,22 @@ coop_spawn_grenadiers local.pos:{
 }end
 
 
+// Returns local.center displaced by a random FLAT ring offset: radius uniform in
+// [local.minr, local.maxr], random direction (angles_toforward - no sin/cos in MOHAA).
+// Shared by the officer Stuka bomb stick and the artillery barrage so their impacts
+// bracket an AREA around the aim point (area denial) instead of landing on it.
+coop_strike_scatter local.center local.minr local.maxr:{
+	local.ang = ( 0 0 0 )
+	local.ang[1] = randomint 360
+	local.dir = angles_toforward local.ang
+	local.span = local.maxr - local.minr
+	if( local.span < 1 ){ local.span = 1 }
+	local.rad = local.minr + (randomint local.span)
+	local.p = local.center + (vector_scale local.dir local.rad)
+	end local.p
+}end
+
+
 // Type 4: Stuka flyover -- visible dive bomber via origin lerp + MG strafing + timed bomb
 // NOTE: spawn ClassName "key" "value" keyvalue syntax is NOT valid in MOHAA script.
 // All spawns use bare classname; properties set via assignment or command afterward.
@@ -1984,9 +2006,18 @@ coop_spawn_grenadiers local.pos:{
 // Origin-stepped (the proven mover; runtime flypath/SplinePath is a future upgrade - see [[plane_bomber_research]]).
 //   local.target = ground impact point     local.fwd = flat approach dir (NIL = random)
 //   local.strafe = 1 to add the MG strafe   local.model = plane .tik (NIL = Allied C-47)
-coop_air_bombing_run local.target local.fwd local.strafe local.model:{
+//   local.leadin = seconds of AUDIBLE approach before the dive begins (NIL/0 = dive
+//                  immediately, the old behavior). The plane spawns further out along the
+//                  approach axis and cruises in with its engine loop running, so players
+//                  HEAR it coming that long before the attack run (officer stuka passes
+//                  8.2 -> first impact ~10.2s after the drone starts).
+//   local.wide   = 1 = officer AREA-DENIAL scatter for the bomb stick (see coop_drop_bombs);
+//                  NIL/0 = the tight player-called (binoc) stick, unchanged.
+coop_air_bombing_run local.target local.fwd local.strafe local.model local.leadin local.wide:{
 	if( local.target == NIL ){ end }
 	if( local.model == NIL ){ local.model = "models/vehicles/p47fly.tik" }	// P-47 fighter-bomber - matches the mission's own bombing plane (global/bomber.scr default)
+	if( local.leadin == NIL ){ local.leadin = 0 }
+	if( local.wide == NIL ){ local.wide = 0 }
 	if( local.fwd == NIL ){ local.fwd = angles_toforward ( 0 (randomint 360) 0 ) }
 	local.fwd[2] = 0
 	local.fwd = vector_normalize local.fwd
@@ -2020,7 +2051,20 @@ coop_air_bombing_run local.target local.fwd local.strafe local.model:{
 
 	// --- no room for a visible pass (cramped interior) -> just deliver the bombs, skip the flyover ---
 	if( local.alt < 250 ){
-		thread coop_drop_bombs local.target local.fwd 700
+		if( local.leadin > 0 ){
+			// no flyover possible, but the warning still has to arrive >=leadin early:
+			// audible engine drone above the target for the whole lead-in, then the stick.
+			// (loopsound needs a modeled entity to transmit -> fx/dummy, the glow pattern)
+			local.warn = spawn script_model
+			local.warn model "models/fx/dummy.tik"
+			local.warn.origin = local.target + ( 0 0 200 )
+			local.warn notsolid
+			local.warn loopsound coop_stuka_engine
+			wait local.leadin
+			local.warn stoploopsound
+			local.warn delete
+		}
+		thread coop_drop_bombs local.target local.fwd 700 local.wide
 		end
 	}
 
@@ -2034,20 +2078,55 @@ coop_air_bombing_run local.target local.fwd local.strafe local.model:{
 	local.endp[2]   = local.target[2] + local.alt
 	local.span = local.endp - local.startp
 
+	// Long audible approach leg (warning time): spawn further out along the approach
+	// axis and cruise in for local.leadin seconds. Capped at 6000u so the entity stays
+	// well inside server transmit range (the engine LOOPSOUND rides the entity state,
+	// so the plane must transmit for players to hear the drone growing louder). Beyond
+	// the farplane the plane is fog-culled anyway: heard first, then it emerges.
+	local.legdist = 0
+	if( local.leadin > 0 ){
+		local.arcspeed = (local.approach * 2) / 3.55
+		local.legdist = local.arcspeed * local.leadin
+		if( local.legdist > 6000 ){ local.legdist = 6000 }
+	}
+	local.holdp = local.startp - (vector_scale local.fwd local.legdist)
+
 	local.plane = spawn script_model
 	local.plane model local.model
-	local.plane.origin = local.startp
+	local.plane.origin = local.holdp
 	local.plane.angles = local.fwdang
 	local.plane notsolid
 	if( local.strafe == 1 ){
-		local.plane playsound coop_stuka_engine
+		// looped so the drone runs the WHOLE approach+dive (one-shot ended too early);
+		// stoploopsound at the end of the run already handles it
+		local.plane loopsound coop_stuka_engine
 	} else {
 		local.plane loopsound coop_c47_approach
 	}
 
+	if( local.legdist > 0 ){
+		local.legticks = int( local.leadin * 10 )
+		if( local.legticks < 1 ){ local.legticks = 1 }
+		local.legstep = vector_scale local.fwd (local.legdist / local.legticks)
+		local.k = 0
+		while( local.plane != NULL && local.k < local.legticks ){
+			local.plane.origin = local.plane.origin + local.legstep
+			wait 0.1
+			local.k++
+		}
+		if( local.plane == NULL ){
+			// plane vanished mid-approach: still deliver the (already warned) stick
+			thread coop_drop_bombs local.target local.fwd local.lowalt local.wide
+			end
+		}
+		local.plane.origin = local.startp
+		// classic dive/flyby scream as the attack run begins (vanilla m1l3b strafing-run wav)
+		local.plane playsound coop_stuka_dive
+	}
+
 	if( local.strafe == 1 ){ thread coop_stuka_mg_strafe local.plane local.target }
 	// release the bomb stick once the plane is overhead (tied to its live position)
-	thread coop_bombrun_release local.plane local.target local.fwd local.lowalt
+	thread coop_bombrun_release local.plane local.target local.fwd local.lowalt local.wide
 
 	local.prevpos = NIL
 	local.prevyaw = NIL
@@ -2100,7 +2179,9 @@ coop_air_bombing_run local.target local.fwd local.strafe local.model:{
 coop_stuka_attack local.target_pos:{
 	if( local.target_pos == NIL ){ end }
 	local.fwd = angles_toforward level.coop_officer.angles
-	waitthread coop_air_bombing_run local.target_pos local.fwd 1 "models/vehicles/stuka_strafe.tik"
+	//[209] 8.2s audible approach leg + 1 = officer area-denial bomb scatter. The engine drone
+	//starts ~10.2s before the first impact (dive adds ~2s), per the 10s-warning requirement.
+	waitthread coop_air_bombing_run local.target_pos local.fwd 1 "models/vehicles/stuka_strafe.tik" 8.2 1
 }end
 
 
@@ -2251,18 +2332,23 @@ coop_artillery_barrage local.target_pos:{
 	// the nearest player, so it can never chase a player the officer can't see / who ducked
 	// indoors. Bail if somehow nil -- never strike blind.
 	if( local.target_pos == NIL ){ end }
+	//[209] 10s WARNING before the first impact (user: hear the strike coming way earlier).
+	//Incoming call sounds at the aim point immediately, repeats at T+8, first shell lands at
+	//T+10. Follow-up shells keep the tighter 2s whistle rhythm so the barrage stays scary.
+	local.snd = spawn script_origin
+	local.snd.origin = local.target_pos
+	local.snd playsound coop_arty_incoming
+	wait 8
+	if( local.snd == NULL ){ end }
+	local.snd playsound coop_arty_incoming
+	wait 2
 	local.i = 0
 	while( local.i < 3 ){
-		// telegraph at the locked target
-		local.center = local.target_pos
-		local.snd = spawn script_origin
-		local.snd.origin = local.center
-		local.snd playsound coop_arty_incoming
-		wait 2
-		// impact on the locked target with some scatter for variety
-		local.hit = local.target_pos
-		local.hit[0] = local.hit[0] + ( (randomint 260) - 130 )
-		local.hit[1] = local.hit[1] + ( (randomint 260) - 130 )
+		//[209] impact scattered in a 250-700u ring around the locked target (was a +/-130
+		//box - effectively pinpoint); ground-snapped so shells never burst mid-air on slopes
+		local.hit = exec coop_mod/officer.scr::coop_strike_scatter local.target_pos 250 700
+		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.hit
+		if( local.gnd != NIL ){ local.hit = local.gnd }
 		local.snd.origin = local.hit
 		local.snd playsound coop_arty_hit
 		local.emitter = spawn "models/emitters/mortar_dirt_dustcloud.tik"
@@ -2272,10 +2358,15 @@ coop_artillery_barrage local.target_pos:{
 		radiusdamage local.hit 200 300
 		wait 4
 		local.emitter remove
-		local.snd remove
-		wait 1
 		local.i++
+		if( local.i < 3 ){
+			// telegraph the next shell at the locked aim point
+			local.snd.origin = local.target_pos
+			local.snd playsound coop_arty_incoming
+			wait 2
+		}
 	}
+	local.snd remove
 }end
 
 
@@ -2527,6 +2618,10 @@ coop_spawn_dogs local.spawn_pos:{
 coop_dog_hunt local.dog:{
 	wait 0.5
 	if( local.dog == NULL || !isAlive local.dog ){ end }
+	//[209] dogs join the wave roster too - paratroopers should shoot incoming attack dogs
+	if( level.coop_wave_count == NIL ){ level.coop_wave_count = 0 }
+	level.coop_wave_count++
+	level.coop_wave_actors[level.coop_wave_count] = local.dog
 	local.dog.movedoneradius = 200
 	local.bark_cd = 0
 	while( local.dog != NULL && isAlive local.dog ){
@@ -3165,13 +3260,20 @@ coop_bombrun_release local.plane local.center local.fwd local.alt:{
 
 
 // Walks a stick of real falling bombs along the plane's heading across the target.
-coop_drop_bombs local.center local.fwd local.alt:{
+coop_drop_bombs local.center local.fwd local.alt local.wide:{
 	local.i = 0
 	while( local.i < 8 ){
-		local.offset = vector_scale local.fwd ((local.i * 130) - 450)
-		local.gx = local.center + local.offset
-		local.gx[0] = local.gx[0] + (randomint 120) - 60
-		local.gx[1] = local.gx[1] + (randomint 120) - 60
+		if( local.wide == 1 ){
+			//[209] officer AREA-DENIAL stick: each bomb lands in a 120-700u ring around the
+			//aim point (the tight 130u line below read as laser-guided against players)
+			local.gx = exec coop_mod/officer.scr::coop_strike_scatter local.center 120 700
+		} else {
+			//player-called (binoc) stick: unchanged tight line along the approach
+			local.offset = vector_scale local.fwd ((local.i * 130) - 450)
+			local.gx = local.center + local.offset
+			local.gx[0] = local.gx[0] + (randomint 120) - 60
+			local.gx[1] = local.gx[1] + (randomint 120) - 60
+		}
 		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.gx
 		if( local.gnd == NIL ){ local.gnd = local.gx }
 		thread coop_one_bomb local.gx local.gnd local.alt

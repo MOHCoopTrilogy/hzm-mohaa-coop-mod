@@ -17,6 +17,42 @@ main: {
 
 	level waittill prespawn
 
+	//[208] HZM coop - addon_weapon_K5 is a BT engine class OpenMOHAA does not implement,
+	//so $kfive_one/$kfive_two resolve to a dead fallback (InitScene2 died at
+	//'$kfive_one waitthread KFiveThink'). The VANILLA scripts already contain the exact
+	//replacement recipe (scene2.scr::KFiveInit: script_model, same angles, origin -17z,
+	//collide snap) and run it on BOTH guns - we only need real stand-in entities at the
+	//exact BSP marker spots so that recipe has something to work on.
+	if ($kfive_one == NULL) {
+		local.k5a = spawn script_model model "weapons/It_W_K5.tik"
+		local.k5a.origin = ( -6599 -593 552 )   //exact BSP entity origin
+		local.k5a.angles = ( 0 0 0 )            //exact BSP entity angle
+		local.k5a notsolid
+		local.k5a targetname "kfive_one"
+	}
+	if ($kfive_two == NULL) {
+		local.k5b = spawn script_model model "weapons/It_W_K5.tik"
+		local.k5b.origin = ( 4955 -6360 -1346 ) //exact BSP entity origin
+		local.k5b.angles = ( 0 0 0 )            //exact BSP entity angle
+		local.k5b notsolid
+		local.k5b targetname "kfive_two"
+	}
+
+	//[208] HZM coop - addon_vehicle_german_Opel-Truck-All is likewise unimplemented:
+	//the convoy never drives ('waittill drive' hangs) and the tunnel trucks cannot take
+	//damage. Native script_vehicle supports drive/waittill drive/damage - respawn each
+	//at its exact BSP origin/angle (captured from the marker when present).
+	waitthread coop_spawnOpel $dastruck_a ( -1900 -5839 80 ) ( 0 270 0 ) "dastruck_a"
+	waitthread coop_spawnOpel $dastruck_b ( -1900 -5191 80 ) ( 0 270 0 ) "dastruck_b"
+	waitthread coop_spawnOpel $dastruck_c ( -1900 -4511 80 ) ( 0 270 0 ) "dastruck_c"
+	waitthread coop_spawnOpel $aaguntruck ( -4824 -4319 64 ) ( 0 90 0 ) "aaguntruck"
+	//two tunnel trucks share the targetname (script uses the $tunneltruck array)
+	if ($tunneltruck != NULL) {
+		while ($tunneltruck != NULL) { $tunneltruck[1] remove; waitframe }
+	}
+	waitthread coop_spawnOpel NULL ( -4685.75 -2389.75 -160 ) ( 0 135 0 ) "tunneltruck"
+	waitthread coop_spawnOpel NULL ( 8 6865 139 ) ( 0 90 0 ) "tunneltruck"
+
 	thread maps/e3l3/scene1.scr::InitScene1  //the trucks
 	thread maps/e3l3/scene2.scr::InitScene2  //the 1st k5
 	thread maps/e3l3/scene3.scr::InitScene3  //the ab41 & 2nd k5
@@ -45,6 +81,11 @@ main: {
 	}
 	
 	waitthread maps/e3l3/scene1.scr::CleanupScene1
+	//[208] HZM coop - convoy resolved: reopen the road
+	if (level.coop_roadWall != NULL) {
+		level.coop_roadWall remove
+		level.coop_roadWall = NIL
+	}
 
 	// bring up objective 3
 	wait 0.5
@@ -191,7 +232,9 @@ InitPlayer: {
 //=========================================================================
 ArmPlayer: {
 //=========================================================================
-	waitexec global/loadout.scr
+	//[208] HZM coop - during the stealth hold the weapon loadout waits for the ambush
+	//(coop_releaseFire grants it); items (radio/explosives/plunger) are given now.
+	if (level.coop_holdFire != 1) { waitexec global/loadout.scr }
 	waitthread global/items.scr::blank_items
 	waitthread global/items.scr::add_item "radio"
 	waitthread global/items.scr::add_item "explosives" noprint
@@ -229,9 +272,9 @@ InitEnemies: {
 
 	$tank.paused = 1
 	$tank thread global/vehicles_thinkers.scr::enemy_tank_think2 0 bridge_panzer
-	$flak thread global/vehicles_thinkers.scr::enemy_flak_think
+	if ($flak != NULL) { $flak thread global/vehicles_thinkers.scr::enemy_flak_think } //[208] HZM coop - no such entity in the BSP
 	//$flak setcollisionentity $flak88_collision
-	$flak setcollisionentity $flak88_turret_collision
+	if ($flak != NULL) { $flak setcollisionentity $flak88_turret_collision } //[208] HZM coop - no such entity in the BSP
 
 	$mg42guy1  ai_off  //mg42 gunner near aa gun --a trigger turns on his ai
 	$mg42guy1b ai_off  //mg42 gunner near aa gun --a trigger turns on his ai
@@ -248,9 +291,18 @@ InitObjectives: {
 //=========================================================================
 GiveObjectives: {
 //=========================================================================
-	waitthread global/objectives.scr::add_objectives 2 2 "Destroy the Munitions Convoy" $dasbox.origin
-	waitthread global/objectives.scr::add_objectives 3 1 "Search the House for Intelligence" $anziomap.origin
-	waitthread global/objectives.scr::add_objectives 4 1 "Locate and Destroy K5 Railway Guns" $kfive_one_explosive1.origin
+	//[208] HZM coop - never let a missing entity kill this thread mid-list (a NULL .origin
+	//aborts silently and the convoy objective then never becomes current). Exact BSP
+	//coordinates as fallbacks.
+	local.o2 = ( -4940 -6368 100 )
+	if ($dasbox != NULL) { local.o2 = $dasbox.origin }
+	local.o3 = ( -5603 -3689 305 )
+	if ($anziomap != NULL) { local.o3 = $anziomap.origin }
+	local.o4 = ( -6553 -388 790 )
+	if ($kfive_one_explosive1 != NULL) { local.o4 = $kfive_one_explosive1.origin }
+	waitthread global/objectives.scr::add_objectives 2 2 "Destroy the Munitions Convoy" local.o2
+	waitthread global/objectives.scr::add_objectives 3 1 "Search the House for Intelligence" local.o3
+	waitthread global/objectives.scr::add_objectives 4 1 "Locate and Destroy K5 Railway Guns" local.o4
 	waitthread global/objectives.scr::current_objectives 2
 }end
 
@@ -313,7 +365,7 @@ DudeNotDumb: {
 //=========================================================================
 DudeNotNumb: {
 //=========================================================================
-	$dude waittill pain
+	$dude waittill damage //[208] was 'waittill pain' - never fires in OpenMOHAA
 	$dude exec global/enable_ai.scr
 }end
 
@@ -422,8 +474,13 @@ waitToExplode: {
 	//self immune explosion
 	//self immune rocket
 
-	self waittill death
-	self.collisionent disconnect_paths
+	//[208] HZM coop - 'waittill death' is rejected for Vehicle-class entities in
+	//OpenMOHAA (killed the watcher thread). Poll health instead.
+	while (self != NULL && self.health > 0) {
+		wait 0.25
+	}
+	if (self == NULL) { end }
+	if (self.collisionent != NULL) { self.collisionent disconnect_paths }
 	thread global/vehicles_thinkers.scr::truck_killed self.type
 
 	// Joel's ligering smoke method, NI yet
@@ -448,7 +505,7 @@ waitToExplode: {
 //
 // -----------------------------------------------
 //=========================================================================
-balconyGuy:
+balconyGuy: { //[208] chrissstrahl-style brace was missing - whole file failed to COMPILE silently (bug-239)
 //=========================================================================  
  	if(!(isalive self) || self.health <= 0) {
 		end 
@@ -489,7 +546,7 @@ balconyGuy:
 	self.jumpDir = vector_scale self.jumpDir 100
 
 	// wait to get hurt  
-	self waittill pain
+	self waittill damage //[208] was 'waittill pain' - never fires in OpenMOHAA
 	self waitexec global/disable_ai.scr
 
 	// if alive, jump off balcony and attack
@@ -647,7 +704,7 @@ JumperGuy: {
 	self.jumpDir = vector_scale self.jumpDir 100
 
 	// wait to get hurt  
-	self waittill pain
+	self waittill damage //[208] was 'waittill pain' - never fires in OpenMOHAA
 
 	if ($kfive_one.shutdown == 0) {
 		self exec global/bullethit.scr (0 0 20) 10000 0 1
@@ -669,7 +726,7 @@ JumperGuy: {
 			self exec global/enable_ai.scr
 		}
 	}
-end
+}end //[208] JumperGuy opened with a brace but ended bare - second half of bug-239
 
 //Die and fall if hit
 //=========================================================================
@@ -708,7 +765,7 @@ FallerGuy: {
   	self.jumpDir = vector_scale self.jumpDir 100
 
   	// wait to get hurt  
-  	self waittill pain
+  	self waittill damage //[208] was 'waittill pain' - never fires in OpenMOHAA
 
   	if ($kfive_one.shutdown == 0) {
 	  	self waitexec global/disable_ai.scr
@@ -753,3 +810,28 @@ end
 
 coop_playerJustRespawned:
 end
+
+//[208] HZM coop - respawn an addon Opel truck marker as a native driveable vehicle
+//=========================================================================
+coop_spawnOpel local.old local.org local.ang local.name local.crew: {
+//=========================================================================
+	if (local.old != NULL) {
+		local.org = local.old.origin
+		local.ang = local.old.angles
+		local.old remove
+	}
+	//spawn by the tik-declared class (drivablevehicle) exactly like the BSP fallback that
+	//produced working vehicles; bare script_vehicle skipped the tik's wheel/speed init
+	local.t = spawn drivablevehicle model "vehicles/opeltruck.tik"
+	local.t.origin = local.org
+	local.t.angles = local.ang
+	local.t.nolights = 1 //[208] parked convoy sits dark and silent until it rolls
+	local.t soundset "opeltruck_" //[208] engine plays m_sSoundSet+snd_run/idle - without the prefix the trucks played the WRONG (generic) aliases = the drive-sound glitch
+	local.t targetname local.name
+	local.t target "dastruck_collide" //truck_INIT wires self.collisionent from the target key (vanilla BSP convention)
+	//crew via the vanilla loader (driver + passengers, wehrmacht per the BSP keys);
+	//truck_unload later spills the passengers out to fight - as BT intended
+	if (local.crew != NIL && local.crew > 0) {
+		local.t waitthread global/vehicles_thinkers.scr::truck_load local.crew "models/human/german_wehrmact_soldier.tik"
+	}
+}end

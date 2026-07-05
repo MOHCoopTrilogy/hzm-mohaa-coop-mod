@@ -192,6 +192,80 @@ dbno_enter local.player local.hitclass:{
 	local.player thread dbno_countdown_hud
 	local.player thread dbno_letgo_monitor
 	thread dbno_marker_manager local.player
+	thread dbno_corpse_monitor local.player
+}end
+
+
+// HZM coop [209] - watch a downed player for death-by-damage (an enemy finished them off while
+// they crawled). Records where they fell and when, opening a short window during which a medkit
+// revive (AI medic, or a self-revive that was mid-channel) still brings them back UP IN PLACE
+// instead of a full respawn. Voluntary exits are excluded automatically: dbno_die, letgo and
+// ai_revive all set coop_dbno_dead=1 BEFORE the player entity dies, and we only record when
+// death arrives with dead != 1. Also normalizes state (dead=1, active=NIL) so the normal death
+// flow proceeds immediately - previously a killed-while-downed player kept "bleeding out" until
+// the full timer expired before the respawn flow would run.
+//=========================================================================
+dbno_corpse_monitor local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.origin = local.player.origin
+	local.angle  = local.player.viewangles[1]
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		if( isAlive local.player ){
+			local.origin = local.player.origin
+			local.angle  = local.player.viewangles[1]
+		}
+		else{
+			if( local.player.flags["coop_dbno_dead"] != 1 ){
+				local.player.flags["coop_dbno_corpseOrigin"] = local.origin
+				local.player.flags["coop_dbno_corpseAngle"]  = local.angle
+				local.player.flags["coop_dbno_corpseTime"]   = level.time
+				local.player.flags["coop_dbno_dead"]   = 1
+				local.player.flags["coop_dbno_active"] = NIL
+			}
+			end
+		}
+		waitframe
+	}
+}end
+
+
+// HZM coop [209] - stand a player killed-while-downed back up at the spot they fell. Fired by a
+// medkit revive that landed after death: the paradrop AI medic (dbno_ai_revive) or a self-revive
+// that was at least half-channeled when the killing shot hit (medkit.scr::dbno_selfrevive).
+// Window: coop_dbnoCorpseRevive seconds (default 10, 0 = feature off). One-shot per death -
+// consumes coop_dbno_corpseTime. LMS: players with no lives left stay down.
+//=========================================================================
+dbno_corpse_revive local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	if( isAlive local.player ){ end }
+	if( local.player.flags["coop_dbno_corpseTime"] == NIL ){ end }
+
+	local.window = getcvar "coop_dbnoCorpseRevive"
+	if( local.window == "" ){ local.window = 10 }
+	local.window = int( local.window )
+	if( local.window <= 0 ){ end }
+	if( level.time > (local.player.flags["coop_dbno_corpseTime"] + local.window) ){ end }
+
+	if( level.coop_lmsLives > 0 && local.player.flags["coop_deaths"] >= level.coop_lmsLives ){ end }
+
+	local.player.flags["coop_dbno_corpseTime"] = NIL
+
+	local.player.flags["coop_respawnOrigin"]   = local.player.flags["coop_dbno_corpseOrigin"]
+	local.player.flags["coop_respawnAngle"]    = local.player.flags["coop_dbno_corpseAngle"]
+	local.player.flags["coop_dbno_reviveWarp"] = 1
+
+	wait 0.5
+	if( local.player == NULL ){ end }
+	local.player respawn
+
+	wait 0.2
+	if( local.player != NULL ){
+		if( isAlive local.player ){
+			local.player iprint "A medkit brought you back to your feet!" 1
+		}
+	}
 }end
 
 
@@ -400,7 +474,12 @@ dbno_revival_stub local.player:{
 // downed teammate: thread coop_mod/dbno.scr::dbno_ai_revive <player>
 dbno_ai_revive local.player:{
 	if( local.player == NULL ){ end }
-	if( local.player.flags["coop_dbno_active"] != 1 ){ end }
+	if( local.player.flags["coop_dbno_active"] != 1 ){
+		// [209] the patient died (shot while downed) just before the medic finished - the kit
+		// still counts: stand them back up where they fell if inside the corpse-revive window.
+		thread dbno_corpse_revive local.player
+		end
+	}
 
 	local.player.flags["coop_dbno_letgo"]   = 1
 	local.player.flags["coop_dbno_dead"]    = 1
