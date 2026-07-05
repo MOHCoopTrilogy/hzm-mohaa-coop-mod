@@ -169,7 +169,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 	if( local.actor == NULL ){ if( local.chute != NULL ){ local.chute delete } end }
 	local.actor notsolid
 	local.actor.enableEnemy = 0
-	local.actor.health = 350	// base paratrooper HP (was 150; +200 per user)
+	local.actor.health = 550	// base paratrooper HP (was 350; raised again per user)
 	local.actor dontdropweapons
 	local.actor.origin = local.drop_pos
 
@@ -210,7 +210,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 		local.actor.origin = local.land
 	}
 	local.actor solid
-	local.actor.accuracy = 65
+	local.actor.accuracy = 80		// HZM coop - raised from 65 per user (snipers still override to 90 below)
 	local.actor.leash = 4096
 	local.actor.movedoneradius = 96
 	local.actor.enableEnemy = 1
@@ -220,7 +220,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 	// AI only to tend a patient, then resumes moving/fighting.
 	if( local.wtype == 5 ){
 		local.actor.enableEnemy = 1
-		local.actor.health = 800	// medic HP (was 300; +500 per user - it must survive to revive/heal)
+		local.actor.health = 1000	// medic HP (raised again per user - must survive to revive/heal)
 	}
 
 	// Weapon assignment - American kit (no more German Mausers on allied troopers).
@@ -253,9 +253,17 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 		iprintlnbold "Allied paratroopers have landed!"
 	}
 
+	// HZM coop - ensure the ALLIED team so the AI threat system treats them as friends fighting the germans
+	// (without an explicit team a freshly-spawned actor can end up team-less and never engage / never be engaged).
+	local.actor.team = "american"
+
 	// Special medic behavior
 	if( local.wtype == 5 ){
 		thread coop_paradrop_medic local.actor
+	} else {
+		// HZM coop - COMBAT troopers (wtype 1-4) ADVANCE with the squad + fight en route, instead of standing
+		// idle where they landed (they used to only engage enemies that happened to wander into view).
+		thread coop_paradrop_combatant local.actor
 	}
 
 	// Follow nearest player. The medic (wtype 5) runs its OWN combined loop in
@@ -478,17 +486,19 @@ coop_paradrop_medic local.actor:{
 			}
 		} else {
 
-		// PRIORITY 2: find the most-wounded living player (below 70 HP) and heal them.
-		// Threshold kept low so the medic only kneels for genuinely wounded players
-		// instead of constantly re-kneeling for minor combat scratches.
+		// PRIORITY 2: find the most-wounded living player AT OR BELOW 50% health and heal them (per user).
+		// Uses a FRACTION of each player's own max_health so it scales with coop_health (e.g. 750 -> tends <=375).
 		local.target = NIL
-		local.worst = 70
+		local.worstfrac = 0.5		// only come for players at/below 50% HP
 		local.pi = 1
 		while( local.pi <= $player.size ){
 			local.pp = $player[local.pi]
-			if( local.pp != NULL && local.pp.health > 0 && local.pp.health < local.worst ){
-				local.worst = local.pp.health
-				local.target = local.pp
+			if( local.pp != NULL && local.pp.health > 0 && local.pp.max_health > 0 ){
+				local.frac = local.pp.health / local.pp.max_health
+				if( local.frac <= local.worstfrac ){
+					local.worstfrac = local.frac
+					local.target = local.pp
+				}
 			}
 			local.pi++
 		}
@@ -506,10 +516,10 @@ coop_paradrop_medic local.actor:{
 				local.actor lookat local.target
 				local.actor turnto local.target
 				local.actor anim_scripted coop_medic_kneel
-				local.actor playsound coop_para_help
+				local.actor playsound coop_para_heal	// HZM coop - "here you go!" heal line (was coop_para_help combat line)
 				wait 1.6
-				local.nh = local.target.health + 35
-				if( local.nh > 100 ){ local.nh = 100 }
+				local.nh = local.target.health + ( local.target.max_health * 0.25 )	// +25% of max HP per kneel (per user; was flat +35 capped at 100)
+				if( local.nh > local.target.max_health ){ local.nh = local.target.max_health }
 				local.target.health = local.nh
 				local.actor playsound med_kit
 				iprintlnbold ("Allied Medic patched you up! HP: " + local.nh)
@@ -551,6 +561,35 @@ coop_paradrop_medic local.actor:{
 			}
 		}
 		}
+	}
+}end
+
+
+// HZM coop - COMBAT paratrooper (wtype 1-4) behaviour: advance with the squad toward the nearest player and
+// fight along the way, instead of standing idle where they landed. Periodically runto the nearest living player
+// when they've fallen >512u behind; enableEnemy=1 means they break off to shoot any germans they spot en route.
+// This is what makes them actually reach + engage the enemy (they used to just sit at the drop zone).
+coop_paradrop_combatant local.actor:{
+	wait 1
+	while( local.actor != NULL && isAlive local.actor ){
+		local.np = NIL
+		local.nd = 99999
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.pp = $player[local.i]
+			if( local.pp != NULL && local.pp.health > 0 ){
+				local.d = vector_length( local.actor.origin - local.pp.origin )
+				if( local.d < local.nd ){ local.nd = local.d; local.np = local.pp }
+			}
+			local.i++
+		}
+		// Only chase the player when well behind - close enough, hold position and let enableEnemy drive the
+		// fight so they don't ignore a target right in front of them to sprint to the player.
+		if( local.np != NIL && local.nd > 512 ){
+			local.actor.movedoneradius = 256
+			local.actor runto local.np.origin
+		}
+		wait 3
 	}
 }end
 

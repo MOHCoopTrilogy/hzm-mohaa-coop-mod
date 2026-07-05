@@ -7,6 +7,7 @@
 
 
 	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (first frame, before prespawn)
+	level.coop_weatherTheme = "rain"		//HZM coop - dynamic weather: Dutch canal town
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 	level.coop_hasCallback["coop_playerJustLeft"] = 1
@@ -19,6 +20,13 @@
 	exec global/auto.scr t1l3
 	exec global/loadout.scr maps/t1l3.scr
 	exec global/bomber.scr
+
+	// HZM coop - precache the Tiger TURRET model at LEVEL LOAD. The tank's body is assigned at runtime
+	// ($tank1 model ... in prespawn below), and the tik's spawnturret sub-model "vehicles/tigercannon.tik"
+	// fails to resolve its skeleton on the CLIENT at runtime (Skeletor: "Could not open vehicles/tigercannon.skc")
+	// -> the turret spawns model-less (invisible; reads as missing/sunk under the hull). Caching it up front with
+	// the full path registers it in the configstrings so the client loads the skeleton correctly before use.
+	cache models/vehicles/tigercannon.tik
 
 level waittill prespawn
 
@@ -75,12 +83,21 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 	exec coop_mod/replace.scr::ammo grenade 3
 
 	
-	$tank1 model models/vehicles/tiger_base.tik
+	// HZM coop - DO NOT re-model the tank at runtime. $tank1 is already a BSP-placed "vehicle_german_tigertank"
+	// with model "vehicles/tigertank.tik", so it spawns with the FULL vehicle setup + a working turret (exactly
+	// like the working M3L3 tiger). The stock line "$tank1 model models/vehicles/tiger_base.tik" swaps the model
+	// at RUNTIME, which OpenMOHAA mishandles (the re-modelled turret never gets its client-side attach / tag
+	// setup -> turret renders beside/under the hull, gun mis-oriented). tigertank.tik and tiger_base.tik are both
+	// VehicleTank, both spawnturret vehicles/tigercannon.tik, both AnimationSet "tank_" - the swap gains nothing
+	// the tank gag needs. Keeping the BSP model is the SP/BSP-matching fix.
+	//$tank1 model models/vehicles/tiger_base.tik
 	$truck_1 vehicleanim idlenolights
 	$truck_1 nodamage
 
 	thread gags/t1l3_BoatRide.scr::DoBoatRide
 	exec gags/t1l3_colonel.scr $officer $bmw $friendlycaptain $friendlyprivate
+	thread coop_captainInvincible	// HZM coop - captain can never die (removes the scripted mission-fail); see fn at end of file
+	thread coop_endgameSpawn		// HZM coop - advance the fallback respawn point to the endgame once the tank is destroyed
 	exec gags/t1l3_tank.scr $tank1
 	exec gags/t1l3_flak_cannon.scr $flakcannon $flakcharge
 	exec gags/t1l3_mg_gunners.scr $gunner1 $gunner2
@@ -121,6 +138,15 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 	$flakcannon_turret0.collisionent = $flak88_turret_collision
 	$flakcannon.collisionent = $flak88_collision
 
+	// HZM coop - TOOL PROTECTION: obj2 requires killing the Tiger with this flak cannon,
+	// so it must survive until the tank duel is over. Damage unlocks in meetcaptain3,
+	// the same moment stock enables the demolition charge.
+	$flakcannon nodamage
+
+	// HZM coop - FAILSAFE: flak cannon killed by the bombing run (or any other blast)
+	// still completes the objective (fires the charge BlowUp -> flakblown setthread)
+	thread coop_mod/main.scr::coop_watchDestroyable $flakcannon $flakcharge
+
 
 	$bmw2 nodamage
 
@@ -150,7 +176,11 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 
 	wait 2.5
 	fadein 3.5 0 0 0 1
-	thread gags/t1l3_misc.scr::pushfarplane 600 4000 20.0 15.0
+	// HZM coop - the stock time-based fog push (600 -> 4000 over ~35s) opens back up while you're still out
+	// on open water, re-exposing a glitchy skybox-seam panel on the horizon. Coop instead drives fog by the
+	// boat's live DISTANCE to the pier (gags/T1L3_BoatRide.Scr::FoggyIntro) so it stays thick out on the water
+	// and only opens as you reach land (where buildings occlude the seam anyway). Stock push disabled here.
+	//thread gags/t1l3_misc.scr::pushfarplane 600 4000 20.0 15.0
 	wait 3.0
 	drawhud 1
 
@@ -356,6 +386,7 @@ meetcaptain3:
 		exec gags/t1l3_flak_cannon.scr::lock_cannon
 		waitthread gags/t1l3_tank.scr::meetcaptain3
 		exec gags/t1l3_flak_cannon.scr::enable_charge
+		$flakcannon takedamage	// HZM coop - TOOL PROTECTION lifted: demo phase begins, any blast may now destroy it
 		thread objective3
 	}
 
@@ -1108,4 +1139,81 @@ coop_playerJustLeft:
 end
 
 coop_playerJustRespawned:
+	// HZM coop - re-apply t1l3's British resistance loadout on respawn. Without this the engine hands the
+	// respawning player the default M1 Garand (MP spawn weapon) instead of the Sten/Enfield the mission
+	// starts with. Mirrors the initial loadout block above (binoculars are left to the reward-item system).
+	local.player = parm.other
+	if ( local.player == NULL )
+		end
+	local.player takeall
+	local.player item weapons/Webley_Revolver.tik
+	local.player item weapons/enfield.tik
+	local.player item weapons/sten.tik
+	local.player item weapons/mills_grenade.tik
+	local.player item weapons/M18_smoke_grenade.tik
+	local.player ammo pistol 32
+	local.player ammo smg 128
+	local.player ammo rifle 49
+	local.player ammo smokegrenade 3
+	local.player useweaponclass smg
+end
+
+
+//-------------------------------------------------------------------------
+// HZM coop - ENDGAME FALLBACK SPAWN
+//
+// The coop respawn warper normally returns a player to where they died. When
+// it can't (warper disabled, or no valid saved origin) the player falls back
+// to the predefined coop_spawn location - which on t1l3 is the default map
+// spawns near the boat START. So a death during the final flak/bridge stretch
+// could bounce you all the way back. Once the Tiger tank is destroyed, move
+// the fallback spawn for all 8 player slots to the endgame area so respawns
+// land near the action. (Warper-to-death-spot still takes priority when valid.)
+//-------------------------------------------------------------------------
+coop_endgameSpawn:
+
+	while ( level.tankdestroyed != 1 )
+	{
+		wait 1
+	}
+
+	for ( local.i = 1; local.i <= 8; local.i++ )
+	{
+		level.flags["coop_spawn"+local.i+"origin"] = ( -1898 2239 105 )
+		level.flags["coop_spawn"+local.i+"angles"] = ( 0 88 0 )		// user gave 808; 808 == 88 normalized
+	}
+
+end
+
+
+//-------------------------------------------------------------------------
+// HZM coop - CAPTAIN FULL INVINCIBILITY  ("invincible + kill the fail")
+//
+// The captain's only scripted death is a mission-FAIL: the stock tank gag
+// (tankpath3) fires radiusdamage 1500 at him, and colonel-gag captaindeathcheck
+// turns any captain death into "You failed the mission" -> missionfailed. In
+// coop's chaos (scaled enemies, stray fire) that fail is far too easy to trip.
+//
+// immortal can't be used - Actor::IsImmortal() is stubbed to false in OpenMOHAA -
+// and 'nodamage' gets flipped back on by the tank gag's own 'takedamage' call.
+// So we give the captain an enormous health pool and keep it topped up. 1500 tank
+// damage (or any stray fire) can never bring 1e6 HP to 0, so he never dies -> the
+// captaindeathcheck 'waittill death' never fires -> missionfailed never triggers.
+// That single mechanism delivers BOTH the invincibility and the killed fail.
+//-------------------------------------------------------------------------
+coop_captainInvincible:
+
+	local.cap = $friendlycaptain
+	if ( local.cap == NULL )
+		end
+
+	local.cap.health = 1000000
+
+	while ( local.cap != NULL )
+	{
+		if ( local.cap.health < 500000 )
+			local.cap.health = 1000000
+		wait 0.5
+	}
+
 end

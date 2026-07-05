@@ -1,0 +1,508 @@
+//-------------------------------------------------------------------------
+//	gags/T1L3_BoatRide.Scr   -   HZM COOP OVERRIDE
+//	Jeff Leggett (original) / HZM coop adaptation 2026-07-02
+//
+//	The stock intro is a single-player cinematic that operated on $player
+//	directly (physics_off / viewangles / glue / notsolid). In coop $player is
+//	an ARRAY, and gluing/physics-toggling the array throws an uncaught engine
+//	exception -> the server aborts (hard crash on t1l3 load).
+//
+//	Coop design (user request): Player 1 (host) rides the boat exactly as SP;
+//	players 2+ ride along glued to the same boat seat (notsolid, controls
+//	frozen) so they see the ride from P1's vantage without the crashing
+//	multi-player glue. At the dock EVERYONE disembarks: unglue, warp all
+//	players onto the pier (and set it as their respawn), hand control back.
+//	Only main / DoBoatRide / AtDock are coop-changed; the rest is stock.
+//-------------------------------------------------------------------------
+
+
+//-------------------------------------------------------------------------
+main:
+//-------------------------------------------------------------------------
+
+	level.rower	= $friendlyprivate
+	level.cappy = $friendlycaptain
+	level.player_listener = $player_listener
+
+	// HZM coop - stop the boat crew ENGAGING from prespawn (before any player connects). This is THE fix for
+	// the t1l3 load crash. In SP the crew's AI isn't disabled until DoBoatRide, which only runs AFTER the
+	// player spawns; in coop that window lets the captain + rower wake at connect, go Curious about the
+	// player, get linked into a squad and pathfind - and a crewman in a broken/attached state makes
+	// SimpleActor::ShortenPathToAvoidSquadMates -> IsTeamMate deref a bad squadmate -> hard crash on load.
+	// disable_ai.scr sets self.enableEnemy = 0 (the SP cinematic disable): they can't acquire an enemy, so no
+	// Curious / no squad pathfind / no crash - but UNLIKE ai_off it leaves the animation system running, so
+	// DoCappy / DoRower still play their idle / row animations. CappyGetOutOfBoat / RowerGetOutOfBoat
+	// re-enable their AI (enable_ai.scr) when they climb out at the dock.
+	level.cappy exec global/disable_ai.scr
+	level.rower exec global/disable_ai.scr
+	level.cappy physics_off
+	level.rower physics_off
+
+	level.cappy attach $boat "passenger1" 0
+
+	level.nashtyboy = 0
+
+	// HZM coop - remember the map's normal fog distance so FoggyIntro can restore it at the dock. t1l3.scr
+	// sets $world farplane 4000 before this gag execs, so this captures 4000 (guard in case it reads NIL/0).
+	level.coop_boatFogDefault = $world.farplane
+	if ( level.coop_boatFogDefault == NIL )
+		level.coop_boatFogDefault = 4000
+	if ( level.coop_boatFogDefault <= 0 )
+		level.coop_boatFogDefault = 4000
+	level.coop_boatRiding = 0
+
+	// HZM coop - binoculars are granted by the coop reward-item system, not here (the stock
+	// add_item ran at prespawn on $player before players exist). Intentionally omitted.
+
+end
+
+//-------------------------------------------------------------------------
+DoBoatRide:
+//-------------------------------------------------------------------------
+
+	level.slowBoatSpeed = 75
+	level.fastBoatSpeed = 160
+	level.parkBoatSpeed = 75
+
+	level.rower.no_idle = 1
+	level.cappy.no_idle = 1
+
+	// HZM coop - host rides the boat; players 2+ ride along at the same seat/viewpoint
+	level.coop_boatHost = $player[1]
+
+	thread SpawnGun
+
+	level.player_listener thread ListenForPlayer
+
+	// HZM coop - distance-driven intro fog. Thick out on the open water (hides the glitchy skybox-seam panel),
+	// smoothly opening to the map default as the boat closes on the pier. coop_boatFogNear tunes the thick end
+	// live (set it in console + reload t1l3, no redeploy needed); default 800.
+	level.coop_boatFogNear = int( getcvar( "coop_boatFogNear" ) )
+	if ( level.coop_boatFogNear <= 0 )
+		level.coop_boatFogNear = 800
+	level.coop_boatFogFar = level.coop_boatFogDefault
+	level.coop_boatRiding = 1
+	thread FoggyIntro
+
+	level.rower physics_off
+	level.rower attach $boat "passenger2" 0
+
+	local.org = $playerspot_boat.origin - (0 0 64)
+	$playerspot_boat.origin = local.org
+
+	$playerspot_boat bind $boat
+
+	// glue EVERY player to the boat seat (single-entity ops per player = coop-safe, no array crash)
+	for( local.i = 1; local.i <= $player.size; local.i++ )
+	{
+		local.p = $player[local.i]
+		if( local.p == NULL )
+			continue
+
+		local.p freezecontrols 1
+		local.p physics_off
+		local.p.viewangles = "0 270 0"
+		local.p glue $playerspot_boat 0
+		local.p notsolid
+		local.p physics_on
+	}
+
+	wait 2
+	level.cappy thread DoCappy
+	level.rower thread DoRower
+
+	$boat thread DriveBoat
+
+end
+
+
+//-------------------------------------------------------------------------
+DoCappy:
+//
+//	Play Captains opening dialog and loop his idle..
+//-------------------------------------------------------------------------
+
+	self exec global/disable_ai.scr
+
+	self thread global/LoopAnim.Scr::LoopAnim 13C101_CaptainIdle
+
+	wait 7	// however long..
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	if ( level.nashtyboy == 0 )
+	{
+		self anim 13C103_CaptainDialog01
+		self waittill animdone
+	}
+
+	self thread global/LoopAnim.Scr::LoopAnim 13C101_CaptainIdle
+
+end
+
+
+//-------------------------------------------------------------------------
+DoRower:
+//-------------------------------------------------------------------------
+	self exec global/disable_ai.scr
+
+	self thread global/LoopAnim.Scr::LoopAnim 13A101_SlowRow
+
+end
+
+
+//-------------------------------------------------------------------------
+YellAtPlayer:
+//
+//	Captain yells at player for shooting!
+//-------------------------------------------------------------------------
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	self anim 13C104_CaptainDialog02
+	self waittill animdone
+	self anim 13C106_CaptainIdletolow
+	self waittill animdone
+
+	self waitthread global/LoopAnim.Scr::LoopAnim 13C102_CaptainIdleLow
+
+end
+
+
+//-------------------------------------------------------------------------
+RowFaster:
+//-------------------------------------------------------------------------
+
+	// tell boat to go faster...
+	$boat thread DriveBoatFast
+
+	// stop our looping
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	// notice the noise...
+	self anim 13A102_NoticeGunFire
+	self waittill animdone
+
+	// row faster
+	self thread global/LoopAnim.Scr::LoopAnim 13A103_FastRow
+
+
+end
+
+
+//-------------------------------------------------------------------------
+BadPlayerBad:
+//-------------------------------------------------------------------------
+
+	// spawn extra guys
+	thread global/ai.scr::spawn 500
+
+	// have cappy and rower do their things...
+	level.cappy thread YellAtPlayer
+	level.rower thread RowFaster
+
+end
+
+
+//-------------------------------------------------------------------------
+ListenForPlayer:
+//-------------------------------------------------------------------------
+
+	self hide
+	self notsolid
+
+	self waittill hasenemy
+
+	if ( isAlive self )
+	{
+		thread BadPlayerBad
+		level.nashtyboy = 1
+		thread gags/t1l3_colonel.scr::colonelattack
+	}
+
+	self ai_off
+
+end
+
+
+//-------------------------------------------------------------------------
+DriveBoat:
+//
+//	drive boat
+//-------------------------------------------------------------------------
+
+	self.slowrow	= local
+
+	self flypath $boat_path level.slowBoatSpeed 200 256
+
+	$boat thread global/LoopAnim.Scr::LoopAnim 13P101_SlowPaddle
+	$boat notsolid
+
+	self waitmove
+
+	self thread ParkBoat 0
+
+end
+
+
+//-------------------------------------------------------------------------
+DriveBoatFast:
+//-------------------------------------------------------------------------
+
+	// kill the slow driving thread...
+	self.slowrow delete
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	self anim 13P102_Slow2fasttran
+	self waittill animdone
+	self thread global/LoopAnim.Scr::LoopAnim 13P103_FastPaddle
+
+	self modifyflypath level.fastBoatSpeed 200 256
+	self waitmove
+
+	self thread ParkBoat 1
+
+end
+
+
+//-------------------------------------------------------------------------
+ParkBoat local.fast:
+//
+//-------------------------------------------------------------------------
+
+	level.player_listener delete
+
+	if ( local.fast==1 )
+	{
+		thread SlowBoatDown 0.1 5 level.fastBoatSpeed
+		level.rower thread RowerGetOutOfBoat 4.6		// rower tells cappy when to get out..
+		self flypath $boat_park level.fastBoatSpeed 200 256
+	}
+	else
+	{
+		thread SlowBoatDown 2 1 level.slowBoatSpeed
+		level.rower thread RowerGetOutOfBoat 7.75		// rower tells cappy when to get out..
+		self flypath $boat_park level.slowBoatSpeed 200 256
+	}
+
+	self waitmove
+	self stop
+
+	thread AtDock
+
+end
+
+
+//-------------------------------------------------------------------------
+SlowBoatDown local.waittime local.rate local.startspeed:
+//-------------------------------------------------------------------------
+
+	wait local.waittime
+
+	local.speed = local.startspeed
+
+	while ( local.speed > 20 )
+	{
+		local.speed -= local.rate
+		self modifyflypath local.speed 200 256
+		wait 0.25
+	}
+
+end
+
+
+//-------------------------------------------------------------------------
+AtDock:
+//-------------------------------------------------------------------------
+
+	// HZM coop - we're at the pier: stop the distance-fog loop and snap fog back to the map default.
+	level.coop_boatRiding = 0
+	$world farplane level.coop_boatFogDefault
+
+	$boat notsolid
+
+	$playerspot_boat unbind
+
+	local.uptime = 0.4
+
+	$playerspot_boat time local.uptime
+	$playerspot_boat moveup 30
+	$playerspot_boat move
+	wait local.uptime
+
+	// HZM coop - EVERYONE disembarks onto the pier. Unglue + restore each player, then warp them all to
+	// the pier (setSpawn 1 so a later death respawns them here, not back at the boat), then hand control back.
+	for( local.i = 1; local.i <= $player.size; local.i++ )
+	{
+		local.p = $player[local.i]
+		if( local.p == NULL )
+			continue
+		local.p unglue
+		local.p solid
+		local.p physics_on
+	}
+
+	local.pier = $cappy_dest
+	if( local.pier == NULL )
+		local.pier = $playerspot_boat
+
+	waitthread coop_mod/main.scr::playersWarpto local.pier.origin NIL 1
+
+	for( local.i = 1; local.i <= $player.size; local.i++ )
+	{
+		local.p = $player[local.i]
+		if( local.p == NULL )
+			continue
+		local.p freezecontrols 0
+	}
+
+end
+
+
+//-------------------------------------------------------------------------
+CappyGetOutOfBoat:
+//-------------------------------------------------------------------------
+
+	wait 0.5
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	self detach
+	self solid
+	self physics_on
+
+	self anim_noclip 13C107_transtodock
+	self waittill animdone
+
+	self anim_noclip 13C105_CaptainDock
+	self waittill animdone
+
+
+	// become a friendly here?
+	self runto $cappy_dest
+	self waittill movedone
+
+	self exec global/enable_ai.scr
+
+	self.no_idle = 0
+
+
+	self thread global/friendly.scr::friendlythink
+	self.friendtype = 0
+
+end
+
+
+//-------------------------------------------------------------------------
+RowerGetOutOfBoat local.waittime:
+// stop rowing
+//-------------------------------------------------------------------------
+
+	wait local.waittime
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+
+	// have boat stop playing it's rowing animation...
+	$boat thread global/LoopAnim.Scr::LoopAnimStop
+
+	$boat anim 13P104_PutOarsDown
+	self anim 13A105_PutOarsDown
+	self thread GimmeGun
+	self waittill animdone
+
+	$boat thread global/LoopAnim.Scr::LoopAnim 13P105_OarsatSide
+
+	level.cappy thread CappyGetOutOfBoat
+
+	self anim_noclip 13A104_RowerDock
+	self waittill animdone
+
+	// become a friendly here?
+	self runto $rower_dest
+	self waittill movedone
+	self exec global/enable_ai.scr
+
+	self.no_idle = 0
+	self thread global/friendly.scr::friendlythink
+	self.friendtype = 0
+
+end
+
+
+//-------------------------------------------------------------------------
+SpawnGun:
+//-------------------------------------------------------------------------
+
+	level.rower_gun = spawn script_model model "models/weapons/enfield.tik"
+
+	level.rower_gun attach $boat "passenger2" 0 ( -20 -25 0 )
+	level.rower_gun angles "0 -120 120"
+	level.rower_gun notsolid
+
+end
+
+
+//-------------------------------------------------------------------------
+GimmeGun:
+//-------------------------------------------------------------------------
+
+	wait 1.26
+	self gun enfield
+	level.rower_gun delete
+
+	wait 2.0
+	self detach
+	self solid
+	self physics_on
+
+end
+
+
+//-------------------------------------------------------------------------
+//	FoggyIntro   -   HZM coop
+//
+//	Drive $world farplane by the boat's live distance to the pier: thick fog
+//	far out on the water (hides the glitchy skybox-seam panel that only shows
+//	over open horizon), opening smoothly to the map default as we reach land.
+//	Distance-based (not a timer) so it tracks the boat even if the player
+//	opens fire and the crew rows faster. AtDock clears level.coop_boatRiding
+//	and restores the default; this thread also restores it on exit as backup.
+//-------------------------------------------------------------------------
+FoggyIntro:
+
+	local.land = $cappy_dest
+	if ( local.land == NULL )
+		local.land = $boat_park
+	if ( local.land == NULL )
+		local.land = $playerspot_boat
+
+	local.near = level.coop_boatFogNear
+	local.far  = level.coop_boatFogFar
+
+	// normalise against the distance at the moment the ride begins (1 = far out, 0 = at the pier)
+	local.startDist = vector_length( $boat.origin - local.land.origin )
+	if ( local.startDist < 1 )
+		local.startDist = 1
+
+	// thick from the first frame so the seam is hidden as the screen fades in
+	$world farplane local.near
+
+	while ( level.coop_boatRiding == 1 )
+	{
+		local.frac = vector_length( $boat.origin - local.land.origin ) / local.startDist
+		if ( local.frac > 1 )
+			local.frac = 1
+		if ( local.frac < 0 )
+			local.frac = 0
+
+		// thick (near) when far from land, opening to the map default (far) as we approach
+		local.fp = local.far + ( ( local.near - local.far ) * local.frac )
+		$world farplane local.fp
+
+		wait 0.1
+	}
+
+	$world farplane level.coop_boatFogDefault
+
+end

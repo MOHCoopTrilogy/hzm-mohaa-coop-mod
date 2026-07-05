@@ -2646,7 +2646,11 @@ coop_officer_combat_music:{
 		waitthread coop_mod/replace.scr::tmfade 1 0 3		// fade the officer track down to silence (~3s)
 		waitthread coop_mod/replace.scr::tmstop			// then stop it
 		wait 2							// quiet beat after the officer is killed
-		if( level.coop_music_saved != NIL ){
+		// HZM coop - ONLY restore the pre-fight ambient track if the MAP hasn't started its own post-officer-death
+		// music. Many maps play e.g. mus_<map>_DeadOfficer via tmstart the instant the officer dies; since tmstart
+		// now records level.coop_music_track, a mismatch here means the map owns the music -> restarting the old
+		// track on top of it was the "music loops over and over after the officer dies" bug. Defer to the map.
+		if( level.coop_music_saved != NIL && level.coop_music_track == level.coop_music_saved ){
 			waitthread coop_mod/replace.scr::tmvolume 0
 			waitthread coop_mod/replace.scr::tmstartloop level.coop_music_saved
 			waitthread coop_mod/replace.scr::tmfade 0 1 1.5	// ease the base/ambient track back in
@@ -3053,6 +3057,13 @@ coop_track_marker local.actor local.mdl:{
 // Plays a radio-chatter alias on EVERY player so all coop players hear shared radio comms
 // (radio is "in your ear" - played on each player so each hears it at full volume).
 coop_radio_all local.alias:{
+	// HZM coop - radio framing: a short squelch/static burst leads every radio call (batch-2 asset)
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){ $player[local.i] playsound coop_radio_static }
+		local.i++
+	}
+	wait 0.35
 	local.i = 1
 	while( local.i <= $player.size ){
 		if( $player[local.i] != NULL ){ $player[local.i] playsound local.alias }
@@ -3071,7 +3082,10 @@ binoculars_fired local.player local.target:{
 	// Sky check on the TARGET (not the player) so a doorway shot is correctly blocked.
 	// Uses coop_hasOpenSky, which treats a SURF_SKY hit as outdoors -- a plain up-trace
 	// hits the skybox brush and falsely reads "indoors" everywhere on outdoor maps.
-	if( (exec coop_mod/officer.scr::coop_hasOpenSky local.target) != 1 ){
+	// coop_binoc_skyCheck 0 = allow strikes ANYWHERE (skip the open-sky requirement). Handy on bridge / urban
+	// maps like t1l2 where most aim points have structure (bridge deck, roofs) overhead so the honest trace
+	// correctly reports "no clear sky" - set it 0 there to bomb freely.
+	if( getcvar "coop_binoc_skyCheck" != "0" && (exec coop_mod/officer.scr::coop_hasOpenSky local.target) != 1 ){
 		thread coop_radio_all "coop_radio_standby"
 		iprintlnbold "Negative - no clear sky above target coordinates. Strike request denied."
 		end
@@ -3112,7 +3126,10 @@ coop_bombing_run_sequence local.target:{
 	// 2) HQ radioman's confirmation back over the radio (all players). Let it play out.
 	local.rp = 1
 	while( local.rp <= $player.size ){
-		if( $player[local.rp] != NULL ){ $player[local.rp] playsound coop_radio_airstrike_resp }
+		if( $player[local.rp] != NULL ){
+			$player[local.rp] playsound coop_radio_static
+			$player[local.rp] playsound coop_radio_airstrike_resp
+		}
 		local.rp++
 	}
 	wait 3.5

@@ -4,8 +4,12 @@ main:
 //	if (getcvar(superfps) == "1")
 //		end
 
-level.rain_width = "0.4"
-level.rain_min_dist = 512
+// HZM coop - only DEFAULT these; if the coop controller pre-set a look (snow uses wider flakes + a farther
+// min_dist) keep it. Rain leaves them unset, so it still gets the 0.4 / 512 defaults.
+if (level.rain_width == NIL)
+	level.rain_width = "0.4"
+if (level.rain_min_dist == NIL)
+	level.rain_min_dist = 512
 // setcvar "cg_density" "10"
 	level.startedrainsound1 = 1
 	level.startedrainsound2 = 1
@@ -93,7 +97,7 @@ if( level.gametype == 0 )
 
 thread unflash
 wait 1
- setcvar "r_fastsky" "0.5"
+ setcvar "r_fastsky" "0"		// HZM coop - was 0.5 (a half-value the gl1 renderer draws GLITCHY - shows as a broken sky at map start until the first lightning flash toggles it; e.g. the t1l3 boat intro). 0 = draw the skybox normally; the flash below still toggles it to 1 briefly.
 $world farplane level.farplane
 
 	if (level.windtime == NIL)
@@ -115,12 +119,30 @@ if (level.thundertime != 0) //added by JG--- what if we don't want thunder ?
 thread thunder
 }
 
-if (game.medic != NIL)
-	thread medicchanger
+// HZM coop - WEATHER DRIVER select (coop_weatherPin):
+//   ""      (default) = the coop random-walk driver in coop_mod/weather.scr drives level.weatherpattern
+//                       (fluid, unpredictable build/ease storms) - so thread NEITHER native changer here.
+//   "cycle"           = the native FIXED escalation cycle (weatherchanger / medicchanger).
+//   "0".."3"          = hold that fixed intensity (0 calm .. 3 downpour/blizzard).
+if (getcvar("coop_weatherPin") == "cycle")
+{
+	if (game.medic != NIL)
+		thread medicchanger
+	else
+		thread weatherchanger
+}
 else
-	thread weatherchanger
+if (getcvar("coop_weatherPin") != "")
+	level.weatherpattern = int(getcvar("coop_weatherPin"))
 
 thread treemovement
+
+// HZM coop - coop maps have no interior/exterior rain-trigger entities; default the counts so the loops
+// below are no-ops instead of erroring on NIL arithmetic (level.interiors+1 when NIL).
+if (level.interiors == NIL)
+	level.interiors = 0
+if (level.exteriors == NIL)
+	level.exteriors = 0
 
 for (local.i=1;local.i<level.interiors+1;local.i++)
 	level.interior[local.i] thread rainin
@@ -267,6 +289,16 @@ end
 
 singlethunder:
 
+	// HZM coop - NO thunder/lightning unless it's actually RAINING. The weatherpattern loop keeps thundertime > 0
+	// even through the dry/clearing spell, so without this gate the sky flashes on an otherwise-dry map. Gate on
+	// live rain intensity (raindensity < 0.5 = basically dry). Coop only (gametype != 0); SP is untouched.
+	if( level.gametype != 0 && ( level.raindensity == NIL || level.raindensity < 0.5 ) ){ end }
+
+	// HZM coop - drive the per-client ihuddraw sky-flash. The native flash below uses r_fastsky/farplane,
+	// which is host-only for remote coop clients; this makes EVERY player see the lightning. One envelope
+	// per strike, fired just before the thunder that follows.
+	thread coop_mod/weather.scr::coop_weather_flash
+
 	local.num = (randomint (3) + 1)
 	if (local.num == 1)
 	{
@@ -316,11 +348,21 @@ singlethunder:
 		wait (1 + (randomfloat(2)))
 	}
 
-	if (game.medic == NIL){
+	if( level.gametype != 0 ){
+		// HZM coop - THUNDER for EVERY player. A raw '$player playsound' on the array is host-only in coop, so
+		// remote players never heard the thunder. The flash sequence above already put ~2-3s between the lightning
+		// and here (light-then-sound); a short extra random delay varies that gap so strikes feel near or far.
+		wait ( randomfloat( 1.5 ) )
+		local.ti = 1
+		while( local.ti <= $player.size ){
+			if( $player[local.ti] != NULL ){ $player[local.ti] playsound thunder }
+			local.ti++
+		}
+	} else if (game.medic == NIL){
 		//[201] Smithy - stop spam in console if server is empty (playsound will work on an array)
-		if ($player){ 
-			$player playsound thunder 
-		}				
+		if ($player){
+			$player playsound thunder
+		}
 	}
 
 end

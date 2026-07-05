@@ -1,62 +1,69 @@
 //=========================================================================
-// HZM coop - DYNAMIC WEATHER (v1): random rain / snow storms that build, hold, and clear, theme-gated per
-// map. Drives the engine's level.rain_* precipitation, which CG_RainGlobal (cgame) renders in a box around
-// each player AND sky-gates per column (SURF_SKY up-trace) - so it works on maps with no rain brush and
-// never falls into interiors / under roofs. Threaded once per map from main.scr::main (lazy: the cycle
-// waits before it does anything, so it never fights map init).
+// HZM coop - WEATHER (v2): coop now drives the NATIVE SP trilogy weather system (global/weather.scr) so
+// rain / thunderstorms / lightning / snow look exactly like single-player. This file is the COOP CONTROLLER:
+// it picks the per-map theme, seeds the SP precip "look", and hands off to the native renderer. BOTH rain and
+// snow are FLUID and DYNAMIC - a coop random-walk driver drifts the intensity so light rain builds into
+// thunderstorms and light snow into blizzards, then eases back, unpredictably; the native weather.scr smooths
+// every transition and (for rain) fires thunder + lightning whose frequency scales with intensity. The rain
+// visual is networked to EVERY coop client by the cgame; our coop_weather_flash hook (called from the native
+// singlethunder) adds a per-client sky flash so all players see the lightning (the native r_fastsky / farplane
+// flash only reaches the host over the network).
 //
-//   coop_dynWeather 1/0               = master on/off
-//   coop_weatherForce ""/rain/snow/off = OVERRIDE the per-map theme (set "rain" to test on any map)
-//   coop_weatherStartStorm 1          = open straight into a storm (testing; skips the first clear wait)
-//   coop_dynWeatherChance 0.6         = chance a clear period turns into a storm
-//   coop_dynWeatherClearMin/Max       = seconds of clear weather between storms
-//   coop_dynWeatherStormMin/Max       = seconds a storm holds at full intensity
-//   coop_dynWeatherMax 0.45           = peak rain density
-//   coop_dynWeatherThunder 1          = thunder rumble during rain storms
+//   coop_dynWeather 1/0                = master on/off (threaded once per map from main.scr::main)
+//   coop_weatherForce ""/rain/snow/off = OVERRIDE the per-map theme (set BEFORE the map loads to test)
+//   coop_weatherPin ""/cycle/0..3      = "" fluid random storms (default) | "cycle" native fixed cycle |
+//                                        0..3 hold a fixed intensity (0 calm .. 3 storm/blizzard)
+//   coop_rainVolume 0.85               = peak rain-ambience loudness
+//   coop_dynWeatherLightning 1         = per-client lightning flash on thunder (0 = thunder sound only)
 //
-// Theme is decided by (1) coop_weatherForce override, else (2) level.coop_weatherTheme if a map set it,
-// else "none" (no weather). So weather only appears where it's been explicitly classified - rain never on
-// snow maps, snow never elsewhere, nothing on desert/indoor maps.
+// Theme is (1) coop_weatherForce override, else (2) level.coop_weatherTheme if the map set one, else "none".
+// ~20 coop maps already declare level.coop_weatherTheme; snow maps get snow, rain maps get storms.
 //=========================================================================
 
 coop_weather_init:{
 	if( int( getcvar "coop_dynWeather" ) != 1 ){ end }
-	level.coop_weatherActive   = 0
-	level.coop_weatherStorming = 0	// 1 only during a build->hold->fade storm; gates dynamics + sound loops
-	level.coop_rainSndEnt      = NULL	// lazily-spawned levelwide rain-ambience emitter
-	level.rain_density     = 0
-	level.coop_rainDensity = 0	// readable density mirror (see coop_weather_ramp)
-	thread coop_weather_watch
-}end
+	level.coop_rainSndEnt = NULL
 
-//=========================================================================
-// Re-checks the theme LIVE every few seconds, so setting coop_weatherForce in the console takes effect
-// without a map reload (the old one-shot read meant a console change after map load did nothing). Starts
-// the storm cycle when a theme turns on, stops it (clears rain) when it turns off.
-coop_weather_watch:{
-	while( 1 ){
-		local.theme = waitthread coop_weather_theme
-		if( local.theme == "none" ){
-			if( level.coop_weatherActive != 0 ){
-				level.coop_weatherActive   = 0
-				level.coop_weatherStorming = 0
-				level.rain_density     = 0
-				level.coop_rainDensity = 0
-				println( "^~^~^ WEATHER off" )
-			}
-		} else {
-			if( level.coop_weatherActive != 1 ){
-				level.coop_weatherActive = 1
-				waitthread coop_weather_setProfile local.theme	// baseline look (static shader + safe defaults)
-				thread coop_weather_cycle local.theme
-				println( "^~^~^ WEATHER on theme=" + local.theme )
-			}
-		}
-		wait 3
+	// HZM coop - DEFER until the map's own main has set level.coop_weatherTheme. This thread is started from
+	// inside main.scr::main, which runs BEFORE the map script's main reaches its 'level.coop_weatherTheme = ...'
+	// line (that line sits AFTER 'waitthread coop_mod/main.scr::main'). Reading the theme immediately therefore
+	// got NIL -> coop_weather_theme returned "none" -> weather silently never started on ANY map even with
+	// coop_dynWeather 1. waitTillPrespawn is a 0.5s coop wait (well after the theme is set) and still long
+	// before 'level waittill spawn', which is when global/weather.scr wants to be exec'd.
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	local.theme = waitthread coop_weather_theme
+	if( local.theme == "none" ){ end }
+
+	// seed the SP precip LOOK for this theme; the native weather.scr then drives density + slant on top
+	if( local.theme == "snow" ){
+		waitthread coop_weather_snowLook
+	} else {
+		waitthread coop_weather_rainLook
 	}
+
+	// start calm; the driver below (or the native cycle / a fixed pin) takes it from here
+	level.weatherpattern = 0
+
+	// hand off to the native SP renderer: it draws the precip, SMOOTHS every intensity change (so transitions
+	// are fluid), and for rain fires thunder + lightning whose frequency auto-scales with intensity. It
+	// self-syncs via its own "level waittill spawn", so exec'ing here (pre-spawn) is the right moment.
+	exec global/weather.scr
+
+	// FLUID RANDOM storms (default): random-walk the intensity up/down so light rain builds into
+	// thunderstorms / light snow into blizzards and eases back, unpredictably. coop_weatherPin "cycle" (native
+	// fixed cycle) or 0-3 (fixed intensity) disables this.
+	if( getcvar( "coop_weatherPin" ) == "" ){
+		thread coop_weather_randomDriver
+	}
+
+	if( local.theme == "rain" ){
+		thread coop_weather_sound		// rain ambience (snow is silent for now)
+	}
+	println( "^~^~^ WEATHER coop=" + local.theme + " (native SP, fluid random)" )
 }end
 
 //=========================================================================
+// Theme resolution: coop_weatherForce override wins, else the map's level.coop_weatherTheme, else none.
 coop_weather_theme:{
 	local.f = getcvar "coop_weatherForce"
 	if( local.f == "rain" ){ end "rain" }
@@ -69,35 +76,7 @@ coop_weather_theme:{
 }end
 
 //=========================================================================
-// BASELINE precip look per theme (set once when a theme turns on). The engine's own rain defaults are
-// speed 2048 / length 90 (cg_nature.cpp) - FAST, LONG, near-vertical streaks; snow is the opposite (slow,
-// short, fat, drifting). This just seeds safe starting values + the shader; while a storm is actually
-// falling, coop_weather_dynamics CONTINUOUSLY varies speed/slant/length/width (gusts + intensity scaling)
-// off the same cvars, so the rain is never uniform. Tune the cvars live - dynamics picks them up each gust.
-coop_weather_setProfile local.theme:{
-	level.rain_numshaders = 0
-	level.rain_min_dist   = 1400
-
-	if( local.theme == "snow" ){
-		level.rain_speed      = waitthread coop_weather_cvar "coop_snowSpeed"     150
-		level.rain_speed_vary = waitthread coop_weather_cvar "coop_snowSpeedVary" 60
-		level.rain_slant      = waitthread coop_weather_cvar "coop_snowSlant"     20
-		level.rain_length     = waitthread coop_weather_cvar "coop_snowLength"    5
-		level.rain_width      = waitthread coop_weather_cvar "coop_snowWidth"     3
-		level.rain_shader     = "textures/coop_snow"
-	} else {
-		level.rain_speed      = waitthread coop_weather_cvar "coop_rainSpeed"     2048
-		level.rain_speed_vary = waitthread coop_weather_cvar "coop_rainSpeedVary" 400
-		level.rain_slant      = waitthread coop_weather_cvar "coop_rainSlant"     80
-		level.rain_length     = waitthread coop_weather_cvar "coop_rainLength"    80
-		level.rain_width      = waitthread coop_weather_cvar "coop_rainWidth"     1
-		level.rain_shader     = "textures/coop_rain"
-	}
-}end
-
-//=========================================================================
-// Read a cvar as a float, falling back to local.def when it's missing/empty/<=0 (so an unregistered cvar
-// never zeroes out the look). Used by the precip profile so the values are live-tunable from console.
+// Read a cvar as a float, falling back to local.def when it is missing / empty / <= 0.
 coop_weather_cvar local.name local.def:{
 	local.v = getcvar local.name
 	if( local.v == "" ){ end local.def }
@@ -107,153 +86,152 @@ coop_weather_cvar local.name local.def:{
 }end
 
 //=========================================================================
-coop_weather_cycle local.theme:{
-	local.maxd = float( getcvar "coop_dynWeatherMax" )
-	if( local.maxd <= 0 ){ local.maxd = 0.45 }
+// SP SNOW look - m6l1a config: slow, short, drifting flakes via textures/snow0 x12. No thunder / lightning.
+// The native weather.scr drives the DENSITY dynamically (via level.weatherpattern), so light snow builds
+// into a blizzard and eases back; level.rain_density is networked to every coop client so all players see it.
+coop_weather_snowLook:{
+	level.rain_numshaders = 12
+	level.rain_shader     = "textures/snow0"
+	level.rain_speed      = 32
+	level.rain_speed_vary = 16
+	level.rain_length     = 2
+	level.rain_width      = 1
+	level.rain_slant      = 250
+	level.rain_min_dist   = 1800
+	level.thundertime     = 0		// snow: no thunder/lightning (native gates the thunder thread on this)
+	setcvar "r_ppRainDrops" "0"		// never wet-lens during snow
+}end
 
-	local.first = 1
-	while( level.coop_weatherActive == 1 ){
-		// CLEAR period (skipped on the very first pass if coop_weatherStartStorm is set, for testing)
-		if( local.first == 1 && int( getcvar "coop_weatherStartStorm" ) == 1 ){
-			local.first = 0
+//=========================================================================
+// SP RAIN look - the static shape only; the native weather.scr drives density + slant dynamically on top of
+// this. Uses the real SP textures/rain x12 art (fast driving streaks) - the fix for the old single-streak
+// "white lines". rain_width + rain_min_dist are (re)defaulted inside global/weather.scr (0.4 / 512), which
+// is correct for rain, so we do not set them here.
+coop_weather_rainLook:{
+	level.rain_numshaders = 12
+	level.rain_shader     = "textures/rain"
+	level.rain_speed      = 2048
+	level.rain_speed_vary = 400
+	level.rain_length     = 90
+	level.rain_slant      = 250
+	level.thundertime     = 20		// rain: thunder + lightning on (native scales frequency with intensity)
+	setcvar "r_ppRainDrops" "1"		// wet-lens FX on for rain
+}end
+
+//=========================================================================
+// FLUID RANDOM intensity (the default driver): random-walk level.weatherpattern between 0 (clear) and
+// 3 (storm / blizzard), holding each level a random while. The native weather.scr SMOOTHS the actual
+// density + slant toward each new target, so storms build and ease naturally - light rain -> thunderstorm
+// -> back, light snow -> blizzard -> back - on no fixed schedule. Slight upward bias so weather tends to
+// build before it clears; and when it fully clears (level 0) it holds a random DRY SPELL (coop_weatherDryMin/
+// Max, default 1-3 min) before the next storm can build - so there are real dry periods, not just brief lulls.
+// (For rain, native thunder frequency auto-scales with the intensity this sets.)
+coop_weather_randomDriver:{
+	local.cur = 0
+	level.weatherpattern = 0
+	while( 1 ){
+		local.r = randomfloat( 1 )
+		if( local.r < 0.38 ){				// HZM coop - build 38% / ease 47% / hold 15% = slight DOWNWARD bias so
+			local.cur = local.cur + 1		// storms clear more readily and dry spells come around more often (per
+		} else {						// user "more dry spells"). Was 45/40/15 (upward-biased = leaned stormy).
+			if( local.r < 0.85 ){
+				local.cur = local.cur - 1	// ease
+			}
+			// else: hold this level
+		}
+		if( local.cur < 0 ){ local.cur = 0 }
+		if( local.cur > 3 ){ local.cur = 3 }
+		level.weatherpattern = local.cur
+
+		if( local.cur == 0 ){
+			// DRY SPELL: the rain/snow has fully cleared - hold it clear for a good stretch (1-3 min)
+			// before the next storm is allowed to build, so there are REAL dry periods, not just brief
+			// lulls. (Live-tunable: coop_weatherDryMin/Max seconds.)
+			local.dmin = waitthread coop_weather_cvar "coop_weatherDryMin" 60
+			local.dmax = waitthread coop_weather_cvar "coop_weatherDryMax" 180
+			if( local.dmax < local.dmin ){ local.dmax = local.dmin }
+			wait ( local.dmin + randomfloat( local.dmax - local.dmin ) )
 		} else {
-			local.first = 0
-			level.rain_density     = 0
-			level.coop_rainDensity = 0
-
-			local.cmin = float( getcvar "coop_dynWeatherClearMin" )
-			if( local.cmin < 5 ){ local.cmin = 180 }
-			local.cmax = float( getcvar "coop_dynWeatherClearMax" )
-			if( local.cmax < local.cmin ){ local.cmax = local.cmin + 180 }
-			wait ( local.cmin + randomfloat( local.cmax - local.cmin ) )
-			if( level.coop_weatherActive != 1 ){ break }
-
-			local.chance = float( getcvar "coop_dynWeatherChance" )
-			if( local.chance <= 0 ){ local.chance = 0.6 }
-			if( randomfloat( 1 ) > local.chance ){ continue }
-		}
-
-		// BUILD -> STORM -> FADE
-		println( "^~^~^ WEATHER storm start (theme=" + local.theme + " peak=" + local.maxd + ")" )
-		level.coop_weatherStorming = 1
-		thread coop_weather_dynamics local.theme local.maxd	// live-vary speed/slant/length/width (gusts)
-		thread coop_weather_sound    local.theme local.maxd	// rain/wind loop, volume tracks density
-		waitthread coop_weather_ramp 0 local.maxd 18
-
-		if( local.theme == "rain" && int( getcvar "coop_dynWeatherThunder" ) == 1 ){
-			thread coop_weather_thunder
-		}
-
-		local.smin = float( getcvar "coop_dynWeatherStormMin" )
-		if( local.smin < 5 ){ local.smin = 70 }
-		local.smax = float( getcvar "coop_dynWeatherStormMax" )
-		if( local.smax < local.smin ){ local.smax = local.smin + 150 }
-		wait ( local.smin + randomfloat( local.smax - local.smin ) )
-
-		waitthread coop_weather_ramp local.maxd 0 14
-		level.coop_weatherStorming = 0	// ends the dynamics + sound loops (they fade/stop themselves)
-		level.thunder = 0
-	}
-	level.coop_weatherStorming = 0
-	level.rain_density     = 0	// stopped (weather turned off) -> ensure clear
-	level.coop_rainDensity = 0
-}end
-
-//=========================================================================
-coop_weather_ramp local.from local.to local.dur:{
-	local.steps = 20
-	local.i = 0
-	while( local.i <= local.steps ){
-		local.d = local.from + ( local.to - local.from ) * local.i / local.steps
-		level.rain_density    = local.d
-		level.coop_rainDensity = local.d	// readable mirror (level.rain_density is a write-only engine prop)
-		wait ( local.dur / local.steps )
-		local.i++
-	}
-	level.rain_density    = local.to
-	level.coop_rainDensity = local.to
-}end
-
-//=========================================================================
-// Thunder rumble while a rain storm holds (sound only in v1; visual lightning flash is v2). Plays the base
-// "thunder" alias to the connected players at random intervals; stops when the storm fades out.
-coop_weather_thunder:{
-	level.thunder = 1
-	while( level.coop_rainDensity > 0.05 ){
-		wait ( 6 + randomfloat( 16 ) )
-		if( level.coop_rainDensity > 0.05 && $player != NULL ){
-			$player playsound thunder
+			wait ( 15 + randomfloat( 35 ) )		// hold 15-50s before the next shift
 		}
 	}
 }end
 
 //=========================================================================
-// DYNAMIC look: while a storm falls, continuously re-vary the streak speed / slant / length / width so the
-// rain is never uniform. Two layers of variation: (1) INTENSITY - heavier rain (higher density) = longer +
-// faster + more driving streaks; (2) GUSTS - a random multiplier each step so no two moments look alike.
-// Reads the same coop_rain*/coop_snow* cvars as the baseline, so live console edits flow straight in.
-coop_weather_dynamics local.theme local.peak:{
-	if( local.peak <= 0 ){ local.peak = 0.45 }
-
-	while( level.coop_weatherStorming == 1 && level.coop_weatherActive == 1 ){
-		if( local.theme == "snow" ){
-			local.baseLen   = waitthread coop_weather_cvar "coop_snowLength" 5
-			local.baseSpd   = waitthread coop_weather_cvar "coop_snowSpeed"  150
-			local.baseSlant = waitthread coop_weather_cvar "coop_snowSlant"  20
-			local.baseW     = waitthread coop_weather_cvar "coop_snowWidth"  3
-		} else {
-			local.baseLen   = waitthread coop_weather_cvar "coop_rainLength" 80
-			local.baseSpd   = waitthread coop_weather_cvar "coop_rainSpeed"  2048
-			local.baseSlant = waitthread coop_weather_cvar "coop_rainSlant"  80
-			local.baseW     = waitthread coop_weather_cvar "coop_rainWidth"  1
-		}
-
-		local.dfrac = level.coop_rainDensity / local.peak	// 0 (clear) .. 1 (peak downpour)
-		if( local.dfrac > 1 ){ local.dfrac = 1 }
-		if( local.dfrac < 0 ){ local.dfrac = 0 }
-		local.dscale = 0.55 + local.dfrac * 0.6		// 0.55 drizzle .. 1.15 downpour
-
-		local.gust = 0.7 + randomfloat( 0.6 )		// 0.7 .. 1.3, re-rolled each step
-
-		// length + speed both vary AROUND the base (gust) AND scale with intensity (downpour = longer/faster);
-		// slant gusts side to side. Wide ranges on purpose so it visibly reads as "different degrees".
-		level.rain_length = local.baseLen   * local.dscale * local.gust
-		level.rain_speed  = local.baseSpd   * ( 0.75 + local.dfrac * 0.35 ) * local.gust
-		level.rain_slant  = local.baseSlant * local.gust
-		level.rain_width  = local.baseW
-
-		wait ( 1.2 + randomfloat( 2.8 ) )		// re-gust every ~1.2-4.0s
-	}
-}end
-
-//=========================================================================
-// RAIN AMBIENCE: a level-wide looping rain hiss (reusing the ship's Amb_t3l1_RainExt track via the
-// coop_rain_ext alias) whose volume tracks storm intensity, so it fades up as the rain builds and out as it
-// clears. Played on a single position-independent emitter ("levelwide" loops ignore the emitter's origin).
-// Rain only (snow is silent for now). coop_rainVolume = peak loudness.
-coop_weather_sound local.theme local.peak:{
-	if( local.theme != "rain" ){ end }
-	if( local.peak <= 0 ){ local.peak = 0.45 }
-
+// COOP RAIN AMBIENCE - one level-wide looping rain hiss whose volume tracks storm intensity. The native
+// weather.scr's own positional rain loops are gated SP-only (gametype 0), so coop gets this single
+// position-independent emitter instead ("levelwide" loops ignore the emitter origin). We read the native's
+// readable pattern value level.raindensity (0 calm .. ~10 downpour), NOT the write-only level.rain_density.
+coop_weather_sound:{
 	if( level.coop_rainSndEnt == NULL ){
 		level.coop_rainSndEnt = spawn script_model
 		level.coop_rainSndEnt model "fx/dummy.tik"
 		level.coop_rainSndEnt notsolid
 	}
+	local.maxvol = waitthread coop_weather_cvar "coop_rainVolume" 0.85
 
-	local.maxvol = float( getcvar "coop_rainVolume" )
-	if( local.maxvol <= 0 ){ local.maxvol = 0.85 }
-
-	while( level.coop_weatherStorming == 1 && level.coop_weatherActive == 1 ){
-		local.dfrac = level.coop_rainDensity / local.peak
+	while( 1 ){
+		local.rd = level.raindensity
+		if( local.rd == NIL ){ local.rd = 0 }
+		local.dfrac = local.rd / 8.0
 		if( local.dfrac > 1 ){ local.dfrac = 1 }
 		if( local.dfrac < 0 ){ local.dfrac = 0 }
-		local.vol = 0.12 + local.dfrac * local.maxvol		// faint at drizzle, full in a downpour
-		level.coop_rainSndEnt loopsound coop_rain_ext local.vol "levelwide"
+
+		if( local.dfrac < 0.02 ){
+			level.coop_rainSndEnt stoploopsound
+		} else {
+			local.vol = 0.4 + local.dfrac * local.maxvol	// HZM coop - higher floor so even light rain is clearly audible (was 0.1 = near-silent)
+			if( local.vol > 1 ){ local.vol = 1 }
+			// keep the levelwide emitter on a player so the loop is never stuck far away at world origin
+			if( $player != NULL && $player[1] != NULL ){ level.coop_rainSndEnt.origin = $player[1].origin }
+			level.coop_rainSndEnt loopsound coop_rain_ext local.vol "levelwide"
+		}
 		wait 1.5
 	}
+}end
 
-	if( level.coop_rainSndEnt != NULL ){
-		level.coop_rainSndEnt stoploopsound
+//=========================================================================
+// LIGHTNING FLASH (per-client) - the coop-safe sky flash: a pale blue-white, top-weighted gradient drawn via
+// ihuddraw (slot 60) for EVERY player, so remote clients see lightning too (the native r_fastsky / farplane
+// flash only reaches the host over the network). Called once per strike from global/weather.scr::singlethunder.
+// coop_dynWeatherLightning 0 = skip the flash (thunder sound only). Flicker: bright -> dim -> bright -> decay.
+coop_weather_flash:{
+	if( getcvar "coop_dynWeatherLightning" == "0" ){ end }
+	local.slot = 60
+	waitthread coop_weather_flash_setup local.slot
+	waitthread coop_weather_flash_set   local.slot 0.75
+	wait 0.04
+	waitthread coop_weather_flash_set   local.slot 0.15
+	wait 0.05
+	waitthread coop_weather_flash_set   local.slot 0.65
+	wait 0.04
+	waitthread coop_weather_flash_set   local.slot 0.35
+	wait 0.06
+	waitthread coop_weather_flash_set   local.slot 0.12
+	wait 0.07
+	waitthread coop_weather_flash_set   local.slot 0
+}end
+
+coop_weather_flash_setup local.slot:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			// top-weighted SKY gradient over the upper ~2/3 of the screen, so it reads as the sky flashing.
+			$player[local.i] ihuddraw_shader      local.slot "textures/coop_skyflash.tga"
+			$player[local.i] ihuddraw_virtualsize local.slot 1
+			$player[local.i] ihuddraw_rect        local.slot 0 0 640 360
+			$player[local.i] ihuddraw_color       local.slot 0.92 0.95 1.0	// pale blue-white
+		}
+		local.i++
+	}
+}end
+
+coop_weather_flash_set local.slot local.a:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			$player[local.i] ihuddraw_alpha local.slot local.a
+		}
+		local.i++
 	}
 }end

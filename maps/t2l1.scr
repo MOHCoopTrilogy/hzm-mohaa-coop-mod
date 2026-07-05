@@ -2,6 +2,8 @@ level.script = "maps/t2l1.scr"
 level.music = "t2l1"
 
 waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (first frame, before prespawn)
+	level.coop_weatherTheme = "snow"		//HZM coop - dynamic weather: Ardennes winter
+	level.coop_ambienceBed = "forest_night"	//HZM coop - BOOM ONE winter-night forest bed
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 	level.coop_hasCallback["coop_playerJustLeft"] = 1
@@ -78,8 +80,10 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 	level.obj4Complete = 0
 
 	level.tank2destroyed = 0
+	level.coop_nebelDestroyed = 0		// HZM coop - count destroyed nebelwerfers (endgame fallback spawn after #2)
+	thread coop_t2l1_endgameSpawn		// HZM coop - relocate respawn fallback to the hill once 2 nebelwerfers are down
 	level.halftrack_triggered = 0
-	level.stickybombs = 0	
+	level.stickybombs = 0
 	level.parade_death_counter = 0
 	level.toiletcounter = 0
 	level.parader_index = 0
@@ -135,6 +139,22 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 	$nebel4_turret0 immune fast_bullet
 	$nebel4_turret0 immune bash
 	$nebel4_turret0 thread global/turret.scr::playerturret_proj_think_aim $nebel4 $nebelwerfer4
+
+	// HZM coop - TOOL PROTECTION: obj2 requires firing a nebelwerfer at the halftrack and
+	// nothing else can hurt it, so the nebels must survive until that scene is done. Stock
+	// gates all the plant boxes until then too (enable_stickybombs); damage unlocks there.
+	$nebel1 nodamage
+	$nebel2 nodamage
+	$nebel3 nodamage
+	$nebel4 nodamage
+
+	// HZM coop - FAILSAFE: a nebelwerfer killed by the bombing run (or any other blast)
+	// still completes the objective. The watcher fires the plant-box BlowUp, which runs
+	// the same wreck swap + nebelX_bomb setthread as a planted stickybomb.
+	thread coop_mod/main.scr::coop_watchDestroyable $nebel1 $nebel1_throbbox
+	thread coop_mod/main.scr::coop_watchDestroyable $nebel2 $nebel2_throbbox
+	thread coop_mod/main.scr::coop_watchDestroyable $nebel3 $nebel3_throbbox
+	thread coop_mod/main.scr::coop_watchDestroyable $nebel4 $nebel4_throbbox
 
 	$nebel1_turret0 pitchcaps ( -30 60 0)
 	$nebel1_turret0 maxyawoffset "50"
@@ -1312,6 +1332,14 @@ end
 //		player from trying to plant charges before they receive them)
 
 enable_stickybombs:
+	// HZM coop - TOOL PROTECTION lifted: the halftrack is dealt with and the plant phase
+	// begins, so the nebelwerfers may now be destroyed by any blast (failsafe watchers
+	// make sure any kill still completes the objective).
+	$nebel1 takedamage
+	$nebel2 takedamage
+	$nebel3 takedamage
+	$nebel4 takedamage
+
 	$nebel1_throbbox show
 	$nebel1_throbbox triggered 0
 	$nebel2_throbbox show
@@ -1655,6 +1683,30 @@ tigertank1_thread:
 	thread gags/T2L1_Tank.scr::DoTank1
 
 	$tigertank1 thread gags/t2l1_tank_mgsoldier.scr::mgsoldier_spawn
+	thread coop_tank1DeathWatch		// HZM coop - FAILSAFE: obj3 counts even if tank 1 dies to the bombing run
+end
+
+//-------------------------------------------------------------------------
+// HZM coop - FAILSAFE [obj3]: tiger tank 1 has no death thread in stock; only the
+// planted stickybomb setthread (tankbomb1) completes the objective. If the tank dies
+// to the bombing run instead, clear the leftover plant boxes and blow the first one,
+// which fires tankbomb1 and advances the mission. A legitimate plant removes the
+// sibling boxes at plant time and the used box at detonation, so the guard below
+// self-cancels on the normal path.
+//-------------------------------------------------------------------------
+coop_tank1DeathWatch:
+	while (isalive $tigertank1)
+		waitframe
+	wait 0.3
+	if ($panzertank1_stickybomb_a == NULL)
+		end		// a stickybomb was planted; the normal path already ran
+	if ($panzertank1_stickybomb_b != NULL)
+		$panzertank1_stickybomb_b remove
+	if ($panzertank1_stickybomb_c != NULL)
+		$panzertank1_stickybomb_c remove
+	if ($panzertank1_stickybomb_d != NULL)
+		$panzertank1_stickybomb_d remove
+	$panzertank1_stickybomb_a BlowUp
 end
 
 stuka_run:
@@ -2150,6 +2202,26 @@ nebelwerferDeath:
 	while (isalive self)
 		waitframe
 	radiusdamage ( local.origin + (0 0 128) ) 300 300
+	level.coop_nebelDestroyed = level.coop_nebelDestroyed + 1		// HZM coop - tally for the endgame fallback spawn
+end
+
+//-------------------------------------------------------------------------
+// HZM coop - ENDGAME FALLBACK SPAWN
+// Once the 2nd nebelwerfer is destroyed, move the coop respawn fallback for all 8
+// player slots up onto the hill near the action, so a death late in the map doesn't
+// bounce a player all the way back to the start. (The warper-to-death-spot still
+// takes priority when it has a valid saved origin.)
+//-------------------------------------------------------------------------
+coop_t2l1_endgameSpawn:
+	while ( level.coop_nebelDestroyed < 2 )
+	{
+		wait 1
+	}
+	for ( local.i = 1; local.i <= 8; local.i++ )
+	{
+		level.flags["coop_spawn"+local.i+"origin"] = ( -4420 1417 1283 )
+		level.flags["coop_spawn"+local.i+"angles"] = ( 0 113 0 )		// user gave 833; 113 == 833 normalized
+	}
 end
 
 // stub handlers - called by coop framework on player events

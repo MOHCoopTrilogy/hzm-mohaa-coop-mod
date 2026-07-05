@@ -1,0 +1,185 @@
+//=========================================================================
+// HZM coop - AMBIENCE BEDS + COMBAT MIXING (script-only; modeled on weather.scr::coop_weather_sound).
+//
+// One subtle levelwide ambience LOOP per map, picked from the map's existing weather theme:
+//   snow theme        -> coop_amb_wind     (gusty outdoor tree wind)
+//   rain / none theme -> coop_amb_country  (light countryside: soft rustle + sparse crickets)
+// A map can override with level.coop_ambienceBed = "wind" / "country" / "none" (set in maps/<map>.scr
+// next to level.coop_weatherTheme, i.e. AFTER 'waitthread coop_mod/main.scr::main').
+//
+// The bed volume is a single smoothed value re-issued via the proven loopsound-reissue idiom
+// (levelwide loops ignore origin; the emitter is parked on player 1 so it is never stuck at world
+// origin). Three live factors multiply the coop_ambienceVol base:
+//   COMBAT DUCK  - any player firing or losing health marks combat; the bed ducks to ~30% fast and
+//                  swells back over ~10s of calm (dynamic combat mixing, report section 6).
+//   INDOOR DUCK  - officer.scr::coop_hasOpenSky poll on the HOST (player 1): under a roof the bed
+//                  drops to ~35% so it reads as "the outside, heard from indoors". (A levelwide loop
+//                  cannot be filtered per-player from script - this is the simple host-side proxy.)
+//   RAIN YIELD   - under real rain (level.raindensity from the native weather) the rain bed owns the
+//                  soundscape; this bed ducks out of its way.
+// SWEETENERS: every 20-60s of relative calm, one distant-artillery rumble (stock Exp_LeadIn_* via the
+// coop_amb_artillery1..4 aliases, numbered-alias randomint pick = the deathvox pattern) fires from a
+// far random offset around a random player. Suppressed during rain and active combat.
+//
+//   coop_ambience 1/0      = master on/off (live; threaded once per map from main.scr::main)
+//   coop_ambienceVol 0.5   = bed base volume (the duck factors scale under this)
+//=========================================================================
+
+coop_ambience_init:{
+	if( int( getcvar "coop_ambience" ) != 1 ){ end }
+
+	// same deferral as weather.scr: the map script sets level.coop_weatherTheme / level.coop_ambienceBed
+	// AFTER main.scr::main returns, so wait for prespawn before reading either.
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	local.bed = waitthread coop_ambience_pick
+	if( local.bed == "none" ){
+		println "^~^~^ AMBIENCE coop bed=none (map opted out)"
+		end
+	}
+
+	level.coop_ambCombatTime = 0 - 1000		// long ago = start calm
+	level.coop_ambEnt = spawn script_model
+	level.coop_ambEnt model "fx/dummy.tik"
+	level.coop_ambEnt notsolid
+
+	thread coop_ambience_combat_monitor
+	thread coop_ambience_bed local.bed
+	thread coop_ambience_sweetener
+	println ( "^~^~^ AMBIENCE coop bed=" + local.bed )
+}end
+
+//=========================================================================
+// Resolve which bed this map gets: per-map override first, else by weather theme.
+coop_ambience_pick:{
+	if( level.coop_ambienceBed == "none" ){ end "none" }
+	if( level.coop_ambienceBed == "wind" ){ end "coop_amb_wind" }
+	if( level.coop_ambienceBed == "country" ){ end "coop_amb_country" }
+	if( level.coop_ambienceBed == "forest_night" ){ end "coop_amb_forest_night" }
+	if( level.coop_ambienceBed == "night_calm" ){ end "coop_amb_night_calm" }
+	if( level.coop_ambienceBed == "surf" ){ end "coop_amb_surf" }
+	if( level.coop_weatherTheme == "snow" ){ end "coop_amb_wind" }
+	end "coop_amb_country"
+}end
+
+//=========================================================================
+// COMBAT HEAT: cheap, robust proxy - a player FIRING or LOSING HEALTH means a fight is on.
+// (Script cannot see cgame near-miss zings or engine-side AI shots; player trigger pulls + damage
+// taken cover every real firefight in practice.) Marks level.coop_ambCombatTime = level.time.
+coop_ambience_combat_monitor:{
+	local.last[1] = 0
+	while( 1 ){
+		local.i = 1
+		while( $player != NULL && local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL && isAlive local.p ){
+				if( local.p.fireheld == 1 ){
+					level.coop_ambCombatTime = level.time
+				}
+				local.h = local.p.health
+				if( local.last[local.i] != NIL && local.h < local.last[local.i] ){
+					level.coop_ambCombatTime = level.time
+				}
+				local.last[local.i] = local.h
+			} else {
+				local.last[local.i] = 0
+			}
+			local.i++
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+// THE BED: smoothed volume, re-issued every 1.5s (live volume control of a playing loop works by
+// re-issuing the loopsound - the weather rain-bed idiom).
+coop_ambience_bed local.alias:{
+	local.cur = 0		// current smoothed volume fraction (0..1 of base)
+	while( 1 ){
+		if( int( getcvar "coop_ambience" ) != 1 ){
+			level.coop_ambEnt stoploopsound
+			local.cur = 0
+			wait 3
+			continue
+		}
+
+		local.base = getcvar "coop_ambienceVol"
+		if( local.base == "" ){ local.base = 0.5 } else { local.base = float( local.base ) }
+		if( local.base > 1 ){ local.base = 1 }
+
+		// target fraction from the three duck factors
+		local.target = 1.0
+
+		// combat duck: hard floor while fighting, swell back after ~10s of calm
+		if( ( level.time - level.coop_ambCombatTime ) < 10 ){ local.target = 0.3 }
+
+		// indoor duck: host under a roof -> the bed reads as "outside", quieter
+		if( $player != NULL && $player[1] != NULL ){
+			if( ( exec coop_mod/officer.scr::coop_hasOpenSky $player[1].origin ) != 1 ){
+				local.target = local.target * 0.35
+			}
+		}
+
+		// rain yield: the rain bed (weather.scr) owns the soundscape while it pours
+		local.rd = level.raindensity
+		if( local.rd != NIL && local.rd > 3 ){ local.target = local.target * 0.35 }
+
+		// smooth: duck fast (fights start abruptly), recover slowly (~10s swell at 1.5s ticks)
+		if( local.target < local.cur ){
+			local.cur = local.cur - 0.30
+			if( local.cur < local.target ){ local.cur = local.target }
+		} else {
+			local.cur = local.cur + 0.12
+			if( local.cur > local.target ){ local.cur = local.target }
+		}
+
+		local.vol = local.base * local.cur
+		if( local.vol < 0.03 ){
+			level.coop_ambEnt stoploopsound
+		} else {
+			// keep the levelwide emitter on a player so the loop is never stuck at world origin
+			if( $player != NULL && $player[1] != NULL ){ level.coop_ambEnt.origin = $player[1].origin }
+			level.coop_ambEnt loopsound local.alias local.vol "levelwide"
+		}
+		wait 1.5
+	}
+}end
+
+//=========================================================================
+// SWEETENERS: a distant artillery rumble every 20-60s of relative calm, from a far random offset
+// around a random player (3D one-shot; the big alias min-dist makes it carry softly to everyone).
+coop_ambience_sweetener:{
+	while( 1 ){
+		wait ( 20 + randomfloat( 40 ) )
+		if( int( getcvar "coop_ambience" ) != 1 ){ continue }
+		// HZM coop - dedicated knobs for the distant-artillery rumbles (user heard them as "random
+		// artillery strikes"). coop_ambArtillery 0 = off; coop_ambArtilleryChance (0..1, def 0.5) =
+		// per-cycle roll so they stay rare + unpredictable rather than metronomic.
+		if( getcvar( "coop_ambArtillery" ) == "0" ){ continue }
+		local.ch = getcvar( "coop_ambArtilleryChance" )
+		if( local.ch == "" ){ local.ch = 0.5 }
+		if( randomfloat( 1 ) > float( local.ch ) ){ continue }
+		if( $player == NULL || $player.size < 1 ){ continue }
+
+		// stay quiet while a fight is running or in the first seconds after (let the aftermath breathe)
+		if( ( level.time - level.coop_ambCombatTime ) < 8 ){ continue }
+
+		// heavy rain drowns distant rumbles; the thunder does this job then
+		local.rd = level.raindensity
+		if( local.rd != NIL && local.rd > 2 ){ continue }
+
+		local.p = $player[ ( randomint $player.size ) + 1 ]
+		if( local.p == NULL ){ continue }
+
+		local.pos = local.p.origin
+		local.pos[0] = local.pos[0] + ( ( randomint 4000 ) - 2000 )
+		local.pos[1] = local.pos[1] + ( ( randomint 4000 ) - 2000 )
+		local.pos[2] = local.pos[2] + 400 + ( randomint 400 )
+
+		local.snd = spawn script_origin
+		local.snd.origin = local.pos
+		local.snd playsound ( "coop_amb_artillery" + ( ( randomint 4 ) + 1 ) )
+		wait 6
+		if( local.snd != NULL ){ local.snd remove }
+	}
+}end
