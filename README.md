@@ -1,44 +1,20 @@
-# HaZardModding Coop: Medal of Honor
-A non-commercial fan project - Coop Mod for Medal of Honor: Allied Assault War Chest.
+# MOH Coop Trilogy — mod source (HZM Extended)
 
-HaZardModding adds modern cooperative experience into the games, that don't support it by default.
-This modification requires a legitimate copy of the original game.
-This particular modification is developed on and meant to be run with Medal of Honor: Allied Assault War Chest that can be found on GOG.com.
+This repository is the **mod source tree** for [MOH Coop Trilogy](https://github.com/MOHCoopTrilogy/releases): game scripts (`.scr`), configs, UI, sounds, and textures for cooperative play through all three *Medal of Honor: Allied Assault War Chest* campaigns (Allied Assault, Spearhead, Breakthrough) on OpenMOHAA.
 
-https://www.gog.com/game/medal_of_honor_allied_assault_war_chest
+It is a fork of the original **[HaZardModding Coop Mod](https://github.com/HaZardModding/hzm-mohaa-coop-mod)** by chrissstrahl / HaZardModding — all coop-framework credit belongs there. Development happens on the `coop-wip` branch; large binary assets (HD packs, built pk3s) are intentionally not tracked here and ship via Releases instead.
 
-# Usage
+**Just want to play?** Don't clone this — get the installer from the [MOH Coop Trilogy releases page](https://github.com/MOHCoopTrilogy/releases). It bundles this mod, the engine, and all HD content, and auto-updates at launch.
 
-1. Download or clone whole repository from master branch
-2. Using [Pakscape or 7-Zip] pack whole folder into zzzzzz_co-op_hzm_mod_mohaa.pk3
-3. Put the folder into /maintt/ directory of your game folder
-4. Launch the game Breaktrough, in the Main Menu head toward Multiplayer -> Start Game and select the HaZardModding Coop Mod Button on the top
+## Related repos
 
-# Legal Notice
-This is an independent, non-commercial fan project and is not affiliated with, endorsed by, or sponsored by Electronic Arts, 2015, Inc., DreamWorks Interactive, EA Los Angeles, Danger Close Games, or any other companies involved in the development, publishing, marketing, or licensing of the Medal of Honor series.
-Medal of Honor and all related trademarks, game assets, and intellectual property remain the property of their respective owners.
+- [MOHCoopTrilogy/releases](https://github.com/MOHCoopTrilogy/releases) — downloads, auto-update manifest, feature overview, build & installer pipeline
+- [MOHCoopTrilogy/openmohaa](https://github.com/MOHCoopTrilogy/openmohaa) — the custom engine fork this mod runs on (GPLv2; upstream [openmoh/openmohaa](https://github.com/openmoh/openmohaa))
 
-For detailed legal information see:
-[HaZardModding Legal Notice](hzm_legal.txt)
+## Building
 
-# Our servers
-You can connect to our Development server by opening the game console and typing:
-connect coop.hazardmodding.com:12203
+There is nothing to compile — `.scr` scripts are loaded at runtime by the engine. The mod ships as pk3 archives: `build.ps1` in the [releases repo](https://github.com/MOHCoopTrilogy/releases) packs this tree into `zzzzzz_co-op_hzm_mod_code.pk3` (scripts/UI/config) plus sound and texture asset pk3s, and deploys them to a local install for testing. For a quick manual test you can also zip the tree yourself as a `.pk3` into the game's `maintt/` folder, per the original HZM instructions.
 
-If you are using a relase from ModDB or Github use the release server:
-connect coop.hazardmodding.com:12204
+## Legal
 
-# Open Console
-The Key to Access the console depends on your Keyboard Layout and Language.
-Please try the following Keys while you are in the main Menu of the game:
-^ , °, ², ³, @, <, ~ or '
-
-# Discord
-[![Discord Banner 1](https://discordapp.com/api/guilds/509441602222030848/widget.png?style=banner2)](https://discord.gg/7ZhHeu4)
-
-# Links
-Official Page: http://www.HaZardModding.com
-Official Releases: https://www.moddb.com/mods/medal-of-honor-coop-hazardmodding
-
-Pakscape: https://www.moddb.com/downloads/pak-scape
-7-Zip: https://7-zip.org
+An independent, non-commercial fan project — not affiliated with, endorsed by, or sponsored by Electronic Arts, 2015 Inc., or any other rights holder of the Medal of Honor series. Medal of Honor and all related trademarks and assets remain the property of their respective owners. A legitimate copy of *Medal of Honor: Allied Assault War Chest* ([GOG](https://www.gog.com/game/medal_of_honor_allied_assault_war_chest)) is required. See [hzm_legal.txt](hzm_legal.txt) for the original mod's full legal notice and [hzm_credits.txt](hzm_credits.txt) for original credits.
