@@ -95,6 +95,7 @@ GetOnPathVehicle: {
 		$AB41.minigun maxYawOffset 82
 		level.ab41yawFix = 1
 		thread AB41MaintainYawlimits
+		thread AB41StallWatch
 
 		// Wait till we are ON the path before we give the player control
 		wait 0.5
@@ -126,6 +127,33 @@ AB41MaintainYawlimits: {
 		waitframe
 	}
 }end
+
+//[209] HZM coop - STALL WATCHDOG: a barrier bounce at an unlucky angle can wedge the AB
+//mid-path (rare vanilla physics; seen once in ~20 runs). While the ride is active, if the
+//AB barely moves for ~4s, re-issue the drive to unwedge it. Stops itself at the jump.
+//=========================================================================
+AB41StallWatch: {
+//=========================================================================
+	local.stall = 0
+	local.last = $AB41.origin
+	while ( $AB41 != NULL && level.playerjumped == 0 ){
+		wait 1
+		if ( $AB41 == NULL ){ end }
+		local.d = vector_length ( $AB41.origin - local.last )
+		local.last = $AB41.origin
+		if ( local.d < 8 ){
+			local.stall++
+			if ( local.stall >= 4 ){
+				iprintlnbold "^~^~^ AB41 stall-recover: re-issuing drive"
+				$AB41 drive $AB41_Path 400 200 256
+				local.stall = 0
+			}
+		} else {
+			local.stall = 0
+		}
+	}
+}end
+
 
 //=========================================================================
 AB41Downhill: {
@@ -253,7 +281,7 @@ StartJumpThread: {
 	//eject turret occupants straight to the user-authored landing spot (viewpos
 	//5305 -2327 -849 yaw -101). The engine detach (v2) runs the full player dismount
 	//and places the rider at this exact position.
-	local.ejectPos = ( 5305 -2327 -931 )
+	local.ejectPos = ( 5305 -2327 -849 )
 	$AB41 detachturretslot 0 local.ejectPos
 	$AB41 detachturretslot 1 local.ejectPos
 	for (local.i = 1; local.i <= $player.size; local.i++){
@@ -277,7 +305,13 @@ StartJumpThread: {
 		local.p = $player[local.i]
 		if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
 			local.xoff = ( local.i - 1 ) * 48
-			local.p.origin = ( 5305 -2327 -931 ) + ( local.xoff 0 0 )
+			//[209] authored X/Y, floor-traced Z: -931 (viewpos minus eye height) sat INSIDE
+			//the floor and wedged players solid ("stuck, can't move"). Trace finds truth.
+			local.top = ( 5305 -2327 -780 ) + ( local.xoff 0 0 )
+			local.bot = local.top - ( 0 0 512 )
+			local.floor = trace local.top local.bot 1
+			if ( local.floor != local.top ){ local.p.origin = local.floor + ( 0 0 4 ) }
+			else { local.p.origin = ( 5305 -2327 -849 ) + ( local.xoff 0 0 ) }
 			local.p.velocity = ( 0 0 0 )
 			local.p forcelegsstate STAND
 			local.p thread coop_mod/main.scr::playerFace ( 0 -101 0 )
