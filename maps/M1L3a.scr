@@ -325,9 +325,13 @@ PLAYER_JEEP_Drive:
 	level waittill spawn
 	thread friendly_start
 	
+	level.coop_jeepDriving = 1		//[210] coop - drive phase 1: non-gunners ride glued seats
+	thread coop_glueAllPassengers	//[210] coop - board everyone already spawned
 	self drive $s1_jeep_path1 level.slowspeed 40 200 level.lookahead
 	self waitTill drive
 	self stop
+	level.coop_jeepDriving = 0		//[210] coop - barricade stop: squad fights on foot
+	thread coop_ungluePassengers
 
 	for (local.i = 1; local.i <= $crate_barrier.size; local.i++)
 	{
@@ -336,8 +340,12 @@ PLAYER_JEEP_Drive:
 	}
 	level.barrier_removed = 1
 	
+	level.coop_jeepDriving = 1		//[210] coop - drive phase 2: all aboard, nobody left at the barricade
+	thread coop_glueAllPassengers
 	self drive $jeep_path2 level.fastspeed 50 200 level.lookahead
 	self waittill drive
+	level.coop_jeepDriving = 0		//[210] coop - ride over: release the squad
+	thread coop_ungluePassengers
 //	self stop
 end
 
@@ -608,22 +616,19 @@ coop_enableJeepActivation:{
 //=========================================================================
 coop_setupAttach:{
 //=========================================================================
-	//[203] chrissstrahl - @chrissstrahl @smithy //devdebug devtest cooptest tempcode
-	//this is disabled as we now try to allow players roaming around the map
-	//no longer glued to jeep
-	end
-	
-	//chrissstrahl - spawn entities which we'll attach to the model then glue the players to
-	local.distance = -100
+	//[210] coop - RE-ENABLED (ported from m1l3b). Spawns invisible seat entities attached to the
+	//jeep's "passenger0" tag; non-gunner players are glued to these during DRIVE phases only
+	//(level.coop_jeepDriving - M1L3a has a fight-on-foot barricade stop, unlike m1l3b's pure ride).
+	//Z = +55 = the proven m1l3b seat height (old -10/-50 offsets sank riders into the road).
 	for(local.i=2;local.i<=8;local.i++){
-		if(local.i==2){ local.offset = ( (local.distance) -10 -10) }
-		else if(local.i==3){ local.offset = ( (local.distance) 30 -10) }
-		else if(local.i==4){ local.offset = ( (local.distance) 70 -10) }
-		else if(local.i==5){ local.offset = ( (local.distance + -40) -10 -50) }
-		else if(local.i==6){ local.offset = ( (local.distance + -40) 30 -50) }
-		else if(local.i==7){ local.offset = ( (local.distance + -40) 70 -50) }
-		else{ local.offset = ( (local.distance + -80) 30 -50) }
-	
+		if(local.i==2){ local.offset = ( -100 -30 55 ) }
+		else if(local.i==3){ local.offset = ( -100 30 55 ) }
+		else if(local.i==4){ local.offset = ( -150 -30 55 ) }
+		else if(local.i==5){ local.offset = ( -150 30 55 ) }
+		else if(local.i==6){ local.offset = ( -200 -30 55 ) }
+		else if(local.i==7){ local.offset = ( -200 30 55 ) }
+		else{ local.offset = ( -250 0 55 ) }
+
 		local.ent = spawn script_model "model" "models/fx/dummy.tik" targetname ("playerAttach"+local.i) notsolid 1
 		waitframe
 		local.ent attach $s1_jeep1 "passenger0" 0 ( local.offset )
@@ -678,6 +683,8 @@ coop_playerJustDied:{
 			local.player.flags["coop_inJeep"] = game.false
 			thread coop_jeepNotOccupied
 		}
+		//[210] coop - if they were riding as a passenger, free their seat + unglue the corpse
+		waitthread coop_freePassengerSeat local.player
 	}
 }end
 
@@ -726,69 +733,93 @@ coop_playerSpawned:{
 //=========================================================================
 	$s1_jeep1 notsolid
 	$oss_man notsolid
-	//$t209 remove
-	
-	//[206] chrissstrahl - put player into jeep if jeep is not yet occupied
+
+	//[210] coop - seat each (re)spawning player (ported from m1l3b). First one mans the .30cal
+	//turret (slot 0). Everyone else: glued to a passenger seat ONLY while the jeep is in a drive
+	//phase (level.coop_jeepDriving, set by PLAYER_JEEP_Drive) - at the barricade stop players
+	//roam and fight on foot. Dead players respawn at the jeep (coop_updateSpawns pins spawns to
+	//the "passenger0" tag), so this re-seats them automatically.
 	local.player = parm.other
-	if(local.player && local.player.targetname != "world"){
-		if(local.player.dmteam != "spectator"){
-			local.player.flags["coop_inJeep"] = game.false 
-			if(!level.coop_inJeep){
-				thread coop_playerForceToJeep local.player
-			}
+	if(!local.player){ end }
+	if(local.player.targetname == "world"){ end }
+	if(local.player.dmteam == "spectator"){ end }
+
+	//release any seat this player held before (handles respawn / re-entry cleanly)
+	waitthread coop_freePassengerSeat local.player
+	local.player.flags["coop_inJeep"] = game.false
+
+	if(!level.coop_inJeep){
+		//no gunner yet -> this player mans the turret
+		thread coop_playerForceToJeep local.player
+	}else if(level.coop_jeepDriving == 1){
+		//jeep has a gunner and is rolling -> ride along as a passenger
+		thread coop_gluePassenger local.player
+	}
+}end
+
+//[210] coop - glue a non-gunner player to a free passenger seat trailing the jeep (from m1l3b)
+//=========================================================================
+coop_gluePassenger local.player:{
+//=========================================================================
+	if(!local.player){ end }
+	for(local.i=2;local.i<=8;local.i++){
+		local.seat = $("playerAttach"+local.i)
+		if(!local.seat){ continue }
+		//seat is free if it has no occupant, the occupant is gone/dead, or it's already this player's seat
+		if(local.seat.coop_occupant == NIL || local.seat.coop_occupant == local.player || !isAlive local.seat.coop_occupant){
+			local.seat.coop_occupant = local.player
+			local.player.flags["coop_seatIdx"] = local.i
+
+			local.player notsolid							//don't block other players' bullets
+			local.player origin local.seat.origin
+			local.player.velocity = local.seat.velocity
+			local.player forcelegsstate CROUCH_IDLE
+			local.player glue local.seat
+			end
 		}
 	}
-	
-	//if (parm.other == $player[1]){ //[200] Smithy - easier way
-	//$player[1].flags["coop_inJeep"] = game.false 
-	//}
-	end
+}end
 
-//COOPTEST - DEVTEST - DEVDEBUG [203] Chrisssstrahl
-//this allowes the jeep to go without a gunner
-//we want this to be so, only @smithy will have to make the jeep usable
-	for(local.i=1;local.i <= $player.size;local.i++){
-		local.player = $player[local.i]
-		if(isAlive local.player && !local.player.isSpectator){
-			level.coop_inJeep = 1
-			break
+//[210] coop - release a player's passenger seat + unglue them (from m1l3b)
+//=========================================================================
+coop_freePassengerSeat local.player:{
+//=========================================================================
+	if(!local.player){ end }
+	if(local.player.flags["coop_seatIdx"] != NIL){
+		local.seat = $("playerAttach"+local.player.flags["coop_seatIdx"])
+		if(local.seat && local.seat.coop_occupant == local.player){
+			local.seat.coop_occupant = NIL
 		}
+		local.player.flags["coop_seatIdx"] = NIL
+		local.player unglue
 	}
-	end
+}end
 
+//[210] coop - board every alive non-gunner for a drive phase (jeep departing - nobody left behind)
+//=========================================================================
+coop_glueAllPassengers:{
+//=========================================================================
 	for(local.i=1;local.i <= $player.size;local.i++){
-		local.player = $player[local.i]
-		if(isAlive local.player && !local.player.isSpectator){
-			//if(local.player isTouching $coop_playerSpawn){
-				if(local.i == 1){
-					level.coop_inJeep = 1
-					if(!local.player.flags["coop_inJeep"]){
-						local.player.flags["coop_inJeep"] = game.true
+		local.p = $player[local.i]
+		if(local.p == NULL){ continue }
+		if(!isAlive local.p){ continue }
+		if(local.p.dmteam == "spectator"){ continue }
+		if(local.p.flags["coop_inJeep"]){ continue }	//the gunner stays on the turret
+		waitthread coop_gluePassenger local.p
+	}
+}end
 
-						local.player notsolid
-						
-						local.vturretent = $s1_jeep1 queryturretslotentity 0
-						local.vturretent unlock
-						$s1_jeep1 attachturretslot 0 local.player    // Attach the player to the jeep
-						local.player perferredweapon ".30cal Machine Gun"
-						local.vturretent lock
-						
-						//local.player thread coop_monitorPlayer1 //[200] Smithy - redundant
-					}
-				}
-				else{
-					//chrissstrahl - they don't need to be monitored, the coop mod does unglue on death
-					//local.player physics_off						//chrissstrahl - this will not work if player shall keep his weapon
-					local.player notsolid							//chrissstrahl - prevent players from stopping bullets of others
-					local.attach = $("playerAttach" + local.i)
-					
-					local.player origin local.attach.origin			//chrissstrahl - this might reduce the shaking
-					//local.player velocity local.attach.velocity	//chrissstrahl - this might reduce the shaking
-					local.player.velocity = local.attach.velocity 		//[200] Smithy - sometimes funcs can only be called as properties
-					local.player forcelegsstate CROUCH_IDLE //chrissstrahl - does not work anyway
-					local.player glue local.attach
-				}
-			//}
+//[210] coop - stop phase: free every passenger so they can roam and fight on foot
+//=========================================================================
+coop_ungluePassengers:{
+//=========================================================================
+	for(local.i=1;local.i <= $player.size;local.i++){
+		local.p = $player[local.i]
+		if(local.p == NULL){ continue }
+		waitthread coop_freePassengerSeat local.p
+		if(isAlive local.p && local.p.dmteam != "spectator" && !local.p.flags["coop_inJeep"]){
+			local.p solid			//glue rides are notsolid; restore for the on-foot fight
+			local.p forcelegsstate STAND
 		}
 	}
 }end
