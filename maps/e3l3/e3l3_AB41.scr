@@ -55,6 +55,34 @@ GetOnPathVehicle: {
 			break //only one MG seat
 		}
 
+		//[209] HZM coop - EVERYONE rides: glue every remaining active player to a hull seat
+		//so the whole squad stays ON the AB41 until the ejection sequence (jeep-map recipe,
+		//m1l3b coop_gluePassenger: dummy seat fixed to the vehicle, rider notsolid + glued +
+		//crouched). DBNO is disabled for the ride - you can't crawl while glued.
+		level.coop_dbno_disabled = 1
+		local.si = 0
+		for (local.ri = 1; local.ri <= $player.size; local.ri++) {
+			local.rp = $player[local.ri]
+			if (local.rp == NULL || !(isalive local.rp) || local.rp.dmteam == "spectator") { continue }
+			if (local.rp.flags["coop_inAB41"] == game.true) { continue }	//gunners already seated
+			local.si++
+			if (local.si == 1) { local.off = ( -70 -34 96 ) }
+			else if (local.si == 2) { local.off = ( -70 34 96 ) }
+			else if (local.si == 3) { local.off = ( -125 -34 96 ) }
+			else { local.off = ( -125 34 96 ) }
+			local.seat = spawn script_model model "models/fx/dummy.tik" targetname ("ab41seat" + local.si) notsolid 1
+			waitframe
+			local.seat.origin = $AB41.origin + local.off
+			local.seat glue $AB41
+			local.rp notsolid
+			local.rp origin local.seat.origin
+			local.rp.velocity = ( 0 0 0 )
+			local.rp forcelegsstate CROUCH_IDLE
+			local.rp glue local.seat
+			local.rp.flags["coop_abSeat"] = local.si
+			local.rp.flags["coop_inAB41"] = game.true
+		}
+
 		$AB41 lock
 		$AB41.mg42 lock
 		$AB41.minigun lock
@@ -206,9 +234,26 @@ StartJumpThread: {
 	$AB41.mg42 unlock
 	$AB41.minigun unlock
 
-	//[208] HZM coop - eject occupants from both turret slots to a spot ABOVE the AB41
-	//(its origin during the jump is midair/underground, which clipped the exiting player).
-	local.ejectPos = $AB41.origin + ( 0 0 96 )
+	//[209] HZM coop - EJECTION SEQUENCE: unglue every hull rider + remove their seats,
+	//then dismount both turret slots. Everyone lands at the user-authored spot below.
+	for (local.i = 1; local.i <= $player.size; local.i++){
+		local.p = $player[local.i]
+		if (local.p != NULL){
+			if (local.p.flags["coop_abSeat"] != NIL){
+				local.p unglue
+				local.p.flags["coop_abSeat"] = NIL
+			}
+		}
+	}
+	for (local.si = 1; local.si <= 4; local.si++){
+		if ($("ab41seat" + local.si) != NULL){ $("ab41seat" + local.si) remove }
+	}
+	level.coop_dbno_disabled = 0
+
+	//eject turret occupants straight to the user-authored landing spot (viewpos
+	//5305 -2327 -849 yaw -101). The engine detach (v2) runs the full player dismount
+	//and places the rider at this exact position.
+	local.ejectPos = ( 5305 -2327 -931 )
 	$AB41 detachturretslot 0 local.ejectPos
 	$AB41 detachturretslot 1 local.ejectPos
 	for (local.i = 1; local.i <= $player.size; local.i++){
@@ -224,21 +269,19 @@ StartJumpThread: {
 	$AB41.minigun lock
 	waitframe
 
-	//[coop] chrissstrahl - lift EVERY active player clear of the AB41 (occupant + ride-alongs)
-	//so the imminent explosion does not catch them. [208] HZM coop - trace DOWN to solid floor
-	//so nobody ends up clipped in the ground; fan out sideways so players do not stack.
+	//[209] HZM coop - place EVERY active player at the user-authored landing spot
+	//(viewpos 5305 -2327 -849, floored -82 yaw -101), fanned 48u apart so nobody stacks, facing the
+	//authored yaw. Replaces the AB41-relative floor-trace (the AB's mid-jump origin made
+	//every computed placement unreliable).
 	for (local.i = 1; local.i <= $player.size; local.i++){
 		local.p = $player[local.i]
 		if (local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator"){
-			local.xoff = ( local.i - 1 ) * 40
-			local.xoff = local.xoff - 20
-			local.top = $AB41.origin + ( local.xoff 100 220 )
-			local.bot = local.top - ( 0 0 4096 )
-			local.floor = trace local.top local.bot 1
-			if ( local.floor != local.top ){ local.p.origin = local.floor + ( 0 0 8 ) }
-			else { local.p.origin = $AB41.origin + ( local.xoff 100 160 ) }
+			local.xoff = ( local.i - 1 ) * 48
+			local.p.origin = ( 5305 -2327 -931 ) + ( local.xoff 0 0 )
 			local.p.velocity = ( 0 0 0 )
-			local.p.viewangles = "0 270 0"
+			local.p forcelegsstate STAND
+			local.p thread coop_mod/main.scr::playerFace ( 0 -101 0 )
+			thread coop_mod/main.scr::playerMakeSolidAsap local.p
 		}
 	}
 
