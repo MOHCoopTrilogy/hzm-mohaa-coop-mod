@@ -80,8 +80,15 @@ state STAND
 		STAND_MINEDETECTOR	       	: IS_WEAPON_ACTIVE "mainhand" "Minensuchgerat"
 
 		RELOAD_WEAPON			: RELOAD
-	
-		CHECK_MORTARRIFLE       	: +ATTACK_PRIMARY IS_WEAPON_ACTIVE "mainhand" "Gewehrgranate"		
+
+		// HZM coop - TAKE COVER [214]: while the engine says a cover pose is live, park the
+		// torso in COVER_TORSO (action none) so the full-body legs cover/blind-fire anims own
+		// every bone and the hip ATTACK dispatch below can't fight them. Must sit ABOVE the
+		// attack edges; weapon switch/reload still work from inside COVER_TORSO.
+		COVER_TORSO			: COOP_COVER
+		COVER_TORSO			: COOP_COVER_LOW
+
+		CHECK_MORTARRIFLE       	: +ATTACK_PRIMARY IS_WEAPON_ACTIVE "mainhand" "Gewehrgranate"
 		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
 		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY !IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
 
@@ -161,6 +168,54 @@ state AIM
 		// model to a movement anim and the support hand drops off the gun.
 		AIM				: +CHECK_MOVEMENT_SPEED "mainhand"
 		AIM				: -CHECK_MOVEMENT_SPEED "mainhand"
+	}
+}
+
+//==============================================================================
+//
+// TAKE COVER torso (HZM coop [214])
+//
+// Parked here while a cover pose is live (COOP_COVER / COOP_COVER_LOW from
+// Player::TickCoopCover). action "none" hands the WHOLE body to the legs
+// machine (COVER_WALL / COVER_LOW / COVER_*_FIRE full-body anims - the same
+// recipe as the emotes/DBNO states). No attack edges on purpose: blind-fire
+// rounds come from the "N fire" frame commands baked on the legs blind-fire
+// aliases, so the hip/ADS fire states must never run while covered. Reload and
+// weapon switching stay available (they return to STAND, which re-enters here
+// while the pose holds).
+//
+//==============================================================================
+state COVER_TORSO
+{
+	movetype legs
+
+	camera behind
+
+	entrycommands
+	{
+		viewmodelanim idle
+	}
+
+	action
+	{
+		none				: default // no torso anim; the legs cover anims drive the body
+	}
+
+	states
+	{
+		KILLED				: KILLED
+
+		VEHICLE_START			: IS_USING_VEHICLE
+		TURRET_START			: IS_USING_TURRET
+		LADDER_IDLE_LEFT		: ON_LADDER
+
+		// both poses gone (released, moved, or geometry lost) -> back to normal
+		AIM					: COOP_COVER_PEEK
+		STAND				: !COOP_COVER !COOP_COVER_LOW
+
+		PUTAWAY_MAIN			: PUTAWAYMAIN
+		RAISE_WEAPON			: NEW_WEAPON
+		RELOAD_WEAPON			: RELOAD
 	}
 }
 

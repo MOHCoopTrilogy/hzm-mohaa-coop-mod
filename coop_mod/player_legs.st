@@ -50,6 +50,13 @@ state STAND
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
 
+		// HZM coop - TAKE COVER [214]: engine-validated pose requests (Player::TickCoopCover).
+		// COOP_COVER = standing back-to-wall, COOP_COVER_LOW = low obstacle ahead (the COVER_LOW
+		// state's modheight "duck" tucks the player automatically). The engine clears the request
+		// on any movement input, so these can sit above the walk/run edges safely.
+		COVER_WALL			: COOP_COVER
+		COVER_LOW			: COOP_COVER_LOW
+
 		RUN_FORWARD			: RUN FORWARD HAS_VELOCITY !BLOCKED "2"
 		RUN_BACKWARD		: RUN BACKWARD HAS_VELOCITY !BLOCKED "2"
 		RUN_LEFT			: RUN STRAFE_LEFT HAS_VELOCITY !BLOCKED "2"
@@ -546,7 +553,10 @@ state CROUCH_IDLE
 		
 		STAND					: JUMP CHECK_HEIGHT "stand"
 		STAND					: +CROUCH CHECK_HEIGHT "stand"
-		STAND					: VIEW_IN_WATER CHECK_HEIGHT "stand"		
+		STAND					: VIEW_IN_WATER CHECK_HEIGHT "stand"
+
+		// HZM coop - TAKE COVER [214]: already crouched at a low obstacle when the pose engages
+		COVER_LOW				: COOP_COVER_LOW
 
 		CROUCH_RUN_FORWARD		: RUN FORWARD HAS_VELOCITY !BLOCKED "2"
 		CROUCH_RUN_BACKWARD		: RUN BACKWARD HAS_VELOCITY !BLOCKED "2"
@@ -1325,8 +1335,10 @@ state VEHICLE_TURRET_USING
 {
 	legs
 	{
-		unarmed_idle	: TURRET_TYPE "MG42"
-		unarmed_idle	: default
+		// HZM coop [215] - real manning pose (was unarmed_idle: guy just standing there).
+		// MG42_high_* = standing hands-on-grips; fire row keys off the actual trigger.
+		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
+		coop_turret_stand_idle	: default
 	}
 	
 	states
@@ -1360,8 +1372,9 @@ state TURRET_USING
 {
 	legs
 	{
-		unarmed_idle : TURRET_TYPE "MG42"
-		unarmed_idle : default
+		// HZM coop [215] - manning pose for ground turrets (MG42 nests) too
+		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
+		coop_turret_stand_idle	: default
 	}
 
 	states
@@ -1633,5 +1646,126 @@ state DBNO_MEDIC
 		STAND : -HAS_WEAPON
 
 		DBNO_MEDIC : ANIMDONE_LEGS
+	}
+}
+
+
+////////////////////////////////////////////////////////////////
+//
+// HZM coop - TAKE COVER [214]
+//
+// Entered from STAND / CROUCH_IDLE on the engine cover conditions (COOP_COVER =
+// standing back-to-wall valid, COOP_COVER_LOW = crouch-height obstacle ahead;
+// both computed per frame in Player::TickCoopCover, which also CLEARS the
+// request on movement/jump/death/mount - so the "!" exits below restore the
+// default states the same frame anything invalidates the pose). Full-body AI
+// cornering anims own every bone while the torso sits in COVER_TORSO (action
+// none, coop_mod/player_Torso.st).
+//
+// BLIND FIRE: COOP_BLINDFIRE (covered + fire held + gun-class weapon) routes to
+// the COVER_*_FIRE states. Their aliases carry the vanilla AI "N fire" server
+// frame commands (models/player/base/anims_shared.txt) - the anim itself pulls
+// the trigger, exactly like the stock 3rd-person *_fire action anims. The fire
+// states MUST ping-pong back to the hold state on ANIMDONE_LEGS: a
+// self-transition would early-return in SetPartAnim (same anim) and stick on
+// the last frame with no restart and no further fire commands.
+//
+////////////////////////////////////////////////////////////////
+
+state COVER_WALL
+{
+	entrycommands
+	{
+		modheight "stand"
+		movementstealth "1.0"
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_cover_wall : default
+	}
+
+	states
+	{
+		COVER_WALL_FIRE : COOP_BLINDFIRE
+
+		STAND : !COOP_COVER
+
+		FALL : FALLING
+	}
+}
+
+state COVER_WALL_FIRE
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		// HZM coop [215] - spray around the DETECTED corner (side probe in TickCoopCover)
+		coop_blindfire_wall_r	: COOP_COVER_OPENRIGHT
+		coop_blindfire_wall	: default
+	}
+
+	states
+	{
+		// pose dropped mid-burst (moved / killed the request) - bail immediately
+		STAND : !COOP_COVER
+
+		// burst finished - back to the hold; it re-dispatches here while fire stays held
+		COVER_WALL : ANIMDONE_LEGS
+
+		FALL : FALLING
+	}
+}
+
+state COVER_LOW
+{
+	entrycommands
+	{
+		modheight "duck"
+		movementstealth "1.25"
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_cover_low : default
+	}
+
+	states
+	{
+		COVER_LOW_FIRE : COOP_BLINDFIRE
+
+		// drop out still crouched - CROUCH_IDLE owns stand-up from there
+		CROUCH_IDLE : !COOP_COVER_LOW
+
+		FALL_DUCKED : FALLING
+	}
+}
+
+state COVER_LOW_FIRE
+{
+	entrycommands
+	{
+		modheight "duck"
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_blindfire_low : default
+	}
+
+	states
+	{
+		CROUCH_IDLE : !COOP_COVER_LOW
+
+		COVER_LOW : ANIMDONE_LEGS
+
+		FALL_DUCKED : FALLING
 	}
 }

@@ -1,0 +1,406 @@
+//========================================================================================
+// HZM Coop - BUILD MODE (dev tool). Full docs: _research/build_mode.md
+//
+// In-game object placement for map development: browse a catalog of ~300 stock models
+// (coop_mod/buildmode_catalog.scr), preview the current model as a translucent ghost at
+// the aim point, place / rotate / scale / remove real script_models live, with the AI
+// ignoring the builder (notarget + nodamage, developer.scr recipe). Every placement is
+// captured to coop_mod/save/build_<map>.dat (homepath) in ready-to-paste script form and
+// mirrored to the console as machine-parseable ^~^~^ BUILD_ lines.
+//
+// ACTIVATION (listen server host, requires coop_dev 1):
+//   exec coop_mod/cfg/buildmode.cfg      - binds numpad, seta coop_build_boot 1, coop_build 1
+//   (first-ever use: restart the map afterwards so main.scr threads the monitor;
+//    coop_build_boot is archived, so every later map is armed automatically)
+//   exec coop_mod/cfg/buildmode_stop.cfg - coop_build 0 + unbind (placements/file kept)
+//
+// WIRING - one line in main.scr next to the coop_maptest hooks (applied by the operator):
+//   if( getcvar( "coop_build_boot" ) == "1" ){ thread coop_mod/buildmode.scr::coop_build_monitor }
+//
+// CONTROL BUS: the cfg binds every key to  set coop_build_cmd <action> ; the session loop
+// polls the cvar each frame, executes the action and clears it (cvar bus, same idea as
+// the coop_maptest cvars). Listen-server only: a client "set" writes the shared cvar
+// table only when client and server are the same process.
+//
+// HUD: ihuddraw slots 54-59 (verified free 2026-07-07: 31-39 dbno/medkit, 40-47
+// cover/ammobox, 50-53 officer, 60 weather, 62-69 xp; 54-59 were only PENCILED for the
+// unbuilt lobby plan - if the lobby lands later, move one of the two).
+//========================================================================================
+
+
+// Threaded from main.scr at map init when coop_build_boot == "1". Idles cheaply until
+// coop_build == 1 AND coop_dev == 1 and a host player is active, then runs the session.
+//=========================================================================
+coop_build_monitor:{
+//=========================================================================
+	if( level.coop_build_monitorOn == 1 ){ end }
+	level.coop_build_monitorOn = 1
+
+	waitthread coop_mod/main.scr::waitForMainScript
+	waitthread coop_mod/buildmode_catalog.scr::catalog_init
+
+	while( 1 ){
+		if( getcvar( "coop_build" ) == "1" ){
+			if( int( getcvar( "coop_dev" ) ) != 1 ){
+				if( level.coop_build_devWarned != 1 ){
+					level.coop_build_devWarned = 1
+					println "^~^~^ BUILD_BLOCKED coop_dev is not 1 - build mode is dev-gated"
+				}
+			}else{
+				local.player = waitthread coop_build_findHost
+				if( local.player != NIL && local.player != NULL ){
+					waitthread coop_build_session local.player
+				}
+			}
+		}
+		wait 0.5
+	}
+}end
+
+
+// Returns the active host player (entnum 0 -> flags["coop_isHost"], set in player.scr),
+// or NIL when none is connected/active yet.
+//=========================================================================
+coop_build_findHost:{
+//=========================================================================
+	local.found = NIL
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( local.found == NIL && $player[local.i] != NULL ){
+			if( $player[local.i].flags["coop_isHost"] == 1 && $player[local.i].flags["coop_isActive"] == 1 ){
+				local.found = $player[local.i]
+			}
+		}
+		local.i++
+	}
+}end local.found
+
+
+// One build session: runs while coop_build == 1 and the builder stays valid.
+//=========================================================================
+coop_build_session local.player:{
+//=========================================================================
+	level.coop_build_active = 1
+	level.coop_build_hudDirty = 1
+
+	// state defaults (persist across sessions within one map; level vars clear on map change)
+	if( level.coop_build_cat == NIL ){ level.coop_build_cat = 1 }
+	if( level.coop_build_idx == NIL ){ level.coop_build_idx = 1 }
+	if( level.coop_build_count == NIL ){ level.coop_build_count = 0 }
+	if( level.coop_build_scale == NIL ){ level.coop_build_scale = 1.0 }
+	if( level.coop_build_zofs == NIL ){ level.coop_build_zofs = 0 }
+	if( level.coop_build_pitch == NIL ){ level.coop_build_pitch = 0 }
+	if( level.coop_build_solid == NIL ){ level.coop_build_solid = 0 }
+	if( level.coop_build_yaw == NIL ){ level.coop_build_yaw = int( local.player.viewangles[1] ) }
+
+	// capture file: continue any existing capture for this map (never clobber old sessions)
+	level.coop_build_file = "coop_mod/save/build_" + level.coop_mapname + ".dat"
+	if( level.coop_build_basetext == NIL ){
+		local.prev = fs_read_content ( level.coop_build_file )
+		if( local.prev == NIL || local.prev == "" ){
+			level.coop_build_basetext = "// HZM coop BUILD MODE capture for map " + level.coop_mapname + "\n// paste-ready script blocks; bake recipe in _research/build_mode.md\n\n"
+		}else{
+			level.coop_build_basetext = local.prev
+		}
+	}
+
+	// protect the builder so the AI never engages (developer.scr recipe: notarget event +
+	// scripted god via nodamage - the "god" console cmd is cheat-gated, the event path is not)
+	local.player notarget 1
+	local.player nodamage
+
+	setcvar "coop_build_cmd" ""
+	local.player iprint "BUILD MODE: ON (numpad controls)" 1
+	println( "^~^~^ BUILD_ON " + level.coop_mapname )
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
+
+	thread coop_build_hud local.player
+	waitthread coop_build_ghostRefresh local.player
+
+	while( getcvar( "coop_build" ) == "1" && local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		local.cmd = getcvar( "coop_build_cmd" )
+		if( local.cmd != "" ){
+			setcvar "coop_build_cmd" ""
+			waitthread coop_build_doCmd local.player local.cmd
+		}
+		waitthread coop_build_ghostFollow local.player
+		waitframe
+	}
+
+	// exit: drop the ghost, restore the builder (placed objects + capture file are kept)
+	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost delete }
+	level.coop_build_ghost = NIL
+	level.coop_build_active = 0
+	if( local.player != NULL ){
+		local.player notarget 0
+		local.player takedamage
+		local.player iprint "BUILD MODE: OFF" 1
+	}
+	println( "^~^~^ BUILD_OFF placed " + level.coop_build_count )
+}end
+
+
+// Dispatch one control-bus action.
+//=========================================================================
+coop_build_doCmd local.player local.cmd:{
+//=========================================================================
+	if( local.cmd == "next" ){
+		level.coop_build_idx++
+		if( level.coop_build_idx > level.coop_build_itemcount[level.coop_build_cat] ){ level.coop_build_idx = 1 }
+		waitthread coop_build_ghostRefresh local.player
+	}
+	else if( local.cmd == "prev" ){
+		level.coop_build_idx--
+		if( level.coop_build_idx < 1 ){ level.coop_build_idx = level.coop_build_itemcount[level.coop_build_cat] }
+		waitthread coop_build_ghostRefresh local.player
+	}
+	else if( local.cmd == "catnext" ){
+		level.coop_build_cat++
+		if( level.coop_build_cat > level.coop_build_catcount ){ level.coop_build_cat = 1 }
+		level.coop_build_idx = 1
+		waitthread coop_build_ghostRefresh local.player
+	}
+	else if( local.cmd == "catprev" ){
+		level.coop_build_cat--
+		if( level.coop_build_cat < 1 ){ level.coop_build_cat = level.coop_build_catcount }
+		level.coop_build_idx = 1
+		waitthread coop_build_ghostRefresh local.player
+	}
+	else if( local.cmd == "yawplus" ){
+		level.coop_build_yaw = level.coop_build_yaw + 15
+		if( level.coop_build_yaw >= 360 ){ level.coop_build_yaw = level.coop_build_yaw - 360 }
+	}
+	else if( local.cmd == "yawminus" ){
+		level.coop_build_yaw = level.coop_build_yaw - 15
+		if( level.coop_build_yaw < 0 ){ level.coop_build_yaw = level.coop_build_yaw + 360 }
+	}
+	else if( local.cmd == "pitchplus" ){
+		level.coop_build_pitch = level.coop_build_pitch + 15
+		if( level.coop_build_pitch >= 360 ){ level.coop_build_pitch = level.coop_build_pitch - 360 }
+	}
+	else if( local.cmd == "pitchminus" ){
+		level.coop_build_pitch = level.coop_build_pitch - 15
+		if( level.coop_build_pitch < 0 ){ level.coop_build_pitch = level.coop_build_pitch + 360 }
+	}
+	else if( local.cmd == "up" ){
+		level.coop_build_zofs = level.coop_build_zofs + 2
+		if( level.coop_build_zofs > 256 ){ level.coop_build_zofs = 256 }
+	}
+	else if( local.cmd == "down" ){
+		level.coop_build_zofs = level.coop_build_zofs - 2
+		if( level.coop_build_zofs < -64 ){ level.coop_build_zofs = -64 }
+	}
+	else if( local.cmd == "scaleup" ){
+		level.coop_build_scale = waitthread coop_build_round1 ( level.coop_build_scale + 0.1 )
+		if( level.coop_build_scale > 5.0 ){ level.coop_build_scale = 5.0 }
+		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost scale level.coop_build_scale }
+	}
+	else if( local.cmd == "scaledown" ){
+		level.coop_build_scale = waitthread coop_build_round1 ( level.coop_build_scale - 0.1 )
+		if( level.coop_build_scale < 0.1 ){ level.coop_build_scale = 0.1 }
+		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost scale level.coop_build_scale }
+	}
+	else if( local.cmd == "reset" ){
+		level.coop_build_yaw = int( local.player.viewangles[1] )
+		level.coop_build_pitch = 0
+		level.coop_build_zofs = 0
+		level.coop_build_scale = 1.0
+		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost scale 1.0 }
+	}
+	else if( local.cmd == "solid" ){
+		if( level.coop_build_solid == 1 ){ level.coop_build_solid = 0 }
+		else{ level.coop_build_solid = 1 }
+	}
+	else if( local.cmd == "place" ){
+		waitthread coop_build_place local.player
+	}
+	else if( local.cmd == "undo" ){
+		waitthread coop_build_undo local.player
+	}
+	level.coop_build_hudDirty = 1
+}end
+
+
+// Round to 1 decimal (scale steps drift with float math otherwise).
+//=========================================================================
+coop_build_round1 local.v:{
+//=========================================================================
+	local.r = int( ( local.v * 10 ) + 0.5 ) / 10.0
+}end local.r
+
+
+// (Re)spawn the preview ghost with the currently selected catalog model.
+//=========================================================================
+coop_build_ghostRefresh local.player:{
+//=========================================================================
+	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost delete }
+	level.coop_build_tik = level.coop_build_item[level.coop_build_cat][level.coop_build_idx]
+	level.coop_build_name = waitthread coop_mod/strings.scr::remove level.coop_build_tik "models/"
+
+	local.g = spawn script_model model level.coop_build_tik
+	local.g notsolid
+	local.g alpha 0.55
+	if( level.coop_build_scale != 1.0 ){ local.g scale level.coop_build_scale }
+	level.coop_build_ghost = local.g
+	level.coop_build_hudDirty = 1
+	waitthread coop_build_ghostFollow local.player
+}end
+
+
+// Per-frame: trace along the view (cover.scr::cover_place recipe - eye at origin+54,
+// angles_toforward, traced) and park the ghost at the hit point + z offset.
+//=========================================================================
+coop_build_ghostFollow local.player:{
+//=========================================================================
+	if( level.coop_build_ghost == NIL || level.coop_build_ghost == NULL ){ end }
+	if( local.player == NULL ){ end }
+
+	local.eyepos = local.player.origin + ( 0 0 54 )
+	local.fwd = angles_toforward local.player.viewangles
+	local.scaled = local.fwd * 512
+	local.traceend = local.eyepos + local.scaled
+	local.result = traced ( local.eyepos ) ( local.traceend )
+	local.frac = local.result["fraction"]
+	local.hitpos = local.result["endpos"]
+	if( local.frac >= 1.0 ){
+		// nothing within reach - float the ghost at fixed range
+		local.scaled = local.fwd * 450
+		local.hitpos = local.eyepos + local.scaled
+	}
+	local.hitpos[2] = local.hitpos[2] + level.coop_build_zofs
+
+	local.ang = ( 0 0 0 )
+	local.ang[0] = level.coop_build_pitch
+	local.ang[1] = level.coop_build_yaw
+
+	level.coop_build_ghost.origin = local.hitpos
+	level.coop_build_ghost.angles = local.ang
+	level.coop_build_lastpos = local.hitpos
+	level.coop_build_lastang = local.ang
+}end
+
+
+// Place a real script_model at the ghost position and capture it.
+//=========================================================================
+coop_build_place local.player:{
+//=========================================================================
+	if( level.coop_build_lastpos == NIL ){ end }
+	local.n = level.coop_build_count + 1
+
+	local.m = spawn script_model model level.coop_build_tik
+	local.m.origin = level.coop_build_lastpos
+	local.m.angles = level.coop_build_lastang
+	if( level.coop_build_scale != 1.0 ){ local.m scale level.coop_build_scale }
+	if( level.coop_build_solid == 1 ){ local.m solid }
+	else{ local.m notsolid }
+
+	level.coop_build_ent[local.n] = local.m
+	level.coop_build_count = local.n
+
+	// capture: paste-ready script block (spaces inside the parens keep vector literals
+	// safe from the paren-minus parse killer when pasted back into a map script)
+	local.px = level.coop_build_lastpos[0]
+	local.py = level.coop_build_lastpos[1]
+	local.pz = level.coop_build_lastpos[2]
+	local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + "\n"
+	local.block = local.block + "local.m = spawn script_model\n"
+	local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
+	local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
+	local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
+	if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
+	if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
+	else{ local.block = local.block + "local.m notsolid\n" }
+	local.block = local.block + "\n"
+	level.coop_build_dumpline[local.n] = local.block
+
+	waitthread coop_build_save
+	println( "^~^~^ BUILD_PLACE " + local.n + " " + level.coop_build_tik + " org " + local.px + " " + local.py + " " + local.pz + " ang " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+	local.player iprint ( "placed #" + local.n + " " + level.coop_build_name ) 1
+}end
+
+
+// Remove the most recent placement (entity + capture line) and rewrite the file.
+//=========================================================================
+coop_build_undo local.player:{
+//=========================================================================
+	if( level.coop_build_count < 1 ){
+		local.player iprint "BUILD: nothing to undo" 1
+		end
+	}
+	local.n = level.coop_build_count
+	local.m = level.coop_build_ent[local.n]
+	if( local.m != NIL && local.m != NULL ){ local.m delete }
+	level.coop_build_ent[local.n] = NIL
+	level.coop_build_dumpline[local.n] = NIL
+	level.coop_build_count = local.n - 1
+
+	waitthread coop_build_save
+	println( "^~^~^ BUILD_UNDO " + local.n )
+	local.player iprint ( "removed #" + local.n ) 1
+}end
+
+
+// Rewrite the whole capture file: prior sessions (basetext) + this session's blocks.
+// fs_write_content lands in the homepath: %APPDATA%/openmohaa/maintt/coop_mod/save/
+//=========================================================================
+coop_build_save:{
+//=========================================================================
+	local.txt = level.coop_build_basetext
+	local.i = 1
+	while( local.i <= level.coop_build_count ){
+		if( level.coop_build_dumpline[local.i] != NIL ){ local.txt = local.txt + level.coop_build_dumpline[local.i] }
+		local.i++
+	}
+	fs_write_content ( level.coop_build_file ) ( local.txt )
+	println( "^~^~^ BUILD_SAVED " + level.coop_build_file + " count " + level.coop_build_count )
+}end
+
+
+// Build-mode readout on ihuddraw slots 54-59 (see header for the slot audit).
+//=========================================================================
+coop_build_hud local.player:{
+//=========================================================================
+	local.i = 54
+	while( local.i <= 59 ){
+		ihuddraw_virtualsize local.player local.i 1
+		ihuddraw_align       local.player local.i left top
+		ihuddraw_font        local.player local.i "verdana-14"
+		ihuddraw_alpha       local.player local.i 0.85
+		local.i++
+	}
+	ihuddraw_color local.player 54 1 0.85 0.25
+	ihuddraw_rect  local.player 54 8 128 0 0
+	ihuddraw_color local.player 55 0.8 0.8 0.8
+	ihuddraw_rect  local.player 55 8 144 0 0
+	ihuddraw_color local.player 56 1 1 1
+	ihuddraw_rect  local.player 56 8 158 0 0
+	ihuddraw_color local.player 57 0.8 0.8 0.8
+	ihuddraw_rect  local.player 57 8 172 0 0
+	ihuddraw_color local.player 58 0.6 0.9 0.6
+	ihuddraw_rect  local.player 58 8 186 0 0
+	ihuddraw_color local.player 59 0.55 0.55 0.55
+	ihuddraw_rect  local.player 59 8 202 0 0
+	ihuddraw_alpha local.player 59 0.6
+
+	ihuddraw_string local.player 54 "BUILD MODE"
+	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat KP7/9 yaw KP8/2 z KP+/- scale KP0 solid KPEnter place KPDel undo"
+
+	while( level.coop_build_active == 1 && local.player != NULL ){
+		if( level.coop_build_hudDirty == 1 ){
+			level.coop_build_hudDirty = 0
+			ihuddraw_string local.player 55 ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ": " + level.coop_build_catname[level.coop_build_cat] )
+			ihuddraw_string local.player 56 ( "[" + level.coop_build_idx + "/" + level.coop_build_itemcount[level.coop_build_cat] + "] " + level.coop_build_name )
+			ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+			ihuddraw_string local.player 58 ( "placed " + level.coop_build_count + " -> " + level.coop_build_file )
+		}
+		wait 0.15
+	}
+
+	// hide everything on exit
+	local.i = 54
+	while( local.i <= 59 ){
+		ihuddraw_alpha  local.player local.i 0
+		ihuddraw_string local.player local.i ""
+		local.i++
+	}
+}end

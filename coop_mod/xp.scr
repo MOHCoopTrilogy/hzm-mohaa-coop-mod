@@ -1,0 +1,710 @@
+// [302] HZM XP SYSTEM - Phase 1 (tracking + persistence + end-of-map debrief + own-rank HUD)
+// Design doc: _research/xp_system.md. Every award funnels through xp_award (single entry point).
+//
+// Identity:    cl_guid userinfo (persistent per install; autoexec ships cl_guidServerUniq 0),
+//              fallback "n_"+netname for clients with no guid.
+// Persistence: write-through server cvar coop_xp_<id> (survives map transitions) +
+//              fs_write_content file coop_mod/save/xp_<id>.dat (survives server restarts).
+//              NEVER park XP in game.* - the coop transition wipes it.
+// Per-player:  self.flags["coop_xp_id" / "coop_xp_total" / "coop_xp_map" / "coop_xp_rank" /
+//              "coop_xp_join" / "coop_xp_rankmapstart"] + breakdown buckets
+//              self.flags["coop_xp_b_kills" / _valor / _objective / _support / _revive / _mission].
+// HUD slots:   62 emblem, 63 rank text (persistent own-rank HUD);
+//              64 bar bg, 65 bar fill, 66-68 breakdown lines, 69 toast (debrief card only).
+
+//=========================================================================
+// Init - threaded from main.scr::main right after server.scr::main.
+//=========================================================================
+xp_init:{
+	if( level.coop_xp_init == 1 ){ end }
+	level.coop_xp_init = 1
+
+	local.en = getcvar "coop_xp"
+	level.coop_xp_enabled = 1
+	if( local.en == "0" ){ level.coop_xp_enabled = 0 }
+
+	level.coop_xp_scale = 1
+	local.sc = getcvar "coop_xp_scale"
+	if( local.sc != "" && local.sc != "0" ){ level.coop_xp_scale = float( local.sc ) }
+
+	// 13-rank ladder (US Army WW2). Thresholds are LOCKED once players have XP on file -
+	// they double as the future skill-tree perk spine (design doc 2.1).
+	level.coop_xp_rankXP[0]  = 0
+	level.coop_xp_rankXP[1]  = 400
+	level.coop_xp_rankXP[2]  = 1000
+	level.coop_xp_rankXP[3]  = 2000
+	level.coop_xp_rankXP[4]  = 3500
+	level.coop_xp_rankXP[5]  = 5500
+	level.coop_xp_rankXP[6]  = 8000
+	level.coop_xp_rankXP[7]  = 11500
+	level.coop_xp_rankXP[8]  = 16000
+	level.coop_xp_rankXP[9]  = 21500
+	level.coop_xp_rankXP[10] = 28000
+	level.coop_xp_rankXP[11] = 36000
+	level.coop_xp_rankXP[12] = 46000
+
+	level.coop_xp_rankName[0]  = "Private"
+	level.coop_xp_rankName[1]  = "Private First Class"
+	level.coop_xp_rankName[2]  = "Corporal"
+	level.coop_xp_rankName[3]  = "Sergeant"
+	level.coop_xp_rankName[4]  = "Staff Sergeant"
+	level.coop_xp_rankName[5]  = "Technical Sergeant"
+	level.coop_xp_rankName[6]  = "Master Sergeant"
+	level.coop_xp_rankName[7]  = "Second Lieutenant"
+	level.coop_xp_rankName[8]  = "First Lieutenant"
+	level.coop_xp_rankName[9]  = "Captain"
+	level.coop_xp_rankName[10] = "Major"
+	level.coop_xp_rankName[11] = "Lieutenant Colonel"
+	level.coop_xp_rankName[12] = "Colonel"
+
+	level.coop_xp_rankAbbr[0]  = "Pvt"
+	level.coop_xp_rankAbbr[1]  = "Pfc"
+	level.coop_xp_rankAbbr[2]  = "Cpl"
+	level.coop_xp_rankAbbr[3]  = "Sgt"
+	level.coop_xp_rankAbbr[4]  = "SSgt"
+	level.coop_xp_rankAbbr[5]  = "TSgt"
+	level.coop_xp_rankAbbr[6]  = "MSgt"
+	level.coop_xp_rankAbbr[7]  = "2Lt"
+	level.coop_xp_rankAbbr[8]  = "1Lt"
+	level.coop_xp_rankAbbr[9]  = "Cpt"
+	level.coop_xp_rankAbbr[10] = "Maj"
+	level.coop_xp_rankAbbr[11] = "LtCol"
+	level.coop_xp_rankAbbr[12] = "Col"
+
+	// kill-XP soft cap counter (anti farm, design doc 6): after 40 x players team kills the
+	// kill-derived XP halves, after 80 x players it quarters. Objectives/support unaffected.
+	level.coop_xp_teamkills = 0
+	// paratrooper survival roster
+	level.coop_xp_paraN = 0
+
+	thread xp_autosave_loop
+}end
+
+
+//=========================================================================
+// 60s autosave (plus flushes on rank-up, mission complete and maptest transitions).
+//=========================================================================
+xp_autosave_loop:{
+	if( level.coop_xp_autosave == 1 ){ end }
+	level.coop_xp_autosave = 1
+	while( 1 ){
+		wait 60
+		waitthread xp_flush
+	}
+}end
+
+
+//=========================================================================
+// Identity + restore. Called from player.scr::manageSetup for every new player.
+//=========================================================================
+xp_identify local.player:{
+	if( level.coop_xp_init != 1 ){ waitthread xp_init }
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_xp_id"] != NIL ){ end }
+	// singleton: a kill can race the connect-time identify (both call here). Second caller
+	// just waits for the first to finish so awards never see half-initialized totals (NIL HUD bug).
+	if( local.player.flags["coop_xp_identifying"] == 1 ){
+		while( local.player != NULL && local.player.flags["coop_xp_identifying"] == 1 ){
+			wait 0.25
+		}
+		end
+	}
+	local.player.flags["coop_xp_identifying"] = 1
+
+	// cl_guid is pushed onto the player entity by the ENGINE (g_client.cpp
+	// G_ClientUserinfoChanged -> self.coop_guid); there is NO script userinfo getter.
+	// It can land a moment after connect, so wait briefly before falling back.
+	local.tries = 0
+	while( (local.player.coop_guid == NIL || local.player.coop_guid == "") && local.tries < 10 ){
+		wait 0.5
+		if( local.player == NULL ){ end }
+		local.tries++
+	}
+	local.id = local.player.coop_guid
+	if( local.id == NIL || local.id == "" ){
+		// no guid (vanilla client / missing qkey) - spoofable, LAN-grade netname identity
+		local.id = "n_" + local.player.netname
+	}
+
+	local.total = 0
+	// 1) session cache (survives map transitions instantly)
+	local.cv = getcvar( "coop_xp_" + local.id )
+	if( local.cv != "" ){
+		local.total = int( local.cv )
+	} else {
+		// 2) file (survives server restarts). Content = plain number.
+		local.data = fs_read_content ( "coop_mod/save/xp_" + local.id + ".dat" )
+		if( local.data != NIL && local.data != "" ){
+			local.total = int( local.data )
+		}
+	}
+	if( local.total == NIL ){ local.total = 0 }
+	if( local.total < 0 ){ local.total = 0 }
+
+	local.player.flags["coop_xp_id"]    = local.id
+	local.player.flags["coop_xp_total"] = local.total
+	local.player.flags["coop_xp_map"]   = 0
+	local.player.flags["coop_xp_join"]  = level.time
+	local.rank = waitthread xp_rankForTotal local.total
+	local.player.flags["coop_xp_rank"]  = local.rank
+	local.player.flags["coop_xp_rankmapstart"] = local.rank
+
+	setcvar ( "coop_xp_" + local.id ) ( "" + local.total )
+	local.player.flags["coop_xp_identifying"] = NIL
+
+	local.player iprint ( "Service record: " + level.coop_xp_rankAbbr[local.rank] + " - " + local.total + " XP" ) 1
+}end
+
+
+//=========================================================================
+// Rank index (0-12) for a cumulative total.
+//=========================================================================
+xp_rankForTotal local.total:{
+	local.r = 0
+	local.i = 1
+	while( local.i <= 12 ){
+		if( local.total >= level.coop_xp_rankXP[local.i] ){ local.r = local.i }
+		local.i++
+	}
+}end(local.r)
+
+
+//=========================================================================
+// THE award entry point. reason buckets: kills valor objective support revive mission
+//=========================================================================
+xp_award local.player local.amount local.reason:{
+	if( level.coop_xp_init != 1 ){ waitthread xp_init }
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.classname != "Player" ){ end }
+	if( local.player.flags["coop_xp_id"] == NIL ){
+		waitthread xp_identify local.player
+		if( local.player == NULL || local.player.flags["coop_xp_id"] == NIL ){ end }
+	}
+	if( local.amount == NIL ){ end }
+
+	local.amount = int( local.amount * level.coop_xp_scale )
+	if( local.amount <= 0 ){ end }
+
+	if( local.player.flags["coop_xp_total"] == NIL ){ end }
+
+	local.player.flags["coop_xp_total"] = local.player.flags["coop_xp_total"] + local.amount
+	local.player.flags["coop_xp_map"]   = local.player.flags["coop_xp_map"] + local.amount
+
+	// poke the top-center gain popup: accumulate the burst, extend the hold window
+	if( local.player.flags["coop_xp_popupGain"] == NIL ){ local.player.flags["coop_xp_popupGain"] = 0 }
+	local.player.flags["coop_xp_popupGain"]  = local.player.flags["coop_xp_popupGain"] + local.amount
+	local.player.flags["coop_xp_popupUntil"] = level.time + 2.5
+	thread xp_hud_popup local.player
+	if( local.reason == NIL ){ local.reason = "kills" }
+	local.bkey = "coop_xp_b_" + local.reason
+	if( local.player.flags[local.bkey] == NIL ){ local.player.flags[local.bkey] = 0 }
+	local.player.flags[local.bkey] = local.player.flags[local.bkey] + local.amount
+
+	// write-through cache: there is NO per-player disconnect hook, so the cvar must always be hot
+	setcvar ( "coop_xp_" + local.player.flags["coop_xp_id"] ) ( "" + local.player.flags["coop_xp_total"] )
+
+	// promotion?
+	local.newrank = waitthread xp_rankForTotal local.player.flags["coop_xp_total"]
+	if( local.newrank > local.player.flags["coop_xp_rank"] ){
+		local.player.flags["coop_xp_rank"] = local.newrank
+		iprintlnbold ( local.player.netname + " was promoted to " + level.coop_xp_rankName[local.newrank] + "!" )
+		local.player playsound med_kit
+		waitthread xp_flush
+	}
+}end
+
+
+//=========================================================================
+// Soft-cap factor for kill-derived income (kills, kill bonuses, assists).
+//=========================================================================
+xp_killcap_factor:{
+	local.f = 1
+	local.np = 0
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){ local.np++ }
+		local.i++
+	}
+	if( local.np < 1 ){ local.np = 1 }
+	if( level.coop_xp_teamkills > (80 * local.np) ){
+		local.f = 0.25
+	} else if( level.coop_xp_teamkills > (40 * local.np) ){
+		local.f = 0.5
+	}
+}end(local.f)
+
+
+//=========================================================================
+// AI kill award. Threaded from aihandler.scr::addKillToPlayer (attacker verified Player).
+// Reads the victim's pain facts (fact.location/meansofdeath/enemyAtPain), the assist ledger
+// (coop_xp_dmg/coop_xp_dmgT per attacker entnum, coop_xp_hp0) and the class tag (coop_xpClass).
+//=========================================================================
+xp_ai_killed local.victim local.killer:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.killer == NULL || local.killer.classname != "Player" ){ end }
+	if( local.victim == NULL ){ end }
+
+	if( level.coop_xp_teamkills == NIL ){ level.coop_xp_teamkills = 0 }
+	level.coop_xp_teamkills = level.coop_xp_teamkills + 1
+	local.factor = waitthread xp_killcap_factor
+
+	local.pts = 10
+	local.valor = 0
+
+	if( local.victim.fact != NIL && local.victim.fact != NULL ){
+		// headshot: location 0/1/2 = head/helmet/neck (dbno.scr classification precedent)
+		if( local.victim.fact.location != NIL && local.victim.fact.location >= 0 && local.victim.fact.location <= 2 ){
+			local.pts = local.pts + 5
+		}
+		// melee / bash
+		if( local.victim.fact.meansofdeath == 26 ){
+			local.pts = local.pts + 20
+		}
+		// savior (a): the AI was actively engaging a DIFFERENT player when it died
+		if( local.victim.fact.enemyAtPain != NIL && local.victim.fact.enemyAtPain != NULL ){
+			if( local.victim.fact.enemyAtPain != local.killer && local.victim.fact.enemyAtPain.classname == "Player" ){
+				local.valor = local.valor + 15
+			}
+		}
+	}
+
+	// long-range kill
+	if( vector_length( local.killer.origin - local.victim.origin ) > 2000 ){
+		local.pts = local.pts + 5
+	}
+
+	// class bonuses (tagged at spawn in officer.scr / paradrop counts as reinf)
+	if( local.victim.coop_xpClass == "reinf" ){ local.pts = local.pts + 5 }
+	if( local.victim.coop_xpClass == "guard" ){ local.pts = local.pts + 10 }
+
+	// fighting from the ground: killer is DBNO
+	if( local.killer.flags["coop_dbno_active"] == 1 ){
+		local.valor = local.valor + 15
+	}
+
+	// savior (b): guarding a downed teammate - only if (a) did not already pay
+	if( local.valor < 15 ){
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL && local.p != local.killer && local.p.flags["coop_dbno_active"] == 1 ){
+				if( vector_length( local.p.origin - local.victim.origin ) < 512 ){
+					local.valor = local.valor + 15
+					break
+				}
+			}
+			local.i++
+		}
+	}
+
+	local.pts = int( local.pts * local.factor )
+	if( local.pts > 0 ){ thread xp_award local.killer local.pts "kills" }
+	if( local.valor > 0 ){
+		local.valor = int( local.valor * local.factor )
+		if( local.valor > 0 ){ thread xp_award local.killer local.valor "valor" }
+	}
+
+	// assists: any OTHER player who dealt >=25% of the victim's starting health within the
+	// last 10 seconds (accumulated at the pain-fact sites; gaps over 10s reset the ledger)
+	local.hp0 = local.victim.coop_xp_hp0
+	if( local.hp0 == NIL || local.hp0 <= 0 ){ end }
+	local.need = local.hp0 * 0.25
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != local.killer ){
+			local.dmg = local.victim.coop_xp_dmg[local.p.entnum]
+			local.dt  = local.victim.coop_xp_dmgT[local.p.entnum]
+			if( local.dmg != NIL && local.dt != NIL ){
+				if( local.dmg >= local.need && (level.time - local.dt) <= 10 ){
+					local.as = int( 5 * local.factor )
+					if( local.as > 0 ){ thread xp_award local.p local.as "kills" }
+				}
+			}
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// Officer death: killer award + share for the squad + heal-denied bonus.
+// Threaded from officer.scr::coop_officer_death_monitor.
+//=========================================================================
+xp_officer_killed local.officer:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.killer = NULL
+	if( local.officer != NULL && local.officer.fact != NIL && local.officer.fact != NULL ){
+		if( local.officer.fact.attacker != NULL && local.officer.fact.attacker.classname == "Player" ){
+			local.killer = local.officer.fact.attacker
+		}
+	}
+
+	if( local.killer != NULL ){
+		thread xp_award local.killer 150 "valor"
+		// denied the heal retreat ("stop him before he heals!" paid off)
+		if( level.coop_xp_heal_pending == 1 ){
+			thread xp_award local.killer 25 "valor"
+		}
+	}
+	level.coop_xp_heal_pending = 0
+
+	// every other active player shares the wave relief
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != local.killer && local.p.flags["coop_isActive"] == 1 ){
+			thread xp_award local.p 50 "kills"
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// Support calls: +15 to the caller (binoc bombing run / signal-smoke paradrop).
+//=========================================================================
+xp_support_call local.player local.kind:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	thread xp_award local.player 15 "support"
+}end
+
+
+//=========================================================================
+// Paratrooper roster: register at spawn; each one still alive at mission end
+// pays its caller +10 (escort the squad instead of spending it).
+//=========================================================================
+xp_para_register local.actor local.owner:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.actor == NULL || local.owner == NULL ){ end }
+	local.n = level.coop_xp_paraN
+	level.coop_xp_para[local.n]    = local.actor
+	level.coop_xp_paraOwn[local.n] = local.owner
+	level.coop_xp_paraN = local.n + 1
+}end
+
+
+//=========================================================================
+// Team-wide objective awards. Gate: active for >=50% of elapsed map time
+// (stops join-at-the-end freeloading without punishing mid-map joiners hard).
+//=========================================================================
+xp_team_award local.amount local.reason:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_xp_join"] != NIL ){
+			if( local.p.flags["coop_xp_join"] <= (level.time * 0.5) ){
+				thread xp_award local.p local.amount local.reason
+			}
+		}
+		local.i++
+	}
+}end
+
+// radio side objective destroyed
+xp_radio_done:{
+	if( level.coop_xp_radioPaid == 1 ){ end }
+	level.coop_xp_radioPaid = 1
+	waitthread xp_team_award 75 "objective"
+}end
+
+// a primary map objective flipped to completed (global/objectives.scr status==3).
+// level.coop_xp_sideObjPush guards out the coop side-objective pushes (they pay separately).
+xp_primary_done local.index:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( level.coop_xp_sideObjPush == 1 ){ end }
+	if( local.index == NIL ){ local.index = 0 }
+	if( level.coop_xp_objPaid[local.index] == 1 ){ end }
+	level.coop_xp_objPaid[local.index] = 1
+	waitthread xp_team_award 50 "objective"
+}end
+
+
+//=========================================================================
+// XP GAIN POPUP (slots 62 emblem, 63 gain text, 64 bar bg, 65 bar fill).
+// Top-center, appears ONLY when XP lands (xp_award pokes popupGain/popupUntil
+// and threads this; singleton per player). The bar shows progress INTO the
+// current rank bracket and eases toward the new value; more XP while visible
+// extends the hold and accumulates the "+N XP" readout. Fades out after 2.5s.
+//=========================================================================
+xp_hud_popup local.player:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_xp_popupOn"] == 1 ){ end }
+	if( local.player.flags["coop_xp_rank"] == NIL ){ end }
+	local.player.flags["coop_xp_popupOn"] = 1
+
+	local.rank = local.player.flags["coop_xp_rank"]
+	local.rn = local.rank
+	if( local.rn < 10 ){ local.rn = "0" + local.rn }
+
+	// static layout, top-center (640x480 virtual space, offsets from center)
+	ihuddraw_virtualsize local.player 62 1
+	ihuddraw_align       local.player 62 center top
+	ihuddraw_shader      local.player 62 ( "textures/hud/coop_rank_" + local.rn )
+	ihuddraw_rect        local.player 62 -128 30 24 24
+	ihuddraw_alpha       local.player 62 0.9
+
+	ihuddraw_virtualsize local.player 64 1
+	ihuddraw_align       local.player 64 center top
+	ihuddraw_shader      local.player 64 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.player 64 0.08 0.08 0.08
+	ihuddraw_rect        local.player 64 -100 39 200 7
+	ihuddraw_alpha       local.player 64 0.75
+
+	ihuddraw_virtualsize local.player 65 1
+	ihuddraw_align       local.player 65 center top
+	ihuddraw_shader      local.player 65 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.player 65 0.9 0.75 0.28
+	ihuddraw_rect        local.player 65 -100 39 0 7
+	ihuddraw_alpha       local.player 65 0.95
+
+	ihuddraw_virtualsize local.player 63 1
+	ihuddraw_align       local.player 63 center top
+	ihuddraw_font        local.player 63 "verdana-12"
+	ihuddraw_color       local.player 63 0.95 0.85 0.45
+	ihuddraw_rect        local.player 63 108 37 0 0
+	ihuddraw_alpha       local.player 63 1
+
+	local.shownW = -1
+	local.shownGain = -1
+
+	while( local.player != NULL && level.time < local.player.flags["coop_xp_popupUntil"] ){
+		local.total = local.player.flags["coop_xp_total"]
+		if( local.total == NIL ){ break }
+
+		// rank-up while visible: swap emblem, bar restarts in the new bracket
+		if( local.player.flags["coop_xp_rank"] != local.rank ){
+			local.rank = local.player.flags["coop_xp_rank"]
+			local.rn = local.rank
+			if( local.rn < 10 ){ local.rn = "0" + local.rn }
+			ihuddraw_shader local.player 62 ( "textures/hud/coop_rank_" + local.rn )
+			local.shownW = 0
+		}
+
+		local.floor = level.coop_xp_rankXP[local.rank]
+		local.ceil  = local.floor + 1
+		if( local.rank < 12 ){ local.ceil = level.coop_xp_rankXP[local.rank + 1] }
+		local.target = 200 * (local.total - local.floor) / (local.ceil - local.floor)
+		if( local.target > 200 ){ local.target = 200 }
+		if( local.target < 0 ){ local.target = 0 }
+
+		if( local.shownW < 0 ){
+			// first frame: start slightly behind the target so a single gain still animates
+			local.shownW = local.target - 24
+			if( local.shownW < 0 ){ local.shownW = 0 }
+		}
+		// ease a quarter of the remaining distance per frame
+		local.shownW = local.shownW + ((local.target - local.shownW) * 0.25)
+		local.w = int( local.shownW )
+		ihuddraw_rect local.player 65 -100 39 local.w 7
+
+		local.gain = local.player.flags["coop_xp_popupGain"]
+		if( local.gain != NIL && local.gain != local.shownGain ){
+			local.shownGain = local.gain
+			ihuddraw_string local.player 63 ( "+" + local.gain + " XP" )
+		}
+		waitframe
+	}
+
+	// fade out
+	local.a = 9
+	while( local.a > 0 && local.player != NULL ){
+		local.f = local.a * 0.1
+		ihuddraw_alpha local.player 62 local.f
+		ihuddraw_alpha local.player 63 local.f
+		ihuddraw_alpha local.player 64 local.f
+		ihuddraw_alpha local.player 65 local.f
+		local.a--
+		wait 0.04
+	}
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 62 0
+		ihuddraw_alpha  local.player 63 0
+		ihuddraw_alpha  local.player 64 0
+		ihuddraw_alpha  local.player 65 0
+		ihuddraw_string local.player 63 ""
+		local.player.flags["coop_xp_popupOn"]   = NIL
+		local.player.flags["coop_xp_popupGain"] = NIL
+	}
+}end
+
+
+//=========================================================================
+// End-of-map debrief card (slots 62-69). Called with waitthread from
+// missioncomplete.scr BEFORE the transition; blocks ~coop_xpSummaryTime sec.
+// Also pays the mission / no-death / paratrooper-survival awards first.
+//=========================================================================
+xp_summary:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.t = getcvar "coop_xpSummaryTime"
+	if( local.t == "" ){ local.t = 10 }
+	local.t = int( local.t )
+
+	// mission complete + no-death bonuses (awarded even when the card is disabled)
+	waitthread xp_team_award 200 "mission"
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
+			if( local.p.flags["coop_deaths"] == NIL || local.p.flags["coop_deaths"] == 0 ){
+				thread xp_award local.p 50 "mission"
+			}
+		}
+		local.i++
+	}
+	// paratrooper survival: +10 to the caller per trooper still standing
+	local.n = 0
+	while( local.n < level.coop_xp_paraN ){
+		local.a = level.coop_xp_para[local.n]
+		local.o = level.coop_xp_paraOwn[local.n]
+		if( local.a != NULL && local.o != NULL ){
+			if( isAlive local.a ){
+				thread xp_award local.o 10 "support"
+			}
+		}
+		local.n++
+	}
+	waitframe
+
+	if( local.t <= 0 ){ end }
+
+	// ---- the card ----
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_xp_id"] != NIL ){
+			thread xp_summary_card local.p
+		}
+		local.i++
+	}
+	wait local.t
+}end
+
+// per-player debrief card sequence (runs in parallel for everyone)
+xp_summary_card local.p:{
+	if( local.p == NULL ){ end }
+
+	local.rank  = local.p.flags["coop_xp_rank"]
+	local.total = local.p.flags["coop_xp_total"]
+	local.map   = local.p.flags["coop_xp_map"]
+
+	// title
+	ihuddraw_virtualsize local.p 63 1
+	ihuddraw_align       local.p 63 center center
+	ihuddraw_font        local.p 63 "facfont-20"
+	ihuddraw_color       local.p 63 0.95 0.9 0.7
+	ihuddraw_rect        local.p 63 0 -120 0 0
+	ihuddraw_string      local.p 63 ( "SQUAD DEBRIEF  -  +" + local.map + " XP" )
+	ihuddraw_alpha       local.p 63 1
+
+	// emblem beside the bar
+	local.rn = local.rank
+	if( local.rn < 10 ){ local.rn = "0" + local.rn }
+	ihuddraw_virtualsize local.p 62 1
+	ihuddraw_align       local.p 62 center center
+	ihuddraw_shader      local.p 62 ( "textures/hud/coop_rank_" + local.rn )
+	ihuddraw_rect        local.p 62 -140 -60 28 28
+	ihuddraw_alpha       local.p 62 1
+
+	// breakdown lines (top three buckets worth showing)
+	local.line = 0
+	local.keys[0] = "kills"
+	local.keys[1] = "valor"
+	local.keys[2] = "objective"
+	local.keys[3] = "support"
+	local.keys[4] = "revive"
+	local.keys[5] = "mission"
+	local.names[0] = "Combat"
+	local.names[1] = "Valor"
+	local.names[2] = "Objectives"
+	local.names[3] = "Support"
+	local.names[4] = "Revives"
+	local.names[5] = "Mission"
+	local.k = 0
+	while( local.k < 6 && local.line < 3 ){
+		local.v = local.p.flags["coop_xp_b_" + local.keys[local.k]]
+		if( local.v != NIL && local.v > 0 ){
+			local.slot = 66 + local.line
+			local.ly = (local.line * 14) - 96
+			ihuddraw_virtualsize local.p local.slot 1
+			ihuddraw_align       local.p local.slot center center
+			ihuddraw_font        local.p local.slot "verdana-12"
+			ihuddraw_color       local.p local.slot 0.85 0.85 0.85
+			ihuddraw_rect        local.p local.slot 0 local.ly 0 0
+			ihuddraw_string      local.p local.slot ( local.names[local.k] + "  +" + local.v )
+			ihuddraw_alpha       local.p local.slot 0.9
+			local.line++
+			wait 0.6
+		}
+		local.k++
+	}
+
+	// XP bar: progress INTO the current rank bracket, animated old -> new
+	local.floor = level.coop_xp_rankXP[local.rank]
+	local.ceil  = local.floor + 1
+	if( local.rank < 12 ){ local.ceil = level.coop_xp_rankXP[local.rank + 1] }
+	local.oldxp = local.total - local.map
+	if( local.oldxp < local.floor ){ local.oldxp = local.floor }
+
+	ihuddraw_virtualsize local.p 64 1
+	ihuddraw_align       local.p 64 center center
+	ihuddraw_shader      local.p 64 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 64 0.12 0.12 0.12
+	ihuddraw_rect        local.p 64 -120 -52 240 8
+	ihuddraw_alpha       local.p 64 0.8
+
+	ihuddraw_virtualsize local.p 65 1
+	ihuddraw_align       local.p 65 center center
+	ihuddraw_shader      local.p 65 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 65 0.85 0.7 0.25
+	ihuddraw_rect        local.p 65 -120 -52 0 8
+	ihuddraw_alpha       local.p 65 0.95
+
+	local.steps = 60
+	local.s = 0
+	while( local.s <= local.steps ){
+		if( local.p == NULL ){ end }
+		local.cur = local.oldxp + ((local.total - local.oldxp) * local.s / local.steps)
+		if( local.cur > local.ceil ){ local.cur = local.ceil }
+		local.w = int( 240 * (local.cur - local.floor) / (local.ceil - local.floor) )
+		if( local.w < 0 ){ local.w = 0 }
+		if( local.w > 240 ){ local.w = 240 }
+		ihuddraw_rect local.p 65 -120 -52 local.w 8
+		local.s++
+		waitframe
+	}
+
+	// promotion toast if a threshold was crossed on this map
+	if( local.rank > local.p.flags["coop_xp_rankmapstart"] ){
+		ihuddraw_virtualsize local.p 69 1
+		ihuddraw_align       local.p 69 center center
+		ihuddraw_font        local.p 69 "handle-23"
+		ihuddraw_color       local.p 69 1 0.85 0.3
+		ihuddraw_rect        local.p 69 0 -20 0 0
+		ihuddraw_string      local.p 69 ( "PROMOTED TO " + level.coop_xp_rankName[local.rank] )
+		ihuddraw_alpha       local.p 69 1
+		local.p playsound med_kit
+	}
+}end
+
+
+//=========================================================================
+// Persist every known player's total to file. Called on rank-ups, mission
+// complete, maptest transitions and the 60s autosave.
+//=========================================================================
+xp_flush:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_xp_id"] != NIL ){
+			fs_write_content ( "coop_mod/save/xp_" + local.p.flags["coop_xp_id"] + ".dat" ) ( "" + local.p.flags["coop_xp_total"] )
+		}
+		local.i++
+	}
+}end
