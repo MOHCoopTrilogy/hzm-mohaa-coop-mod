@@ -104,6 +104,8 @@ state RUN_FORWARD
 
 	states
 	{
+		SPRINT_FORWARD		: COOP_SPRINTING
+
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -1365,5 +1367,271 @@ state TURRET_USING
 	states
 	{
 		STAND : !IS_USING_TURRET
+	}
+}
+
+
+////////////////////////////////////////////////////////////////
+//
+// HZM coop - EMOTES [211]
+//
+// Reachable ONLY via forcelegsstate (coop_mod/player.scr::playerEmote, name-append
+// bus indices 23-25) - no entry edges anywhere, so STAND stays untouched. The anims
+// are the model-selection-screen idles every player TIK already aliases
+// (models/player/base/anims_shared.txt). Full-body legs anim owns every bone while
+// torso STAND action is none. Movement / jump / crouch / fire / ADS / weapon switch
+// cancel via the exits below; death force-jumps to KILLED regardless of state.
+// (research: _research/player_actor_anims.md - a bad .st ERR_DROPs the server,
+// boot-test after ANY edit here.)
+//
+////////////////////////////////////////////////////////////////
+
+state EMOTE_SALUTE
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_emote_salute : default
+	}
+
+	states
+	{
+		STAND : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+state EMOTE_ATEASE
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_emote_atease : default
+	}
+
+	states
+	{
+		EMOTE_ATEASE : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+state EMOTE_STRETCH
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_emote_stretch : default
+	}
+
+	states
+	{
+		EMOTE_STRETCH : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+
+////////////////////////////////////////////////////////////////
+//
+// HZM coop - SPRINT [212]
+//
+// Entered from RUN_FORWARD while the engine sprint state is active (COOP_SPRINTING =
+// m_bCoopSprinting from TickSprint). Plays the real AI sprint cycle (alert_sprint.skc,
+// aliased coop_sprint_forward in models/player/base/anims_shared.txt). Falls back to
+// RUN_FORWARD the moment sprint ends; jump/crouch/fall/stop exit like the run state.
+//
+////////////////////////////////////////////////////////////////
+
+state SPRINT_FORWARD
+{
+	entrycommands
+	{
+		movementstealth "0.25"
+		moveposflags "standing" "running"
+	}
+
+	legs
+	{
+		coop_sprint_forward : default
+	}
+
+	states
+	{
+		// exit the INSTANT sprint ends - checked before everything else. No ANIMDONE
+		// self-transition: alert_sprint.skc is a looping anim (re-entry is a stick hazard).
+		RUN_FORWARD : !COOP_SPRINTING
+
+		FALL : FALLING
+
+		CROUCH_IDLE : ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
+		CROUCH_DENIED : ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
+
+		STAND : !HAS_VELOCITY
+		STAND : BLOCKED "2"
+
+		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
+	}
+}
+
+
+////////////////////////////////////////////////////////////////
+//
+// HZM coop - DBNO CINEMATICS [213]
+//
+// Reachable ONLY via forcelegsstate from coop_mod/dbno.scr (no entry edges - the DBNO
+// system owns entry/exit; KILLED force-overrides everything). Uses the engine's own
+// major-pain collapse/crawl/death sequence + a ground writhe idle. Full-body anims:
+// torso stays in STAND (action none) so the legs channel owns every bone.
+//
+////////////////////////////////////////////////////////////////
+
+state DBNO_COLLAPSE
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_collapse : default
+	}
+
+	states
+	{
+		DBNO_IDLE : ANIMDONE_LEGS
+	}
+}
+
+state DBNO_IDLE
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_idle : default
+	}
+
+	states
+	{
+		DBNO_CRAWL : FORWARD HAS_VELOCITY
+		DBNO_CRAWL : BACKWARD HAS_VELOCITY
+		DBNO_CRAWL : STRAFE_LEFT HAS_VELOCITY
+		DBNO_CRAWL : STRAFE_RIGHT HAS_VELOCITY
+
+		DBNO_IDLE : ANIMDONE_LEGS
+	}
+}
+
+state DBNO_CRAWL
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_crawl : default
+	}
+
+	states
+	{
+		DBNO_IDLE : !HAS_VELOCITY
+
+		DBNO_CRAWL : ANIMDONE_LEGS
+	}
+}
+
+state DBNO_BLEEDOUT
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_bleedout : default
+	}
+
+	states
+	{
+	}
+}
+
+state DBNO_MEDIC
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_dbno_medic : default
+	}
+
+	states
+	{
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+
+		DBNO_MEDIC : ANIMDONE_LEGS
 	}
 }
