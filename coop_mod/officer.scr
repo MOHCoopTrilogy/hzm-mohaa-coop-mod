@@ -30,6 +30,9 @@
 coop_officer_policy:{
 	local.m = level.coop_mapname
 
+	// HZM coop pre-mission lobby - no combat phase, so no officer waves / weapon-ban / spawn-policy spam
+	if( level.coop_lobbyMap == 1 ){ end "none" }
+
 	// ---- NONE: pure cinematic / vehicle-only maps with no go-loud combat phase ----
 	// Per user rule, NONE is reserved for pure-cinematic or pure-vehicle maps that
 	// never expose a stealth->loud combat phase the officer could respond to.
@@ -149,9 +152,9 @@ coop_officer_init:{
 	// Decided BEFORE the intro/ride waits so NONE maps exit instantly and never
 	// spawn a boss into a stealth/cinematic sequence (e1l4 truck-stop bug).
 	local.policy = exec coop_mod/officer.scr::coop_officer_policy
-	iprintlnbold ("OFFICER: spawn policy = " + local.policy)
+	if( !level.coop_lobbyMap ){ iprintlnbold ("OFFICER: spawn policy = " + local.policy) }	// silent in the lobby
 	if( local.policy == "none" ){
-		iprintlnbold "OFFICER: policy NONE - officer disabled on this map"
+		if( !level.coop_lobbyMap ){ iprintlnbold "OFFICER: policy NONE - officer disabled on this map" }	// silent in the lobby
 		end
 	}
 	if( local.policy == "deferred" ){
@@ -545,9 +548,18 @@ coop_officer_spawn local.pos:{
 	local.guard_back = local.officer.origin - (local.ofwd * 250)
 	local.guard1_pos = local.guard_back + (0 80 0)
 	local.guard2_pos = local.guard_back + (0 -80 0)
+	//[310] player-scaled guard detail: 2 authored (= 2-player baseline), 1 solo, up to 4 (cap)
+	local.bgn = exec coop_mod/officer.scr::coop_reinf_count 2 "coop_officerSquadPer" 1 4
+	level.coop_bodyguard_n = local.bgn
 	thread coop_spawn_bodyguard local.guard1_pos 1
-	thread coop_spawn_bodyguard local.guard2_pos 2
-	iprintlnbold "OFFICER: spawned 2 bodyguards"
+	if( local.bgn >= 2 ){ thread coop_spawn_bodyguard local.guard2_pos 2 }
+	local.bgi = 3
+	while( local.bgi <= local.bgn ){
+		local.gext = exec coop_mod/officer.scr::coop_spread_pos local.guard_back local.bgi
+		thread coop_spawn_bodyguard local.gext local.bgi
+		local.bgi++
+	}
+	iprintlnbold ("OFFICER: spawned " + local.bgn + " bodyguards")
 	thread coop_officer_bodyguard_monitor
 	thread coop_officer_retreat_monitor local.officer
 	thread coop_officer_reinforcements local.officer
@@ -593,6 +605,7 @@ coop_spawn_bodyguard local.pos local.idx:{
 	local.guard.enableEnemy = 1
 	local.guard gun "stg44"
 	local.guard.nosurprise = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.guard	//[310] player-count health/accuracy
 	local.guard forceactivate
 	local.guard rendereffects "+coopboss"
 	thread coop_mark_boss local.guard
@@ -693,18 +706,34 @@ coop_officer_canteen local.officer:{
 
 
 coop_officer_bodyguard_monitor:{
-	// wait for both bodyguards to be assigned
+	//[310] player-scaled guard detail: wait for however many guards were requested
+	// (level.coop_bodyguard_n - can be 1 solo) to be assigned, then watch exactly that many so a
+	// smaller detail never false-fires the "you killed a bodyguard" wave call at spawn.
+	local.bgn = level.coop_bodyguard_n
+	if( local.bgn == NIL || local.bgn < 1 ){ local.bgn = 2 }
 	local.t = 0
-	while( ( level.coop_bodyguards[1] == NULL || level.coop_bodyguards[2] == NULL ) && local.t < 10 ){
-		wait 0.5
-		local.t += 0.5
+	local.got = 0
+	while( local.got < local.bgn && local.t < 10 ){
+		local.got = 0
+		local.bgw = 1
+		while( local.bgw <= local.bgn ){
+			if( level.coop_bodyguards[local.bgw] != NULL ){ local.got++ }
+			local.bgw++
+		}
+		if( local.got < local.bgn ){
+			wait 0.5
+			local.t += 0.5
+		}
 	}
-	if( level.coop_bodyguards[1] == NULL && level.coop_bodyguards[2] == NULL ){ end }
-	local.prev = 2
+	if( local.got == 0 ){ end }
+	local.prev = local.got
 	while( level.coop_officer_alive == 1 ){
 		local.alive = 0
-		if( level.coop_bodyguards[1] != NULL && isAlive level.coop_bodyguards[1] ){ local.alive++ }
-		if( level.coop_bodyguards[2] != NULL && isAlive level.coop_bodyguards[2] ){ local.alive++ }
+		local.bgk = 1
+		while( local.bgk <= local.bgn ){
+			if( level.coop_bodyguards[local.bgk] != NULL && isAlive level.coop_bodyguards[local.bgk] ){ local.alive++ }
+			local.bgk++
+		}
 		if( local.alive < local.prev ){
 			// a bodyguard just died -- officer calls reinforcements
 			local.prev = local.alive
@@ -1301,6 +1330,101 @@ coop_call_reinforcements:{
 }end
 
 
+//[310] HZM coop - OFFICER REINFORCEMENT PLAYER-SCALING. Effective player count for the officer
+// system: live players, honoring the same solo-test override as the generic AI scaler
+// (coop_aiScaleTest 1 = a lone host counts as 2 - REQUIRED to see scaling solo) and capped by
+// level.coop_maxPlayerScalar (variables.scr, def 4) so a huge lobby doesn't scale forever.
+coop_reinf_pc:{
+	local.pc = 1
+	if( $player != NULL && $player.size > 0 ){ local.pc = $player.size }
+	if( getcvar "coop_aiScaleTest" == "1" && local.pc < 2 ){ local.pc = 2 }
+	local.cap = level.coop_maxPlayerScalar
+	if( local.cap == NIL || local.cap < 1 ){ local.cap = 4 }
+	if( local.pc > local.cap ){ local.pc = local.cap }
+	end local.pc
+}end
+
+
+//[310] HZM coop - scaled UNIT COUNT for a wave/battalion. The AUTHORED base numbers are the
+// coop_officerBasePc-player experience (def 2): n = base + (pc - basePc) * per, so SOLO play
+// fields SMALLER units than authored and 3-4 players field bigger ones. per comes from the named
+// cvar (local.pername; empty/invalid = local.perdef), floor 1, hard-limited by local.cap (squads
+// are limited by their monitor slots). If the LIVE german count is already at the entity-budget
+// hardcap (level.coop_aiScaleHardCap, shared with the generic count-scaler), never exceed the
+// authored base - the base wave always spawns, only the extras yield.
+coop_reinf_count local.base local.pername local.perdef local.cap:{
+	local.n = local.base
+	if( getcvar "coop_officerScale" == "0" ){ end local.n }
+	local.pc = exec coop_mod/officer.scr::coop_reinf_pc
+	local.bp = getcvar "coop_officerBasePc"
+	if( local.bp == "" ){ local.bp = 2 }
+	local.bp = int( local.bp )
+	if( local.bp < 1 ){ local.bp = 2 }
+	if( local.pc == local.bp ){ end local.n }
+	local.per = getcvar local.pername
+	if( local.per == "" ){ local.per = local.perdef }
+	local.per = int( local.per )
+	if( local.per <= 0 ){ local.per = local.perdef }
+	local.n = local.base + ((local.pc - local.bp) * local.per)
+	if( local.n < 1 ){ local.n = 1 }
+	if( local.cap != NIL && local.n > local.cap ){ local.n = local.cap }
+	if( level.coop_aiScaleHardCap != NIL && level.coop_actorArray["german"] != NIL && level.coop_actorArray["german"].size >= level.coop_aiScaleHardCap ){
+		if( local.n > local.base ){ local.n = local.base }
+	}
+	end local.n
+}end
+
+
+//[310] HZM coop - scale ONE reinforcement trooper's HEALTH + ACCURACY by player count. Call right
+// after the spawner sets its authored .health/.accuracy/gun (same tick as spawn). Works for BOTH
+// health systems: flagged (coop_actorStopPainHandler) troops keep plain .health; unflagged troops
+// get the scaled value snapshotted into coop_actorActualHealth by aihandler::initialisePainVars a
+// frame later (scaled health is kept under 700 so the >700 re-clamp there never fires).
+// The AUTHORED stats are the coop_officerBasePc-player experience (def 2): extra = pc - basePc
+// can be NEGATIVE, so a SOLO player faces weaker/less accurate troops than authored. HEALTH:
+// +/-coop_officerHealthPct% per player step (def 35, floor 25hp). ACCURACY: moves
+// coop_officerAccPct% (def 15) of the remaining range to 100 per step (floor 20) - gentler than
+// the generic aihandler curve, which is DISABLED for these actors (coop_actorStopAccuracy) so the
+// two systems never double-scale. coop_waveActor=1 also excludes officer troops from the generic
+// per-spawn cloner (aihandler::coop_tryDuplicateActor) - coop_reinf_count is the single count
+// authority for officer content.
+coop_reinf_scale local.actor:{
+	if( local.actor == NULL ){ end }
+	local.actor.flags["coop_waveActor"] = 1
+	if( getcvar "coop_officerScale" == "0" ){ end }
+	local.actor.flags["coop_actorStopAccuracy"] = 1
+	local.pc = exec coop_mod/officer.scr::coop_reinf_pc
+	local.bp = getcvar "coop_officerBasePc"
+	if( local.bp == "" ){ local.bp = 2 }
+	local.bp = int( local.bp )
+	if( local.bp < 1 ){ local.bp = 2 }
+	local.extra = local.pc - local.bp
+	if( local.extra == 0 ){ end }
+	local.hpct = getcvar "coop_officerHealthPct"
+	if( local.hpct == "" ){ local.hpct = 35 }
+	local.hpct = int( local.hpct )
+	if( local.hpct <= 0 ){ local.hpct = 35 }
+	local.hp = local.actor.health
+	if( local.hp > 0 ){
+		local.hp = int( local.hp + ((local.hp * local.hpct * local.extra) / 100) )
+		if( local.hp < 25 ){ local.hp = 25 }
+		if( local.hp > 690 ){ local.hp = 690 }
+		local.actor.health = local.hp
+	}
+	local.apct = getcvar "coop_officerAccPct"
+	if( local.apct == "" ){ local.apct = 15 }
+	local.apct = int( local.apct )
+	if( local.apct <= 0 ){ local.apct = 15 }
+	local.acc = local.actor.accuracy
+	if( local.acc > 0 && local.acc < 100 ){
+		local.acc = int( local.acc + (((100 - local.acc) * local.apct * local.extra) / 100) )
+		if( local.acc < 20 ){ local.acc = 20 }
+		if( local.acc > 100 ){ local.acc = 100 }
+		local.actor.accuracy = local.acc
+	}
+}end
+
+
 // Returns a SCATTERED ground position around local.anchor for the local.i-th trooper, so a
 // squad/battalion never pops in stacked inside each other (they used to spawn in a tight straight
 // line and droptofloor on top of one another). Fans them on a widening spiral (angle via
@@ -1489,8 +1613,11 @@ coop_spawn_battalion:{
 
 	iprintlnbold "Recon reports the Officer has summoned a BATTALION! They are converging to protect him!"
 
+	//[310] player-scaled battalion: 10 base + coop_officerBattalionPer (def 3) per extra player
+	local.bn = exec coop_mod/officer.scr::coop_reinf_count 10 "coop_officerBattalionPer" 3 22
+	level.coop_battalion_n = local.bn
 	local.n = 0
-	while( local.n < 10 ){
+	while( local.n < local.bn ){
 		local.sgnd = exec coop_mod/officer.scr::coop_spread_pos local.anchor local.n
 
 		local.bmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
@@ -1520,6 +1647,7 @@ coop_spawn_battalion:{
 			local.b gun "mauser kar 98k"
 		}
 
+		exec coop_mod/officer.scr::coop_reinf_scale local.b	//[310] player-count health/accuracy (after the gun table so the lead sniper's 100 acc stands)
 		local.b rendereffects "+coopboss"
 		local.b forceactivate
 		thread coop_wave_glow local.b
@@ -1552,10 +1680,13 @@ coop_battalion_march local.actor local.dest:{
 // Announces when the whole battalion is wiped out.
 coop_battalion_monitor:{
 	wait 2
+	//[310] watch however many troopers the scaled battalion actually spawned (solo can be < 10)
+	local.bn = level.coop_battalion_n
+	if( local.bn == NIL || local.bn < 1 ){ local.bn = 10 }
 	while( level.coop_officer_alive == 1 ){
 		local.alive = 0
 		local.k = 1
-		while( local.k <= 10 ){
+		while( local.k <= local.bn ){
 			if( level.coop_battalion[local.k] != NULL && isAlive level.coop_battalion[local.k] ){ local.alive++ }
 			local.k++
 		}
@@ -1575,7 +1706,12 @@ coop_spawn_elite_squad local.pos:{
 	local.sq1 = NIL
 	local.sq2 = NIL
 	local.sq3 = NIL
-	while( local.i < 3 ){
+	local.sq4 = NIL
+	local.sq5 = NIL
+	local.sq6 = NIL
+	//[310] player-scaled squad: 3 base + coop_officerSquadPer (def 1) per extra player, cap 6
+	local.nt = exec coop_mod/officer.scr::coop_reinf_count 3 "coop_officerSquadPer" 1 6
+	while( local.i < local.nt ){
 		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
 		if( local.gnd != NIL ){
 			local.smodel = exec coop_mod/officer.scr::coop_model_for "elite"
@@ -1596,6 +1732,7 @@ coop_spawn_elite_squad local.pos:{
 			} else {
 				local.s gun "stg44"
 			}
+			exec coop_mod/officer.scr::coop_reinf_scale local.s	//[310] player-count health/accuracy
 			local.s attackplayer
 			local.s rendereffects "+coopboss"
 			local.s.flags["coop_squadSlot"] = local.i
@@ -1604,7 +1741,10 @@ coop_spawn_elite_squad local.pos:{
 			thread coop_wave_glow local.s
 			if( local.i == 0 ){ local.sq1 = local.s }
 			else if( local.i == 1 ){ local.sq2 = local.s }
-			else { local.sq3 = local.s }
+			else if( local.i == 2 ){ local.sq3 = local.s }
+			else if( local.i == 3 ){ local.sq4 = local.s }
+			else if( local.i == 4 ){ local.sq5 = local.s }
+			else { local.sq6 = local.s }
 			local.count++
 			local.last_pos = local.gnd
 		}
@@ -1612,18 +1752,23 @@ coop_spawn_elite_squad local.pos:{
 	}
 	if( local.count > 0 ){
 		thread coop_elite_smoke_barrage local.last_pos
-		thread coop_squad_monitor local.sq1 local.sq2 local.sq3 "Elite Squad"
+		thread coop_squad_monitor local.sq1 local.sq2 local.sq3 "Elite Squad" local.sq4 local.sq5 local.sq6
 	}
 	iprintlnbold ("REINF: wave elite squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
 }end
 
 
-coop_squad_monitor local.a1 local.a2 local.a3 local.label:{
+//[310] extra trailing slots a4-a6 AFTER the label so pre-scaling callers keep working unchanged;
+// player-scaled squads pass their extra members there.
+coop_squad_monitor local.a1 local.a2 local.a3 local.label local.a4 local.a5 local.a6:{
 	while( level.coop_officer_alive == 1 ){
 		local.allDead = 1
 		if( local.a1 != NULL && isAlive local.a1 ){ local.allDead = 0 }
 		if( local.a2 != NULL && isAlive local.a2 ){ local.allDead = 0 }
 		if( local.a3 != NULL && isAlive local.a3 ){ local.allDead = 0 }
+		if( local.a4 != NULL && isAlive local.a4 ){ local.allDead = 0 }
+		if( local.a5 != NULL && isAlive local.a5 ){ local.allDead = 0 }
+		if( local.a6 != NULL && isAlive local.a6 ){ local.allDead = 0 }
 		if( local.allDead == 1 ){ break }
 		wait 2
 	}
@@ -1677,7 +1822,12 @@ coop_spawn_infantry_squad local.pos:{
 	local.s1 = NIL
 	local.s2 = NIL
 	local.s3 = NIL
-	while( local.i < 3 ){
+	local.s4 = NIL
+	local.s5 = NIL
+	local.s6 = NIL
+	//[310] player-scaled squad: 3 base + coop_officerSquadPer (def 1) per extra player, cap 6
+	local.nt = exec coop_mod/officer.scr::coop_reinf_count 3 "coop_officerSquadPer" 1 6
+	while( local.i < local.nt ){
 		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
 		if( local.gnd != NIL ){
 			local.smodel = exec coop_mod/officer.scr::coop_model_for "infantry"
@@ -1697,6 +1847,7 @@ coop_spawn_infantry_squad local.pos:{
 			} else {
 				local.s gun "stg44"
 			}
+			exec coop_mod/officer.scr::coop_reinf_scale local.s	//[310] player-count health/accuracy
 			local.s attackplayer
 			local.s rendereffects "+coopboss"
 			local.s.flags["coop_squadSlot"] = local.i
@@ -1705,14 +1856,17 @@ coop_spawn_infantry_squad local.pos:{
 			thread coop_wave_glow local.s
 			if( local.i == 0 ){ local.s1 = local.s }
 			else if( local.i == 1 ){ local.s2 = local.s }
-			else { local.s3 = local.s }
+			else if( local.i == 2 ){ local.s3 = local.s }
+			else if( local.i == 3 ){ local.s4 = local.s }
+			else if( local.i == 4 ){ local.s5 = local.s }
+			else { local.s6 = local.s }
 			local.count++
 			local.last_pos = local.gnd
 		}
 		local.i++
 	}
 	if( local.count > 0 ){
-		thread coop_squad_monitor local.s1 local.s2 local.s3 "Wehrmacht Squad"
+		thread coop_squad_monitor local.s1 local.s2 local.s3 "Wehrmacht Squad" local.s4 local.s5 local.s6
 	}
 	iprintlnbold ("REINF: wave Wehrmacht squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
 }end
@@ -1852,6 +2006,7 @@ coop_spawn_sniper local.pos:{
 	local.sniper.nosurprise = 1
 	local.sniper.movedoneradius = 450
 	local.sniper.enableEnemy = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.sniper	//[310] player-count health (accuracy already 100 - no-op there)
 	local.sniper forceactivate
 	local.sniper attackplayer
 	local.sniper rendereffects "+coopboss"
@@ -1976,7 +2131,13 @@ coop_spawn_grenadiers local.pos:{
 	local.last_pos = local.pos
 	local.g1 = NIL
 	local.g2 = NIL
-	while( local.i < 2 ){
+	local.g3 = NIL
+	local.g4 = NIL
+	local.g5 = NIL
+	local.g6 = NIL
+	//[310] player-scaled squad: 2 base + coop_officerSquadPer (def 1) per extra player, cap 6
+	local.nt = exec coop_mod/officer.scr::coop_reinf_count 2 "coop_officerSquadPer" 1 6
+	while( local.i < local.nt ){
 		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
 		if( local.gnd != NIL ){
 			local.gmodel = exec coop_mod/officer.scr::coop_model_for "grenadier"
@@ -1991,6 +2152,7 @@ coop_spawn_grenadiers local.pos:{
 			local.g.ammo_grenade = 5
 			local.g.leash = 4096
 			local.g.enableEnemy = 1
+			exec coop_mod/officer.scr::coop_reinf_scale local.g	//[310] player-count health/accuracy
 			local.g forceactivate
 			local.g attackplayer
 			local.g rendereffects "+coopboss"
@@ -2001,14 +2163,19 @@ coop_spawn_grenadiers local.pos:{
 			waitthread coop_apply_personality local.g
 			thread coop_wave_hunt local.g
 			thread coop_grenade_lob_loop local.g
-			if( local.i == 0 ){ local.g1 = local.g } else { local.g2 = local.g }
+			if( local.i == 0 ){ local.g1 = local.g }
+			else if( local.i == 1 ){ local.g2 = local.g }
+			else if( local.i == 2 ){ local.g3 = local.g }
+			else if( local.i == 3 ){ local.g4 = local.g }
+			else if( local.i == 4 ){ local.g5 = local.g }
+			else { local.g6 = local.g }
 			local.count++
 			local.last_pos = local.gnd
 		}
 		local.i++
 	}
 	if( local.count > 0 ){
-		thread coop_squad_monitor local.g1 local.g2 NIL "Grenadier Squad"
+		thread coop_squad_monitor local.g1 local.g2 local.g3 "Grenadier Squad" local.g4 local.g5 local.g6
 	}
 	iprintlnbold ("REINF: wave grenadiers spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
 }end
@@ -2426,6 +2593,7 @@ coop_spawn_at_team local.spawn_pos:{
 	local.gunner.enableEnemy = 1
 	local.gunner gun "panzerschrek"
 	local.gunner.flags["coop_actorStopPainHandler"] = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.gunner	//[310] player-count health/accuracy
 	local.gunner rendereffects "+coopboss"
 	local.gunner forceactivate
 	thread coop_wave_glow local.gunner
@@ -2444,6 +2612,7 @@ coop_spawn_at_team local.spawn_pos:{
 	local.loader.enableEnemy = 1
 	local.loader gun "mp40"
 	local.loader.flags["coop_actorStopPainHandler"] = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.loader	//[310] player-count health/accuracy
 	local.loader attackplayer
 	local.loader rendereffects "+coopboss"
 	thread coop_wave_glow local.loader
@@ -2610,10 +2779,14 @@ coop_spawn_dogs local.spawn_pos:{
 	local.handler_pos = exec coop_mod/officer.scr::coop_find_ground local.off3
 	if( local.handler_pos == NIL ){ local.handler_pos = local.spawn_pos }
 
+	//[310] player-scaled pack: 2 base dogs + coop_officerSquadPer (def 1) per extra player, cap 5
+	local.dn = exec coop_mod/officer.scr::coop_reinf_count 2 "coop_officerSquadPer" 1 5
+
 	local.dog1 = spawn "models/animal/german_shepherd.tik"
 	local.dog1.origin = local.dog_pos1
 	local.dog1 droptofloor
 	local.dog1.health = 150
+	exec coop_mod/officer.scr::coop_reinf_scale local.dog1	//[310] player-count health
 	local.dog1.leash = 4096
 	local.dog1.enableEnemy = 1
 	local.dog1 rendereffects "+coopboss"
@@ -2623,19 +2796,24 @@ coop_spawn_dogs local.spawn_pos:{
 	thread coop_dog_hunt local.dog1
 
 	// stagger the second dog so the pair don't run in lockstep and clip into each other
-	wait 3
-	if( level.coop_officer_alive != 1 ){ end }
-	local.dog2 = spawn "models/animal/german_shepherd.tik"
-	local.dog2.origin = local.dog_pos2
-	local.dog2 droptofloor
-	local.dog2.health = 150
-	local.dog2.leash = 4096
-	local.dog2.enableEnemy = 1
-	local.dog2 rendereffects "+coopboss"
-	local.dog2 forceactivate
-	local.dog2 attackplayer
-	thread coop_wave_glow local.dog2
-	thread coop_dog_hunt local.dog2
+	//[310] solo fields a single dog (local.dn 1) - skip the authored second
+	local.dog2 = NIL
+	if( local.dn >= 2 ){
+		wait 3
+		if( level.coop_officer_alive != 1 ){ end }
+		local.dog2 = spawn "models/animal/german_shepherd.tik"
+		local.dog2.origin = local.dog_pos2
+		local.dog2 droptofloor
+		local.dog2.health = 150
+		exec coop_mod/officer.scr::coop_reinf_scale local.dog2	//[310] player-count health
+		local.dog2.leash = 4096
+		local.dog2.enableEnemy = 1
+		local.dog2 rendereffects "+coopboss"
+		local.dog2 forceactivate
+		local.dog2 attackplayer
+		thread coop_wave_glow local.dog2
+		thread coop_dog_hunt local.dog2
+	}
 
 	local.hmodel = exec coop_mod/officer.scr::coop_model_for "handler"
 	local.handler = spawn local.hmodel
@@ -2644,12 +2822,40 @@ coop_spawn_dogs local.spawn_pos:{
 	local.handler droptofloor
 	local.handler health 150
 	local.handler gun "mp40"
-	local.handler.coop_actorStopPainHandler = 1
+	local.handler.flags["coop_actorStopPainHandler"] = 1	//[310] was set as an entity VAR (typo) - never actually opted out
+	exec coop_mod/officer.scr::coop_reinf_scale local.handler	//[310] player-count health/accuracy
 	local.handler rendereffects "+coopboss"
 	thread coop_wave_glow local.handler
 	thread coop_wave_hunt local.handler
 
-	thread coop_squad_monitor local.dog1 local.dog2 local.handler "Attack Dogs"
+	//[310] extra pack dogs for bigger lobbies (slots 3-5), staggered like dog2 so they don't lockstep
+	local.dog3 = NIL
+	local.dog4 = NIL
+	local.dog5 = NIL
+	local.di = 3
+	while( local.di <= local.dn ){
+		wait 2
+		if( level.coop_officer_alive != 1 ){ break }
+		local.dpx = exec coop_mod/officer.scr::coop_spread_pos local.spawn_pos local.di
+		local.dx = spawn "models/animal/german_shepherd.tik"
+		local.dx.origin = local.dpx
+		local.dx droptofloor
+		local.dx.health = 150
+		exec coop_mod/officer.scr::coop_reinf_scale local.dx
+		local.dx.leash = 4096
+		local.dx.enableEnemy = 1
+		local.dx rendereffects "+coopboss"
+		local.dx forceactivate
+		local.dx attackplayer
+		thread coop_wave_glow local.dx
+		thread coop_dog_hunt local.dx
+		if( local.di == 3 ){ local.dog3 = local.dx }
+		else if( local.di == 4 ){ local.dog4 = local.dx }
+		else { local.dog5 = local.dx }
+		local.di++
+	}
+
+	thread coop_squad_monitor local.dog1 local.dog2 local.handler "Attack Dogs" local.dog3 local.dog4 local.dog5
 	iprintlnbold ("REINF: wave Dogs spawned at " + int(local.dog_pos1[0]) + " " + int(local.dog_pos1[1]))
 }end
 
@@ -2808,8 +3014,10 @@ coop_spawn_death_battalion local.pos local.ang local.msg local.hold local.seed:{
 	wait 2
 	if( local.msg != NIL && local.msg != "" ){ iprintlnbold local.msg }
 	level.coop_death_battalion_count = 0
+	//[310] player-scaled: 10 base + coop_officerBattalionPer (def 3) per extra player
+	local.dbn = exec coop_mod/officer.scr::coop_reinf_count 10 "coop_officerBattalionPer" 3 22
 	local.n = 0
-	while( local.n < 10 ){
+	while( local.n < local.dbn ){
 		local.idx = local.n + (local.seed * 10)
 		local.sgnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.idx
 
@@ -2837,6 +3045,7 @@ coop_spawn_death_battalion local.pos local.ang local.msg local.hold local.seed:{
 			local.b gun "mauser kar 98k"
 		}
 
+		exec coop_mod/officer.scr::coop_reinf_scale local.b	//[310] player-count health/accuracy
 		local.b rendereffects "+coopboss"
 		local.b forceactivate
 		thread coop_wave_glow local.b

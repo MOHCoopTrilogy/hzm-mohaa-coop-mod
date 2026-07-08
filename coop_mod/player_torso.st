@@ -135,9 +135,21 @@ state AIM
 		viewmodelanim charge
 	}
 
+	// HZM coop [227] - the gun stays RAISED AND LEVEL the entire time the shoulder aim is held:
+	// standing, strafing, forward, back - the TRUE shouldered aim holds (coop_aim_* aliases, the
+	// AI aiming anims) on the upper body, never a carry. The [223] stand_idle rows were the
+	// muzzle-up patrol carry - "gun should stay raised... not relaxed at any point" (user).
+	// Torso slot masks to upper bones; the legs keep their run/strafe anims underneath.
 	action
 	{
-		none				: default // no torso anim; legs drive the body
+		coop_aim_smg			: IS_WEAPON_ACTIVE "mainhand" "MP40"
+		coop_aim_mg			: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+		coop_aim_rifle			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		coop_aim_pistol			: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
+		coop_aim_rifle			: IS_WEAPONCLASS_ACTIVE "mainhand" "rifle"
+		coop_aim_smg			: IS_WEAPONCLASS_ACTIVE "mainhand" "smg"
+		coop_aim_mg			: IS_WEAPONCLASS_ACTIVE "mainhand" "mg"
+		none				: default
 	}
 
 	states
@@ -163,9 +175,15 @@ state AIM
 		// static aim pose can't retrigger, so full-auto fires reliably here (slight kick during a spray).
 		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
 		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY !IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
-		// HZM coop - re-assert the raised "charge" pose on movement-speed change (start/stop
-		// moving), mirroring STAND lines 97-98. Without it, starting to move swaps the view
-		// model to a movement anim and the support hand drops off the gun.
+		// HZM coop [234] - LOOP the upper-body aim hold: re-pitch AIM every time the torso aim
+		// anim finishes, so the raised gun is held CONSTANTLY while ADS is down. Without this the
+		// hold played ONCE and then the legs' full-body run/strafe anim bled back onto the arms
+		// mid-move ("raised gun torso should be the constant state regardless of walking f/b/l/r"
+		// - user). Sits below the attack rows so firing still dispatches; COOP_ADS guard = only
+		// while aiming. Same re-pitch pattern as the vanilla rechamber->AIM return.
+		AIM				: ANIMDONE_TORSO COOP_ADS
+		// re-assert the raised pose on movement-speed change (start/stop/turn) too, covering the
+		// single frame between an anim finishing and the next ANIMDONE re-pitch.
 		AIM				: +CHECK_MOVEMENT_SPEED "mainhand"
 		AIM				: -CHECK_MOVEMENT_SPEED "mainhand"
 	}
@@ -210,12 +228,64 @@ state COVER_TORSO
 		LADDER_IDLE_LEFT		: ON_LADDER
 
 		// both poses gone (released, moved, or geometry lost) -> back to normal
-		AIM					: COOP_COVER_PEEK
+		COVER_PEEK_TORSO	: COOP_COVER_PEEK
 		STAND				: !COOP_COVER !COOP_COVER_LOW
 
 		PUTAWAY_MAIN			: PUTAWAYMAIN
 		RAISE_WEAPON			: NEW_WEAPON
 		RELOAD_WEAPON			: RELOAD
+	}
+}
+
+//==============================================================================
+// TAKE COVER peek torso (HZM coop [217]) - RMB pop-out aiming WITHOUT routing
+// through the vanilla AIM state: AIM's own exits bounced AIM->STAND->COVER_TORSO
+// ->AIM in one frame = engine infinite-loop guard = server kill (bug-313). This
+// state is cover-owned: it only tucks back into COVER_TORSO or leaves to STAND
+// when the pose ends. Firing uses the same dispatch rows as AIM.
+//==============================================================================
+state COVER_PEEK_TORSO
+{
+	movetype legs
+
+	camera behind
+
+	entrycommands
+	{
+		viewmodelanim idle
+	}
+
+	// HZM coop [224] - while peeked, hold a TRUE shouldered AIM on the upper body: the AI aiming
+	// anims (coop_aim_* aliases, anims_shared.txt) keep the barrel LEVEL at the view. The [223]
+	// stand_idle rows were a muzzle-up patrol CARRY - "gun always aims up instead of straight"
+	// (user, shot0019). Shotgun shares the rifle aim (both shouldered long guns), BAR/StG the
+	// mp44 aim.
+	action
+	{
+		coop_aim_smg			: IS_WEAPON_ACTIVE "mainhand" "MP40"
+		coop_aim_mg			: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+		coop_aim_rifle			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		coop_aim_pistol			: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
+		coop_aim_rifle			: IS_WEAPONCLASS_ACTIVE "mainhand" "rifle"
+		coop_aim_smg			: IS_WEAPONCLASS_ACTIVE "mainhand" "smg"
+		coop_aim_mg			: IS_WEAPONCLASS_ACTIVE "mainhand" "mg"
+		none				: default
+	}
+
+	states
+	{
+		KILLED				: KILLED
+
+		// tuck back in when the peek ends but the pose still holds
+		COVER_TORSO			: !COOP_COVER_PEEK COOP_COVER
+		COVER_TORSO			: !COOP_COVER_PEEK COOP_COVER_LOW
+		// pose dropped entirely
+		STAND				: !COOP_COVER !COOP_COVER_LOW
+
+		RELOAD_WEAPON			: RELOAD
+		// aimed firing while peeked (same dispatch as the AIM state)
+		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
+		CHECK_PRIMARY_ATTACK_FULLAUTO	: ATTACK_PRIMARY !IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
 	}
 }
 
@@ -3566,11 +3636,41 @@ state VEHICLE_IDLE
 {
 	states
 	{
+		// HZM coop [222] - vehicle GUNNER (jeep .30cal / halftrack MG): IS_USING_TURRET only ever
+		// true for the slot gunner (EnterTurret), never for drivers/passengers. Must sit ABOVE the
+		// default row - bug-309 final: while on a vehicle the TORSO state drives the whole body
+		// (the legs statemap is engine-disabled, player.cpp EvaluateState:5754), so every legs-side
+		// fix was writing to a machine that was switched off.
+		COOP_VEHTURRET_MAN		: IS_USING_TURRET
 		VEHICLE_TURRET_IDLE		: VEHICLE_TYPE "aagun"
 		VEHICLE_TURRET_IDLE		: VEHICLE_TYPE "flak88"
 		VEHICLE_TURRET_IDLE		: VEHICLE_TYPE "nebelwerfer"
 		VEHICLE_TURRET_IDLE		: VEHICLE_TYPE "granatwerfer"
 		VEHICLE_NORMAL_IDLE		: default
+	}
+}
+
+// HZM coop [222] - full-body manning pose for vehicle-mounted guns (VEHICLE_TURRET_IDLE recipe:
+// movetype anim + action block = full-body). r8: the MG42_stand set - the vanilla STANDING
+// EMPLACEMENT GUNNER (upright, both hands on the spade grips at chest height) = the actual
+// .30cal pedestal stance. Earlier tries: MG42_high (salute-arm misfit), MG42_crouch (ground
+// tripod - hands drooped below the grips), flak88_idle (arms spread wide for flak wheels,
+// torso pitched over the jeep). Aliases coop_turret_stand_* live in anims_shared.txt and now
+// point at MG42_stand_idle_a(loop)/MG42_stand_firing.
+state COOP_VEHTURRET_MAN
+{
+	movetype anim
+
+	action
+	{
+		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
+		coop_turret_stand_idle	: default
+	}
+
+	states
+	{
+		STAND					: !IS_USING_TURRET
+		STAND					: !IS_USING_VEHICLE
 	}
 }
 

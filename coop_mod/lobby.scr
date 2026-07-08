@@ -1,0 +1,445 @@
+//==========================================================================================================//
+// HZM Coop - Pre-Mission Lobby module.  Full spec: _research/coop_lobby1_build.md
+//
+// Called from maps/co_lobby1.scr::main after prespawn. PHASE A scope: spawn the placed props, build the
+// single static camera every player views through, place the squad at the 4 anchor points, and lock them
+// (no move / look / fire) while leaving the menu, console, quit and text chat fully usable.
+// Idle-emote rotation, overhead rank/name, ready-up, skin cycle, music and the briefing launch are wired
+// in later phases (marked STUB below).
+//==========================================================================================================//
+
+//=========================================================================
+lobbyMapMain:{
+//=========================================================================
+	level.coop_lobbyActive = 1
+	// NOTE: do NOT freezeplayer here - the level-global freeze pins players in the spawn CROUCH before the
+	// at-ease pose can stand them up. The lock is per-player freezecontrols, applied AFTER the pose is set
+	// (lobbyPoseAndFreeze) + re-asserted each frame (lobbyLockWatch) to survive the respawn m_bFrozen reset.
+
+	// lobby players sit idle by design - stop the inactivity timer from spec-booting them (the
+	// auto-spawn loop would then re-join them, causing a respawn flicker). Restored at teardown (Phase D).
+	level.coop_lobbyPrevInactiveSpec = getcvar "g_inactivespectate"
+	setcvar "g_inactivespectate" "0"
+	setcvar "g_inactivekick" "0"
+
+	// g_forcerespawn only auto-respawns DEAD players - it is NOT the deploy mechanism (that is
+	// lobbyAutoSpawnLoop + skipTeamAndWeaponSelect). Keep it 1 for later dead-respawns; it MUST be
+	// restored on launch (teardown) or a leaked =1 auto-respawns DBNO'd players in the mission.
+	level.coop_lobbyPrevForceRespawn = getcvar "g_forcerespawn"
+	setcvar "g_forcerespawn" "1"
+
+	// lobby soldiers stay ARMED (rifle slung) so the EMOTE_ATEASE pose holds: the emote system's proven
+	// path is an armed player - going unarmed risks the -HAS_WEAPON edge cancelling the pose to STAND.
+
+	// --- the 4 player anchor points (viewpos coords recorded in training space; yaw only) ---
+	level.coop_lobbySlotOrg[1] = ( -5264 -498 -227 )
+	level.coop_lobbySlotYaw[1] = 101
+	level.coop_lobbySlotOrg[2] = ( -5446 -438 -227 )
+	level.coop_lobbySlotYaw[2] = 74
+	level.coop_lobbySlotOrg[3] = ( -5377 -393 -227 )
+	level.coop_lobbySlotYaw[3] = 86
+	level.coop_lobbySlotOrg[4] = ( -5301 -378 -227 )
+	level.coop_lobbySlotYaw[4] = 83
+
+	// point the coop spawn system at the anchors too, so the first spawn + any late joiner lands here
+	level.flags["coop_spawn1origin"] = level.coop_lobbySlotOrg[1]
+	level.flags["coop_spawn2origin"] = level.coop_lobbySlotOrg[2]
+	level.flags["coop_spawn3origin"] = level.coop_lobbySlotOrg[3]
+	level.flags["coop_spawn4origin"] = level.coop_lobbySlotOrg[4]
+
+	thread spawnProps
+	waitthread spawnLobbyCamera
+	thread lobbyCamTune
+	thread lobbyAutoSpawnLoop
+}end
+
+//=========================================================================
+// The single static camera at anchor #1. Every player is bound to this one entity, so the whole
+// squad shares the same framed shot. Pitch/yaw are live-tunable via cvars for on-the-fly framing.
+//=========================================================================
+spawnLobbyCamera:{
+//=========================================================================
+	// A Camera IGNORES .origin= and .angles= (same class of no-op as moveto on a script_model; proven
+	// by LOBBYDBG: the cam stayed at 0 0 0). Position it with 'movetopos' and aim it with 'watch' at a
+	// look-at marker - the t2l2 recipe. bug-360.
+	level.coop_lobbyCam = spawn Camera
+	level.coop_lobbyCam.targetname = "coop_lobbyCam"
+	level.coop_lobbyLookAt = spawn script_origin targetname "coop_lobbyLookAt"
+	waitthread applyLobbyCam
+	if( level.coop_lobbyCam != NULL ){ level.coop_lobbyCam cut }
+}end
+
+//=========================================================================
+// Position + aim the shared camera from cvars (live-tunable). Camera at coop_lobbyCamX/Y/Z looks at the
+// squad-centre marker at coop_lobbyLookX/Y/Z. Defaults frame the 4 slots from the front.
+//=========================================================================
+applyLobbyCam:{
+//=========================================================================
+	// DEFAULTS = the user's original captured viewpos:  (-5304 -248 -237) : yaw 230.
+	// The look-at (-5497 -478 -237) is that origin projected 300u along yaw 230 (pitch 0), so 'watch'
+	// aims the camera exactly on the recorded facing. FOV 80 matches the player's own cg_fov.
+	local.cx = getcvar "coop_lobbyCamX"
+	if( local.cx == "" ){ local.cx = "-5304" }
+	local.cy = getcvar "coop_lobbyCamY"
+	if( local.cy == "" ){ local.cy = "-248" }
+	local.cz = getcvar "coop_lobbyCamZ"
+	if( local.cz == "" ){ local.cz = "-237" }
+	local.cxi = int( local.cx )
+	local.cyi = int( local.cy )
+	local.czi = int( local.cz )
+
+	local.lx = getcvar "coop_lobbyLookX"
+	if( local.lx == "" ){ local.lx = "-5497" }
+	local.ly = getcvar "coop_lobbyLookY"
+	if( local.ly == "" ){ local.ly = "-478" }
+	local.lz = getcvar "coop_lobbyLookZ"
+	if( local.lz == "" ){ local.lz = "-237" }
+	local.lxi = int( local.lx )
+	local.lyi = int( local.ly )
+	local.lzi = int( local.lz )
+
+	local.fov = getcvar "coop_lobbyCamFov"
+	if( local.fov == "" ){ local.fov = "80" }
+	local.fovi = int( local.fov )
+
+	if( level.coop_lobbyLookAt != NULL ){
+		level.coop_lobbyLookAt.origin = ( local.lxi local.lyi local.lzi )
+	}
+	if( level.coop_lobbyCam != NULL ){
+		level.coop_lobbyCam movetopos ( local.cxi local.cyi local.czi )
+		if( level.coop_lobbyLookAt != NULL ){
+			level.coop_lobbyCam watch level.coop_lobbyLookAt 0
+		}
+		level.coop_lobbyCam fov local.fovi
+	}
+}end
+
+//=========================================================================
+lobbyCamTune:{
+//=========================================================================
+	// cheap live-tune loop: re-reads the framing cvars so the camera can be dialed in-game
+	while( level.coop_lobbyActive == 1 ){
+		waitthread applyLobbyCam
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+// Auto-spawn: force any spectator straight onto allies (skips the team/weapon-select click) so the
+// squad just appears in the lobby. PER-FRAME scan (F3) so a spectator is force-joined the same frame it
+// becomes one - kills the multi-second deploy limbo / "click to spawn". join_team while already allied is
+// a no-op, so once everyone is deployed the loop costs nothing.
+//=========================================================================
+lobbyAutoSpawnLoop:{
+//=========================================================================
+	while( level.coop_lobbyActive == 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.player = $player[local.i]
+			if( local.player != NULL ){
+				if( local.player.dmteam == "spectator" ){
+					waitthread coop_mod/main.scr::skipTeamAndWeaponSelect local.player
+					local.player.flags["coop_lobbyDeployTry"] = NIL
+				}
+				else if( local.player.flags["coop_isActive"] != 1 && local.player.flags["coop_lobbyDeployTry"] != 1 ){
+					// Joined allies but the engine gates the actual SPAWN behind a fire-click (player.cpp:4959);
+					// g_forcerespawn only auto-deploys DEAD players (4940) and a fresh joiner never died. Force
+					// the deploy ONCE with a direct respawn (EV_Player_Respawn) - kills the ~10s click limbo.
+					local.player.flags["coop_lobbyDeployTry"] = 1
+					local.player respawn
+				}
+			}
+		}
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Called from co_lobby1.scr on every (re)spawn: seat this player at their slot, lock them, and hand
+// their view to the shared static camera. Runs AFTER the spawn completes, so the camera view holds.
+//=========================================================================
+lobbyOnSpawn local.player:{
+//=========================================================================
+	if( local.player == NULL || local.player == $world ){ end }
+	if( level.coop_lobbyActive != 1 ){ end }
+
+	// assign a slot once (round-robin 1..4)
+	if( local.player.flags["coop_lobbySlot"] == NIL ){
+		if( level.coop_lobbyNextSlot == NIL ){ level.coop_lobbyNextSlot = 1 }
+		local.player.flags["coop_lobbySlot"] = level.coop_lobbyNextSlot
+		level.coop_lobbyNextSlot = level.coop_lobbyNextSlot + 1
+		if( level.coop_lobbyNextSlot > 4 ){ level.coop_lobbyNextSlot = 1 }
+	}
+	local.slot = local.player.flags["coop_lobbySlot"]
+
+	// feet-on-ground: slot origins were recorded at EYE height (viewpos); drop by the standing view height.
+	local.drop = getcvar "coop_lobbyFeetDrop"
+	if( local.drop == "" ){ local.drop = "82" }
+	local.di = int( local.drop )
+	local.feet = level.coop_lobbySlotOrg[local.slot] - ( 0 0 local.di )
+
+	local.player.flags["coop_lobbyYaw"] = level.coop_lobbySlotYaw[local.slot]
+	local.player.flags["coop_lobbyOrg"] = local.feet
+
+	// The visible soldier is the REAL player, so it wears the player's OWN chosen MP skin - a stand-in
+	// actor cannot (a models/player/*.tik has no Actor classname; bug-355). We plant the player at the
+	// slot, then pose + lock them with the proven map-intro recipe used by t2l2/t1l2:
+	//   cuecamera      - the ONE shared squad shot every client sees
+	//   freezecontrols - engine lock (PMF_FROZEN): blocks movement AND mouselook, so the body never rotates
+	//   EMOTE_ATEASE   - the emote-system at-ease legs state, playing on the player's own model
+	local.player.origin = local.feet
+	local.player.angles = ( 0 level.coop_lobbySlotYaw[local.slot] 0 )
+	local.player.viewangles = ( 0 level.coop_lobbySlotYaw[local.slot] 0 )
+	local.player.flags["coop_lobbyFrozen"] = 1
+
+	// HIDE the model until he is holstered + posed, so nobody sees the combat-spawn rifle-in-hand or the
+	// holster swing - lobbyPoseAndFreeze shows him again once he is standing at ease, so he "starts" at
+	// parade rest. (There is no spawn-already-holstered path; the coop deploy always hands the loadout rifle.)
+	local.player hide
+
+	// hide the coop HUD (health/ammo/objectives slots) + compass for this client
+	local.player thread lobbyHideHud
+
+	// every player views the ONE shared static camera. Re-cue per spawn so late joiners pick it up; a
+	// re-cut to the same static cam is visually a no-op (no camera motion).
+	if( level.coop_lobbyCam != NULL ){
+		level.coop_lobbyCam cut
+		cuecamera level.coop_lobbyCam
+	}
+
+	// pose + freeze AFTER the spawn loadout settles, so a weapon-status change can't cancel the emote
+	local.player thread lobbyPoseAndFreeze
+
+	// F4: hide the vanilla engine HUD (the bottom-left hud_health STAR + compass/ammo/crosshair) via
+	// drawhud 0 -> PMF_NO_HUD. Respawn clears it (player.cpp:2201), so re-assert here on each deploy.
+	// This does NOT touch the coop custom ihuddraw layer (lobbyHideHud wipes that) or the XP system.
+	drawhud 0
+
+	// STUB Phase B: lobbyNameplate (rank + name), Kleveburg music
+	// STUB Phase C: F ready + A/D skin cycle
+}end
+
+//=========================================================================
+// self = player. Settle past the spawn loadout, pose the player at-ease, then hand movement + look to
+// the engine freeze (map-intro recipe). Runs per (re)spawn.
+//=========================================================================
+lobbyPoseAndFreeze:{
+//=========================================================================
+	// Let the spawn + coop loadout (managePlayerInventory / itemGetAll, player.scr:899-900) settle so the
+	// weapon has actually been given before we sling it. The player is HIDDEN this whole time (lobbyOnSpawn),
+	// so the combat-spawn rifle-in-hand and any weapon churn are never seen.
+	wait 0.8
+	if( self == NULL ){ end }
+	if( level.coop_lobbyActive != 1 ){ end }
+
+	// re-plant (the spawn may have nudged us) and face the shot
+	if( self.flags["coop_lobbyOrg"] != NIL ){ self.origin = self.flags["coop_lobbyOrg"] }
+	self.viewangles = ( 0 self.flags["coop_lobbyYaw"] 0 )
+
+	// Pose him as a parade-rest mannequin via the ENGINE (player.cpp::CoopLobbyPose). Script-only posing
+	// lost a per-frame fight: EvaluateState re-runs every tick, and the forced-respawn deploy leaves the
+	// weapon in the "banned -> re-allowed rifle" limbo so the weapon-change edges keep firing - STAND torso
+	// "RAISE_WEAPON : NEW_WEAPON" redrew the rifle and EMOTE_ATEASE legs "STAND : +/-HAS_WEAPON" kicked the
+	// pose out => the rifle twitched in his hands (bug-378/-379). coop_lobbypose does it in one shot: forces
+	// EMOTE_ATEASE legs + STAND torso, slings the rifle straight onto the back tag (AttachToHolster, no
+	// putaway anim), then sets FL_IMMOBILE so EvaluateState early-returns and NO edge can fire again.
+	self coop_lobbypose
+	self.flags["coop_isHolstered"] = game.true
+	if( self == NULL ){ end }
+
+	// Movement + mouselook lock (menu / console / chat still usable). In ADDITION to the anim freeze above:
+	// FL_IMMOBILE stops the statemap, freezecontrols (PMF_FROZEN) stops pmove so the body can't be nudged or
+	// rotated. lobbyLockWatch re-asserts it every frame (the coop respawn churn clears m_bFrozen).
+	self freezecontrols 1
+	if( self.flags["coop_lobbyLockWatch"] != 1 ){
+		self.flags["coop_lobbyLockWatch"] = 1
+		self thread lobbyLockWatch
+	}
+
+	// reveal him now that he is posed at ease (hidden since spawn to mask the combat-spawn rifle-in-hand)
+	self show
+	// No script rotation needed: EMOTE_LOBBY_SELECT self-cycles the weighted coop_lobbyselect pool in the
+	// engine (exactly like the skin-select screen). lobbyOnSpawn re-applies the pose on every (re)spawn.
+}end
+
+//=========================================================================
+// self = player. Per-frame watchdog: re-assert BOTH the movement lock (freezecontrols - m_bFrozen resets
+// on the coop respawn churn) AND the hands-on-hips pose (coop_lobbyholdpose - the spawn/weapon settle
+// clobbers the legs anim after coop_lobbypose, leaving him arms-at-side; re-asserting corrects it and is a
+// no-op once correct, so no stutter).
+//=========================================================================
+lobbyLockWatch:{
+//=========================================================================
+	while( level.coop_lobbyActive == 1 && self != NULL && self.flags["coop_lobbyFrozen"] == 1 ){
+		self freezecontrols 1
+		self coop_lobbyholdpose
+		waitframe
+	}
+}end
+
+//=========================================================================
+lobbyHideHud:{
+//=========================================================================
+	// self = player. Hide the coop HUD - the health/ammo/objectives ihuddraw slots (the same slots the
+	// DBNO spectator cleanup clears) plus the compass menu. Re-asserted because the HUD re-inits at spawn.
+	// Coop draws its HUD across slots 20..72 (ammo/nade/objectives ~27-47, deployables/XP/rank ~62-72).
+	// Hide the WHOLE range and keep re-asserting while the lobby is active - the XP + item HUD threads
+	// re-draw their slots on update, so a one-shot (or 4s) hide leaks the icons back (bug-361).
+	while( level.coop_lobbyActive == 1 && self != NULL ){
+		for( local.s = 20; local.s <= 90; local.s++ ){
+			ihuddraw_alpha self local.s 0
+		}
+		// drawhud is a LEVEL script command (not a client cvar) - call it bare. Hides the vanilla HUD + compass.
+		drawhud 0
+		self stufftext "ui_removehud hud_compass"
+		// The vanilla bottom-left STAR lives in the hud_health UI MENU (ui/hud_health.urc, faded via
+		// ui_hudAlpha) - drawhud 0 / PMF_NO_HUD does NOT remove UI menus, so remove them by name like compass.
+		self stufftext "ui_removehud hud_health"
+		self stufftext "ui_removehud hud_ammo"
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+// The props the host placed in build mode (from coop_mod/save/build_training.dat). All notsolid set
+// dressing; negative angles converted to positive equivalents to stay clear of the parse-killer.
+//=========================================================================
+spawnProps:{
+//=========================================================================
+	local.m = spawn script_model
+	local.m model "models/static/vehicle_gmctruck.tik"
+	local.m.origin = ( -5696.097 -445.587 -309.875 )
+	local.m.angles = ( 0 226 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/bunkertable.tik"
+	local.m.origin = ( -5347.144 -489.967 -309.875 )
+	local.m.angles = ( 0 256 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/typewriter.tik"
+	local.m.origin = ( -5323.914 -492.988 -257.875 )
+	local.m.angles = ( 0 115 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/miscobj/clipboard.tik"
+	local.m.origin = ( -5375.690 -472.982 -257.875 )
+	local.m.angles = ( 0 250 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/heat_crate.tik"
+	local.m.origin = ( -5503.509 -324.611 -309.875 )
+	local.m.angles = ( 0 250 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/mg42ammoboxwbelt.tik"
+	local.m.origin = ( -5502.054 -326.673 -267.875 )
+	local.m.angles = ( 0 295 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/45cal_crate.tik"
+	local.m.origin = ( -5344.409 -469.893 -309.875 )
+	local.m.angles = ( 0 222 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/static_us-helmet_captain.tik"
+	local.m.origin = ( -5347.310 -487.394 -257.875 )
+	local.m.angles = ( 0 342 0 )
+	local.m scale 1.200
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/trunk.tik"
+	local.m.origin = ( -5561.156 -305.913 -313.832 )
+	local.m.angles = ( 0 42 0 )
+	local.m scale 1.200
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/exp_crate3.tik"
+	local.m.origin = ( -5555.066 -300.947 -275.229 )
+	local.m.angles = ( 0 27 0 )
+	local.m scale 1.200
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/deckofcards.tik"
+	local.m.origin = ( -5527.142 -303.615 -274.478 )
+	local.m.angles = ( 0 27 0 )
+	local.m scale 1.200
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/miscobj/wrench.tik"
+	local.m.origin = ( -5515.346 -301.594 -301.047 )
+	local.m.angles = ( 0 297 0 )
+	local.m scale 1.200
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/furniture/interrogationchair.tik"
+	local.m.origin = ( -5310.866 -451.647 -309.875 )
+	local.m.angles = ( 0 206 0 )
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/bunkbed.tik"
+	local.m.origin = ( -5405.353 -622.126 -309.875 )
+	local.m.angles = ( 0 238 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/bunkbed.tik"
+	local.m.origin = ( -5482.602 -752.942 -309.875 )
+	local.m.angles = ( 0 238 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/bunkbed.tik"
+	local.m.origin = ( -5515.642 -565.778 -309.875 )
+	local.m.angles = ( 0 238 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/bunkbed.tik"
+	local.m.origin = ( -5590.375 -692.183 -309.875 )
+	local.m.angles = ( 0 238 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/body_us05.tik"
+	local.m.origin = ( -5513.057 -564.450 -291.875 )
+	local.m.angles = ( 0 73 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/hedgehog_cluster_two.tik"
+	local.m.origin = ( -5121.565 -68.729 -301.875 )
+	local.m.angles = ( 0 73 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/static_thompsonsmg.tik"
+	local.m.origin = ( -5345.870 -469.871 -293.875 )
+	local.m.angles = ( 0 103 0 )
+	local.m scale 0.900
+	local.m notsolid
+
+	local.m = spawn script_model
+	local.m model "models/static/static_cablespool_full.tik"
+	local.m.origin = ( -5516.602 -397.892 -309.875 )
+	local.m.angles = ( 0 237 0 )
+	local.m notsolid
+}end

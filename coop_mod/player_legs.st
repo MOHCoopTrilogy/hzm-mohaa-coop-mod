@@ -43,6 +43,9 @@ state STAND
 	states
 	{
 		FALL				: FALLING
+		// HZM coop [216] - manning pose that actually fires for coop players: the vanilla rows
+		// below require !HAS_WEAPON (never true with a rifle in inventory - bug-309)
+		COOP_TURRET_MAN		: COOP_ON_TURRET
 		VEHICLE_TURRET_START	: IS_USING_VEHICLE IS_USING_TURRET !HAS_WEAPON
 		VEHICLE_START		: IS_USING_VEHICLE !HAS_WEAPON
 		TURRET_START		: IS_USING_TURRET !HAS_WEAPON
@@ -1383,6 +1386,39 @@ state TURRET_USING
 	}
 }
 
+// HZM coop [216] - the coop manning pose (jeep .30cal / MG42 nests). Entered on the raw
+// m_pTurret condition so it works regardless of carried weapons (bug-309).
+state COOP_TURRET_MAN
+{
+	legs
+	{
+		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
+		coop_turret_stand_idle	: default
+	}
+
+	states
+	{
+		STAND : !COOP_ON_TURRET
+	}
+}
+
+// HZM coop [221] - FORCED variant for script-seated vehicle gunners (m1l3a/m1l3b jeep .30cal):
+// the seat attach leaves ALL player-side turret signals bare (bug-309 paradox), so the map
+// script forcelegsstate's in and out itself (DBNO/emote recipe). NO condition exits on purpose
+// - the empty states block is the DBNO_BLEEDOUT precedent. The ATTACK row still animates fire.
+state COOP_TURRET_MAN_F
+{
+	legs
+	{
+		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
+		coop_turret_stand_idle	: default
+	}
+
+	states
+	{
+	}
+}
+
 
 ////////////////////////////////////////////////////////////////
 //
@@ -1414,6 +1450,128 @@ state EMOTE_SALUTE
 	states
 	{
 		STAND : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+// HZM coop [230] - ANIM TEST bay: plays the retargeted CoD2 sprint loop (coop_test_sprint alias)
+// on the spot for eyeball QA. Trigger: console `append name ,t1x` (bus 27). Loops until any
+// movement/action input, same cancel recipe as the looping emotes. PRIVATE EXPERIMENT.
+// HZM coop [231] - sprint-candidate test bay 2 (coop_sprint_rifle_a)
+state COOP_ANIMTEST2
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_sprint_rifle_a : default
+	}
+
+	states
+	{
+		COOP_ANIMTEST2 : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+// HZM coop [231] - sprint-candidate test bay 3 (coop_sprint_rifle_b)
+state COOP_ANIMTEST3
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_sprint_rifle_b : default
+	}
+
+	states
+	{
+		COOP_ANIMTEST3 : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+// HZM coop [231] - sprint-candidate test bay 4 (coop_sprint_rifle_c)
+state COOP_ANIMTEST4
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_sprint_rifle_c : default
+	}
+
+	states
+	{
+		COOP_ANIMTEST4 : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
+state COOP_ANIMTEST
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_test_sprint : default
+	}
+
+	states
+	{
+		COOP_ANIMTEST : ANIMDONE_LEGS
 		STAND : FORWARD
 		STAND : BACKWARD
 		STAND : STRAFE_LEFT
@@ -1483,6 +1641,41 @@ state EMOTE_STRETCH
 		STAND : +ATTACK_SECONDARY_BUTTON
 		STAND : +HAS_WEAPON
 		STAND : -HAS_WEAPON
+	}
+}
+
+////////////////////////////////////////////////////////////////
+//
+// HZM coop LOBBY idle - MP skin-select mimic
+//
+// One self-cycling state that plays the weight-pooled coop_lobbyselect idle set (allied + axis
+// selection anims), the same mechanism the multiplayer skin-select screen uses. Engine forces
+// torso=STAND (action none) so each full-body legs clip owns the skeleton.
+//
+////////////////////////////////////////////////////////////////
+
+// The single lobby idle state. Its legs anim is the weight-POOLED name 'coop_lobbyselect' - each time
+// this state is (re)entered the anim system resolves it to a fresh weighted-random variation, and the
+// only exit is ANIMDONE_LEGS which re-enters THIS state, so it endlessly cycles the pool, blending at
+// each anim boundary. That is a 1:1 copy of how americanselectionidle/germanselectionidle drive the MP
+// skin-select models. No movement/weapon exits: the lobby player is freezecontrol-locked (no input) and
+// the rifle is slung stable, so nothing should fire them - dropping them guarantees the cycle never
+// breaks (this is what makes it robust WITHOUT the FL_IMMOBILE freeze, which would stop the cycling).
+state EMOTE_LOBBY_SELECT
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_pose_g100 : default
+	}
+
+	states
+	{
+		EMOTE_LOBBY_SELECT : ANIMDONE_LEGS
 	}
 }
 
@@ -1706,7 +1899,9 @@ state COVER_WALL_FIRE
 	legs
 	{
 		// HZM coop [215] - spray around the DETECTED corner (side probe in TickCoopCover)
-		coop_blindfire_wall_r	: COOP_COVER_OPENRIGHT
+		// [216] overhead spray for RIGHT corners: the mp44 right-corner anim shoots with the
+		// LEFT hand while the gun stays on tag_weapon_right = rifle at the ceiling (bug-310)
+		coop_blindfire_low	: COOP_COVER_OPENRIGHT
 		coop_blindfire_wall	: default
 	}
 
@@ -1738,9 +1933,49 @@ state COVER_LOW
 
 	states
 	{
+		// HZM coop [223] - RMB peek from LOW cover RISES to a standing hold so you can actually
+		// shoot over the obstacle (user: "increase their height when you aim over shoulder").
+		// Must sit above the blindfire row: while peeked, fire is AIMED (torso dispatch).
+		COVER_LOW_PEEK : COOP_COVER_PEEK
+
 		COVER_LOW_FIRE : COOP_BLINDFIRE
 
 		// drop out still crouched - CROUCH_IDLE owns stand-up from there
+		CROUCH_IDLE : !COOP_COVER_LOW
+
+		FALL_DUCKED : FALLING
+	}
+}
+
+// HZM coop [223] - standing peek-over hold for LOW cover: modheight "stand" raises the bbox and
+// eye height for the duration of the peek (real line-of-sight over the obstacle), the standing
+// wall-cover hold anim keeps the body at-cover, and the exit restores the crouch before COVER_LOW
+// re-enters (its own entrycommands re-assert duck as well - belt and braces).
+state COVER_LOW_PEEK
+{
+	entrycommands
+	{
+		modheight "stand"
+		moveposflags "standing"
+	}
+
+	exitcommands
+	{
+		modheight "duck"
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_cover_wall : default
+	}
+
+	states
+	{
+		// peek released but the pose holds - tuck back down
+		COVER_LOW : !COOP_COVER_PEEK
+
+		// pose dropped entirely (moved / geometry lost)
 		CROUCH_IDLE : !COOP_COVER_LOW
 
 		FALL_DUCKED : FALLING
