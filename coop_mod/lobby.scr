@@ -180,98 +180,94 @@ lobbyOnSpawn local.player:{
 	local.player.flags["coop_lobbyYaw"] = level.coop_lobbySlotYaw[local.slot]
 	local.player.flags["coop_lobbyOrg"] = local.feet
 
-	// The visible soldier is the REAL player, so it wears the player's OWN chosen MP skin - a stand-in
-	// actor cannot (a models/player/*.tik has no Actor classname; bug-355). We plant the player at the
-	// slot, then pose + lock them with the proven map-intro recipe used by t2l2/t1l2:
-	//   cuecamera      - the ONE shared squad shot every client sees
-	//   freezecontrols - engine lock (PMF_FROZEN): blocks movement AND mouselook, so the body never rotates
-	//   EMOTE_ATEASE   - the emote-system at-ease legs state, playing on the player's own model
+	// AVENUE #2: the VISIBLE body is a script_model MANNEQUIN wearing the player's OWN chosen skin
+	// (lobbySpawnMannequin) - it has no player statemap / weapon / freeze fight, so it animates fluidly like
+	// the MP skin-select menu. The REAL player is just an INVISIBLE, locked camera-viewer. So here we only
+	// plant + HIDE + lock the player and bind the shared camera - NO pose, NO holster, NO unhide. Any residual
+	// weapon/anim churn on the real player is never seen, which is what makes the whole freeze fight moot.
 	local.player.origin = local.feet
 	local.player.angles = ( 0 level.coop_lobbySlotYaw[local.slot] 0 )
 	local.player.viewangles = ( 0 level.coop_lobbySlotYaw[local.slot] 0 )
 	local.player.flags["coop_lobbyFrozen"] = 1
-
-	// HIDE the model until he is holstered + posed, so nobody sees the combat-spawn rifle-in-hand or the
-	// holster swing - lobbyPoseAndFreeze shows him again once he is standing at ease, so he "starts" at
-	// parade rest. (There is no spawn-already-holstered path; the coop deploy always hands the loadout rifle.)
 	local.player hide
 
 	// hide the coop HUD (health/ammo/objectives slots) + compass for this client
 	local.player thread lobbyHideHud
 
-	// every player views the ONE shared static camera. Re-cue per spawn so late joiners pick it up; a
-	// re-cut to the same static cam is visually a no-op (no camera motion).
+	// every player views the ONE shared static camera. Re-cue per spawn so late joiners pick it up.
 	if( level.coop_lobbyCam != NULL ){
 		level.coop_lobbyCam cut
 		cuecamera level.coop_lobbyCam
 	}
 
-	// pose + freeze AFTER the spawn loadout settles, so a weapon-status change can't cancel the emote
-	local.player thread lobbyPoseAndFreeze
+	// lock the (invisible) body so it can't drift/jump/rotate the shared shot; lobbyLockWatch re-asserts it
+	// every frame (m_bFrozen resets on the coop respawn churn).
+	local.player freezecontrols 1
+	if( local.player.flags["coop_lobbyLockWatch"] != 1 ){
+		local.player.flags["coop_lobbyLockWatch"] = 1
+		local.player thread lobbyLockWatch
+	}
 
-	// F4: hide the vanilla engine HUD (the bottom-left hud_health STAR + compass/ammo/crosshair) via
-	// drawhud 0 -> PMF_NO_HUD. Respawn clears it (player.cpp:2201), so re-assert here on each deploy.
-	// This does NOT touch the coop custom ihuddraw layer (lobbyHideHud wipes that) or the XP system.
+	// hide the vanilla engine HUD (star/compass/ammo/crosshair); respawn clears it so re-assert each deploy.
 	drawhud 0
 
-	// STUB Phase B: lobbyNameplate (rank + name), Kleveburg music
+	// spawn the visible mannequin (per player, own skin, animated) - guarded so a respawn re-uses it.
+	local.player thread lobbySpawnMannequin
+
+	// STUB Phase B: overhead nameplate (rank + name), Kleveburg music
 	// STUB Phase C: F ready + A/D skin cycle
 }end
 
 //=========================================================================
-// self = player. Settle past the spawn loadout, pose the player at-ease, then hand movement + look to
-// the engine freeze (map-intro recipe). Runs per (re)spawn.
+// self = player. AVENUE #2: spawn ONE script_model mannequin wearing THIS player's chosen skin at their
+// slot, animated by the same weight-pooled idle the MP skin-select menu uses (coop_lobbyselect). The
+// mannequin is the VISIBLE body; the real player stays hidden + locked. A script_model has no player
+// statemap / weapon system / freeze, so it just cycles the pool fluidly (proven PoC). Guarded so a respawn
+// re-uses the existing mannequin instead of spawning duplicates.
 //=========================================================================
-lobbyPoseAndFreeze:{
+lobbySpawnMannequin:{
 //=========================================================================
-	// Let the spawn + coop loadout (managePlayerInventory / itemGetAll, player.scr:899-900) settle so the
-	// weapon has actually been given before we sling it. The player is HIDDEN this whole time (lobbyOnSpawn),
-	// so the combat-spawn rifle-in-hand and any weapon churn are never seen.
-	wait 0.8
+	// already have a mannequin (this is a respawn) - just re-seat it and stop.
+	if( self.flags["coop_lobbyMannequin"] != NIL ){
+		if( self.flags["coop_lobbyMannequin"] != NULL ){
+			self.flags["coop_lobbyMannequin"].origin = self.flags["coop_lobbyOrg"]
+			self.flags["coop_lobbyMannequin"].angles = ( 0 self.flags["coop_lobbyYaw"] 0 )
+		}
+		end
+	}
+
+	// let the spawn settle so the player's chosen model is assigned before we copy it.
+	wait 0.5
 	if( self == NULL ){ end }
 	if( level.coop_lobbyActive != 1 ){ end }
 
-	// re-plant (the spawn may have nudged us) and face the shot
-	if( self.flags["coop_lobbyOrg"] != NIL ){ self.origin = self.flags["coop_lobbyOrg"] }
-	self.viewangles = ( 0 self.flags["coop_lobbyYaw"] 0 )
+	// copy the player's OWN skin (models/player/<dm_playermodel>.tik); default if unset.
+	local.skin = self.model
+	if( local.skin == "" || local.skin == NIL ){ local.skin = "models/player/allied_tanker2.tik" }
 
-	// Pose him as a parade-rest mannequin via the ENGINE (player.cpp::CoopLobbyPose). Script-only posing
-	// lost a per-frame fight: EvaluateState re-runs every tick, and the forced-respawn deploy leaves the
-	// weapon in the "banned -> re-allowed rifle" limbo so the weapon-change edges keep firing - STAND torso
-	// "RAISE_WEAPON : NEW_WEAPON" redrew the rifle and EMOTE_ATEASE legs "STAND : +/-HAS_WEAPON" kicked the
-	// pose out => the rifle twitched in his hands (bug-378/-379). coop_lobbypose does it in one shot: forces
-	// EMOTE_ATEASE legs + STAND torso, slings the rifle straight onto the back tag (AttachToHolster, no
-	// putaway anim), then sets FL_IMMOBILE so EvaluateState early-returns and NO edge can fire again.
-	self coop_lobbypose
-	self.flags["coop_isHolstered"] = game.true
-	if( self == NULL ){ end }
+	local.m = spawn script_model
+	local.m model local.skin
+	local.m.origin = self.flags["coop_lobbyOrg"]
+	local.m.angles = ( 0 self.flags["coop_lobbyYaw"] 0 )
+	local.m notsolid
+	self.flags["coop_lobbyMannequin"] = local.m
 
-	// Movement + mouselook lock (menu / console / chat still usable). In ADDITION to the anim freeze above:
-	// FL_IMMOBILE stops the statemap, freezecontrols (PMF_FROZEN) stops pmove so the body can't be nudged or
-	// rotated. lobbyLockWatch re-asserts it every frame (the coop respawn churn clears m_bFrozen).
-	self freezecontrols 1
-	if( self.flags["coop_lobbyLockWatch"] != 1 ){
-		self.flags["coop_lobbyLockWatch"] = 1
-		self thread lobbyLockWatch
+	// menu-style fluid idle: play a weighted-random pick from the pool, wait for it, pick again.
+	while( level.coop_lobbyActive == 1 && local.m != NULL ){
+		local.m anim "coop_lobbyselect"
+		local.m waittill animdone
 	}
-
-	// reveal him now that he is posed at ease (hidden since spawn to mask the combat-spawn rifle-in-hand)
-	self show
-	// No script rotation needed: EMOTE_LOBBY_SELECT self-cycles the weighted coop_lobbyselect pool in the
-	// engine (exactly like the skin-select screen). lobbyOnSpawn re-applies the pose on every (re)spawn.
 }end
 
 //=========================================================================
-// self = player. Per-frame watchdog: re-assert BOTH the movement lock (freezecontrols - m_bFrozen resets
-// on the coop respawn churn) AND the hands-on-hips pose (coop_lobbyholdpose - the spawn/weapon settle
-// clobbers the legs anim after coop_lobbypose, leaving him arms-at-side; re-asserting corrects it and is a
-// no-op once correct, so no stutter).
+// self = player. Per-frame watchdog: re-assert the movement/look lock (freezecontrols - m_bFrozen resets
+// on the coop respawn churn). The player is invisible now, so there is no pose to hold - just the lock so
+// the hidden body can't drift and wander the shared camera.
 //=========================================================================
 lobbyLockWatch:{
 //=========================================================================
 	while( level.coop_lobbyActive == 1 && self != NULL && self.flags["coop_lobbyFrozen"] == 1 ){
 		self freezecontrols 1
-		self coop_lobbyholdpose
 		waitframe
 	}
 }end
