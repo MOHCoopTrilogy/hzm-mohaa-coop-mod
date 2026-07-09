@@ -319,26 +319,31 @@ xp_ai_killed local.victim local.killer:{
 	// Buckets stay coarse (kills/valor) for the debrief categories. Each component is soft-capped
 	// by local.factor individually.
 	local.saviorPaid = 0
-
-	local.b = int( 2 * local.factor )
-	if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Kill" }
+	local.killPaid = 0		// [user 07-08] the base "Kill" pays ONLY for a plain kill; a headshot / reinforcement /
+							// wallbang / etc. REPLACES it (you get the specific bonus, NEVER bonus + base kill).
 
 	if( local.victim.fact != NIL && local.victim.fact != NULL ){
 		// headshot: location 0/1/2 = head/helmet/neck (dbno.scr classification precedent)
 		if( local.victim.fact.location != NIL && local.victim.fact.location >= 0 && local.victim.fact.location <= 2 ){
 			local.b = int( 5 * local.factor )
-			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Headshot" }
+			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Headshot"; local.killPaid = 1 }
+		}
+		// [user 07-08] WALLBANG: the killing round reached the victim THROUGH a solid (engine sets
+		// coop_wallbang in weaputils.cpp BulletAttack). Same value as a headshot.
+		if( local.victim.coop_wallbang == 1 ){
+			local.b = int( 5 * local.factor )
+			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Wallbang"; local.killPaid = 1 }
 		}
 		// melee / bash
 		if( local.victim.fact.meansofdeath == 26 ){
 			local.b = int( 20 * local.factor )
-			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Melee Kill" }
+			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Melee Kill"; local.killPaid = 1 }
 		}
 		// savior (a): the AI was actively engaging a DIFFERENT player when it died
 		if( local.victim.fact.enemyAtPain != NIL && local.victim.fact.enemyAtPain != NULL ){
 			if( local.victim.fact.enemyAtPain != local.killer && local.victim.fact.enemyAtPain.classname == "Player" ){
 				local.b = int( 15 * local.factor )
-				if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Savior" }
+				if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Savior"; local.killPaid = 1 }
 				local.saviorPaid = 1
 			}
 		}
@@ -347,32 +352,32 @@ xp_ai_killed local.victim local.killer:{
 	// long-range kill
 	if( vector_length( local.killer.origin - local.victim.origin ) > 2000 ){
 		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Long Shot" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Long Shot"; local.killPaid = 1 }
 	}
 
 	// class bonuses (tagged at spawn in officer.scr / paradrop counts as reinf)
 	if( local.victim.coop_xpClass == "reinf" ){
 		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Reinforcement" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Reinforcement"; local.killPaid = 1 }
 	}
 	if( local.victim.coop_xpClass == "guard" ){
 		local.b = int( 10 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Bodyguard" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Bodyguard"; local.killPaid = 1 }
 	}
 
 	// [235] cover-system kills: blindfire +5, aimed-from-cover +3. Blindfire wins; never both.
 	if( local.killer.coop_bf_t != NIL && (level.time - local.killer.coop_bf_t) < 0.75 ){
 		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Blindfire" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Blindfire"; local.killPaid = 1 }
 	} else if( local.killer.coop_incover == 1 ){
 		local.b = int( 3 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Cover Kill" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Cover Kill"; local.killPaid = 1 }
 	}
 
 	// fighting from the ground: killer is DBNO
 	if( local.killer.flags["coop_dbno_active"] == 1 ){
 		local.b = int( 15 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Downed Fight" }
+		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Downed Fight"; local.killPaid = 1 }
 	}
 
 	// savior (b): guarding a downed teammate - only if (a) did not already pay
@@ -383,12 +388,19 @@ xp_ai_killed local.victim local.killer:{
 			if( local.p != NULL && local.p != local.killer && local.p.flags["coop_dbno_active"] == 1 ){
 				if( vector_length( local.p.origin - local.victim.origin ) < 512 ){
 					local.b = int( 15 * local.factor )
-					if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Guardian" }
+					if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Guardian"; local.killPaid = 1 }
 					break
 				}
 			}
 			local.i++
 		}
+	}
+
+	// [user 07-08] BASE kill: pays ONLY when nothing special above fired (a plain kill = +2). Headshot,
+	// wallbang, reinforcement, savior, etc. already paid + set killPaid, so the base kill never stacks on top.
+	if( local.killPaid != 1 ){
+		local.b = int( 2 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Kill" }
 	}
 
 	// assists: any OTHER player who dealt >=25% of the victim's starting health within the
@@ -497,7 +509,7 @@ xp_team_award local.amount local.reason local.label:{
 xp_radio_done:{
 	if( level.coop_xp_radioPaid == 1 ){ end }
 	level.coop_xp_radioPaid = 1
-	waitthread xp_team_award 75 "objective" "Radio Destroyed"
+	waitthread xp_team_award 20 "objective" "Radio Destroyed"		// [user 07-08] objectives are worth 20 XP
 }end
 
 // a primary map objective flipped to completed (global/objectives.scr status==3).
@@ -508,7 +520,7 @@ xp_primary_done local.index:{
 	if( local.index == NIL ){ local.index = 0 }
 	if( level.coop_xp_objPaid[local.index] == 1 ){ end }
 	level.coop_xp_objPaid[local.index] = 1
-	waitthread xp_team_award 50 "objective" "Objective"
+	waitthread xp_team_award 20 "objective" "Objective"		// [user 07-08] objectives are worth 20 XP
 }end
 
 
@@ -674,7 +686,7 @@ xp_hud_popup local.player:{
 xp_summary:{
 	if( level.coop_xp_enabled != 1 ){ end }
 	local.t = getcvar "coop_xpSummaryTime"
-	if( local.t == "" ){ local.t = 10 }
+	if( local.t == "" ){ local.t = 16 }		// [user 07-08] longer so the slowed fill + tally are readable
 	local.t = int( local.t )
 
 	// mission complete + no-death bonuses (awarded even when the card is disabled)
@@ -755,20 +767,21 @@ xp_summary_card local.p:{
 	ihuddraw_rect        local.p 71 292 168 56 56
 	ihuddraw_alpha       local.p 71 1
 
-	// center-screen bar
+	// [user 07-08] center-screen bar = the SAME clean brass-on-steel xpbar used at the top of the screen
+	// (xpbar_base plate + xpbar_fill), not the old flat coop_bar_white. Fill is inset in the plate like the HUD bar.
 	ihuddraw_virtualsize local.p 64 1
 	ihuddraw_align       local.p 64 left top
-	ihuddraw_shader      local.p 64 "textures/hud/coop_bar_white"
-	ihuddraw_color       local.p 64 0.12 0.12 0.12
-	ihuddraw_rect        local.p 64 212 236 216 8
-	ihuddraw_alpha       local.p 64 0.8
+	ihuddraw_shader      local.p 64 "textures/hud/xpbar/xpbar_base"
+	ihuddraw_color       local.p 64 1 1 1
+	ihuddraw_rect        local.p 64 212 234 216 14
+	ihuddraw_alpha       local.p 64 0.92
 
 	ihuddraw_virtualsize local.p 65 1
 	ihuddraw_align       local.p 65 left top
-	ihuddraw_shader      local.p 65 "textures/hud/coop_bar_white"
-	ihuddraw_color       local.p 65 0.85 0.7 0.25
-	ihuddraw_rect        local.p 65 212 236 0 8
-	ihuddraw_alpha       local.p 65 0.95
+	ihuddraw_shader      local.p 65 "textures/hud/xpbar/xpbar_fill"
+	ihuddraw_color       local.p 65 1 1 1
+	ihuddraw_rect        local.p 65 228 240 0 6
+	ihuddraw_alpha       local.p 65 1
 
 	// category totals reveal in parallel, clicks synced under the fill
 	thread xp_card_categories local.p
@@ -785,17 +798,17 @@ xp_summary_card local.p:{
 		local.segEnd = local.total
 		if( local.segEnd > local.ceil ){ local.segEnd = local.ceil }
 
-		local.steps = 40
+		local.steps = 70		// [user 07-08] slower fill so you can actually read it (was 40 @ waitframe = ~1s)
 		local.s = 0
 		while( local.s <= local.steps ){
 			if( local.p == NULL ){ end }
 			local.v = local.cur + ((local.segEnd - local.cur) * local.s / local.steps)
-			local.w = int( 216 * (local.v - local.floor) / (local.ceil - local.floor) )
+			local.w = int( 184 * (local.v - local.floor) / (local.ceil - local.floor) )
 			if( local.w < 0 ){ local.w = 0 }
-			if( local.w > 216 ){ local.w = 216 }
-			ihuddraw_rect local.p 65 212 236 local.w 8
+			if( local.w > 184 ){ local.w = 184 }
+			ihuddraw_rect local.p 65 228 240 local.w 6
 			local.s++
-			waitframe
+			wait 0.035
 		}
 		local.cur = local.segEnd
 
@@ -810,8 +823,8 @@ xp_summary_card local.p:{
 			local.p playsound coop_rankup_cine
 			ihuddraw_alpha  local.p 70 0.95
 			ihuddraw_shader local.p 71 ( "textures/hud/coop_rank_" + local.rn )
-			ihuddraw_rect   local.p 65 212 236 0 8
-			wait 0.5
+			ihuddraw_rect   local.p 65 228 240 0 6
+			wait 0.8
 			ihuddraw_alpha  local.p 70 0.45
 		} else {
 			break
@@ -840,7 +853,7 @@ xp_card_categories local.p:{
 	local.keys[3] = "support"
 	local.keys[4] = "revive"
 	local.keys[5] = "mission"
-	local.names[0] = "Combat"
+	local.names[0] = "Kills"
 	local.names[1] = "Valor"
 	local.names[2] = "Objectives"
 	local.names[3] = "Support"
@@ -852,7 +865,7 @@ xp_card_categories local.p:{
 	local.slots[3] = 68
 	local.line = 0
 	local.k = 0
-	wait 0.5
+	wait 1.2		// [user 07-08] let the bar start filling before the tally reveals
 	while( local.k < 6 && local.line < 4 ){
 		if( local.p == NULL ){ end }
 		local.v = local.p.flags["coop_xp_b_" + local.keys[local.k]]
@@ -864,11 +877,11 @@ xp_card_categories local.p:{
 			ihuddraw_font        local.p local.slot "verdana-12"
 			ihuddraw_color       local.p local.slot 0.85 0.85 0.85
 			ihuddraw_rect        local.p local.slot 0 local.ly 0 0
-			ihuddraw_string      local.p local.slot ( local.names[local.k] + "  +" + local.v )
+			ihuddraw_string      local.p local.slot ( local.names[local.k] + "     " + local.v + " XP" )
 			ihuddraw_alpha       local.p local.slot 0.9
 			local.p playsound coop_ui_click
 			local.line++
-			wait 0.9
+			wait 1.4		// [user 07-08] one category at a time, slow enough to read
 		}
 		local.k++
 	}

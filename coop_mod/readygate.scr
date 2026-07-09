@@ -1,0 +1,118 @@
+//========================================================================================
+// HZM Coop - READY GATE (reusable "whole squad press [Use] to continue").
+//
+// Reuses the SAME input path as the pre-mission lobby: the engine coop_lobbyinput usercmd bridge
+// (Player::TickCoopLobbyInput) publishes self.coop_lobbyInput; 33 = the Use key (F) = ready toggle. NO client
+// binds. When every connected, non-spectator player has readied, sets level.coop_readyGateDone = 1 and stops.
+//
+// USE: `thread coop_mod/readygate.scr::coop_readyGateStart` then watch level.coop_readyGateDone (or just let
+// it flip and act). Stop early any time with `level.coop_readyGateActive = 0`.
+// First used by the campaign briefing (briefing1) to skip the cinematic on a full-squad ready.
+// HUD: fade-exempt ihuddraw slot 115 (lobby uses 100-114). cg_huddraw_force forced on per client while active.
+//========================================================================================
+
+//=========================================================================
+coop_readyGateStart:{
+//=========================================================================
+	if( level.coop_readyGateActive == 1 ){ end }
+	level.coop_readyGateActive = 1
+	level.coop_readyGateDone = 0
+
+	thread coop_readyGateHud
+
+	while( level.coop_readyGateActive == 1 ){
+		// (re)arm every connected active player - covers late joiners too
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( local.p.flags["coop_gatePoll"] != 1 ){
+				local.p.flags["coop_gatePoll"] = 1
+				local.p.flags["coop_gateReady"] = 0
+				local.p coop_lobbyinput 1
+				local.p stufftext "set cg_huddraw_force 1"
+				local.p thread coop_readyGatePoll
+			}
+		}
+
+		// all non-spectator players ready?
+		local.n = 0
+		local.r = 0
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p.dmteam == "spectator" ){ continue }
+			local.n = local.n + 1
+			if( local.p.flags["coop_gateReady"] == 1 ){ local.r = local.r + 1 }
+		}
+		if( local.n >= 1 && local.r >= local.n ){
+			level.coop_readyGateDone = 1
+			level.coop_readyGateActive = 0
+		}
+		wait 0.3
+	}
+
+	// teardown: disable the input bridge, clear the HUD flag/prompt, reset per-player state
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		local.p coop_lobbyinput 0
+		local.p.flags["coop_gatePoll"] = NIL
+		local.p.flags["coop_gateReady"] = NIL
+		ihuddraw_alpha local.p 115 0
+	}
+}end
+
+//=========================================================================
+// self = player. Poll the engine input bridge; Use/F (code 33) toggles this player's gate-ready.
+//=========================================================================
+coop_readyGatePoll:{
+//=========================================================================
+	self.coop_lobbyInput = 0
+	while( level.coop_readyGateActive == 1 && self != NULL && self.flags["coop_gatePoll"] == 1 ){
+		local.cmd = self.coop_lobbyInput
+		if( local.cmd != NIL && local.cmd != 0 ){
+			self.coop_lobbyInput = 0
+			if( local.cmd == 33 ){
+				if( self.flags["coop_gateReady"] == 1 ){
+					self.flags["coop_gateReady"] = 0
+					self iprintlnbold "Not ready"
+				} else {
+					self.flags["coop_gateReady"] = 1
+					self iprintlnbold "Ready"
+				}
+			}
+		}
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Bottom-centre prompt + live ready tally on every screen (fade-exempt slot 115).
+//=========================================================================
+coop_readyGateHud:{
+//=========================================================================
+	while( level.coop_readyGateActive == 1 ){
+		local.n = 0
+		local.r = 0
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p.dmteam == "spectator" ){ continue }
+			local.n = local.n + 1
+			if( local.p.flags["coop_gateReady"] == 1 ){ local.r = local.r + 1 }
+		}
+		for( local.v = 1; local.v <= $player.size; local.v++ ){
+			local.viewer = $player[local.v]
+			if( local.viewer == NULL ){ continue }
+			ihuddraw_virtualsize local.viewer 115 1
+			ihuddraw_align local.viewer 115 center bottom
+			ihuddraw_rect local.viewer 115 0 458 640 0
+			ihuddraw_font local.viewer 115 "verdana-14"
+			ihuddraw_string local.viewer 115 ( "Press [Use] to skip briefing    ( " + local.r + " / " + local.n + " ready )" )
+			ihuddraw_color local.viewer 115 1 1 0.6
+			ihuddraw_alpha local.viewer 115 1
+		}
+		wait 0.3
+	}
+	for( local.v = 1; local.v <= $player.size; local.v++ ){
+		if( $player[local.v] != NULL ){ ihuddraw_alpha $player[local.v] 115 0 }
+	}
+}end

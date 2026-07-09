@@ -1,8 +1,10 @@
 //========================================================================================
 // HZM Coop - BUILD MODE (dev tool). Full docs: _research/build_mode.md
+// Allied-actor + animation extension: _research/build_actor_anims.md (coop_mod/buildmode_actors.scr).
 //
 // In-game object placement for map development: browse a catalog of ~300 stock models
-// (coop_mod/buildmode_catalog.scr), preview the current model as a translucent ghost at
+// (coop_mod/buildmode_catalog.scr) PLUS 76 allied player actors with a selectable, prop-bearing
+// idle animation (buildmode_actors.scr), preview the current model as a translucent ghost at
 // the aim point, place / rotate / scale / remove real script_models live, with the AI
 // ignoring the builder (notarget + nodamage, developer.scr recipe). Every placement is
 // captured to coop_mod/save/build_<map>.dat (homepath) in ready-to-paste script form and
@@ -38,6 +40,7 @@ coop_build_monitor:{
 
 	waitthread coop_mod/main.scr::waitForMainScript
 	waitthread coop_mod/buildmode_catalog.scr::catalog_init
+	waitthread coop_mod/buildmode_actors.scr::actor_catalog_init		//HZM coop BUILD MODE: append the ALLIED ACTORS category + anim catalog
 
 	while( 1 ){
 		if( getcvar( "coop_build" ) == "1" ){
@@ -83,6 +86,12 @@ coop_build_session local.player:{
 	level.coop_build_active = 1
 	level.coop_build_hudDirty = 1
 
+	// [user 07-09] keep the build HUD (slots 54-61) FULLY visible - the activity HUD-fade multiplies every
+	// ihuddraw element's alpha (build slots are < 100 so they are NOT in the lobby fade-exemption). Build mode
+	// is host-only (listen server), so the shared cvar reaches cgame directly. Restored on exit.
+	if( level.coop_build_prevHudFade == NIL ){ level.coop_build_prevHudFade = getcvar "coop_hudFade" }
+	setcvar "coop_hudFade" "0"
+
 	// state defaults (persist across sessions within one map; level vars clear on map change)
 	if( level.coop_build_cat == NIL ){ level.coop_build_cat = 1 }
 	if( level.coop_build_idx == NIL ){ level.coop_build_idx = 1 }
@@ -92,6 +101,7 @@ coop_build_session local.player:{
 	if( level.coop_build_pitch == NIL ){ level.coop_build_pitch = 0 }
 	if( level.coop_build_solid == NIL ){ level.coop_build_solid = 0 }
 	if( level.coop_build_yaw == NIL ){ level.coop_build_yaw = int( local.player.viewangles[1] ) }
+	if( level.coop_build_animIdx == NIL ){ level.coop_build_animIdx = 1 }		//HZM coop BUILD MODE: selected actor animation (actor category only)
 
 	// capture file: continue any existing capture for this map (never clobber old sessions)
 	level.coop_build_file = "coop_mod/save/build_" + level.coop_mapname + ".dat"
@@ -112,7 +122,7 @@ coop_build_session local.player:{
 	setcvar "coop_build_cmd" ""
 	local.player iprint "BUILD MODE: ON (numpad controls)" 1
 	println( "^~^~^ BUILD_ON " + level.coop_mapname )
-	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
 
 	thread coop_build_hud local.player
 	waitthread coop_build_ghostRefresh local.player
@@ -131,6 +141,11 @@ coop_build_session local.player:{
 	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost delete }
 	level.coop_build_ghost = NIL
 	level.coop_build_active = 0
+	// [user 07-09] restore the HUD-fade setting the builder had before build mode
+	if( level.coop_build_prevHudFade != NIL ){
+		setcvar "coop_hudFade" level.coop_build_prevHudFade
+		level.coop_build_prevHudFade = NIL
+	}
 	if( local.player != NULL ){
 		local.player notarget 0
 		local.player takedamage
@@ -159,12 +174,14 @@ coop_build_doCmd local.player local.cmd:{
 		if( level.coop_build_cat > level.coop_build_catcount ){ level.coop_build_cat = 1 }
 		level.coop_build_idx = 1
 		waitthread coop_build_ghostRefresh local.player
+		local.player iprint ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ":  " + level.coop_build_catname[level.coop_build_cat] ) 1
 	}
 	else if( local.cmd == "catprev" ){
 		level.coop_build_cat--
 		if( level.coop_build_cat < 1 ){ level.coop_build_cat = level.coop_build_catcount }
 		level.coop_build_idx = 1
 		waitthread coop_build_ghostRefresh local.player
+		local.player iprint ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ":  " + level.coop_build_catname[level.coop_build_cat] ) 1
 	}
 	else if( local.cmd == "yawplus" ){
 		level.coop_build_yaw = level.coop_build_yaw + 15
@@ -211,6 +228,20 @@ coop_build_doCmd local.player local.cmd:{
 		if( level.coop_build_solid == 1 ){ level.coop_build_solid = 0 }
 		else{ level.coop_build_solid = 1 }
 	}
+	else if( local.cmd == "animprev" ){
+		if( level.coop_build_cat == level.coop_build_actorCat ){
+			level.coop_build_animIdx--
+			if( level.coop_build_animIdx < 1 ){ level.coop_build_animIdx = level.coop_build_animCount }
+			waitthread coop_build_ghostRefresh local.player
+		}
+	}
+	else if( local.cmd == "animnext" ){
+		if( level.coop_build_cat == level.coop_build_actorCat ){
+			level.coop_build_animIdx++
+			if( level.coop_build_animIdx > level.coop_build_animCount ){ level.coop_build_animIdx = 1 }
+			waitthread coop_build_ghostRefresh local.player
+		}
+	}
 	else if( local.cmd == "place" ){
 		waitthread coop_build_place local.player
 	}
@@ -233,7 +264,15 @@ coop_build_round1 local.v:{
 //=========================================================================
 coop_build_ghostRefresh local.player:{
 //=========================================================================
-	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost delete }
+	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){
+		// detach any actor prop first so it is removed with the ghost (removeattachedmodel
+		// posts EV_Remove on the child; delete alone would orphan it)
+		if( level.coop_build_ghostPropTag != NIL && level.coop_build_ghostPropTag != "" ){
+			level.coop_build_ghost removeattachedmodel level.coop_build_ghostPropTag
+		}
+		level.coop_build_ghost delete
+	}
+	level.coop_build_ghostPropTag = ""
 	level.coop_build_tik = level.coop_build_item[level.coop_build_cat][level.coop_build_idx]
 	level.coop_build_name = waitthread coop_mod/strings.scr::remove level.coop_build_tik "models/"
 
@@ -242,6 +281,19 @@ coop_build_ghostRefresh local.player:{
 	local.g alpha 0.55
 	if( level.coop_build_scale != 1.0 ){ local.g scale level.coop_build_scale }
 	level.coop_build_ghost = local.g
+
+	// ALLIED ACTORS category: attach the selected anim's prop (if any) + animate the ghost so the
+	// preview PLAYS the pose. Same alias/prop the placed actor + the lobby importer will use.
+	if( level.coop_build_cat == level.coop_build_actorCat ){
+		local.ptik = level.coop_build_animProp[level.coop_build_animIdx]
+		local.ptag = level.coop_build_animTag[level.coop_build_animIdx]
+		if( local.ptik != NIL && local.ptik != "" && local.ptag != NIL && local.ptag != "" ){
+			local.g attachmodel local.ptik local.ptag
+			level.coop_build_ghostPropTag = local.ptag
+		}
+		thread coop_mod/buildmode_actors.scr::coop_build_ghostAnimLoop local.g
+	}
+
 	level.coop_build_hudDirty = 1
 	waitthread coop_build_ghostFollow local.player
 }end
@@ -287,12 +339,37 @@ coop_build_place local.player:{
 	if( level.coop_build_lastpos == NIL ){ end }
 	local.n = level.coop_build_count + 1
 
+	local.isActor = 0
+	if( level.coop_build_cat == level.coop_build_actorCat ){ local.isActor = 1 }
+
 	local.m = spawn script_model model level.coop_build_tik
 	local.m.origin = level.coop_build_lastpos
 	local.m.angles = level.coop_build_lastang
 	if( level.coop_build_scale != 1.0 ){ local.m scale level.coop_build_scale }
 	if( level.coop_build_solid == 1 ){ local.m solid }
 	else{ local.m notsolid }
+
+	// resolve the actor anim + prop (empty for a plain prop placement)
+	local.anim = ""
+	local.ptik = ""
+	local.ptag = ""
+	local.hasProp = 0
+	if( local.isActor == 1 ){
+		local.anim = level.coop_build_animAlias[level.coop_build_animIdx]
+		if( local.anim == NIL ){ local.anim = "coop_act_idle" }
+		local.ptik = level.coop_build_animProp[level.coop_build_animIdx]
+		local.ptag = level.coop_build_animTag[level.coop_build_animIdx]
+		if( local.ptik == NIL ){ local.ptik = "" }
+		if( local.ptag == NIL ){ local.ptag = "" }
+		if( local.ptik != "" && local.ptag != "" ){ local.hasProp = 1 }
+		if( local.hasProp == 1 ){
+			local.m attachmodel local.ptik local.ptag
+			local.m.coop_buildPropTag = local.ptag
+		}
+		// animate live (the proven lobby recipe; the placed actor loops its pose)
+		local.m.coop_sceneAnim = local.anim
+		local.m thread coop_mod/lobby.scr::coop_sceneActorAnimate
+	}
 
 	level.coop_build_ent[local.n] = local.m
 	level.coop_build_count = local.n
@@ -302,20 +379,43 @@ coop_build_place local.player:{
 	local.px = level.coop_build_lastpos[0]
 	local.py = level.coop_build_lastpos[1]
 	local.pz = level.coop_build_lastpos[2]
-	local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + "\n"
-	local.block = local.block + "local.m = spawn script_model\n"
-	local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
-	local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
-	local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
-	if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
-	if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
-	else{ local.block = local.block + "local.m notsolid\n" }
-	local.block = local.block + "\n"
+	if( local.isActor == 1 ){
+		// ACTOR block: spawns the skinned model, attaches the prop, threads the shared scene
+		// animator. Paste into coop_mod/lobby.scr::spawnSceneActors (or any coop map) - see
+		// _research/build_actor_anims.md.
+		local.block = "// coop_build ACTOR #" + local.n + " " + level.coop_build_tik + " anim " + local.anim + "\n"
+		local.block = local.block + "local.m = spawn script_model\n"
+		local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
+		local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
+		local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
+		if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
+		if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
+		else{ local.block = local.block + "local.m notsolid\n" }
+		if( local.hasProp == 1 ){ local.block = local.block + "local.m attachmodel \"" + local.ptik + "\" \"" + local.ptag + "\"\n" }
+		local.block = local.block + "local.m.coop_sceneAnim = \"" + local.anim + "\"\n"
+		local.block = local.block + "local.m thread coop_mod/lobby.scr::coop_sceneActorAnimate\n"
+		local.block = local.block + "\n"
+	}else{
+		local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + "\n"
+		local.block = local.block + "local.m = spawn script_model\n"
+		local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
+		local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
+		local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
+		if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
+		if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
+		else{ local.block = local.block + "local.m notsolid\n" }
+		local.block = local.block + "\n"
+	}
 	level.coop_build_dumpline[local.n] = local.block
 
 	waitthread coop_build_save
-	println( "^~^~^ BUILD_PLACE " + local.n + " " + level.coop_build_tik + " org " + local.px + " " + local.py + " " + local.pz + " ang " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
-	local.player iprint ( "placed #" + local.n + " " + level.coop_build_name ) 1
+	if( local.isActor == 1 ){
+		println( "^~^~^ BUILD_PLACE_ACTOR " + local.n + " " + level.coop_build_tik + " anim " + local.anim + " prop " + local.ptik + " tag " + local.ptag + " org " + local.px + " " + local.py + " " + local.pz + " ang " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+		local.player iprint ( "placed actor #" + local.n + " " + level.coop_build_name + " (" + local.anim + ")" ) 1
+	}else{
+		println( "^~^~^ BUILD_PLACE " + local.n + " " + level.coop_build_tik + " org " + local.px + " " + local.py + " " + local.pz + " ang " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+		local.player iprint ( "placed #" + local.n + " " + level.coop_build_name ) 1
+	}
 }end
 
 
@@ -329,7 +429,13 @@ coop_build_undo local.player:{
 	}
 	local.n = level.coop_build_count
 	local.m = level.coop_build_ent[local.n]
-	if( local.m != NIL && local.m != NULL ){ local.m delete }
+	if( local.m != NIL && local.m != NULL ){
+		// detach an actor prop first so it is removed with the model, not orphaned
+		if( local.m.coop_buildPropTag != NIL && local.m.coop_buildPropTag != "" ){
+			local.m removeattachedmodel local.m.coop_buildPropTag
+		}
+		local.m delete
+	}
 	level.coop_build_ent[local.n] = NIL
 	level.coop_build_dumpline[local.n] = NIL
 	level.coop_build_count = local.n - 1
@@ -356,7 +462,7 @@ coop_build_save:{
 }end
 
 
-// Build-mode readout on ihuddraw slots 54-59 (see header for the slot audit).
+// Build-mode readout on ihuddraw slots 54-59 (+ 61 = actor anim line). See header slot audit.
 //=========================================================================
 coop_build_hud local.player:{
 //=========================================================================
@@ -382,8 +488,17 @@ coop_build_hud local.player:{
 	ihuddraw_rect  local.player 59 8 202 0 0
 	ihuddraw_alpha local.player 59 0.6
 
+	// slot 61 = ACTOR anim readout (only shown while the ALLIED ACTORS category is selected).
+	// 61 is free between 60 (weather) and 62-69 (xp); see header slot audit.
+	ihuddraw_virtualsize local.player 61 1
+	ihuddraw_align       local.player 61 left top
+	ihuddraw_font        local.player 61 "verdana-14"
+	ihuddraw_color       local.player 61 0.6 0.85 1
+	ihuddraw_rect        local.player 61 8 216 0 0
+	ihuddraw_alpha       local.player 61 0
+
 	ihuddraw_string local.player 54 "BUILD MODE"
-	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat KP7/9 yaw KP8/2 z KP+/- scale KP0 solid KPEnter place KPDel undo"
+	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z KP+/- scale KP0 solid KPEnter place KPDel undo"
 
 	while( level.coop_build_active == 1 && local.player != NULL ){
 		if( level.coop_build_hudDirty == 1 ){
@@ -392,6 +507,18 @@ coop_build_hud local.player:{
 			ihuddraw_string local.player 56 ( "[" + level.coop_build_idx + "/" + level.coop_build_itemcount[level.coop_build_cat] + "] " + level.coop_build_name )
 			ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
 			ihuddraw_string local.player 58 ( "placed " + level.coop_build_count + " -> " + level.coop_build_file )
+
+			// actor anim line (54 title gets an [ACTOR] tag too)
+			if( level.coop_build_cat == level.coop_build_actorCat ){
+				ihuddraw_string local.player 54 "BUILD MODE [ACTOR]"
+				local.propnote = ""
+				if( level.coop_build_animProp[level.coop_build_animIdx] != NIL && level.coop_build_animProp[level.coop_build_animIdx] != "" ){ local.propnote = "  +prop" }
+				ihuddraw_string local.player 61 ( "ANIM [" + level.coop_build_animIdx + "/" + level.coop_build_animCount + "] " + level.coop_build_animName[level.coop_build_animIdx] + local.propnote )
+				ihuddraw_alpha  local.player 61 0.85
+			}else{
+				ihuddraw_string local.player 54 "BUILD MODE"
+				ihuddraw_alpha  local.player 61 0
+			}
 		}
 		wait 0.15
 	}
@@ -403,4 +530,6 @@ coop_build_hud local.player:{
 		ihuddraw_string local.player local.i ""
 		local.i++
 	}
+	ihuddraw_alpha  local.player 61 0
+	ihuddraw_string local.player 61 ""
 }end
