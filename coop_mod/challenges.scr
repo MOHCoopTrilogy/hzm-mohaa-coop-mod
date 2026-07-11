@@ -1,0 +1,1393 @@
+// [303] HZM CHALLENGES / ACHIEVEMENTS SYSTEM - Phase 1 (tracking + persistence + unlocks + HUD toast + review)
+// Mirrors coop_mod/xp.scr (identity, persistence, HUD-emblem patterns). Every progress bump funnels
+// through chal_bump -> chal_apply (single entry point). Adding a challenge = ONE chal_def line in chal_init.
+//
+// Identity:    reuses the XP identity (self.flags["coop_xp_id"] from xp.scr::xp_identify; guid, or
+//              "n_"+netname fallback). If XP is disabled we derive the same id locally so challenges
+//              still work standalone. Keyed as self.flags["coop_chal_id"].
+// Persistence: write-through server cvar coop_chal_<id> (survives map transitions) +
+//              fs_write_content file coop_mod/save/chal_<id>.dat (survives server restarts).
+//              Serialized as "cid:progress|cid:progress|..." (zeros omitted). Unlocks are stored
+//              SEPARATELY (companion) so a future loadout picker can read "which rewards did this
+//              player unlock": cvar coop_unlocks_<id> + file coop_mod/save/unlocks_<id>.dat,
+//              a "|"-delimited list of reward ids (weapon tik paths or symbolic perk/cosmetic ids).
+// Per-player:  self.flags["coop_chal_id" / "coop_chal_loaded" / "coop_chal_unlocks"] +
+//              self.flags["coop_chalP_<cid>"] (progress) + self.flags["coop_chalD_<cid>"] (done).
+// HUD slots:   76 header, 77 title, 78 subtitle (completion toast; clear of XP 62-75, build 54-59).
+// Review:      name-append bind index 34 (",chx") -> chal_review; prints the full list to the
+//              player's console (grouped by category, [progress/target], done/locked).
+// Cvar gate:   coop_challenges (default 1). coop_xp_enabled conventions respected where sensible.
+
+//=========================================================================
+// Init - threaded from main.scr::main right after xp_init. Builds the DATA table
+// (no wait/waitframe -> completes in the init frame) and starts the autosave loop.
+//=========================================================================
+chal_init:{
+	if( level.coop_chal_init == 1 ){ end }
+	level.coop_chal_init = 1
+
+	level.coop_chal_enabled = 1
+	if( getcvar "coop_challenges" == "" ){ setcvar "coop_challenges" "1" }
+	if( getcvar "coop_challenges" == "0" ){ level.coop_chal_enabled = 0 }
+
+	level.coop_chal_count = 0
+
+	// ============================ WEAPON MASTERY ============================
+	// stat "wpn_<id>" is bumped by chal_ai_killed from the killer's active weapon.
+	// One family per real weapon (variants/scoped/KUN fold in); base + elite tier
+	// share the stat. Category = weapon class so the menu pages by class.
+	// ---- RIFLES ----
+	waitthread chal_def "wpn_garand" "rifle" "Greatest Battle Implement" "Get 50 kills with the M1 Garand" "wpn_garand" 50 "models/weapons/m1_garand.tik"
+	waitthread chal_def "wpn_garand_e" "rifle" "The Tell-Tale Ping" "Get 150 kills with the M1 Garand (Elite)" "wpn_garand" 150 "cosmetic_garand"
+	waitthread chal_def "wpn_kar98" "rifle" "Their Own Mauser" "Get 50 kills with the Kar98k" "wpn_kar98" 50 "models/weapons/kar98.tik"
+	waitthread chal_def "wpn_kar98_e" "rifle" "Mauser Meister" "Get 150 kills with the Kar98k (Elite)" "wpn_kar98" 150 "cosmetic_kar98"
+	waitthread chal_def "wpn_g43" "rifle" "Hitler's Semi-Auto" "Get 40 kills with the Gewehr 43" "wpn_g43" 40 "models/weapons/g43.tik"
+	waitthread chal_def "wpn_g43_e" "rifle" "Gewehr Grognard" "Get 120 kills with the Gewehr 43 (Elite)" "wpn_g43" 120 "cosmetic_g43"
+	waitthread chal_def "wpn_enfield" "rifle" "The Mad Minute" "Get 40 kills with the Lee-Enfield" "wpn_enfield" 40 "models/weapons/enfield.tik"
+	waitthread chal_def "wpn_enfield_e" "rifle" "Bolt-Action Ballet" "Get 120 kills with the Lee-Enfield (Elite)" "wpn_enfield" 120 "cosmetic_enfield"
+	waitthread chal_def "wpn_mosin" "rifle" "Rifle of the Rodina" "Get 40 kills with the Mosin-Nagant" "wpn_mosin" 40 "models/weapons/Mosin_Nagant_Rifle.tik"
+	waitthread chal_def "wpn_mosin_e" "rifle" "For the Motherland" "Get 120 kills with the Mosin-Nagant (Elite)" "wpn_mosin" 120 "cosmetic_mosin"
+	waitthread chal_def "wpn_svt" "rifle" "Tokarev's Answer" "Get 30 kills with the SVT-40" "wpn_svt" 30 "models/weapons/svt_rifle.tik"
+	waitthread chal_def "wpn_svt_e" "rifle" "Red Army Semi" "Get 90 kills with the SVT-40 (Elite)" "wpn_svt" 90 "cosmetic_svt"
+	waitthread chal_def "wpn_carcano" "rifle" "Mannlicher's Cast-Off" "Get 30 kills with the Carcano" "wpn_carcano" 30 "models/weapons/It_W_Carcano.tik"
+	waitthread chal_def "wpn_carcano_e" "rifle" "Il Fucile" "Get 90 kills with the Carcano (Elite)" "wpn_carcano" 90 "cosmetic_carcano"
+	waitthread chal_def "wpn_arisaka" "rifle" "Chrysanthemum Stock" "Get 30 kills with the Arisaka" "wpn_arisaka" 30 "models/weapons/arisaka.tik"
+	waitthread chal_def "wpn_arisaka_e" "rifle" "Banzai Bolt" "Get 90 kills with the Arisaka (Elite)" "wpn_arisaka" 90 "cosmetic_arisaka"
+	waitthread chal_def "wpn_stg44" "rifle" "Sturmgeist's Choice" "Get 40 kills with the StG44" "wpn_stg44" 40 "models/weapons/mp44.tik"
+	waitthread chal_def "wpn_stg44_e" "rifle" "Sturm und Drang" "Get 120 kills with the StG44 (Elite)" "wpn_stg44" 120 "cosmetic_stg44"
+	// ---- SNIPERS ----
+	waitthread chal_def "wpn_springfield" "sniper" "Old Reliable" "Get 40 kills with the Springfield '03" "wpn_springfield" 40 "models/weapons/springfield.tik"
+	waitthread chal_def "wpn_springfield_e" "sniper" "One Shot, One Kill" "Get 120 kills with the Springfield '03 (Elite)" "wpn_springfield" 120 "cosmetic_springfield"
+	waitthread chal_def "wpn_kar98sniper" "sniper" "Their Own Scope" "Get 40 kills with the Kar98 Sniper" "wpn_kar98sniper" 40 "models/weapons/kar98sniper.tik"
+	waitthread chal_def "wpn_kar98sniper_e" "sniper" "Scharfschutze" "Get 120 kills with the Kar98 Sniper (Elite)" "wpn_kar98sniper" 120 "cosmetic_kar98sniper"
+	waitthread chal_def "wpn_g43sniper" "sniper" "Zielfernrohr" "Get 30 kills with the G43 Sniper" "wpn_g43sniper" 30 "models/weapons/g43sniper.tik"
+	waitthread chal_def "wpn_g43sniper_e" "sniper" "Semi-Auto Assassin" "Get 90 kills with the G43 Sniper (Elite)" "wpn_g43sniper" 90 "cosmetic_g43sniper"
+	waitthread chal_def "wpn_mosinsniper" "sniper" "Zaitsev's Trade" "Get 30 kills with the Mosin Sniper" "wpn_mosinsniper" 30 "models/weapons/Nagant_sniper.tik"
+	waitthread chal_def "wpn_mosinsniper_e" "sniper" "Ghost of Stalingrad" "Get 90 kills with the Mosin Sniper (Elite)" "wpn_mosinsniper" 90 "cosmetic_mosinsniper"
+	waitthread chal_def "wpn_carcanosniper" "sniper" "Mannlicher's Eye" "Get 25 kills with the Carcano Sniper" "wpn_carcanosniper" 25 "models/weapons/carcanosniper.tik"
+	waitthread chal_def "wpn_carcanosniper_e" "sniper" "Il Cecchino" "Get 75 kills with the Carcano Sniper (Elite)" "wpn_carcanosniper" 75 "cosmetic_carcanosniper"
+	waitthread chal_def "wpn_arisakasniper" "sniper" "Nest in the Palms" "Get 25 kills with the Arisaka Sniper" "wpn_arisakasniper" 25 "models/weapons/arisakasniper.tik"
+	waitthread chal_def "wpn_arisakasniper_e" "sniper" "Jungle Ghost" "Get 75 kills with the Arisaka Sniper (Elite)" "wpn_arisakasniper" 75 "cosmetic_arisakasniper"
+	waitthread chal_def "wpn_l42a1" "sniper" "His Majesty's Marksman" "Get 25 kills with the L42A1" "wpn_l42a1" 25 "models/weapons/Uk_W_L42A1.tik"
+	waitthread chal_def "wpn_l42a1_e" "sniper" "Enfield Enforcer" "Get 75 kills with the L42A1 (Elite)" "wpn_l42a1" 75 "cosmetic_l42a1"
+	waitthread chal_def "wpn_delisle" "sniper" "The Silent Carbine" "Get 25 kills with the De Lisle" "wpn_delisle" 25 "models/weapons/DeLisle.tik"
+	waitthread chal_def "wpn_delisle_e" "sniper" "Whisper of Death" "Get 75 kills with the De Lisle (Elite)" "wpn_delisle" 75 "cosmetic_delisle"
+	// ---- SUBMACHINE GUNS ----
+	waitthread chal_def "wpn_thompson" "smg" "The Chopper" "Get 50 kills with the Thompson" "wpn_thompson" 50 "models/weapons/thompsonsmg.tik"
+	waitthread chal_def "wpn_thompson_e" "smg" "Chicago Piano" "Get 150 kills with the Thompson (Elite)" "wpn_thompson" 150 "cosmetic_thompson"
+	waitthread chal_def "wpn_greasegun" "smg" "GI's Grease Gun" "Get 40 kills with the M3 Grease Gun" "wpn_greasegun" 40 "models/weapons/greasegun.tik"
+	waitthread chal_def "wpn_greasegun_e" "smg" "Cheap and Deadly" "Get 120 kills with the M3 Grease Gun (Elite)" "wpn_greasegun" 120 "cosmetic_greasegun"
+	waitthread chal_def "wpn_mp40" "smg" "Not a Schmeisser" "Get 50 kills with the MP40" "wpn_mp40" 50 "models/weapons/mp40.tik"
+	waitthread chal_def "wpn_mp40_e" "smg" "Burp Gun Baron" "Get 150 kills with the MP40 (Elite)" "wpn_mp40" 150 "cosmetic_mp40"
+	waitthread chal_def "wpn_sten" "smg" "Plumber's Nightmare" "Get 40 kills with the Sten" "wpn_sten" 40 "models/weapons/sten.tik"
+	waitthread chal_def "wpn_sten_e" "smg" "Woolworth Wonder" "Get 120 kills with the Sten (Elite)" "wpn_sten" 120 "cosmetic_sten"
+	waitthread chal_def "wpn_ppsh" "smg" "Papasha" "Get 40 kills with the PPSh-41" "wpn_ppsh" 40 "models/weapons/ppsh_smg.tik"
+	waitthread chal_def "wpn_ppsh_e" "smg" "Drum of the Red Army" "Get 120 kills with the PPSh-41 (Elite)" "wpn_ppsh" 120 "cosmetic_ppsh"
+	waitthread chal_def "wpn_type100" "smg" "Nambu's Chatterbox" "Get 30 kills with the Type 100" "wpn_type100" 30 "models/weapons/type100smg.tik"
+	waitthread chal_def "wpn_type100_e" "smg" "Rising Sun Ripper" "Get 90 kills with the Type 100 (Elite)" "wpn_type100" 90 "cosmetic_type100"
+	waitthread chal_def "wpn_moschetto" "smg" "Balilla Automatico" "Get 30 kills with the Beretta M38" "wpn_moschetto" 30 "models/weapons/It_W_Moschetto.tik"
+	waitthread chal_def "wpn_moschetto_e" "smg" "Roman Ripper" "Get 90 kills with the Beretta M38 (Elite)" "wpn_moschetto" 90 "cosmetic_moschetto"
+	// ---- PISTOLS ----
+	waitthread chal_def "wpn_colt" "pistol" "Cocked and Locked" "Get 40 kills with the Colt .45" "wpn_colt" 40 "models/weapons/colt45.tik"
+	waitthread chal_def "wpn_colt_e" "pistol" "Slabsides Slayer" "Get 120 kills with the Colt .45 (Elite)" "wpn_colt" 120 "cosmetic_colt"
+	waitthread chal_def "wpn_silenced" "pistol" "Wet Work" "Get 30 kills with the Silenced Pistol" "wpn_silenced" 30 "models/weapons/silencedpistol.tik"
+	waitthread chal_def "wpn_silenced_e" "pistol" "OSS Special" "Get 90 kills with the Silenced Pistol (Elite)" "wpn_silenced" 90 "cosmetic_silenced"
+	waitthread chal_def "wpn_p38" "pistol" "Spoils of Rank" "Get 40 kills with the Walther P38" "wpn_p38" 40 "models/weapons/p38.tik"
+	waitthread chal_def "wpn_p38_e" "pistol" "Officer's Sidearm" "Get 120 kills with the Walther P38 (Elite)" "wpn_p38" 120 "cosmetic_p38"
+	waitthread chal_def "wpn_luger" "pistol" "The Parabellum Prize" "Get 30 kills with the Luger P08" "wpn_luger" 30 "models/weapons/LugerP08.tik"
+	waitthread chal_def "wpn_luger_e" "pistol" "Toggle-Lock Trophy" "Get 90 kills with the Luger P08 (Elite)" "wpn_luger" 90 "cosmetic_luger"
+	waitthread chal_def "wpn_ppk" "pistol" "Gestapo Pocket" "Get 30 kills with the Walther PPK" "wpn_ppk" 30 "models/weapons/ppk.tik"
+	waitthread chal_def "wpn_ppk_e" "pistol" "Kripo's Companion" "Get 90 kills with the Walther PPK (Elite)" "wpn_ppk" 90 "cosmetic_ppk"
+	waitthread chal_def "wpn_webley" "pistol" "Six for the Crown" "Get 30 kills with the Webley" "wpn_webley" 30 "models/weapons/Webley_Revolver.tik"
+	waitthread chal_def "wpn_webley_e" "pistol" "Top-Break Tommy" "Get 90 kills with the Webley (Elite)" "wpn_webley" 90 "cosmetic_webley"
+	waitthread chal_def "wpn_nagantrev" "pistol" "Seven for Stalin" "Get 30 kills with the Nagant Revolver" "wpn_nagantrev" 30 "models/weapons/Nagant_revolver.tik"
+	waitthread chal_def "wpn_nagantrev_e" "pistol" "Commissar's Companion" "Get 90 kills with the Nagant Revolver (Elite)" "wpn_nagantrev" 90 "cosmetic_nagantrev"
+	waitthread chal_def "wpn_tt33" "pistol" "Tokarev Steel" "Get 30 kills with the TT-33" "wpn_tt33" 30 "models/weapons/tt33.tik"
+	waitthread chal_def "wpn_tt33_e" "pistol" "Soviet Sidearm" "Get 90 kills with the TT-33 (Elite)" "wpn_tt33" 90 "cosmetic_tt33"
+	waitthread chal_def "wpn_beretta" "pistol" "Bella Pistola" "Get 30 kills with the Beretta" "wpn_beretta" 30 "models/weapons/It_W_Beretta.tik"
+	waitthread chal_def "wpn_beretta_e" "pistol" "Roman Roscoe" "Get 90 kills with the Beretta (Elite)" "wpn_beretta" 90 "cosmetic_beretta"
+	waitthread chal_def "wpn_nambu" "pistol" "Papa Nambu" "Get 30 kills with the Nambu" "wpn_nambu" 30 "models/weapons/nambu.tik"
+	waitthread chal_def "wpn_nambu_e" "pistol" "Rising Sun Roscoe" "Get 90 kills with the Nambu (Elite)" "wpn_nambu" 90 "cosmetic_nambu"
+	waitthread chal_def "wpn_welrod" "pistol" "Assassin's Whisper" "Get 25 kills with the Welrod" "wpn_welrod" 25 "models/weapons/welrod.tik"
+	waitthread chal_def "wpn_welrod_e" "pistol" "SOE Silencer" "Get 75 kills with the Welrod (Elite)" "wpn_welrod" 75 "cosmetic_welrod"
+	// ---- MG & HEAVY ----
+	waitthread chal_def "wpn_bar" "heavy" "Walking Fire" "Get 50 kills with the BAR" "wpn_bar" 50 "models/weapons/bar.tik"
+	waitthread chal_def "wpn_bar_e" "heavy" "Browning's Bruiser" "Get 150 kills with the BAR (Elite)" "wpn_bar" 150 "cosmetic_bar"
+	waitthread chal_def "wpn_thirtycal" "heavy" "Belt-Fed Fury" "Get 40 kills with the .30 Cal" "wpn_thirtycal" 40 "models/weapons/30calportable.tik"
+	waitthread chal_def "wpn_thirtycal_e" "heavy" "Mow 'Em Down" "Get 120 kills with the .30 Cal (Elite)" "wpn_thirtycal" 120 "cosmetic_thirtycal"
+	waitthread chal_def "wpn_vickers" "heavy" "Water-Cooled Wrath" "Get 30 kills with the Vickers" "wpn_vickers" 30 "models/weapons/Uk_W_Vickers.tik"
+	waitthread chal_def "wpn_vickers_e" "heavy" "Somme Survivor" "Get 90 kills with the Vickers (Elite)" "wpn_vickers" 90 "cosmetic_vickers"
+	waitthread chal_def "wpn_breda" "heavy" "Modello 30 Misery" "Get 30 kills with the Breda 30" "wpn_breda" 30 "models/weapons/It_W_Breda.tik"
+	waitthread chal_def "wpn_breda_e" "heavy" "Italian Iron" "Get 90 kills with the Breda 30 (Elite)" "wpn_breda" 90 "cosmetic_breda"
+	waitthread chal_def "wpn_mg42" "heavy" "Bonesaw" "Get 40 kills with the MG42" "wpn_mg42" 40 "models/weapons/mg42carryable.tik"
+	waitthread chal_def "wpn_mg42_e" "heavy" "Hitler's Zipper" "Get 120 kills with the MG42 (Elite)" "wpn_mg42" 120 "cosmetic_mg42"
+	waitthread chal_def "wpn_shotgun" "heavy" "Diplomatic Protest" "Get 30 kills with the Shotgun" "wpn_shotgun" 30 "models/weapons/shotgun.tik"
+	waitthread chal_def "wpn_shotgun_e" "heavy" "Trench Sweeper" "Get 90 kills with the Shotgun (Elite)" "wpn_shotgun" 90 "cosmetic_shotgun"
+	waitthread chal_def "wpn_bazooka" "heavy" "Bob Burns' Horn" "Get 15 kills with the Bazooka" "wpn_bazooka" 15 "models/weapons/bazooka.tik"
+	waitthread chal_def "wpn_bazooka_e" "heavy" "Stovepipe Serenade" "Get 45 kills with the Bazooka (Elite)" "wpn_bazooka" 45 "cosmetic_bazooka"
+	waitthread chal_def "wpn_panzerschreck" "heavy" "Tank Terror" "Get 15 kills with the Panzerschreck" "wpn_panzerschreck" 15 "models/weapons/panzerschreck.tik"
+	waitthread chal_def "wpn_panzerschreck_e" "heavy" "Ofenrohr Overkill" "Get 45 kills with the Panzerschreck (Elite)" "wpn_panzerschreck" 45 "cosmetic_panzerschreck"
+	waitthread chal_def "wpn_piat" "heavy" "Spring-Loaded Suicide" "Get 15 kills with the PIAT" "wpn_piat" 15 "models/weapons/Uk_W_Piat.tik"
+	waitthread chal_def "wpn_piat_e" "heavy" "Blacker's Bombard" "Get 45 kills with the PIAT (Elite)" "wpn_piat" 45 "cosmetic_piat"
+
+	// ============================ KILL TYPES ============================
+	waitthread chal_def "kt_head"       "killtype" "Kopfschuss"      "Get 25 headshot kills"                          "headshot"   25  "attach_ironsight_tuned"
+	waitthread chal_def "kt_head_e"     "killtype" "Kopfjager"     "Get 100 headshot kills"                         "headshot"   100 "cosmetic_marksman_badge"
+	waitthread chal_def "kt_melee"      "killtype" "Cold Steel" "Get 15 melee kills"                             "melee"      15  "perk_quickbash"
+	waitthread chal_def "kt_melee_e"    "killtype" "Knuckle and Blade"  "Get 40 melee kills"                             "melee"      40  "cosmetic_trench_knife"
+	waitthread chal_def "kt_wallbang"   "killtype" "Through the Bocage"   "Kill 10 enemies with a wallbang shot"           "wallbang"   10  "perk_penetrator"
+	waitthread chal_def "kt_long"       "killtype" "Kentucky Windage"   "Get 25 long-range kills (over 2000 units)"      "longshot"   25  "attach_scope"
+	waitthread chal_def "kt_long_e"     "killtype" "A Thousand Yards"      "Get 75 long-range kills"                        "longshot"   75  "cosmetic_ghillie_wrap"
+	waitthread chal_def "kt_blind"      "killtype" "Blind Faith"        "Get 15 blindfire kills from cover"              "blindfire"  15  "perk_steadyblind"
+	waitthread chal_def "kt_savior"     "killtype" "Leave No Man"        "Save a teammate 20 times with a savior kill"    "savior"     20  "perk_overwatch"
+	waitthread chal_def "kt_savior_e"   "killtype" "For Donnie"   "Get 60 savior kills"                            "savior"     60  "cosmetic_guardian_wings"
+	waitthread chal_def "kt_reinf"      "killtype" "Welcoming Committee"         "Kill 30 enemy reinforcements"                   "reinf"      30  "perk_ambusher"
+	waitthread chal_def "kt_grenade"    "killtype" "Fire in the Hole"     "Get 20 grenade kills"                           "grenade"    20  "perk_extragrenade"
+	waitthread chal_def "kt_grenade_e"  "killtype" "Granate!"         "Get 60 grenade kills"                           "grenade"    60  "cosmetic_grenade_bandolier"
+	waitthread chal_def "kt_rocket"     "killtype" "Backblast Clear"            "Get 15 rocket or bazooka kills"                 "rocket"     15  "perk_extrarocket"
+	waitthread chal_def "kt_downed"     "killtype" "Taking You With Me"          "Kill 10 enemies while downed (DBNO)"            "downedkill" 10  "perk_lastditch"
+	waitthread chal_def "kt_vehicle"    "killtype" "Panzerknacker"           "Destroy 10 enemy vehicles in the campaign"      "vehicle"    10  ""
+	waitthread chal_def "kt_vehicle_e"  "killtype" "Panzer Graveyard"        "Destroy 30 enemy vehicles in the campaign"      "vehicle"    30  ""
+
+	// ============================ MILESTONES (total kills) ============================
+	waitthread chal_def "q_100"   "quantity" "Blooded" "Get 100 total kills"   "kill" 100  "cosmetic_stripe_1"
+	waitthread chal_def "q_nazibiz" "quantity" "Business Is A-Boomin'" "Business is a-boomin' - get 250 total kills" "kill" 250 "cosmetic_basterds"
+	waitthread chal_def "q_500"   "quantity" "Dogface"    "Get 500 total kills"   "kill" 500  "cosmetic_stripe_2"
+	waitthread chal_def "q_1000"  "quantity" "To Hell and Back"        "Get 1000 total kills"  "kill" 1000 "cosmetic_stripe_3"
+	waitthread chal_def "q_2500"  "quantity" "Todesengel"          "Get 2500 total kills"  "kill" 2500 "cosmetic_reaper_emblem"
+
+	// ============================ TASKS ============================
+	waitthread chal_def "t_revive"    "task" "Sulfa and a Prayer"                "Revive 10 downed teammates"      "revive"    10  "perk_fastrevive"
+	waitthread chal_def "t_revive_e"  "task" "Corpsman Up!"      "Revive 40 downed teammates"      "revive"    40  "cosmetic_medic_armband"
+	waitthread chal_def "t_air"       "task" "On My Smoke"          "Call in 5 air strikes"           "airstrike" 5   "perk_extrabinoc"
+	waitthread chal_def "t_air_e"     "task" "Steel Rain"          "Call in 20 air strikes"          "airstrike" 20  "cosmetic_forward_observer"
+	waitthread chal_def "t_reinf"     "task" "Stand in the Door"   "Call in 5 paradrops"             "reinforce" 5   "perk_extrasmoke"
+	waitthread chal_def "t_reinf_e"   "task" "Currahee" "Call in 15 paradrops"            "reinforce" 15  "cosmetic_airborne_wings"
+	waitthread chal_def "t_officer"   "task" "Herr Kommandant"     "Kill 5 enemy officers"           "officer"   5   "perk_officer_hunter"
+	waitthread chal_def "t_officer_e" "task" "Enjoy the Walk" "Kill 20 enemy officers"         "officer"   20  "cosmetic_iron_cross_trophy"
+	waitthread chal_def "t_obj"       "task" "The Business We're In"     "Complete 15 primary objectives"  "objective" 15  "perk_objective_boost"
+	waitthread chal_def "t_obj_e"     "task" "Conspicuous Gallantry"      "Complete 50 primary objectives"  "objective" 50  "cosmetic_bronze_star"
+	waitthread chal_def "t_radio"     "task" "Dead Air"         "Destroy 10 enemy radios"         "sideobj"   10  "perk_recon"
+
+	// ============================ CAMPAIGN (missions / chapters / full campaign) ============================
+	waitthread chal_def "m_omaha"     "mission" "Easy Red"          "Complete the Omaha Beach landing"          "map_m3l1a" 1  "cosmetic_omaha_patch"
+	waitthread chal_def "m_overlord"  "mission" "Beyond the Seawall"  "Complete the D-Day breakout"               "map_m3l2"  1  "cosmetic_ranger_patch"
+	waitthread chal_def "m_dasboot"   "mission" "Iron Coffin"              "Complete the U-boat pens"                  "map_m2l2a" 1  "cosmetic_uboat_patch"
+	waitthread chal_def "m_train"     "mission" "The Marshalling Yard"       "Complete the train station finale"         "map_m2l3"  1  "cosmetic_train_patch"
+	waitthread chal_def "m_first"     "mission" "Torchbearer"       "Complete your first mission"               "map_m1l1"  1  "cosmetic_rookie_patch"
+	waitthread chal_def "m_market"    "mission" "Hell's Highway"      "Hold the bridge (Operation Market Garden)" "map_t1l2"  1  "cosmetic_market_garden_patch"
+	waitthread chal_def "m_bulge"     "mission" "The Ghost Front"   "Survive the Ardennes counteroffensive"     "map_t2l1"  1  "cosmetic_bulge_patch"
+	waitthread chal_def "m_kasserine" "mission" "Red Bull Country"        "Hold the line in Tunisia"                  "map_e1l1"  1  "cosmetic_tunisia_patch"
+	waitthread chal_def "ms_1"        "mission" "Wet Behind the Ears"         "Complete 1 mission"                        "missions"  1  "cosmetic_service_ribbon_1"
+	waitthread chal_def "ms_5"        "mission" "Combat Ready"   "Complete 5 missions"                       "missions"  5  "cosmetic_service_ribbon_2"
+	waitthread chal_def "ms_15"       "mission" "The Road to Berlin"        "Complete 15 missions"                      "missions"  15 "cosmetic_service_ribbon_3"
+	waitthread chal_def "ms_30"       "mission" "The Guns Fall Silent"     "Complete 30 missions (full campaign)"      "missions"  30 "cosmetic_ve_day_medal"
+
+	// ==================== CAMPAIGN FEATS (franchise-named, wired to specific map moments) ====================
+	// stat == id -> a map script bumps that exact stat once via chal_team_bump / cc_award_clean (see the
+	// per-map hooks below and _research/campaign_challenges.md). The six "map_<name>" ones are freebies that
+	// fire automatically from chal_mission_complete when that map is completed. Rewards deferred ("").
+	waitthread chal_def "cc_finest_hour"      "campaign" "Finest Hour"                 "Reach the bangalores on Omaha without a squadmate going down" "cc_finest_hour"      1  ""
+	waitthread chal_def "cc_longest_day"      "campaign" "Across Dog Green"             "Cross the beach to the seawall in under 90 seconds"          "cc_longest_day"      1  ""
+	waitthread chal_def "cc_pointe_du_hoc"    "campaign" "Rudder's Rangers"       "Silence every gun emplacement above Omaha Beach"             "cc_pointe_du_hoc"    1  ""
+	waitthread chal_def "cc_rangers_house"    "campaign" "Room by Room"                "Clear the strongpoint house with nobody downed"              "cc_rangers_house"    1  ""
+	waitthread chal_def "cc_rangers_flak"     "campaign" "Silence the Acht-Acht"             "Destroy both Flak 88s in the D-Day breakout"                 "cc_rangers_flak"     1  ""
+	waitthread chal_def "cc_torch"            "campaign" "Hitler's Buzzsaw"          "Hold the MG42 through the reinforcement wave, nobody downed" "cc_torch"            1  ""
+	waitthread chal_def "cc_the_rescue"       "campaign" "Stick Close to Me"          "Get the SAS agent out of the fortress alive"                 "cc_the_rescue"       1  ""
+	waitthread chal_def "cc_lights_out"       "campaign" "Blind and Deaf"      "Destroy every piece of enemy communications equipment"       "cc_lights_out"       1  ""
+	waitthread chal_def "cc_signal_fleet"     "campaign" "Light the Beacon"             "Light the lighthouse beacon and signal the fleet"            "cc_signal_fleet"     1  ""
+	waitthread chal_def "cc_special_cargo"    "campaign" "The Naxos Papers"               "Steal the research documents from the Naxos complex"         "cc_special_cargo"    1  ""
+	waitthread chal_def "cc_das_boot_stealth" "campaign" "Silence in the Pens"              "Reach the second U-boat without raising the alarm"           "cc_das_boot_stealth" 1  ""
+	waitthread chal_def "cc_naxos"            "campaign" "Blind the Wolfpack"           "Destroy the Naxos radar prototype"                           "cc_naxos"            1  ""
+	waitthread chal_def "cc_end_of_line"      "campaign" "All Present and Accounted For"             "Reach the train-station rendezvous with the whole squad up"  "cc_end_of_line"      1  ""
+	waitthread chal_def "cc_rough_landing"    "campaign" "Get the Flyboy Home"               "Escort the downed pilot to the Maquis hideout alive"         "cc_rough_landing"    1  ""
+	waitthread chal_def "cc_resistance"       "campaign" "Eyes of the Milice"          "Complete the Paper Chase without tripping the alarm"         "cc_resistance"       1  ""
+	waitthread chal_def "cc_snipers_alley"    "campaign" "Every Window a Rifle"         "Get 10 sniper-rifle kills in Sniper Town"                    "cc_snipers_alley"    10 ""
+	waitthread chal_def "cc_king_tiger"       "campaign" "Beutepanzer" "Steal the King Tiger with the tank crew still alive"         "cc_king_tiger"       1  ""
+	waitthread chal_def "cc_day_of_tiger"     "campaign" "Drive It Like You Stole It"        "Escape Sniper Town in the captured King Tiger"               "map_m5l2b"           1  ""
+	waitthread chal_def "cc_the_bridge"       "campaign" "Tiger by the Tail"             "Knock out the enemy King Tiger at the bridge"                "cc_the_bridge"       1  ""
+	waitthread chal_def "cc_nordwind"         "campaign" "Quad-Twenty"          "Destroy the 20mm Flaks in the frozen forest"                 "cc_nordwind"         1  ""
+	waitthread chal_def "cc_under_radar"      "campaign" "Wire It Quiet"             "Wire the radio command post undetected"                      "cc_under_radar"      1  ""
+	waitthread chal_def "cc_gas_gas_gas"      "campaign" "Fort of Pain"                "Plant the charges deep in the Fort Schmerzen gas works"      "cc_gas_gas_gas"      1  ""
+	waitthread chal_def "cc_schmerzen_escape" "campaign" "Out Through the Fire"    "Escape the burning fort with everyone on their feet"         "cc_schmerzen_escape" 1  ""
+	waitthread chal_def "cc_schmerzen_done"   "campaign" "Where Patterson Fought"              "Complete the Fort Schmerzen finale"                          "map_m6l3e"           1  ""
+	waitthread chal_def "cc_nijmegen"         "campaign" "Crossing the Waal"             "Destroy both Flak 88s guarding the bridge town"              "cc_nijmegen"         1  ""
+	waitthread chal_def "cc_purple_heart"     "campaign" "Kill the Screaming Mimis"           "Destroy all five Nebelwerfers in the Ardennes"               "cc_purple_heart"     1  ""
+	waitthread chal_def "cc_tiger_country"    "campaign" "Sticky End"               "Kill a Tiger tank with a sticky bomb"                        "cc_tiger_country"    1  ""
+	waitthread chal_def "cc_nuts"             "campaign" "The Poor Bastards"                       "Survive all three Bastogne defense waves, nobody downed"     "cc_nuts"             1  ""
+	waitthread chal_def "cc_convoy"           "campaign" "Red Ball Express"            "Get the supply truck to the Allied line intact"              "cc_convoy"           1  ""
+	waitthread chal_def "cc_quiet_town"       "campaign" "Nothing Quiet About It"         "Clear the church and hotel at Stavelot"                      "map_t2l4"            1  ""
+	waitthread chal_def "cc_berlin_safe"      "campaign" "The Chancellery Job"          "Crack the Chancellery safe and steal a T-34"                 "cc_berlin_safe"      1  ""
+	waitthread chal_def "cc_return"           "campaign" "Hold Until Relieved"                      "Hold the last bridge until air support arrives"              "map_t3l2"            1  ""
+	waitthread chal_def "cc_desert_fox"       "campaign" "Chasing the Fox"                  "Win the Panzer duel on the Tunisian front"                   "cc_desert_fox"       1  ""
+	waitthread chal_def "cc_stowaway"         "campaign" "Papers, Please"            "Infiltrate the ship in disguise without blowing your cover"  "cc_stowaway"         1  ""
+	waitthread chal_def "cc_enemy_mine"       "campaign" "Autoblinda Down"                  "Destroy the Italian AB-41 with the Flak cannon"              "cc_enemy_mine"       1  ""
+	waitthread chal_def "cc_flugplatz"        "campaign" "Ground the Luftwaffe"               "Sabotage the enemy airfield"                                 "map_e2l2"            1  ""
+	waitthread chal_def "cc_rolling_thunder"  "campaign" "Anzio Annie"                       "Destroy the K5 railway guns"                                 "cc_rolling_thunder"  1  ""
+	waitthread chal_def "cc_shingle"          "campaign" "The Stranded Whale"           "Call in the Anzio airstrike and finish the campaign"         "map_e3l4"            1  ""
+	waitthread chal_def "cc_mein_kampf"       "campaign" "Hoist by His Own Petard"                  "Make an officer blow himself up with one of his own reinforcements" "cc_mein_kampf"      1  ""
+
+	// category display order + labels for the review printout
+	level.coop_chal_catOrder[0] = "rifle"
+	level.coop_chal_catOrder[1] = "sniper"
+	level.coop_chal_catOrder[2] = "smg"
+	level.coop_chal_catOrder[3] = "pistol"
+	level.coop_chal_catOrder[4] = "heavy"
+	level.coop_chal_catOrder[5] = "killtype"
+	level.coop_chal_catOrder[6] = "quantity"
+	level.coop_chal_catOrder[7] = "task"
+	level.coop_chal_catOrder[8] = "mission"
+	level.coop_chal_catOrder[9] = "campaign"
+	level.coop_chal_catN = 10
+	level.coop_chal_catLabel["rifle"]    = "RIFLES"
+	level.coop_chal_catLabel["sniper"]   = "SNIPERS"
+	level.coop_chal_catLabel["smg"]      = "SUBMACHINE GUNS"
+	level.coop_chal_catLabel["pistol"]   = "PISTOLS"
+	level.coop_chal_catLabel["heavy"]    = "MG & HEAVY"
+	level.coop_chal_catLabel["killtype"] = "KILL TYPES"
+	level.coop_chal_catLabel["quantity"] = "MILESTONES"
+	level.coop_chal_catLabel["task"]     = "TASKS"
+	level.coop_chal_catLabel["mission"]  = "MISSIONS"
+	level.coop_chal_catLabel["campaign"] = "CAMPAIGN FEATS"
+
+	// ---- menu page map: sub-paginate each category into pages of 18 rows so the
+	// fixed 18-slot ihuddraw block never overflows (pistol=22, campaign=39, etc.).
+	// pageCat/pageOff/pageSub/pageSubN are indexed by a FLAT page number 0..pageN-1.
+	level.coop_chal_pageN = 0
+	local.rpp = 18
+	local.c = 0
+	while( local.c < level.coop_chal_catN ){
+		local.cat = level.coop_chal_catOrder[local.c]
+		local.n = 0
+		local.i = 0
+		while( local.i < level.coop_chal_count ){
+			if( level.coop_chal_cat[local.i] == local.cat ){ local.n++ }
+			local.i++
+		}
+		local.pages = int( ( local.n + local.rpp - 1 ) / local.rpp )
+		local.s = 0
+		while( local.s < local.pages ){
+			local.k = level.coop_chal_pageN
+			level.coop_chal_pageCat[local.k]  = local.cat
+			level.coop_chal_pageOff[local.k]  = local.s * local.rpp
+			level.coop_chal_pageSub[local.k]  = local.s + 1
+			level.coop_chal_pageSubN[local.k] = local.pages
+			level.coop_chal_pageN = local.k + 1
+			local.s++
+		}
+		local.c++
+	}
+
+	thread chal_autosave_loop
+	thread coop_vehKill_monitor
+}end
+
+
+//=========================================================================
+// Append one challenge definition + register it in the per-stat reverse index.
+// No waits -> callable synchronously from chal_init's init frame.
+//=========================================================================
+chal_def local.id local.cat local.title local.desc local.stat local.target local.reward:{
+	local.i = level.coop_chal_count
+	level.coop_chal_id[local.i]     = local.id
+	level.coop_chal_cat[local.i]    = local.cat
+	level.coop_chal_title[local.i]  = local.title
+	level.coop_chal_desc[local.i]   = local.desc
+	level.coop_chal_stat[local.i]   = local.stat
+	level.coop_chal_target[local.i] = local.target
+	level.coop_chal_reward[local.i] = local.reward
+
+	if( level.coop_chal_statN[local.stat] == NIL ){ level.coop_chal_statN[local.stat] = 0 }
+	local.k = level.coop_chal_statN[local.stat]
+	level.coop_chal_statIdx[local.stat][local.k] = local.i
+	level.coop_chal_statN[local.stat] = local.k + 1
+
+	level.coop_chal_count = local.i + 1
+}end
+
+
+//=========================================================================
+// 30s autosave (plus flushes on completion and mission complete).
+//=========================================================================
+chal_autosave_loop:{
+	if( level.coop_chal_autosave == 1 ){ end }
+	level.coop_chal_autosave = 1
+	while( 1 ){
+		wait 30
+		waitthread chal_flush
+	}
+}end
+
+
+//=========================================================================
+// Ensure a player is identified + loaded. Reuses the XP id; derives it locally
+// if XP is off. Singleton per player (a bump can race the first load).
+//=========================================================================
+chal_ensure local.player:{
+	if( level.coop_chal_init != 1 ){ waitthread chal_init }
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_loaded"] == 1 ){ end }
+	if( local.player.flags["coop_chal_loading"] == 1 ){
+		while( local.player != NULL && local.player.flags["coop_chal_loading"] == 1 ){
+			wait 0.25
+		}
+		end
+	}
+	local.player.flags["coop_chal_loading"] = 1
+
+	// identity: reuse the XP id (waits out the guid). Harmless no-op if XP is disabled.
+	if( local.player.flags["coop_xp_id"] == NIL ){
+		waitthread coop_mod/xp.scr::xp_identify local.player
+	}
+	if( local.player == NULL ){ end }
+	local.id = local.player.flags["coop_xp_id"]
+	if( local.id == NIL || local.id == "" ){
+		// XP disabled or no id yet - derive the same identity standalone
+		local.id = local.player.coop_guid
+		if( local.id == NIL || local.id == "" ){ local.id = "n_" + local.player.netname }
+	}
+	if( local.id == NIL || local.id == "" ){
+		local.player.flags["coop_chal_loading"] = NIL
+		end
+	}
+	local.player.flags["coop_chal_id"] = local.id
+
+	// progress: session cvar first (survives map transitions), then the file
+	local.data = getcvar( "coop_chal_" + local.id )
+	if( local.data == "" ){
+		local.data = fs_read_content ( "coop_mod/save/chal_" + local.id + ".dat" )
+	}
+	if( local.data != NIL && local.data != "" ){
+		waitthread chal_deserialize local.player local.data
+	}
+
+	// unlocks: session cvar first, then the file
+	local.u = getcvar( "coop_unlocks_" + local.id )
+	if( local.u == "" ){
+		local.u = fs_read_content ( "coop_mod/save/unlocks_" + local.id + ".dat" )
+	}
+	if( local.u != NIL && local.u != "" ){
+		local.player.flags["coop_chal_unlocks"] = local.u
+	} else {
+		local.player.flags["coop_chal_unlocks"] = ""
+	}
+
+	// mark done flags for anything already complete (silent, no toast/regrant)
+	local.i = 0
+	while( local.i < level.coop_chal_count ){
+		local.cid = level.coop_chal_id[local.i]
+		local.p = local.player.flags["coop_chalP_" + local.cid]
+		if( local.p != NIL && local.p >= level.coop_chal_target[local.i] ){
+			local.player.flags["coop_chalD_" + local.cid] = 1
+		}
+		local.i++
+	}
+
+	local.player.flags["coop_chal_loaded"]  = 1
+	local.player.flags["coop_chal_loading"] = NIL
+
+	// publish this player's progress to their client's SAVED cvars so the disconnected menu
+	// Service Record (ui/coop_sr_*.urc per-category pages) can show last-known progress bars.
+	local.player thread chal_ui_export
+}end
+
+
+//=========================================================================
+// Parse "cid:progress|cid:progress|..." into per-challenge progress flags.
+//=========================================================================
+chal_deserialize local.player local.data:{
+	if( local.player == NULL ){ end }
+	if( local.data == NIL || local.data == "" ){ end }
+	local.field = ""
+	local.cid   = ""
+	local.mode  = 0		// 0 = reading cid, 1 = reading progress
+	local.i = 0
+	local.n = local.data.size
+	while( local.i < local.n ){
+		local.c = local.data[local.i]
+		if( local.c == ":" ){
+			local.cid   = local.field
+			local.field = ""
+			local.mode  = 1
+		} else if( local.c == "|" ){
+			if( local.cid != "" && local.field != "" && local.mode == 1 ){
+				local.player.flags["coop_chalP_" + local.cid] = int( local.field )
+			}
+			local.field = ""
+			local.cid   = ""
+			local.mode  = 0
+		} else {
+			local.field += local.c
+		}
+		local.i++
+	}
+	// trailing entry (no terminating "|")
+	if( local.cid != "" && local.field != "" && local.mode == 1 ){
+		local.player.flags["coop_chalP_" + local.cid] = int( local.field )
+	}
+}end
+
+
+//=========================================================================
+// Serialize a player's non-zero progress into "cid:progress|..."
+//=========================================================================
+chal_serialize local.player:{
+	local.out = ""
+	local.i = 0
+	while( local.i < level.coop_chal_count ){
+		local.cid = level.coop_chal_id[local.i]
+		local.p = local.player.flags["coop_chalP_" + local.cid]
+		if( local.p != NIL && local.p > 0 ){
+			if( local.out == "" ){
+				local.out = local.cid + ":" + local.p
+			} else {
+				local.out = local.out + "|" + local.cid + ":" + local.p
+			}
+		}
+		local.i++
+	}
+}end(local.out)
+
+
+//=========================================================================
+// Persist one player (session cvar + file).
+//=========================================================================
+chal_save_player local.player:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_id"] == NIL ){ end }
+	local.out = waitthread chal_serialize local.player
+	local.id = local.player.flags["coop_chal_id"]
+	setcvar ( "coop_chal_" + local.id ) local.out
+	fs_write_content ( "coop_mod/save/chal_" + local.id + ".dat" ) local.out
+}end
+
+
+//=========================================================================
+// Persist every loaded player.
+//=========================================================================
+chal_flush:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_chal_id"] != NIL ){
+			waitthread chal_save_player local.p
+			local.p thread chal_ui_export		// refresh the menu's last-known progress cvars
+		}
+		local.i++
+	}
+}end
+
+//=========================================================================
+// LAST-KNOWN PROGRESS BRIDGE: publish this player's per-challenge progress as a bucketed fill-bar
+// SHADER name into SAVED (archived) client cvars coop_uiB<index> (index = catalog order 0..count-1).
+// The disconnected menu (ui/coop_sr_*.urc per-category pages) binds each bar Label to its cvar via
+// linkcvar + linkcvartoshader, so it shows the player's real progress from their last session even
+// with no server/player present. Paced so the 61 stufftext setas never overflow the command buffer.
+//=========================================================================
+chal_ui_export:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.i = 0
+	local.pace = 0
+	while( local.i < level.coop_chal_count && self != NULL ){
+		waitthread chal_ui_writeOne self local.i
+		local.i++
+		local.pace++
+		if( local.pace >= 8 ){ local.pace = 0; waitframe }
+	}
+}end
+
+chal_ui_writeOne local.player local.i:{
+	if( local.player == NULL ){ end }
+	local.cid = level.coop_chal_id[local.i]
+	local.tgt = level.coop_chal_target[local.i]
+	local.p   = local.player.flags["coop_chalP_" + local.cid]
+	if( local.p == NIL ){ local.p = 0 }
+	if( local.player.flags["coop_chalD_" + local.cid] == 1 ){
+		local.player stufftext ( "seta coop_uiB" + local.i + " textures/hud/coop_bfd" )
+		local.player stufftext ( "seta coop_uiN" + local.i + " " + local.tgt + "/" + local.tgt )
+		end
+	}
+	local.b = 0
+	if( local.tgt > 0 ){ local.b = int( local.p * 10 / local.tgt ) }
+	if( local.b > 10 ){ local.b = 10 }
+	if( local.p > local.tgt ){ local.p = local.tgt }
+	local.player stufftext ( "seta coop_uiB" + local.i + " textures/hud/coop_bf" + local.b )
+	local.player stufftext ( "seta coop_uiN" + local.i + " " + local.p + "/" + local.tgt )
+}end
+
+
+//=========================================================================
+// THE progress entry point. Increments every challenge tracking local.stat.
+//=========================================================================
+chal_bump local.player local.stat local.amount:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.classname != "Player" ){ end }
+	if( local.amount == NIL || local.amount <= 0 ){ end }
+
+	waitthread chal_ensure local.player
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_id"] == NIL ){ end }
+
+	local.cnt = level.coop_chal_statN[local.stat]
+	if( local.cnt == NIL || local.cnt <= 0 ){ end }
+	local.j = 0
+	while( local.j < local.cnt ){
+		local.idx = level.coop_chal_statIdx[local.stat][local.j]
+		waitthread chal_apply local.player local.idx local.amount
+		local.j++
+	}
+}end
+
+
+//=========================================================================
+// Apply progress to one challenge index; clamp, mark done once, grant unlock.
+//=========================================================================
+chal_apply local.player local.idx local.amt:{
+	if( local.player == NULL ){ end }
+	local.cid  = level.coop_chal_id[local.idx]
+	local.dkey = "coop_chalD_" + local.cid
+	if( local.player.flags[local.dkey] == 1 ){ end }		// already complete
+
+	local.pkey = "coop_chalP_" + local.cid
+	local.p = local.player.flags[local.pkey]
+	if( local.p == NIL ){ local.p = 0 }
+	local.old = local.p
+	local.p = local.p + local.amt
+
+	local.tgt = level.coop_chal_target[local.idx]
+	if( local.p > local.tgt ){ local.p = local.tgt }
+	local.player.flags[local.pkey] = local.p
+
+	// quarter-progress popup: mini HD bar on the left at each 25/50/75% milestone (100% is
+	// covered by the CHALLENGE COMPLETE toast instead). Only for counters (target >= 4).
+	if( local.tgt >= 4 && local.p < local.tgt ){
+		if( int( local.p * 4 / local.tgt ) > int( local.old * 4 / local.tgt ) ){
+			thread chal_progress_popup local.player level.coop_chal_title[local.idx] local.p local.tgt
+		}
+	}
+
+	if( local.p >= local.tgt ){
+		local.player.flags[local.dkey] = 1
+		waitthread chal_grant local.player local.idx
+	}
+}end
+
+
+//=========================================================================
+// A challenge just completed: record the unlock, toast the player, persist.
+//=========================================================================
+chal_grant local.player local.idx:{
+	if( local.player == NULL ){ end }
+	local.reward = level.coop_chal_reward[local.idx]
+	local.title  = level.coop_chal_title[local.idx]
+	waitthread chal_add_unlock local.player local.reward
+	thread chal_notify local.player local.title
+	waitthread chal_save_player local.player
+}end
+
+
+//=========================================================================
+// Record an unlock id into the player's unlock set (dedup) + persist to the
+// companion cvar/file that a future loadout picker reads.
+//=========================================================================
+chal_add_unlock local.player local.reward:{
+	if( local.player == NULL ){ end }
+	if( local.reward == NIL || local.reward == "" ){ end }
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if( local.u == NIL ){ local.u = "" }
+
+	// membership test with delimiters so "bar" != "bar.tik" collisions can't happen
+	local.probe = "|" + local.reward + "|"
+	local.hay   = "|" + local.u + "|"
+	if( waitthread coop_mod/main.scr::containsText local.hay local.probe 0 ){ end }
+
+	if( local.u == "" ){ local.u = local.reward }
+	else { local.u = local.u + "|" + local.reward }
+	local.player.flags["coop_chal_unlocks"] = local.u
+
+	local.id = local.player.flags["coop_chal_id"]
+	if( local.id != NIL && local.id != "" ){
+		setcvar ( "coop_unlocks_" + local.id ) local.u
+		fs_write_content ( "coop_mod/save/unlocks_" + local.id + ".dat" ) local.u
+	}
+}end
+
+
+//=========================================================================
+// Team-wide bump (objectives / mission complete). Active players only.
+//=========================================================================
+chal_team_bump local.stat local.amount:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
+			waitthread chal_bump local.p local.stat local.amount
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// Award a campaign feat ONLY to active players who never went down THIS map.
+// dbno.scr (on DBNO entry) and player.scr (on death) stamp self.coop_wentDownMap
+// with the current level.coop_mapname; since that string differs on the next map,
+// the disqualification auto-resets per map with no explicit clear, and retries
+// within the same map stay disqualified. Used by the "no-down" campaign feats.
+//=========================================================================
+cc_award_clean local.stat:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 && local.p.coop_wentDownMap != level.coop_mapname ){
+			waitthread chal_bump local.p local.stat 1
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// Identify the killer's active weapon -> short id ("garand"/"thompson"/...).
+// Returns "" when holstered/unknown. Most-specific substrings first.
+//=========================================================================
+chal_weaponId local.player:{
+	local.wid = ""
+	if( local.player == NULL ){ end "" }
+	local.w = local.player.flags["coop_activeWeapon"]
+	if( local.w == NULL || local.w == NIL ){ end "" }
+	local.m = local.w.model
+	if( local.m == NIL || local.m == "" ){ end "" }
+
+	if( waitthread coop_mod/main.scr::containsText local.m "nagant_revolver" 0 ){ local.wid = "nagantrev" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "silencedpistol" 0 ){ local.wid = "silenced" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "nagant_sniper" 0 ){ local.wid = "mosinsniper" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "carcanosniper" 0 ){ local.wid = "carcanosniper" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "arisakasniper" 0 ){ local.wid = "arisakasniper" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "panzerschreck" 0 ){ local.wid = "panzerschreck" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "springfield" 0 ){ local.wid = "springfield" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "kar98sniper" 0 ){ local.wid = "kar98sniper" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "g43sniper" 0 ){ local.wid = "g43sniper" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "greasegun" 0 ){ local.wid = "greasegun" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "moschetto" 0 ){ local.wid = "moschetto" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "thompson" 0 ){ local.wid = "thompson" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "enfield" 0 ){ local.wid = "enfield" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "carcano" 0 ){ local.wid = "carcano" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "arisaka" 0 ){ local.wid = "arisaka" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "delisle" 0 ){ local.wid = "delisle" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "type100" 0 ){ local.wid = "type100" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "beretta" 0 ){ local.wid = "beretta" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "bar.tik" 0 ){ local.wid = "bar" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "bar_kun" 0 ){ local.wid = "bar" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "vickers" 0 ){ local.wid = "vickers" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "shotgun" 0 ){ local.wid = "shotgun" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "bazooka" 0 ){ local.wid = "bazooka" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "garand" 0 ){ local.wid = "garand" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "colt45" 0 ){ local.wid = "colt" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "webley" 0 ){ local.wid = "webley" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "welrod" 0 ){ local.wid = "welrod" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "kar98" 0 ){ local.wid = "kar98" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "mosin" 0 ){ local.wid = "mosin" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "l42a1" 0 ){ local.wid = "l42a1" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "luger" 0 ){ local.wid = "luger" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "nambu" 0 ){ local.wid = "nambu" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "30cal" 0 ){ local.wid = "thirtycal" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "breda" 0 ){ local.wid = "breda" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "mp44" 0 ){ local.wid = "stg44" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "mp40" 0 ){ local.wid = "mp40" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "sten" 0 ){ local.wid = "sten" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "ppsh" 0 ){ local.wid = "ppsh" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "tt33" 0 ){ local.wid = "tt33" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "mg42" 0 ){ local.wid = "mg42" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "piat" 0 ){ local.wid = "piat" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "g43" 0 ){ local.wid = "g43" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "svt" 0 ){ local.wid = "svt" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "p38" 0 ){ local.wid = "p38" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "ppk" 0 ){ local.wid = "ppk" }
+}end(local.wid)
+
+
+//=========================================================================
+// HOOK: AI killed. Threaded from aihandler.scr::addKillToPlayer.
+// Reclassifies the kill exactly like xp.scr::xp_ai_killed (headshot/wallbang/
+// melee/savior/long/blindfire/reinf/downed + means-of-death families) and the
+// killer's specific weapon. Every path is a threaded bump so a bug here can
+// never block the kill path.
+//=========================================================================
+chal_ai_killed local.victim local.killer:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.killer == NULL || local.killer.classname != "Player" ){ end }
+	if( local.victim == NULL ){ end }
+
+	waitthread chal_bump local.killer "kill" 1
+
+	// weapon mastery
+	local.wid = waitthread chal_weaponId local.killer
+	if( local.wid != "" ){ waitthread chal_bump local.killer ( "wpn_" + local.wid ) 1 }
+
+	// campaign feat "Sniper's Last Stand": sniper-rifle kills on Sniper Town (m5l1a)
+	if( level.coop_mapname == "m5l1a" && ( local.wid == "springfield" || local.wid == "kar98sniper" ) ){
+		waitthread chal_bump local.killer "cc_snipers_alley" 1
+	}
+
+	// pain-fact classification (mirrors xp.scr)
+	if( local.victim.fact != NIL && local.victim.fact != NULL ){
+		if( local.victim.fact.location != NIL && local.victim.fact.location >= 0 && local.victim.fact.location <= 2 ){
+			waitthread chal_bump local.killer "headshot" 1
+		}
+		local.mod = local.victim.fact.meansofdeath
+		if( local.mod == 26 ){ waitthread chal_bump local.killer "melee" 1 }			// MOD_BASH
+		if( local.mod == 14 ){ waitthread chal_bump local.killer "grenade" 1 }		// MOD_GRENADE
+		if( local.mod == 16 ){ waitthread chal_bump local.killer "rocket" 1 }			// MOD_ROCKET
+		if( local.victim.fact.enemyAtPain != NIL && local.victim.fact.enemyAtPain != NULL ){
+			if( local.victim.fact.enemyAtPain != local.killer && local.victim.fact.enemyAtPain.classname == "Player" ){
+				waitthread chal_bump local.killer "savior" 1
+			}
+		}
+	}
+
+	if( local.victim.coop_wallbang == 1 ){ waitthread chal_bump local.killer "wallbang" 1 }
+	if( vector_length( local.killer.origin - local.victim.origin ) > 2000 ){ waitthread chal_bump local.killer "longshot" 1 }
+	if( local.killer.coop_bf_t != NIL && (level.time - local.killer.coop_bf_t) < 0.75 ){ waitthread chal_bump local.killer "blindfire" 1 }
+	if( local.victim.coop_xpClass == "reinf" ){ waitthread chal_bump local.killer "reinf" 1 }
+	if( local.killer.flags["coop_dbno_active"] == 1 ){ waitthread chal_bump local.killer "downedkill" 1 }
+}end
+
+
+//=========================================================================
+// HOOK: Officer killed. Threaded from officer.scr::coop_officer_death_monitor.
+//=========================================================================
+chal_officer_killed local.officer:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.killer = NULL
+	if( local.officer != NULL && local.officer.fact != NIL && local.officer.fact != NULL ){
+		if( local.officer.fact.attacker != NULL && local.officer.fact.attacker.classname == "Player" ){
+			local.killer = local.officer.fact.attacker
+		}
+	}
+	if( local.killer == NULL ){ end }
+	waitthread chal_bump local.killer "officer" 1
+}end
+
+
+//=========================================================================
+// HOOK: support call. Threaded from officer.scr (airstrike) + paradrop.scr (reinforce).
+//=========================================================================
+chal_support_call local.player local.kind:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.kind == "airstrike" ){ waitthread chal_bump local.player "airstrike" 1 }
+	else if( local.kind == "reinforce" ){ waitthread chal_bump local.player "reinforce" 1 }
+}end
+
+
+//=========================================================================
+// HOOK: primary objective completed. Threaded from global/objectives.scr.
+// Skips the coop side-objective push (it pays via chal_radio_done) using the
+// same guard xp uses; one-shot per objective index per map.
+//=========================================================================
+chal_primary_done local.index:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( level.coop_xp_sideObjPush == 1 ){ end }
+	if( local.index == NIL ){ local.index = 0 }
+	if( level.coop_chal_objPaid[local.index] == 1 ){ end }
+	level.coop_chal_objPaid[local.index] = 1
+	waitthread chal_team_bump "objective" 1
+
+	// campaign feats keyed on (map, objective index). Central + parse-safe: every AA-style
+	// objective completion routes through here, so most feats need NO map-script edit.
+	waitthread cc_objFeat level.coop_mapname local.index
+}end
+
+
+//=========================================================================
+// Campaign-feat dispatch: award a feat when a specific objective completes on a
+// specific map. Keyed "map:index". No-down feats go through cc_award_clean; timed
+// / stealth feats add a guard. Indices verified against each map's add_objectives.
+// Maps whose objectives do NOT route through global/objectives.scr (SH/BT t*/e*
+// maps, the Omaha beach maps) are handled by their own map hooks, not here.
+//=========================================================================
+cc_objFeat local.map local.index:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	local.k = local.map + ":" + local.index
+	// --- Omaha / D-Day ---
+	if( local.k == "m3l1a:3" ){ waitthread cc_award_clean "cc_finest_hour" }			// bangalores, nobody down
+	else if( local.k == "m3l1a:1" ){ if( level.time - level.coop_mapStartTime < 90 ){ waitthread chal_team_bump "cc_longest_day" 1 } }	// reach shingle < 90s
+	else if( local.k == "m3l1b:3" ){ waitthread chal_team_bump "cc_pointe_du_hoc" 1 }	// all gun emplacements
+	else if( local.k == "m3l2:1" ){ waitthread cc_award_clean "cc_rangers_house" }		// clear house, nobody down
+	else if( local.k == "m3l2:6" ){ waitthread chal_team_bump "cc_rangers_flak" 1 }		// flak 88s airstrike
+	// --- Mission 1 ---
+	else if( local.k == "m1l1:4" ){ waitthread cc_award_clean "cc_torch" }				// hold reinforcements, nobody down
+	else if( local.k == "m1l3c:1" ){ waitthread chal_team_bump "cc_lights_out" 1 }
+	else if( local.k == "m1l3c:3" ){ waitthread chal_team_bump "cc_signal_fleet" 1 }
+	else if( local.k == "m1l2a:6" ){ waitthread chal_team_bump "cc_the_rescue" 1 }
+	// --- Mission 2 ---
+	else if( local.k == "m2l1:2" ){ waitthread chal_team_bump "cc_special_cargo" 1 }
+	else if( local.k == "m2l2a:2" ){ waitthread chal_team_bump "cc_naxos" 1 }
+	else if( local.k == "m2l2a:3" ){ waitthread chal_team_bump "cc_das_boot_stealth" 1 }	// reach 2nd U-boat (disguise/stealth level)
+	else if( local.k == "m2l3:2" ){ waitthread cc_award_clean "cc_end_of_line" }		// train station, whole squad up
+	// --- Mission 4 ---
+	else if( local.k == "m4l1:2" ){ waitthread chal_team_bump "cc_rough_landing" 1 }
+	// --- Mission 5 ---
+	else if( local.k == "m5l1b:4" ){ waitthread chal_team_bump "cc_king_tiger" 1 }
+	else if( local.k == "m5l3:4" ){ waitthread chal_team_bump "cc_the_bridge" 1 }
+	// --- Mission 6 ---
+	else if( local.k == "m6l1a:1" ){ waitthread chal_team_bump "cc_nordwind" 1 }
+	else if( local.k == "m6l2a:1" ){ if( level.alarmactive != 1 ){ waitthread chal_team_bump "cc_under_radar" 1 } }	// wire post undetected
+	else if( local.k == "m6l3d:2" ){ waitthread chal_team_bump "cc_gas_gas_gas" 1 }
+	// --- Spearhead ---
+	else if( local.k == "t1l2:1" ){ waitthread chal_team_bump "cc_nijmegen" 1 }			// both Flak 88s destroyed
+	else if( local.k == "t2l2:1" ){ waitthread chal_team_bump "cc_convoy" 1 }
+	else if( local.k == "t2l3:6" ){ waitthread cc_award_clean "cc_nuts" }				// Bastogne waves, nobody down
+	else if( local.k == "t3l1:7" ){ waitthread chal_team_bump "cc_berlin_safe" 1 }
+}end
+
+
+//=========================================================================
+// HOOK: radio side objective destroyed. Threaded from coop_mod/objectives.scr.
+//=========================================================================
+chal_radio_done:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( level.coop_chal_radioPaid == 1 ){ end }
+	level.coop_chal_radioPaid = 1
+	waitthread chal_team_bump "sideobj" 1
+}end
+
+
+//=========================================================================
+// HOOK: teammate revived a downed player. Threaded from dbno.scr.
+//=========================================================================
+chal_revive local.reviver:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.reviver == NULL ){ end }
+	waitthread chal_bump local.reviver "revive" 1
+}end
+
+
+//=========================================================================
+// HOOK: a PLAYER destroyed a drivable vehicle (tank/halftrack/armored car). Threaded from
+// coop_vehKill_monitor (which consumes the engine's per-map level.coop_vehKills counter set
+// in DrivableVehicle::Killed). Team-wide "vehicle" stat.
+//=========================================================================
+chal_vehicle_killed:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	waitthread chal_team_bump "vehicle" 1
+}end
+
+
+//=========================================================================
+// HOOK: an officer was blown up by his OWN reinforcements. Threaded from
+// officer.scr::coop_officer_death_monitor when the officer's death fact is an explosive
+// kill by a non-player AI. Team-wide (funny) one-shot.
+//=========================================================================
+chal_mein_kampf:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	waitthread chal_team_bump "cc_mein_kampf" 1
+}end
+
+
+//=========================================================================
+// Per-map monitor: the engine bumps level.coop_vehKills each time a player destroys a drivable
+// vehicle; award each increment once (challenge + XP). Started from chal_init (runs per map).
+//=========================================================================
+coop_vehKill_monitor:{
+	if( level.coop_vehKillMonRun == 1 ){ end }
+	level.coop_vehKillMonRun = 1
+	local.seen = 0
+	while( 1 ){
+		waitframe
+		local.n = level.coop_vehKills
+		if( local.n == NIL ){ local.n = 0 }
+		while( local.seen < local.n ){
+			local.seen++
+			waitthread chal_vehicle_killed
+			thread coop_mod/xp.scr::xp_vehicle_killed
+		}
+	}
+}end
+
+
+//=========================================================================
+// QUARTER-PROGRESS POPUP: a small HD bar on the LEFT edge with the challenge title + N/T,
+// shown when a counter challenge crosses 25/50/75% (100% is the CHALLENGE COMPLETE toast).
+// Per-player, gated by cvar coop_chalPopup. Draws once on slots 84-87 then a single fader
+// (coop_chalPopRun guard) handles the timed fade; a new milestone overwrites + resets the timer.
+//=========================================================================
+chal_progress_popup local.player local.title local.p local.tgt:{
+	if( local.player == NULL ){ end }
+	if( getcvar "coop_chalPopup" == "0" ){ end }
+
+	local.w = 150
+	local.fw = local.w
+	if( local.tgt > 0 ){ local.fw = int( local.w * local.p / local.tgt ) }
+	if( local.fw < 2 ){ local.fw = 2 }
+
+	// HD track = the rank-up bar's beveled brass-on-steel plate
+	ihuddraw_shader      local.player 84 "textures/hud/xpbar/xpbar_base"
+	ihuddraw_virtualsize local.player 84 1
+	ihuddraw_align       local.player 84 left top
+	ihuddraw_rect        local.player 84 18 209 local.w 14
+	ihuddraw_color       local.player 84 1 1 1
+	ihuddraw_alpha       local.player 84 0.95
+
+	// glossy brass fill (same xpbar_fill as the rank-up bar), inset in the plate
+	ihuddraw_shader      local.player 85 "textures/hud/xpbar/xpbar_fill"
+	ihuddraw_virtualsize local.player 85 1
+	ihuddraw_align       local.player 85 left top
+	ihuddraw_rect        local.player 85 22 212 local.fw 8
+	ihuddraw_color       local.player 85 0.98 0.85 0.5
+	ihuddraw_alpha       local.player 85 1
+
+	// title
+	ihuddraw_virtualsize local.player 86 1
+	ihuddraw_align       local.player 86 left top
+	ihuddraw_font        local.player 86 "verdana-12"
+	ihuddraw_color       local.player 86 1 0.90 0.60
+	ihuddraw_rect        local.player 86 18 195 0 0
+	ihuddraw_string      local.player 86 local.title
+	ihuddraw_alpha       local.player 86 1
+
+	// count N/T
+	ihuddraw_virtualsize local.player 87 1
+	ihuddraw_align       local.player 87 left top
+	ihuddraw_font        local.player 87 "verdana-12"
+	ihuddraw_color       local.player 87 0.85 0.87 0.95
+	ihuddraw_rect        local.player 87 174 209 0 0
+	ihuddraw_string      local.player 87 ( local.p + "/" + local.tgt )
+	ihuddraw_alpha       local.player 87 1
+
+	local.player playsound coop_ui_click
+	local.player.coop_chalPopUntil = level.time + 3.5
+	thread chal_progress_fade local.player
+}end
+
+chal_progress_fade local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.coop_chalPopRun == 1 ){ end }
+	local.player.coop_chalPopRun = 1
+	while( local.player != NULL && level.time < local.player.coop_chalPopUntil ){ wait 0.2 }
+	local.a = 10
+	while( local.a > 0 && local.player != NULL ){
+		local.f = local.a * 0.1
+		ihuddraw_alpha local.player 84 ( local.f * 0.85 )
+		ihuddraw_alpha local.player 85 local.f
+		ihuddraw_alpha local.player 86 local.f
+		ihuddraw_alpha local.player 87 local.f
+		local.a--
+		wait 0.05
+	}
+	if( local.player != NULL ){
+		ihuddraw_alpha local.player 84 0
+		ihuddraw_alpha local.player 85 0
+		ihuddraw_alpha local.player 86 0
+		ihuddraw_alpha local.player 87 0
+		local.player.coop_chalPopRun = NIL
+	}
+}end
+
+
+//=========================================================================
+// HOOK: mission complete. Threaded from missioncomplete.scr::main (before the
+// XP debrief, so it runs during the debrief's blocking waits and persists
+// before the level transition wipes state). Awards per-map + total-missions
+// (chapter/campaign) challenges to every active player.
+//=========================================================================
+chal_mission_complete local.mapname:{
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( level.coop_chal_missionPaid == 1 ){ end }
+	level.coop_chal_missionPaid = 1
+	if( local.mapname == NIL || local.mapname == "" ){ local.mapname = level.coop_mapname }
+	if( local.mapname != NIL && local.mapname != "" ){
+		waitthread chal_team_bump ( "map_" + local.mapname ) 1
+	}
+	waitthread chal_team_bump "missions" 1
+	waitthread chal_flush
+}end
+
+
+//=========================================================================
+// COMPLETION TOAST (slots 76 header, 77 title, 78 subtitle). Queued so several
+// completions in one frame show one at a time (never spammed).
+//=========================================================================
+chal_notify local.player local.title:{
+	if( local.player == NULL ){ end }
+	if( local.player.coop_chalTQN == NIL ){ local.player.coop_chalTQN = 0 }
+	local.n = local.player.coop_chalTQN
+	local.player.coop_chalTitleQ[local.n] = local.title
+	local.player.coop_chalTQN = local.n + 1
+	thread chal_toast_pump local.player
+}end
+
+chal_toast_pump local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.coop_chalTRun == 1 ){ end }
+	local.player.coop_chalTRun = 1
+	local.i = 0
+	while( local.player != NULL && local.i < local.player.coop_chalTQN ){
+		local.title = local.player.coop_chalTitleQ[local.i]
+		waitthread chal_toast_show local.player local.title
+		local.i++
+	}
+	if( local.player != NULL ){ local.player.coop_chalTRun = NIL }
+}end
+
+chal_toast_show local.player local.title:{
+	if( local.player == NULL ){ end }
+
+	ihuddraw_virtualsize local.player 76 1
+	ihuddraw_align       local.player 76 center top
+	ihuddraw_font        local.player 76 "facfont-20"
+	ihuddraw_color       local.player 76 1 0.85 0.3
+	ihuddraw_rect        local.player 76 0 96 0 0
+	ihuddraw_string      local.player 76 "CHALLENGE COMPLETE"
+	ihuddraw_alpha       local.player 76 1
+
+	ihuddraw_virtualsize local.player 77 1
+	ihuddraw_align       local.player 77 center top
+	ihuddraw_font        local.player 77 "handle-23"
+	ihuddraw_color       local.player 77 1 1 1
+	ihuddraw_rect        local.player 77 0 120 0 0
+	ihuddraw_string      local.player 77 local.title
+	ihuddraw_alpha       local.player 77 1
+
+	ihuddraw_virtualsize local.player 78 1
+	ihuddraw_align       local.player 78 center top
+	ihuddraw_font        local.player 78 "verdana-12"
+	ihuddraw_color       local.player 78 0.8 0.85 0.95
+	ihuddraw_rect        local.player 78 0 146 0 0
+	ihuddraw_string      local.player 78 "New Loadout Unlock"
+	ihuddraw_alpha       local.player 78 1
+
+	local.player playsound coop_ui_click
+
+	wait 4
+
+	local.a = 9
+	while( local.a > 0 && local.player != NULL ){
+		local.f = local.a * 0.1
+		ihuddraw_alpha local.player 76 local.f
+		ihuddraw_alpha local.player 77 local.f
+		ihuddraw_alpha local.player 78 local.f
+		local.a--
+		wait 0.05
+	}
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 76 0
+		ihuddraw_alpha  local.player 77 0
+		ihuddraw_alpha  local.player 78 0
+		ihuddraw_string local.player 76 ""
+		ihuddraw_string local.player 77 ""
+		ihuddraw_string local.player 78 ""
+	}
+}end
+
+
+//=========================================================================
+// REVIEW: print the full challenge list to the player's console, grouped by
+// category, with [progress/target] and DONE/locked. Reached via the name-append
+// bind (index 34, ",chx"). Threaded from player.scr::playerNameCommand.
+//=========================================================================
+chal_review local.player:{
+	if( level.coop_chal_init != 1 ){ waitthread chal_init }
+	if( local.player == NULL ){ end }
+	if( level.coop_chal_enabled != 1 ){
+		local.player iprint "Challenges are disabled (coop_challenges 0)." 1
+		end
+	}
+	waitthread chal_ensure local.player
+	if( local.player == NULL ){ end }
+
+	local.done = 0
+	local.tot  = level.coop_chal_count
+	local.i = 0
+	while( local.i < local.tot ){
+		local.cid = level.coop_chal_id[local.i]
+		if( local.player.flags["coop_chalD_" + local.cid] == 1 ){ local.done++ }
+		local.i++
+	}
+
+	waitthread chal_print local.player "^5======== COOP CHALLENGES ========"
+	waitthread chal_print local.player ( "Completed: " + local.done + " / " + local.tot + "   (open with the console key to read)" )
+
+	local.c = 0
+	while( local.c < level.coop_chal_catN ){
+		local.cat = level.coop_chal_catOrder[local.c]
+		waitthread chal_print local.player ( "^3-- " + level.coop_chal_catLabel[local.cat] + " --" )
+		local.i = 0
+		while( local.i < local.tot && local.player != NULL ){
+			if( level.coop_chal_cat[local.i] == local.cat ){
+				local.cid = level.coop_chal_id[local.i]
+				local.tgt = level.coop_chal_target[local.i]
+				local.p = local.player.flags["coop_chalP_" + local.cid]
+				if( local.p == NIL ){ local.p = 0 }
+				local.title = level.coop_chal_title[local.i]
+				if( local.player.flags["coop_chalD_" + local.cid] == 1 ){
+					waitthread chal_print local.player ( "  ^2[X]^7 " + local.title + "  (" + local.tgt + "/" + local.tgt + ")  unlock: " + level.coop_chal_reward[local.i] )
+				} else {
+					waitthread chal_print local.player ( "  [ ] " + local.title + "  (" + local.p + "/" + local.tgt + ")  " + level.coop_chal_desc[local.i] )
+				}
+			}
+			local.i++
+		}
+		local.c++
+	}
+	waitthread chal_print local.player "^5================================="
+}end
+
+// one review line to the player's console (echo) + server log; paced so the
+// client's reliable-command buffer never overflows on a 60+ line dump.
+chal_print local.player local.text:{
+	println( local.text )
+	if( local.player != NULL ){
+		local.player stufftext ( "echo " + local.text + "\n" )
+	}
+	wait 0.03
+}end
+
+
+//=========================================================================
+// [303] CHALLENGES MENU - on-screen Service Record panel (ihuddraw slots
+// 150-174; all >=100 so the coop HUD auto-fade leaves them alone). Reached
+// via the same "Coop: Challenges" bind (player.scr index 34). Each press
+// cycles to the next CATEGORY page; pressing past the last page closes it.
+// Rewards are intentionally NOT drawn yet (being revisited). Auto-closes
+// after 20s with no further input.
+//=========================================================================
+chal_menu local.player:{
+	if( level.coop_chal_init != 1 ){ waitthread chal_init }
+	if( local.player == NULL ){ end }
+	if( level.coop_chal_enabled != 1 ){
+		local.player iprint "Challenges are disabled (coop_challenges 0)." 1
+		end
+	}
+	waitthread chal_ensure local.player
+	if( local.player == NULL ){ end }
+
+	local.pg = local.player.flags["coop_chalMenuPage"]
+	if( local.pg == NIL ){ local.pg = 0 }
+	local.pg++
+	if( local.pg > level.coop_chal_pageN ){ local.pg = 0 }
+	local.player.flags["coop_chalMenuPage"] = local.pg
+
+	if( local.pg == 0 ){
+		waitthread chal_menu_clear local.player
+		end
+	}
+
+	local.tok = local.player.flags["coop_chalMenuTok"]
+	if( local.tok == NIL ){ local.tok = 0 }
+	local.tok++
+	local.player.flags["coop_chalMenuTok"] = local.tok
+
+	waitthread chal_menu_draw local.player local.pg
+	local.player playsound coop_ui_click
+	local.player thread chal_menu_autoclose local.tok
+}end
+
+//=========================================================================
+// Draw one category page into the fixed slot block.
+//=========================================================================
+chal_menu_draw local.player local.pg:{
+	if( local.player == NULL ){ end }
+	local.ci   = local.pg - 1
+	local.cat  = level.coop_chal_pageCat[local.ci]
+	local.roff = level.coop_chal_pageOff[local.ci]
+	local.rsub = level.coop_chal_pageSub[local.ci]
+	local.rsubN= level.coop_chal_pageSubN[local.ci]
+
+	// completed tally across ALL challenges (header readout)
+	local.done = 0
+	local.tot  = level.coop_chal_count
+	local.i = 0
+	while( local.i < local.tot ){
+		if( local.player.flags["coop_chalD_" + level.coop_chal_id[local.i]] == 1 ){ local.done++ }
+		local.i++
+	}
+
+	// full-screen dim
+	ihuddraw_shader      local.player 150 "textures/mohmenu/black.tga"
+	ihuddraw_virtualsize local.player 150 1
+	ihuddraw_align       local.player 150 left top
+	ihuddraw_rect        local.player 150 0 0 640 480
+	ihuddraw_color       local.player 150 0 0 0
+	ihuddraw_alpha       local.player 150 0.55
+
+	// designed Service Record panel: dark leather + beveled brass frame + corner rivets + header
+	// nameplate + baked divider (one texture; replaces the old flat border/panel/divider rects)
+	ihuddraw_shader      local.player 151 "textures/hud/coop_chal_panel"
+	ihuddraw_virtualsize local.player 151 1
+	ihuddraw_align       local.player 151 left top
+	ihuddraw_rect        local.player 151 140 58 360 360
+	ihuddraw_color       local.player 151 1 1 1
+	ihuddraw_alpha       local.player 151 1
+	ihuddraw_alpha       local.player 152 0
+	ihuddraw_string      local.player 152 ""
+
+	// title "SERVICE RECORD" is now BAKED into the panel art (perfectly centered on the nameplate -
+	// avoids the engine's ultrawide center-align drift where text left-anchors at screen center).
+	ihuddraw_alpha  local.player 153 0
+	ihuddraw_string local.player 153 ""
+
+	// subtitle: category + page + completed. LEFT-aligned, centered on the panel (320) by an estimated
+	// string width (the engine's center-align left-anchors text on non-4:3 screens, so we do it manually).
+	local.sub = level.coop_chal_catLabel[local.cat]
+	if( local.rsubN > 1 ){ local.sub = local.sub + " (" + local.rsub + "/" + local.rsubN + ")" }
+	local.sub = local.sub + "   [ " + local.pg + " / " + level.coop_chal_pageN + " ]   COMPLETED " + local.done + " / " + local.tot
+	local.subx = 320 - local.sub.size * 2.8
+	ihuddraw_virtualsize local.player 154 1
+	ihuddraw_align       local.player 154 left top
+	ihuddraw_font        local.player 154 "verdana-12"
+	ihuddraw_color       local.player 154 0.87 0.8 0.64
+	ihuddraw_rect        local.player 154 local.subx 102 0 0
+	ihuddraw_string      local.player 154 local.sub
+	ihuddraw_alpha       local.player 154 1
+
+	// divider is baked into the panel art now
+	ihuddraw_alpha  local.player 155 0
+	ihuddraw_string local.player 155 ""
+
+	// rows.  PACED: in MP every ihuddraw call is a CGM network message, and ~4 elements/row x 18 rows
+	// overflows one frame's snapshot buffer (drops the last rows). A waitframe every few rows keeps each
+	// frame's CGM count safe, so the whole list actually reaches the client (host + remote).
+	local.r = 0
+	local.seen = 0
+	local.i = 0
+	local.pace = 0
+	while( local.i < local.tot ){
+		if( level.coop_chal_cat[local.i] == local.cat ){
+			local.seen++
+			if( local.seen > local.roff && local.r < 18 ){
+			local.slot = 156 + local.r
+			local.cid  = level.coop_chal_id[local.i]
+			local.tgt  = level.coop_chal_target[local.i]
+			local.p    = local.player.flags["coop_chalP_" + local.cid]
+			if( local.p == NIL ){ local.p = 0 }
+			if( local.p > local.tgt ){ local.p = local.tgt }
+			local.dn = 0
+			if( local.player.flags["coop_chalD_" + local.cid] == 1 ){ local.dn = 1 }
+			local.y   = 122 + local.r * 13
+			local.bbg = 196 + local.r
+			local.bfl = 214 + local.r
+			local.bct = 232 + local.r
+
+			// remember this row's description (how-to-earn) + where the TITLE text ends (x), so the
+			// lobbyui hover tooltip only triggers over the challenge title itself, not the whole row.
+			local.player.coop_uiRowDesc[local.r]    = level.coop_chal_desc[local.i]
+			local.player.coop_uiRowNameEnd[local.r] = 160 + ( level.coop_chal_title[local.i].size + 5 ) * 6
+
+			// challenge name
+			ihuddraw_virtualsize local.player local.slot 1
+			ihuddraw_align       local.player local.slot left top
+			ihuddraw_font        local.player local.slot "verdana-12"
+			ihuddraw_rect        local.player local.slot 160 local.y 0 0
+			if( local.dn == 1 ){
+				ihuddraw_color  local.player local.slot 0.5 0.85 0.4
+				ihuddraw_string local.player local.slot ( "[X]  " + level.coop_chal_title[local.i] )
+			} else {
+				ihuddraw_color  local.player local.slot 0.88 0.86 0.78
+				ihuddraw_string local.player local.slot ( "[  ]  " + level.coop_chal_title[local.i] )
+			}
+			ihuddraw_alpha local.player local.slot 1
+
+			// progress bar track
+			ihuddraw_shader      local.player local.bbg "textures/hud/coop_bar_white.tga"
+			ihuddraw_virtualsize local.player local.bbg 1
+			ihuddraw_align       local.player local.bbg left top
+			ihuddraw_rect        local.player local.bbg 346 ( local.y + 3 ) 78 6
+			ihuddraw_color       local.player local.bbg 0.12 0.09 0.05
+			ihuddraw_alpha       local.player local.bbg 0.8
+
+			// progress bar fill ( width = 78 * progress / target ) - glossy xpbar fill (same as the rank-up bar)
+			local.fw = 78 * local.p / local.tgt
+			ihuddraw_shader      local.player local.bfl "textures/hud/xpbar/xpbar_fill"
+			ihuddraw_virtualsize local.player local.bfl 1
+			ihuddraw_align       local.player local.bfl left top
+			ihuddraw_rect        local.player local.bfl 346 ( local.y + 3 ) local.fw 6
+			if( local.dn == 1 ){
+				ihuddraw_color local.player local.bfl 0.6 0.98 0.5
+			} else {
+				ihuddraw_color local.player local.bfl 0.98 0.85 0.5
+			}
+			if( local.fw > 0 ){ ihuddraw_alpha local.player local.bfl 1 } else { ihuddraw_alpha local.player local.bfl 0 }
+
+			// progress count
+			ihuddraw_virtualsize local.player local.bct 1
+			ihuddraw_align       local.player local.bct left top
+			ihuddraw_font        local.player local.bct "verdana-12"
+			ihuddraw_color       local.player local.bct 0.74 0.68 0.54
+			ihuddraw_rect        local.player local.bct 432 local.y 0 0
+			ihuddraw_string      local.player local.bct ( local.p + " / " + local.tgt )
+			ihuddraw_alpha       local.player local.bct 1
+
+			local.r++
+			local.pace++
+			if( local.pace >= 4 ){
+				local.pace = 0
+				waitframe
+				if( local.player == NULL ){ end }
+			}
+			}
+		}
+		local.i++
+	}
+	local.player.coop_uiRowN = local.r		// rows on this page - lobbyui.scr hover-tests against them
+
+	// blank unused row slots (name 156.., bar-bg 196.., bar-fill 214.., count 232..)
+	while( local.r < 18 ){
+		local.slot = 156 + local.r
+		ihuddraw_string local.player local.slot ""
+		ihuddraw_alpha  local.player local.slot 0
+		ihuddraw_alpha  local.player ( 196 + local.r ) 0
+		ihuddraw_alpha  local.player ( 214 + local.r ) 0
+		ihuddraw_string local.player ( 232 + local.r ) ""
+		ihuddraw_alpha  local.player ( 232 + local.r ) 0
+		local.r++
+	}
+
+	// footer hint (keyboard view; the clickable lobby view hides this and shows PREV/NEXT/CLOSE)
+	ihuddraw_virtualsize local.player 174 1
+	ihuddraw_align       local.player 174 left top
+	ihuddraw_font        local.player 174 "verdana-12"
+	ihuddraw_color       local.player 174 0.55 0.48 0.36
+	ihuddraw_rect        local.player 174 188 398 0 0
+	ihuddraw_string      local.player 174 "Press your Challenges key again for next page"
+	ihuddraw_alpha       local.player 174 1
+}end
+
+//=========================================================================
+// Hide the whole panel.
+//=========================================================================
+chal_menu_clear local.player:{
+	if( local.player == NULL ){ end }
+	local.s = 150
+	while( local.s <= 174 ){
+		ihuddraw_alpha  local.player local.s 0
+		ihuddraw_string local.player local.s ""
+		local.s++
+	}
+	// progress-bar tracks/fills/counts (196..249)
+	local.s = 196
+	while( local.s <= 249 ){
+		ihuddraw_alpha  local.player local.s 0
+		ihuddraw_string local.player local.s ""
+		local.s++
+	}
+}end
+
+//=========================================================================
+// Auto-close guard: if no further page press within 20s, hide the panel.
+//=========================================================================
+chal_menu_autoclose local.tok:{
+	wait 20
+	if( self == NULL ){ end }
+	if( self.flags["coop_chalMenuTok"] != local.tok ){ end }
+	if( self.flags["coop_chalMenuPage"] == 0 ){ end }
+	self.flags["coop_chalMenuPage"] = 0
+	waitthread chal_menu_clear self
+}end

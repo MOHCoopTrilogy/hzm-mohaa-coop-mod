@@ -18,6 +18,11 @@ coop_readyGateStart:{
 	level.coop_readyGateActive = 1
 	level.coop_readyGateDone = 0
 
+	// DEBUG (temporary) - confirms the gate actually starts during a briefing, and shows the gametype +
+	// player count. If you DON'T see this line on a briefing screen, briefingReadyGate never ran (gametype
+	// path); if you DO, the gate is running and the issue is downstream. Remove once the briefing gate is verified.
+	iprintlnbold ( "^3[coop] ready-gate START  players=" + $player.size + "  gametype=" + level.gametype )
+
 	thread coop_readyGateHud
 
 	while( level.coop_readyGateActive == 1 ){
@@ -90,6 +95,10 @@ coop_readyGatePoll:{
 //=========================================================================
 coop_readyGateHud:{
 //=========================================================================
+	iprintlnbold "^2[coop] gateHud thread running"		// DEBUG (temporary)
+	// Same ready-up presentation as the pre-mission lobby: a top prompt telling players HOW to ready up,
+	// plus the bottom-left roster (rank emblem + name + green checkmark once readied). Uses ihuddraw slots
+	// 100-116 (>=100 so the HUD-fade leaves them fully on); coop_gateReady is this gate's per-player flag.
 	while( level.coop_readyGateActive == 1 ){
 		local.n = 0
 		local.r = 0
@@ -99,20 +108,157 @@ coop_readyGateHud:{
 			local.n = local.n + 1
 			if( local.p.flags["coop_gateReady"] == 1 ){ local.r = local.r + 1 }
 		}
+
+		// TOP prompt (how to ready up) + squad tally - centred near the top, mirrors the lobby's "F Ready Up"
 		for( local.v = 1; local.v <= $player.size; local.v++ ){
 			local.viewer = $player[local.v]
 			if( local.viewer == NULL ){ continue }
+
+			ihuddraw_virtualsize local.viewer 116 1
+			ihuddraw_align local.viewer 116 center top
+			ihuddraw_rect local.viewer 116 0 20 0 0
+			ihuddraw_font local.viewer 116 "verdana-14"
+			ihuddraw_string local.viewer 116 "Press  F  ( [Use] )  to Ready Up"
+			ihuddraw_color local.viewer 116 1 1 0.55
+			ihuddraw_alpha local.viewer 116 1
+
 			ihuddraw_virtualsize local.viewer 115 1
-			ihuddraw_align local.viewer 115 center bottom
-			ihuddraw_rect local.viewer 115 0 458 640 0
-			ihuddraw_font local.viewer 115 "verdana-14"
-			ihuddraw_string local.viewer 115 ( "Press [Use] to skip briefing    ( " + local.r + " / " + local.n + " ready )" )
-			ihuddraw_color local.viewer 115 1 1 0.6
+			ihuddraw_align local.viewer 115 center top
+			ihuddraw_rect local.viewer 115 0 38 0 0
+			ihuddraw_font local.viewer 115 "verdana-12"
+			ihuddraw_string local.viewer 115 ( "The briefing begins when the whole squad is ready    ( " + local.r + " / " + local.n + " )" )
+			ihuddraw_color local.viewer 115 0.85 0.85 0.85
 			ihuddraw_alpha local.viewer 115 1
 		}
-		wait 0.3
+
+		// bottom-left ROSTER: rank emblem + clean name + green checkmark (identical to lobby.scr::lobbyRoster)
+		for( local.p = 1; local.p <= 4; local.p++ ){
+			local.rankSlot = 100 + ( ( local.p - 1 ) * 3 )
+			local.nameSlot = local.rankSlot + 1
+			local.chkSlot  = local.rankSlot + 2
+			local.ly = 410 + ( ( local.p - 1 ) * 15 )
+
+			local.pl = NULL
+			if( local.p <= $player.size ){ local.pl = $player[local.p] }
+
+			if( local.pl == NULL ){
+				for( local.v = 1; local.v <= $player.size; local.v++ ){
+					if( $player[local.v] != NULL ){
+						ihuddraw_alpha $player[local.v] local.rankSlot 0
+						ihuddraw_alpha $player[local.v] local.nameSlot 0
+						ihuddraw_alpha $player[local.v] local.chkSlot 0
+					}
+				}
+				continue
+			}
+
+			local.rank = local.pl.flags["coop_xp_rank"]
+			if( local.rank == NIL ){ local.rank = 0 }
+			local.rn = local.rank
+			if( local.rn < 10 ){ local.rn = "0" + local.rn }
+			local.nm = waitthread game.player::playerCleanName local.pl.netname
+			local.rdy = local.pl.flags["coop_gateReady"]
+
+			local.nmlen = local.nm.size
+			if( local.nmlen == NIL ){ local.nmlen = 0 }
+			local.nmw = local.nmlen * 6.5
+			local.nmw = int( local.nmw )
+			local.chkX = local.nmw + 29
+			if( local.chkX < 40 ){ local.chkX = 40 }
+			if( local.chkX > 600 ){ local.chkX = 600 }
+
+			for( local.v = 1; local.v <= $player.size; local.v++ ){
+				local.viewer = $player[local.v]
+				if( local.viewer == NULL ){ continue }
+
+				ihuddraw_virtualsize local.viewer local.rankSlot 1
+				ihuddraw_align local.viewer local.rankSlot left top
+				ihuddraw_rect local.viewer local.rankSlot 8 local.ly 12 12
+				ihuddraw_shader local.viewer local.rankSlot ( "textures/hud/coop_rank_" + local.rn )
+				ihuddraw_color local.viewer local.rankSlot 1 1 1
+				ihuddraw_alpha local.viewer local.rankSlot 1
+
+				ihuddraw_virtualsize local.viewer local.nameSlot 1
+				ihuddraw_align local.viewer local.nameSlot left top
+				ihuddraw_rect local.viewer local.nameSlot 23 ( local.ly + 1 ) 0 0
+				ihuddraw_font local.viewer local.nameSlot "verdana-12"
+				ihuddraw_string local.viewer local.nameSlot local.nm
+				ihuddraw_color local.viewer local.nameSlot 1 1 1
+				ihuddraw_alpha local.viewer local.nameSlot 1
+
+				if( local.rdy == 1 ){
+					ihuddraw_virtualsize local.viewer local.chkSlot 1
+					ihuddraw_align local.viewer local.chkSlot left top
+					ihuddraw_rect local.viewer local.chkSlot local.chkX local.ly 11 11
+					ihuddraw_shader local.viewer local.chkSlot "textures/hud/coop_ready_check"
+					ihuddraw_color local.viewer local.chkSlot 1 1 1
+					ihuddraw_alpha local.viewer local.chkSlot 1
+				} else {
+					ihuddraw_alpha local.viewer local.chkSlot 0
+				}
+			}
+		}
+		// BRIEFING overlay bridge: the ihuddraw roster above is HIDDEN behind the briefing's fullscreen menu
+		// (bgfill), so mirror the roster into per-client cvars that ui/missionbriefingback.inc reads (UI layer,
+		// on top). Pushed with `set` (filter allows user-created cvars) and ONLY on change (coop_gateSet caches
+		// last-sent) so the reliable-command buffer never floods. Harmless in the lobby (nothing reads these there).
+		for( local.v = 1; local.v <= $player.size; local.v++ ){
+			local.viewer = $player[local.v]
+			if( local.viewer == NULL ){ continue }
+			waitthread coop_gateSet local.viewer "coop_gate_active" 1
+			waitthread coop_gateSet local.viewer "coop_gate_tally" ( "Squad ready:   " + local.r + " / " + local.n )
+			for( local.s = 1; local.s <= 4; local.s++ ){
+				local.sp = NULL
+				if( local.s <= $player.size ){ local.sp = $player[local.s] }
+				if( local.sp == NULL || local.sp.dmteam == "spectator" ){
+					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 0
+					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) 0
+					continue
+				}
+				local.srank = local.sp.flags["coop_xp_rank"]
+				if( local.srank == NIL ){ local.srank = 0 }
+				if( local.srank < 10 ){ local.srank = "0" + local.srank }
+				local.snm = waitthread game.player::playerCleanName local.sp.netname
+				if( local.snm == NIL ){ local.snm = local.sp.netname }
+				local.srdy = local.sp.flags["coop_gateReady"]
+				if( local.srdy != 1 ){ local.srdy = 0 }
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 1
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s ) local.snm
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "r" ) ( "textures/hud/coop_rank_" + local.srank )
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) local.srdy
+			}
+		}
+		wait 0.4
 	}
+	// teardown: wipe every slot we own (roster 100-114 + prompt 115/116) on all viewers
 	for( local.v = 1; local.v <= $player.size; local.v++ ){
-		if( $player[local.v] != NULL ){ ihuddraw_alpha $player[local.v] 115 0 }
+		if( $player[local.v] == NULL ){ continue }
+		waitthread coop_gateSet $player[local.v] "coop_gate_active" 0
+		for( local.s = 100; local.s <= 116; local.s++ ){
+			ihuddraw_alpha $player[local.v] local.s 0
+		}
 	}
+}end
+
+//=========================================================================
+// coop_gateSet local.gv local.gc local.gx  - push a single client cvar for the briefing ready overlay,
+// but ONLY when the value changed since we last sent it to this viewer (cached in gv.flags["gu_"+name]).
+// The value is quoted so player names with spaces survive the `set`. Uses plain `set` (not seta) so the
+// servercmd filter permits it as a user-created cvar.
+//=========================================================================
+coop_gateSet local.gv local.gc local.gx:{
+//=========================================================================
+	if( local.gv == NULL ){ end }
+	local.gukey = "gu_" + local.gc
+	// change-tracking: skip only if we ALREADY sent this exact value. MUST check NIL explicitly - a raw
+	// `flags[key] != local.gx` compares NIL(unset) vs e.g. 1, which GameScript does NOT treat as "changed",
+	// so the very first push was being skipped and the cvar was never created (that's why the briefing gate
+	// ran but coop_gate_* stayed "does not exist"). This matches the itemhandler/xp `!= NIL` pattern.
+	if( local.gv.flags[local.gukey] != NIL ){
+		if( local.gv.flags[local.gukey] == local.gx ){ end }
+	}
+	local.gv.flags[local.gukey] = local.gx
+	// DEBUG (temporary): confirm the send is actually reached for the master flag
+	if( local.gc == "coop_gate_active" ){ iprintlnbold ( "^5[coop] gateSet SEND active=" + local.gx ) }
+	local.gv stufftext ( "set " + local.gc + " \"" + local.gx + "\"" )
 }end

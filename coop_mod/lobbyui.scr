@@ -1,0 +1,233 @@
+//=========================================================================
+// [304] CLICKABLE LOBBY UI - a mouse cursor + button framework for the live
+// lobby, the foundation for challenges (now) and loadout / skill trees (later).
+//
+// The engine (Player::TickCoopLobbyCursor, enabled by "coop_lobbycursor 1")
+// turns the frozen lobby player's mouse into self.coop_lobbyCurX / coop_lobbyCurY
+// (virtual 640x480) + self.coop_lobbyClick (1 on a left-click edge). This script
+// draws the cursor, draws a registered set of buttons, hit-tests the cursor
+// against them, highlights the hovered one, and dispatches its id on click.
+//
+// ihuddraw slots: cursor 178-179, buttons 180..195 (bg+label per button, 8 max).
+// The challenges panel it opens lives in challenges.scr (slots 150-174).
+// Gate cvar: coop_lobbyClickUI (default 1).
+//=========================================================================
+
+//=========================================================================
+// self = player. Start the clickable UI for this lobby player.
+//=========================================================================
+lobbyui_start:{
+	if( getcvar( "coop_lobbyClickUI" ) == "0" ){ end }
+	if( self.coop_lobbyUiOn == 1 ){ end }
+	self.coop_lobbyUiOn  = 1
+	self.coop_lobbyClick = 0
+	self.coop_uiChalPage = 0
+	self coop_lobbycursor 1
+	waitthread lobbyui_setDefault self
+	self thread lobbyui_loop
+}end
+
+//=========================================================================
+// self = player. Stop + hide everything (call when leaving the lobby).
+//=========================================================================
+lobbyui_stop:{
+	self.coop_lobbyUiOn = 0
+	self coop_lobbycursor 0
+	waitthread lobbyui_clear self
+	ihuddraw_alpha self 251 0
+	ihuddraw_alpha self 252 0
+	ihuddraw_alpha self 253 0
+	if( self.coop_uiChalPage != 0 ){
+		waitthread coop_mod/challenges.scr::chal_menu_clear self
+		self.coop_uiChalPage = 0
+	}
+}end
+
+//=========================================================================
+// Button registry (arrays on the player). Default set = one CHALLENGES button.
+//=========================================================================
+lobbyui_setDefault local.player:{
+	waitthread lobbyui_clear local.player
+	waitthread lobbyui_add local.player "chal_open" 244 447 152 21 "SERVICE RECORD"
+}end
+
+lobbyui_clear local.player:{
+	// blank every possible button slot (bg + label), then reset the count
+	local.i = 0
+	while( local.i < 8 ){
+		local.s = 180 + local.i * 2
+		ihuddraw_alpha  local.player local.s 0
+		ihuddraw_string local.player local.s ""
+		ihuddraw_alpha  local.player ( local.s + 1 ) 0
+		ihuddraw_string local.player ( local.s + 1 ) ""
+		local.i++
+	}
+	local.player.coop_uiN = 0
+}end
+
+lobbyui_add local.player local.id local.x local.y local.w local.h local.label:{
+	local.i = local.player.coop_uiN
+	if( local.i == NIL ){ local.i = 0 }
+	if( local.i >= 8 ){ end }
+	local.player.coop_uiId[local.i]    = local.id
+	local.player.coop_uiX[local.i]     = local.x
+	local.player.coop_uiY[local.i]     = local.y
+	local.player.coop_uiW[local.i]     = local.w
+	local.player.coop_uiH[local.i]     = local.h
+	local.player.coop_uiLabel[local.i] = local.label
+	local.player.coop_uiN = local.i + 1
+}end
+
+//=========================================================================
+// self = player. Per-frame: draw cursor, draw + hover buttons, handle click.
+//=========================================================================
+lobbyui_loop:{
+	while( self != NULL && self.coop_lobbyUiOn == 1 ){
+		local.cx = self.coop_lobbyCurX
+		local.cy = self.coop_lobbyCurY
+		if( local.cx == NIL ){ local.cx = 320 }
+		if( local.cy == NIL ){ local.cy = 240 }
+
+		// modern brass arrow cursor - slot 253 (top of everything: panel 150-174, bars 196-249, buttons
+		// 180-195, tooltip 251-252). Smaller now (13px). Higher slot = drawn last = on top.
+		ihuddraw_shader      self 253 "textures/hud/coop_cursor"
+		ihuddraw_virtualsize self 253 1
+		ihuddraw_align       self 253 left top
+		ihuddraw_rect        self 253 ( local.cx - 1 ) ( local.cy - 1 ) 13 13
+		ihuddraw_color       self 253 1 1 1
+		ihuddraw_alpha       self 253 1
+
+		local.hover = -1
+		local.n = self.coop_uiN
+		if( local.n == NIL ){ local.n = 0 }
+		local.i = 0
+		while( local.i < local.n ){
+			local.bx = self.coop_uiX[local.i]
+			local.by = self.coop_uiY[local.i]
+			local.bw = self.coop_uiW[local.i]
+			local.bh = self.coop_uiH[local.i]
+			local.over = 0
+			if( local.cx >= local.bx && local.cx <= ( local.bx + local.bw ) && local.cy >= local.by && local.cy <= ( local.by + local.bh ) ){
+				local.over  = 1
+				local.hover = local.i
+			}
+			local.bg = 180 + local.i * 2
+			local.lb = local.bg + 1
+
+			ihuddraw_shader      self local.bg "textures/hud/coop_btn"
+			ihuddraw_virtualsize self local.bg 1
+			ihuddraw_align       self local.bg left top
+			ihuddraw_rect        self local.bg local.bx local.by local.bw local.bh
+			if( local.over == 1 ){
+				ihuddraw_color self local.bg 1 1 1
+			} else {
+				ihuddraw_color self local.bg 0.74 0.68 0.54
+			}
+			ihuddraw_alpha self local.bg 1
+
+			// left-align + estimate-center (the engine center-align left-anchors text on non-4:3 screens)
+			local.lname = self.coop_uiLabel[local.i]
+			local.lbx = local.bx + local.bw * 0.5 - local.lname.size * 3
+			local.lby = local.by + local.bh * 0.5 - 7
+			ihuddraw_virtualsize self local.lb 1
+			ihuddraw_align       self local.lb left top
+			ihuddraw_font        self local.lb "verdana-12"
+			ihuddraw_rect        self local.lb local.lbx local.lby 0 0
+			ihuddraw_color       self local.lb 0.15 0.09 0.03
+			ihuddraw_string      self local.lb local.lname
+			ihuddraw_alpha       self local.lb 1
+			local.i++
+		}
+
+		// blank any button slots left over from a larger previous set
+		while( local.i < 8 ){
+			local.bg = 180 + local.i * 2
+			ihuddraw_alpha self local.bg 0
+			ihuddraw_alpha self ( local.bg + 1 ) 0
+			local.i++
+		}
+
+		// click
+		if( self.coop_lobbyClick == 1 ){
+			self.coop_lobbyClick = 0
+			if( local.hover >= 0 ){
+				self playsound coop_ui_click
+				waitthread lobbyui_dispatch self ( self.coop_uiId[local.hover] )
+			}
+		}
+
+		// HOVER TOOLTIP: while the challenges panel is open and no button is hovered, hovering a
+		// challenge row shows its "how to earn" description near the cursor (slots 251 bg, 252 text).
+		local.tip = 0
+		if( self.coop_uiChalPage != NIL && self.coop_uiChalPage > 0 && local.hover < 0 ){
+			local.rn = self.coop_uiRowN
+			if( local.rn == NIL ){ local.rn = 0 }
+			local.rr = 0
+			while( local.rr < local.rn ){
+				local.ry = 122 + local.rr * 13
+				local.nend = self.coop_uiRowNameEnd[local.rr]
+				if( local.nend == NIL ){ local.nend = 340 }
+				if( local.cx >= 158 && local.cx <= local.nend && local.cy >= local.ry && local.cy <= ( local.ry + 13 ) ){
+					local.desc = self.coop_uiRowDesc[local.rr]
+					local.tw = local.desc.size * 5 + 14
+					local.tx = local.cx + 12
+					if( ( local.tx + local.tw ) > 566 ){ local.tx = local.cx - local.tw - 8 }
+					local.tyy = local.cy + 8
+					ihuddraw_shader      self 251 "textures/mohmenu/black.tga"
+					ihuddraw_virtualsize self 251 1
+					ihuddraw_align       self 251 left top
+					ihuddraw_rect        self 251 local.tx local.tyy local.tw 16
+					ihuddraw_color       self 251 0.06 0.05 0.03
+					ihuddraw_alpha       self 251 0.92
+					ihuddraw_virtualsize self 252 1
+					ihuddraw_align       self 252 left top
+					ihuddraw_font        self 252 "verdana-12"
+					ihuddraw_color       self 252 0.92 0.86 0.7
+					ihuddraw_rect        self 252 ( local.tx + 6 ) ( local.tyy + 2 ) 0 0
+					ihuddraw_string      self 252 local.desc
+					ihuddraw_alpha       self 252 1
+					local.tip = 1
+					break
+				}
+				local.rr++
+			}
+		}
+		if( local.tip == 0 ){
+			ihuddraw_alpha self 251 0
+			ihuddraw_alpha self 252 0
+		}
+
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Route a clicked button id to its action.
+//=========================================================================
+lobbyui_dispatch local.player local.id:{
+	if( local.id == "chal_open" ){
+		local.player.coop_uiChalPage = 1
+		waitthread coop_mod/challenges.scr::chal_menu_draw local.player 1
+		ihuddraw_alpha  local.player 174 0			// hide the keyboard-hint footer in the clickable view
+		ihuddraw_string local.player 174 ""
+		waitthread lobbyui_clear local.player
+		waitthread lobbyui_add local.player "chal_prev"  152 398 74 20 "< PREV"
+		waitthread lobbyui_add local.player "chal_close" 283 398 54 20 "CLOSE"
+		waitthread lobbyui_add local.player "chal_next"  414 398 74 20 "NEXT >"
+	}
+	else if( local.id == "chal_next" || local.id == "chal_prev" ){
+		local.pg = local.player.coop_uiChalPage
+		if( local.id == "chal_next" ){ local.pg++ } else { local.pg-- }
+		if( local.pg > level.coop_chal_pageN ){ local.pg = 1 }
+		if( local.pg < 1 ){ local.pg = level.coop_chal_pageN }
+		local.player.coop_uiChalPage = local.pg
+		waitthread coop_mod/challenges.scr::chal_menu_draw local.player local.pg
+		ihuddraw_alpha  local.player 174 0
+		ihuddraw_string local.player 174 ""
+	}
+	else if( local.id == "chal_close" ){
+		waitthread coop_mod/challenges.scr::chal_menu_clear local.player
+		local.player.coop_uiChalPage = 0
+		waitthread lobbyui_setDefault local.player
+	}
+}end

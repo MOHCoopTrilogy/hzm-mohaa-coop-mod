@@ -157,6 +157,7 @@ dbno_enter local.player local.hitclass:{
 	local.player.flags["coop_dbno_active"]       = 1
 	local.player.flags["coop_dbno_timer_actual"] = local.actual_timer
 	local.player.flags["coop_dbno_elapsed"]      = 0
+	local.player.coop_wentDownMap                = level.coop_mapname	// disqualify from "no-down" campaign feats this map (challenges.scr::cc_award_clean)
 
 	local.detail = "chest wound"
 	if( local.hitclass == "arm" ){ local.detail = "arm wound" }
@@ -189,6 +190,7 @@ dbno_enter local.player local.hitclass:{
 	thread dbno_crawl_manager  local.player
 	thread dbno_revival_stub   local.player
 	thread coop_mod/medkit.scr::dbno_selfrevive local.player
+	thread dbno_teamrevive_monitor local.player		// [user 07-09] teammate holds [USE] to revive
 	local.player thread dbno_countdown_hud
 	local.player thread dbno_letgo_monitor
 	thread dbno_marker_manager local.player
@@ -470,6 +472,85 @@ dbno_revival_stub local.player:{
 	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
 		waitframe
 	}
+}end
+
+
+//=========================================================================
+// TEAM REVIVE [user 07-09]: a LIVING teammate stands over a downed player and HOLDS [USE] (F) to
+// bring them back up - no medkit needed. Threaded from dbno_enter. While a reviver channels, they
+// play the coop_dbno_medic kneel (REVIVE_MEDIC legs state) and both players see a prompt; on
+// completion the downed player stands via dbno_ai_revive and the reviver earns support XP. Resets
+// if the reviver moves out of range, releases [USE], or the patient dies/self-revives.
+//   coop_teamRevive 0 = off | coop_teamReviveRange (units) | coop_teamReviveTime (seconds)
+//=========================================================================
+dbno_teamrevive_monitor local.downed:{
+//=========================================================================
+	if( getcvar( "coop_teamRevive" ) == "0" ){ end }
+	local.range = int( getcvar "coop_teamReviveRange" )
+	if( local.range <= 0 ){ local.range = 80 }
+	local.rt = getcvar "coop_teamReviveTime"
+	if( local.rt == "" ){ local.rt = "3.5" }
+	local.reviveSec = float( local.rt )
+	if( local.reviveSec <= 0 ){ local.reviveSec = 3.5 }
+	local.dt = 0.1
+	local.progress = 0
+	local.nextPrompt = 0
+	local.reviver = NULL
+
+	while( local.downed != NULL && local.downed.flags["coop_dbno_active"] == 1 ){
+		// nearest LIVING, non-downed teammate within range holding [USE]
+		local.best = NULL
+		local.bestD = local.range
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL && local.p != local.downed && isAlive local.p && local.p.flags["coop_dbno_active"] != 1 && local.p.useheld == 1 ){
+				local.dist = vector_length( local.p.origin - local.downed.origin )
+				if( local.dist <= local.bestD ){
+					local.bestD = local.dist
+					local.best  = local.p
+				}
+			}
+			local.i++
+		}
+
+		if( local.best != NULL ){
+			if( local.best != local.reviver ){
+				if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
+				local.reviver    = local.best
+				local.progress   = 0
+				local.nextPrompt = 0
+				local.reviver forcelegsstate REVIVE_MEDIC
+				local.downed iprint "A medic is reviving you - hold on!" 1
+			}
+			local.progress = local.progress + local.dt
+			if( local.progress >= local.nextPrompt ){
+				local.nextPrompt = local.progress + 0.6
+				local.pct = int( ( local.progress / local.reviveSec ) * 100 )
+				local.reviver iprint ( "Reviving teammate... " + local.pct + "%" ) 1
+			}
+			if( local.progress >= local.reviveSec ){
+				if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
+				if( local.reviver != NULL ){
+					local.reviver iprint "Teammate revived!" 1
+					thread coop_mod/xp.scr::xp_award local.reviver 15 "revive"
+					thread coop_mod/challenges.scr::chal_revive local.reviver	// [303] HZM CHALLENGES - revive task
+				}
+				waitthread dbno_ai_revive local.downed
+				end
+			}
+		}else{
+			if( local.reviver != NULL ){
+				local.reviver forcelegsstate STAND
+				local.reviver  = NULL
+				local.progress = 0
+			}
+		}
+		wait local.dt
+	}
+
+	// patient resolved (self-revived / died) mid-channel: release the reviver's pose
+	if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
 }end
 
 

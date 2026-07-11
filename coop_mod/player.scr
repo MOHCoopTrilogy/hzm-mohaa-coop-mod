@@ -549,6 +549,7 @@ playerNameCommand local.player:{
 	else if(local.arrayIndex==31){ local.player thread coop_mod/lobby.scr::lobbySkinCycle 1 }  //[lobby] skin next (D)
 	else if(local.arrayIndex==32){ local.player thread coop_mod/lobby.scr::lobbySkinCycle -1 } //[lobby] skin prev (A)
 	else if(local.arrayIndex==33){ local.player thread coop_mod/lobby.scr::lobbyReadyToggle }   //[lobby] ready toggle (F)
+	else if(local.arrayIndex==34){ thread coop_mod/challenges.scr::chal_menu local.player }   //[303] challenges - on-screen Service Record menu (cycles category pages; chal_review still callable for console dump)
 }end
 
 //[211] HZM coop - EMOTES: play a selection-screen anim on the player's own model via a
@@ -870,6 +871,19 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		end
 	}
 	
+	//[user 07-09] EXACT-AMMO RESPAWN: remember whether THIS pass is a respawn before the branch
+	//below clears coop_respawning, so we can restore the player's exact pre-death ammo after the
+	//inventory is (re)built further down. Also make sure the per-player ammo-snapshot loop is
+	//running (guarded to one instance) so there is a value to restore.
+	local.wasRespawn = 0
+	if( local.player.flags["coop_respawning"] == TRUE ){
+		local.wasRespawn = 1
+	}
+	if( local.player.flags["coop_ammoSnapshotRunning"] != 1 ){
+		local.player.flags["coop_ammoSnapshotRunning"] = 1
+		local.player thread coop_mod/itemhandler.scr::coop_ammoSnapshotLoop
+	}
+
 	// RESPAWNING /////////////////////////////////////////
 	//place at spawn or respawn, this needs to be done regardless of glueing
 	if(local.player.flags["coop_respawning"] == TRUE){
@@ -900,7 +914,15 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//INVENTORY
 	waitthread coop_mod/itemhandler.scr::managePlayerInventory
 	thread coop_mod/main.scr::itemGetAll
-	thread coop_mod/main.scr::playerHealth	
+	thread coop_mod/main.scr::playerHealth
+
+	//[user 07-09] EXACT-AMMO RESPAWN: the inventory rebuild above hands out DEFAULT ammo per
+	//weapon. If this was a respawn (not a first spawn / map start), overwrite it with the exact
+	//ammo the player was carrying when they went down. Reward items (binocs/smoke) are NOT in the
+	//saved set on purpose - they drop on death and must not come back.
+	if( local.wasRespawn == 1 ){
+		local.player thread coop_mod/itemhandler.scr::coop_ammoRestore
+	}
 	
 	// primarydmweapon + popmenu 0 now handled unconditionally above (before spectator check).
 
@@ -1133,6 +1155,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 			end
 		}
 	}
+	local.player.coop_wentDownMap = level.coop_mapname	// true death: disqualify from "no-down" campaign feats this map (challenges.scr::cc_award_clean)
 	local.player.flags["coop_iAmTruelyActive"] = 0
 	if(	local.player.flags["coop_isActive"] != -2 ){
 		//[202] chrissstrahl - reset last selected spawnlocation

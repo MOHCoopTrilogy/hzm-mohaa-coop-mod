@@ -1464,6 +1464,39 @@ state EMOTE_SALUTE
 	}
 }
 
+// HZM coop [user 07-09] - TEAM REVIVE: the reviver kneels over a downed teammate while holding
+// [USE]. Forced by dbno.scr::dbno_teamrevive_monitor; loops the pre-staged coop_dbno_medic kneel
+// (self : ANIMDONE_LEGS = loop, same recipe as COOP_ANIMTEST2). Script forces STAND when the
+// channel ends / cancels; moving or firing also cancels via the exits below.
+state REVIVE_MEDIC
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_dbno_medic : default
+	}
+
+	states
+	{
+		REVIVE_MEDIC : ANIMDONE_LEGS
+		STAND : FORWARD
+		STAND : BACKWARD
+		STAND : STRAFE_LEFT
+		STAND : STRAFE_RIGHT
+		STAND : +JUMP
+		STAND : +CROUCH
+		FALL : FALLING
+		STAND : +ATTACK_PRIMARY_BUTTON
+		STAND : +ATTACK_SECONDARY_BUTTON
+		STAND : +HAS_WEAPON
+		STAND : -HAS_WEAPON
+	}
+}
+
 // HZM coop [230] - ANIM TEST bay: plays the retargeted CoD2 sprint loop (coop_test_sprint alias)
 // on the spot for eyeball QA. Trigger: console `append name ,t1x` (bus 27). Loops until any
 // movement/action input, same cancel recipe as the looping emotes. PRIVATE EXPERIMENT.

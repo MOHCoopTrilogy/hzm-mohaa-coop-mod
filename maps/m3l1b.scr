@@ -297,6 +297,8 @@ $mg42_middle2 setaimtarget $mg42_middle2_target
 //*** trigger brushes
 $door_floor_hatch1_lock nottriggerable
 $end_level_trigger nottriggerable
+$88mm_trigger1 nottriggerable		// HZM restored: FLAK 88 plant points armed only when the destroy objective starts
+$88mm_trigger2 nottriggerable
 
 //*** solidifying objects after paths
 $e2_table solid
@@ -748,7 +750,7 @@ fadeout 5 0 0 0 1
 //*** give the medal
 setcvar "g_medal5" "1"
 
-waitthread global/objectives.scr::add_objectives 3 3
+waitthread global/objectives.scr::add_objectives 4 3
 waitthread global/objectives.scr::current_objectives 0
 
 //*** end the level
@@ -775,13 +777,9 @@ if (level.clear_bunker >= 6)
         	thread seq_bunker_upper_exit
 
         	//*** activate the end level trigger
-        	$end_level_trigger triggerable
-
-        	//*** complete the objectives
         	waitthread global/objectives.scr::add_objectives 2 3
-
-        	waitthread global/objectives.scr::add_objectives 3 2 "Exit the bunker." $end_level_trigger.origin
-        	waitthread global/objectives.scr::current_objectives 3
+        	//*** HZM restored: instead of ending here, go destroy the two FLAK 88 emplacements first
+        	thread coop_flak88_objective
         }
 	else
 	{
@@ -810,13 +808,9 @@ if (level.clear_farbunker_gunner >= 2)
         	thread seq_bunker_upper_exit
 
         	//*** activate the end level trigger
-        	$end_level_trigger triggerable
-
-        	//*** complete the objectives
         	waitthread global/objectives.scr::add_objectives 2 3
-
-        	waitthread global/objectives.scr::add_objectives 3 2 "Exit the bunker." $end_level_trigger.origin
-        	waitthread global/objectives.scr::current_objectives 3
+        	//*** HZM restored: instead of ending here, go destroy the two FLAK 88 emplacements first
+        	thread coop_flak88_objective
         }
 	else
 	{
@@ -2021,3 +2015,144 @@ println "NEED HUDDRAW REFRESH!!"
 
 end
 
+
+//===========================================================================
+// HZM coop [RESTORED CUT OBJECTIVE] - Destroy the two FLAK 88 emplacements in the back-field.
+// The retail BSP shipped two 88mm guns (88mm_weapon1 near, 88mm_weapon2 far back), each with a plant
+// trigger (88mm_trigger1/2) + a pulse_explosive charge marker (88mm_explosive1/2) carrying the exact entity
+// keys the MP bomb system reads ($trigger_name/$explosion_fx/target). The devs CUT the objective and just
+// ended the level after the bunker gunners. This re-wires it with the REAL MP bomb-plant
+// (global/obj_dm.scr::bomb_thinker) exactly how the Omaha MP map obj_team3 does it - 6s timed plant, plant
+// animation, physical bomb, explosion + wrecked-gun swap - then gates the exit on both being blown.
+//===========================================================================
+coop_flak88_objective:
+
+	if (level.coop_flak88_started == 1){ end }
+	level.coop_flak88_started = 1
+	level.coop_flak88_destroyed = 0
+
+	//*** MP bomb-plant params (mirror obj_team3, the Omaha Beach MP map)
+	level.bomb_damage = 200
+	level.bomb_explosion_radius = 640
+	level.planting_team = "allies"
+
+	//*** objective + map marker on the nearer gun
+	waitthread global/objectives.scr::add_objectives 3 2 "Destroy the 2 FLAK 88 artillery emplacements" $88mm_weapon1.origin
+	waitthread global/objectives.scr::current_objectives 3
+
+	//*** arm the plant points and start the REAL bomb thinkers on the charge markers (timer/anim/bomb/boom
+	//*** all come from the entity keys already on the markers)
+	$88mm_trigger1 triggerable
+	$88mm_trigger2 triggerable
+	$88mm_explosive1 thread global/obj_dm.scr::bomb_thinker
+	$88mm_explosive2 thread global/obj_dm.scr::bomb_thinker
+
+	//*** watch each bomb; when bomb_thinker sets .exploded, count it + silence that gun
+	thread coop_flak88_watch $88mm_explosive1 $88mm_weapon1
+	thread coop_flak88_watch $88mm_explosive2 $88mm_weapon2
+
+	//*** the guns fire on the beach until knocked out; a few defenders hold the emplacements
+	thread coop_flak88_fire $88mm_weapon1
+	thread coop_flak88_fire $88mm_weapon2
+	thread coop_flak88_defenders
+
+end
+
+
+//===========================================================================
+// Watch a planted bomb; when bomb_thinker detonates it (.exploded), count the kill + stop that gun firing.
+//===========================================================================
+coop_flak88_watch local.bomb local.gun:
+
+	if (local.bomb == NULL){ end }
+
+	while (local.bomb.exploded != 1)
+	{
+		waitframe
+	}
+
+	if (local.gun != NULL){ local.gun.coop_fireStop = 1 }
+
+	level.coop_flak88_destroyed = level.coop_flak88_destroyed + 1
+	if (level.coop_flak88_destroyed >= 2)
+	{
+		thread coop_flak88_complete
+	}
+
+end
+
+
+//===========================================================================
+// Restored firing-on-the-beach: the turret ACTUALLY fires (muzzle + sound + recoil via startFiring, like
+// m3l3's scene4 gun) every few seconds until destroyed - not an explosion effect.
+//===========================================================================
+coop_flak88_fire local.gun:
+
+	if (local.gun == NULL){ end }
+
+	while (local.gun.coop_fireStop != 1)
+	{
+		local.gun startFiring
+		wait 1
+		if (local.gun != NULL){ local.gun stopfiring }
+		if ($player != NULL)
+		{
+			if (vector_length(local.gun.origin - $player.origin) < 1200)
+			{
+				thread jitter_artillery 0
+			}
+		}
+		wait 4
+	}
+
+end
+
+
+//===========================================================================
+// A few German defenders from the bunker-exit spawn points (valid ground), sent at the players.
+//===========================================================================
+coop_flak88_defenders:
+
+	waitthread coop_flak88_spawn_defender $mg42_bunker_upper_fodder_spawn1
+	wait 0.4
+	waitthread coop_flak88_spawn_defender $mg42_bunker_upper_fodder_spawn2
+	wait 0.4
+	waitthread coop_flak88_spawn_defender $mg42_bunker_upper_fodder_spawn1
+	wait 0.4
+	waitthread coop_flak88_spawn_defender $mg42_bunker_upper_fodder_spawn2
+
+end
+
+
+coop_flak88_spawn_defender local.spot:
+
+	if (local.spot == NULL){ end }
+
+	local.sol = spawn "models/human/german_wehrmact_soldier" gun "mauser kar 98k"
+	local.sol exec global/disable_ai.scr
+	local.sol.origin = local.spot.origin
+	local.sol exec global/enable_ai.scr
+
+	local.player = exec coop_mod/replace.scr::player_closestTo local.sol
+	if (local.player != NULL)
+	{
+		local.sol exec global/runto.scr local.player
+	}
+
+end
+
+
+//===========================================================================
+// Both guns destroyed -> complete the objective and open the exit.
+//===========================================================================
+coop_flak88_complete:
+
+	iprintlnbold "Both FLAK 88 emplacements destroyed - fall back to the exit!"
+
+	waitthread global/objectives.scr::add_objectives 3 3
+	waitthread global/objectives.scr::add_objectives 4 2 "Exit the bunker." $end_level_trigger.origin
+	waitthread global/objectives.scr::current_objectives 4
+
+	$end_level_trigger triggerable
+
+end

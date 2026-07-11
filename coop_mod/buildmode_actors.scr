@@ -297,7 +297,26 @@ actor_catalog_init:{
 	level.coop_build_animAlias[45] = "coop_act_cower"
 	level.coop_build_animProp[45] = ""
 	level.coop_build_animTag[45] = ""
-	level.coop_build_animCount = 45
+	// ---- CHAINED ROUTINES [user 07-09]: multi-clip sequences with pauses (coop_seq_* -> animSeq=1).
+	// Play a natural loop (light once, drag, relaxed hold, drag, longer hold) instead of one clip on
+	// repeat - fixes "constant cigarette hits" and the abrupt pack re-light. Driven by
+	// coop_build_animSequence; see coop_sceneActorAnimate (placed) + coop_build_ghostAnimLoop (ghost).
+	level.coop_build_animName[46] = "Smoke Routine (chain)"
+	level.coop_build_animAlias[46] = "coop_seq_smoke"
+	level.coop_build_animProp[46] = "models/items/cigarette.tik"
+	level.coop_build_animTag[46] = "Bip01 L Finger11"
+	level.coop_build_animSeq[46] = 1
+	level.coop_build_animName[47] = "Smoke Casual (chain)"
+	level.coop_build_animAlias[47] = "coop_seq_smoke2"
+	level.coop_build_animProp[47] = "models/items/cigarette.tik"
+	level.coop_build_animTag[47] = "Bip01 L Finger11"
+	level.coop_build_animSeq[47] = 1
+	level.coop_build_animName[48] = "Drink Routine (chain)"
+	level.coop_build_animAlias[48] = "coop_seq_drink"
+	level.coop_build_animProp[48] = "models/miscobj/canteen.tik"
+	level.coop_build_animTag[48] = "tag_weapon_left"
+	level.coop_build_animSeq[48] = 1
+	level.coop_build_animCount = 48
 
 	level.coop_build_actorReady = 1
 }end
@@ -313,9 +332,80 @@ coop_build_ghostAnimLoop local.g:{
 //=========================================================================
 	if( local.g == NIL || local.g == NULL ){ end }
 	while( local.g != NULL && level.coop_build_ghost == local.g ){
-		local.alias = level.coop_build_animAlias[level.coop_build_animIdx]
+		local.idx = level.coop_build_animIdx
+		local.alias = level.coop_build_animAlias[local.idx]
 		if( local.alias == NIL || local.alias == "" ){ local.alias = "idle" }
-		local.g anim local.alias
-		local.g waittill animdone
+		if( level.coop_build_animSeq[local.idx] == 1 ){
+			// chained routine: runs its own loop until the ghost is replaced (anim cycle spawns a
+			// fresh ghost, so this returns and the outer while re-evaluates). waitframe guards a spin.
+			waitthread coop_build_animSequence local.g local.alias
+			waitframe
+		}else{
+			local.g anim local.alias
+			local.g waittill animdone
+		}
 	}
+}end
+
+
+//=========================================================================
+// CHAINED ANIMATION ROUTINE PLAYER [user 07-09]. Plays a natural SEQUENCE of clips with pauses
+// instead of one clip on repeat. Drives the passed entity directly (a build ghost OR a placed
+// scene actor). For a ghost it stops when level.coop_build_ghost changes (anim/model switch spawns
+// a new ghost); for a placed actor (ghost != ent) it loops while the entity lives. The one-time
+// intro (light the cigarette) plays before the loop so the pack isn't re-pulled every cycle.
+//=========================================================================
+coop_build_animSequence local.ent local.seq:{
+//=========================================================================
+	if( local.ent == NIL || local.ent == NULL ){ end }
+	local.isGhost = 0
+	if( level.coop_build_ghost == local.ent ){ local.isGhost = 1 }
+
+	// one-time intro
+	if( local.seq == "coop_seq_smoke" || local.seq == "coop_seq_smoke2" ){
+		waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke_light" 0.3
+	}
+
+	while( local.ent != NULL && ( local.isGhost == 0 || level.coop_build_ghost == local.ent ) ){
+		if( local.seq == "coop_seq_smoke" ){
+			// drag -> relaxed hold (exhale) -> drag -> longer hold. Pauses land on the idle poses.
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke" 0
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke_stand" 2.5
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke" 0
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_stand" 3.0
+		}
+		else if( local.seq == "coop_seq_smoke2" ){
+			// casual: stand with cig -> drag -> glance around -> drag
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke_stand" 3.0
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke" 0
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_lookaround" 1.0
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_smoke_stand2" 2.5
+		}
+		else if( local.seq == "coop_seq_drink" ){
+			// raise + drink -> hold canteen -> relaxed pause
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_drink" 0.4
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_canteen" 1.5
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_stand" 3.0
+		}
+		else{
+			waitthread coop_build_animStep local.ent local.isGhost "coop_act_stand" 2.0
+		}
+	}
+}end
+
+
+//=========================================================================
+// Play ONE clip, wait for it to finish, then hold local.pause seconds (the natural beat between
+// chained clips). Bails immediately if the entity vanished or - ghost only - was replaced, so a
+// live anim/model switch stays responsive.
+//=========================================================================
+coop_build_animStep local.ent local.isGhost local.alias local.pause:{
+//=========================================================================
+	if( local.ent == NULL ){ end }
+	if( local.isGhost == 1 && level.coop_build_ghost != local.ent ){ end }
+	local.ent anim local.alias
+	local.ent waittill animdone
+	if( local.ent == NULL ){ end }
+	if( local.isGhost == 1 && level.coop_build_ghost != local.ent ){ end }
+	if( local.pause > 0 ){ wait local.pause }
 }end

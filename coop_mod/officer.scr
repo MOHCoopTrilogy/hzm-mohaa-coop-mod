@@ -408,7 +408,10 @@ coop_officer_init:{
 	//sequences (e3l3 AB41 convoy ride: boss waves + attack dogs piling into the pathed
 	//vehicle mid-barrier-smash wedged it on the bank). The officer waits here until the
 	//map clears the flag - all reinforcement waves inherently wait with him.
-	while( level.coop_officer_hold == 1 ){
+	//[user 07-09] BUILD MODE: never spawn the boss while the host is building (coop_build 1).
+	//The officer parks here until build mode ends, then spawns normally - so build sessions
+	//started at map load (the usual case) never see him at all.
+	while( level.coop_officer_hold == 1 || getcvar( "coop_build" ) == "1" ){
 		wait 2
 	}
 	thread coop_radio_init local.base_pos
@@ -580,6 +583,37 @@ coop_mark_boss local.ent:{
 		local.ent rendereffects "+coopboss"
 		wait 0.25
 		local.n++
+	}
+}end
+
+
+// [user 07-09] BUILD MODE cleanup: remove the officer, his bodyguards and any already-spawned
+// reinforcement-wave soldiers so the builder is left in peace. Called from buildmode.scr when a
+// build session starts (the spawn itself is separately gated on coop_build in the hold loop, so
+// this only matters when build mode is toggled AFTER the officer already appeared). Setting
+// coop_officer_alive = 0 stops every officer thread (guard/brain/waves/monitors all loop on it)
+// and blocks new waves. Uses 'remove' not 'delete' per the corpse.scr/butler.scr actor rule.
+coop_officer_buildSuppress:{
+	level.coop_officer_alive = 0
+	if( level.coop_officer != NIL && level.coop_officer != NULL ){ level.coop_officer remove }
+	level.coop_officer = NULL
+	if( level.coop_bodyguard_n != NIL ){
+		local.i = 1
+		while( local.i <= level.coop_bodyguard_n ){
+			if( level.coop_bodyguards[local.i] != NIL && level.coop_bodyguards[local.i] != NULL ){
+				level.coop_bodyguards[local.i] remove
+			}
+			local.i++
+		}
+	}
+	if( level.coop_wave_count != NIL ){
+		local.i = 1
+		while( local.i <= level.coop_wave_count ){
+			if( level.coop_wave_actors[local.i] != NIL && level.coop_wave_actors[local.i] != NULL ){
+				level.coop_wave_actors[local.i] remove
+			}
+			local.i++
+		}
 	}
 }end
 
@@ -2893,6 +2927,16 @@ coop_officer_death_monitor local.officer:{
 	// [302] HZM XP - officer kill (150 killer / 50 squad) + heal-denied bonus if he died
 	// inside the retreat-to-heal window (level.coop_xp_heal_pending)
 	thread coop_mod/xp.scr::xp_officer_killed local.officer
+	// [303] HZM CHALLENGES - officer-kill challenge progress
+	thread coop_mod/challenges.scr::chal_officer_killed local.officer
+	// [303] "Mein Kampf" feat: the officer was blown up by his OWN reinforcements - an EXPLOSIVE
+	// death (grenade=14 / rocket=16) dealt by a non-player AI (not himself). Bait his men into
+	// nading you next to him and their splash finishes him.
+	if( local.officer.fact != NIL && local.officer.fact != NULL ){
+		if( ( local.officer.fact.meansofdeath == 14 || local.officer.fact.meansofdeath == 16 ) && local.officer.fact.attacker != NULL && local.officer.fact.attacker != local.officer && local.officer.fact.attacker.classname != "Player" ){
+			thread coop_mod/challenges.scr::chal_mein_kampf
+		}
+	}
 	forcemusic "success"
 	iprintlnbold "The officer has been eliminated!"
 	iprintlnbold "Plant explosives on the radio to stop reinforcements permanently!"
@@ -3441,6 +3485,7 @@ binoculars_fired local.player local.target:{
 	// CONFIRMED (target accepted, opposite of the denial above): all players hear the call-in.
 	thread coop_radio_all "coop_radio_airstrike_req"
 	thread coop_mod/xp.scr::xp_support_call local.player "bombing"	// [302] HZM XP - called in a strike
+	thread coop_mod/challenges.scr::chal_support_call local.player "airstrike"	// [303] HZM CHALLENGES - air-strike task
 	level.coop_binoc_uses = level.coop_binoc_uses - 1
 	if( level.coop_binoc_uses > 0 ){
 		iprintlnbold ("Fire mission requested... (" + level.coop_binoc_uses + " strikes remaining)")

@@ -41,6 +41,7 @@ coop_build_monitor:{
 	waitthread coop_mod/main.scr::waitForMainScript
 	waitthread coop_mod/buildmode_catalog.scr::catalog_init
 	waitthread coop_mod/buildmode_actors.scr::actor_catalog_init		//HZM coop BUILD MODE: append the ALLIED ACTORS category + anim catalog
+	waitthread coop_mod/buildmode_sounds.scr::sound_catalog_init		//HZM coop BUILD MODE: parallel SOUND-emitter catalog (SOUND mode)
 
 	while( 1 ){
 		if( getcvar( "coop_build" ) == "1" ){
@@ -92,12 +93,25 @@ coop_build_session local.player:{
 	if( level.coop_build_prevHudFade == NIL ){ level.coop_build_prevHudFade = getcvar "coop_hudFade" }
 	setcvar "coop_hudFade" "0"
 
+	// [user 07-09] build mode: banish the officer boss + guards/waves so building is undisturbed.
+	// Spawning is also gated on coop_build in officer.scr; this clears anyone already in the world.
+	thread coop_mod/officer.scr::coop_officer_buildSuppress
+
 	// state defaults (persist across sessions within one map; level vars clear on map change)
 	if( level.coop_build_cat == NIL ){ level.coop_build_cat = 1 }
 	if( level.coop_build_idx == NIL ){ level.coop_build_idx = 1 }
 	if( level.coop_build_count == NIL ){ level.coop_build_count = 0 }
 	if( level.coop_build_scale == NIL ){ level.coop_build_scale = 1.0 }
 	if( level.coop_build_zofs == NIL ){ level.coop_build_zofs = 0 }
+	if( level.coop_build_dist == NIL ){ level.coop_build_dist = 0 }		//HZM coop BUILD MODE: aim-ray push/pull offset (units; -=closer, +=farther)
+	// SOUND-mode state (parallel to the model/actor state; '\' toggles level.coop_build_mode)
+	if( level.coop_build_mode == NIL ){ level.coop_build_mode = "object" }
+	if( level.coop_build_sndcat == NIL ){ level.coop_build_sndcat = 1 }
+	if( level.coop_build_sndidx == NIL ){ level.coop_build_sndidx = 1 }
+	if( level.coop_build_sndvol == NIL ){ level.coop_build_sndvol = 1.0 }
+	if( level.coop_build_sndmin == NIL ){ level.coop_build_sndmin = 200 }
+	if( level.coop_build_sndtype == NIL ){ level.coop_build_sndtype = "loop" }
+	if( level.coop_build_sndcount == NIL ){ level.coop_build_sndcount = 0 }
 	if( level.coop_build_pitch == NIL ){ level.coop_build_pitch = 0 }
 	if( level.coop_build_solid == NIL ){ level.coop_build_solid = 0 }
 	if( level.coop_build_yaw == NIL ){ level.coop_build_yaw = int( local.player.viewangles[1] ) }
@@ -122,7 +136,7 @@ coop_build_session local.player:{
 	setcvar "coop_build_cmd" ""
 	local.player iprint "BUILD MODE: ON (numpad controls)" 1
 	println( "^~^~^ BUILD_ON " + level.coop_mapname )
-	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
 
 	thread coop_build_hud local.player
 	waitthread coop_build_ghostRefresh local.player
@@ -159,6 +173,24 @@ coop_build_session local.player:{
 //=========================================================================
 coop_build_doCmd local.player local.cmd:{
 //=========================================================================
+	// [user 07-09] SOUND mode: '\' toggles object<->sound; when in sound mode the whole numpad bus
+	// is reinterpreted by buildmode_sounds.scr::coop_snd_doCmd (see that file's header for the map).
+	if( local.cmd == "modeswap" ){
+		if( level.coop_build_mode == "sound" ){ level.coop_build_mode = "object" }
+		else{
+			level.coop_build_mode = "sound"
+			waitthread coop_mod/buildmode_sounds.scr::coop_snd_loadDefaults
+		}
+		waitthread coop_build_ghostRefresh local.player
+		local.player iprint ( "BUILD MODE: " + level.coop_build_mode ) 1
+		level.coop_build_hudDirty = 1
+		end
+	}
+	if( level.coop_build_mode == "sound" ){
+		waitthread coop_mod/buildmode_sounds.scr::coop_snd_doCmd local.player local.cmd
+		level.coop_build_hudDirty = 1
+		end
+	}
 	if( local.cmd == "next" ){
 		level.coop_build_idx++
 		if( level.coop_build_idx > level.coop_build_itemcount[level.coop_build_cat] ){ level.coop_build_idx = 1 }
@@ -207,6 +239,14 @@ coop_build_doCmd local.player local.cmd:{
 		level.coop_build_zofs = level.coop_build_zofs - 2
 		if( level.coop_build_zofs < -64 ){ level.coop_build_zofs = -64 }
 	}
+	else if( local.cmd == "closer" ){
+		level.coop_build_dist = level.coop_build_dist - 16
+		if( level.coop_build_dist < -256 ){ level.coop_build_dist = -256 }
+	}
+	else if( local.cmd == "farther" ){
+		level.coop_build_dist = level.coop_build_dist + 16
+		if( level.coop_build_dist > 1024 ){ level.coop_build_dist = 1024 }
+	}
 	else if( local.cmd == "scaleup" ){
 		level.coop_build_scale = waitthread coop_build_round1 ( level.coop_build_scale + 0.1 )
 		if( level.coop_build_scale > 5.0 ){ level.coop_build_scale = 5.0 }
@@ -221,6 +261,7 @@ coop_build_doCmd local.player local.cmd:{
 		level.coop_build_yaw = int( local.player.viewangles[1] )
 		level.coop_build_pitch = 0
 		level.coop_build_zofs = 0
+		level.coop_build_dist = 0
 		level.coop_build_scale = 1.0
 		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost scale 1.0 }
 	}
@@ -264,6 +305,10 @@ coop_build_round1 local.v:{
 //=========================================================================
 coop_build_ghostRefresh local.player:{
 //=========================================================================
+	if( level.coop_build_mode == "sound" ){
+		waitthread coop_mod/buildmode_sounds.scr::coop_snd_ghostRefresh local.player
+		end
+	}
 	if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){
 		// detach any actor prop first so it is removed with the ghost (removeattachedmodel
 		// posts EV_Remove on the child; delete alone would orphan it)
@@ -319,6 +364,11 @@ coop_build_ghostFollow local.player:{
 		local.scaled = local.fwd * 450
 		local.hitpos = local.eyepos + local.scaled
 	}
+	// push/pull the park point along the aim ray (,/. = closer/farther); dist 0 = auto-snap to surface
+	if( level.coop_build_dist != 0 ){
+		local.dvec = local.fwd * level.coop_build_dist
+		local.hitpos = local.hitpos + local.dvec
+	}
 	local.hitpos[2] = local.hitpos[2] + level.coop_build_zofs
 
 	local.ang = ( 0 0 0 )
@@ -336,6 +386,10 @@ coop_build_ghostFollow local.player:{
 //=========================================================================
 coop_build_place local.player:{
 //=========================================================================
+	if( level.coop_build_mode == "sound" ){
+		waitthread coop_mod/buildmode_sounds.scr::coop_snd_place local.player
+		end
+	}
 	if( level.coop_build_lastpos == NIL ){ end }
 	local.n = level.coop_build_count + 1
 
@@ -498,26 +552,37 @@ coop_build_hud local.player:{
 	ihuddraw_alpha       local.player 61 0
 
 	ihuddraw_string local.player 54 "BUILD MODE"
-	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z KP+/- scale KP0 solid KPEnter place KPDel undo"
+	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z  , / . dist  KP+/- scale KP0 solid KPEnter place KPDel undo"
 
 	while( level.coop_build_active == 1 && local.player != NULL ){
 		if( level.coop_build_hudDirty == 1 ){
 			level.coop_build_hudDirty = 0
-			ihuddraw_string local.player 55 ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ": " + level.coop_build_catname[level.coop_build_cat] )
-			ihuddraw_string local.player 56 ( "[" + level.coop_build_idx + "/" + level.coop_build_itemcount[level.coop_build_cat] + "] " + level.coop_build_name )
-			ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
-			ihuddraw_string local.player 58 ( "placed " + level.coop_build_count + " -> " + level.coop_build_file )
-
-			// actor anim line (54 title gets an [ACTOR] tag too)
-			if( level.coop_build_cat == level.coop_build_actorCat ){
-				ihuddraw_string local.player 54 "BUILD MODE [ACTOR]"
-				local.propnote = ""
-				if( level.coop_build_animProp[level.coop_build_animIdx] != NIL && level.coop_build_animProp[level.coop_build_animIdx] != "" ){ local.propnote = "  +prop" }
-				ihuddraw_string local.player 61 ( "ANIM [" + level.coop_build_animIdx + "/" + level.coop_build_animCount + "] " + level.coop_build_animName[level.coop_build_animIdx] + local.propnote )
+			if( level.coop_build_mode == "sound" ){
+				// SOUND-mode readout
+				ihuddraw_string local.player 54 "BUILD MODE [SOUND]"
+				ihuddraw_string local.player 55 ( "SND CAT " + level.coop_build_sndcat + "/" + level.coop_build_sndcatcount + ": " + level.coop_build_sndcatname[level.coop_build_sndcat] )
+				ihuddraw_string local.player 56 ( "[" + level.coop_build_sndidx + "/" + level.coop_build_snditemcount[level.coop_build_sndcat] + "] " + level.coop_build_snddisp[level.coop_build_sndcat][level.coop_build_sndidx] )
+				ihuddraw_string local.player 57 ( "vol " + level.coop_build_sndvol + " min " + level.coop_build_sndmin + " zofs " + level.coop_build_zofs + " dist " + level.coop_build_dist + " type " + level.coop_build_sndtype )
+				ihuddraw_string local.player 58 ( "sounds placed " + level.coop_build_sndcount )
+				ihuddraw_string local.player 61 ( "KP4/6 sound KP1/3 cat  KP+/- vol  KP*// radius  KP0 loop/oneshot  KPEnter drop  \\ back to OBJECT" )
 				ihuddraw_alpha  local.player 61 0.85
 			}else{
-				ihuddraw_string local.player 54 "BUILD MODE"
-				ihuddraw_alpha  local.player 61 0
+				ihuddraw_string local.player 55 ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ": " + level.coop_build_catname[level.coop_build_cat] )
+				ihuddraw_string local.player 56 ( "[" + level.coop_build_idx + "/" + level.coop_build_itemcount[level.coop_build_cat] + "] " + level.coop_build_name )
+				ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " dist " + level.coop_build_dist + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+				ihuddraw_string local.player 58 ( "placed " + level.coop_build_count + " -> " + level.coop_build_file )
+
+				// actor anim line (54 title gets an [ACTOR] tag too)
+				if( level.coop_build_cat == level.coop_build_actorCat ){
+					ihuddraw_string local.player 54 "BUILD MODE [ACTOR]"
+					local.propnote = ""
+					if( level.coop_build_animProp[level.coop_build_animIdx] != NIL && level.coop_build_animProp[level.coop_build_animIdx] != "" ){ local.propnote = "  +prop" }
+					ihuddraw_string local.player 61 ( "ANIM [" + level.coop_build_animIdx + "/" + level.coop_build_animCount + "] " + level.coop_build_animName[level.coop_build_animIdx] + local.propnote )
+					ihuddraw_alpha  local.player 61 0.85
+				}else{
+					ihuddraw_string local.player 54 "BUILD MODE"
+					ihuddraw_alpha  local.player 61 0
+				}
 			}
 		}
 		wait 0.15
