@@ -736,7 +736,17 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	}
 
 	//either give them a default loadout or give them their old one
-	thread giveWeaponLoadout !(level.coop_retainInventory && waitthread playerHasInventory group.player)
+	//[user 07-16] ARMORY PICKS ARE AUTHORITATIVE: coop_retainInventory (default ON) re-gave the
+	//accumulated pickup set (coop_inventoryWeapons) on every spawn, which IGNORES the player's
+	//loadout picks - so a spectate->rejoin (or any spawn once the retain set was populated) came
+	//back WITHOUT the picked kit ("spectated and came back in and didnt have my loadout"). When the
+	//player HAS armory picks, force the DEFAULT path (spawnInventory reads coop_loWeapons there).
+	//No picks -> unchanged retain/default behavior.
+	local.useDefault = !(level.coop_retainInventory && waitthread playerHasInventory group.player)
+	if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
+		local.useDefault = game.true
+	}
+	thread giveWeaponLoadout local.useDefault
 }end
 
 //[202] Smithy - improved to swap to previous uniform
@@ -1202,6 +1212,22 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		}
 	}
 	
+	//[user 07-16] MISSION ITEMS (bug-620): map-issued critical gear (e1l2 minedetector etc.)
+	//must survive EVERY loadout source - registered inventory, armory picks, and map default all
+	//passed through takeall without it. Registered via addMissionItemToEveryone; appended to a
+	//COPY of the array (appending in place would permanently grow the shared level/picks arrays).
+	if (level.coop_missionItems.size > 0){
+		local.combined[1] = NIL
+		for (local.mi = 1; local.mi <= local.weaponArray.size; local.mi++){
+			local.combined[local.mi] = local.weaponArray[local.mi]
+		}
+		local.mbase = local.weaponArray.size
+		for (local.mi = 1; local.mi <= level.coop_missionItems.size; local.mi++){
+			local.combined[local.mbase + local.mi] = level.coop_missionItems[local.mi]
+		}
+		local.weaponArray = local.combined
+	}
+
 	//[202] Smithy - spawn them backwards so the grenade start tiks are done first
 	//so additionalStartAmmo is removed from weaps, otherwise we can end up with 0 nades that are still usable
 	for (local.i = local.weaponArray.size; local.i > 0; local.i--){ 	//do the spawning
@@ -1242,6 +1268,27 @@ playerHasInventory local.player:{
 //=========================================================================
 if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/playerHasInventory->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 }end (local.player.flags["coop_inventoryWeapons"].size > 0)
+
+//[user 07-16] MISSION ITEM registration (bug-620): critical map gear (minedetector etc.) that
+//must be issued on TOP of any loadout source and survive regives/DBNO. Gives to current
+//players immediately and registers for every future spawn (spawnInventory appends the list).
+//=========================================================================
+addMissionItemToEveryone local.model:{
+//=========================================================================
+	if (level.gametype == 0){
+		$player item local.model
+		end
+	}
+	local.n = level.coop_missionItems.size + 1
+	level.coop_missionItems[local.n] = local.model
+	if ($player){
+		for (local.i = 1; local.i <= $player.size; local.i++){
+			if ($player[local.i] != NULL && isAlive $player[local.i]){
+				$player[local.i] item local.model
+			}
+		}
+	}
+}end
 
 //add weapon to everyone's inventory, whether current or future
 //use this if you want the whole server to spawn with this weap
