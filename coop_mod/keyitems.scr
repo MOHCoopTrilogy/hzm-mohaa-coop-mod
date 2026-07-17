@@ -1,0 +1,139 @@
+//[306] HZM coop - KEY MISSION ITEMS can never be permanently lost
+//=========================================================================
+// Mission-critical gear must survive a player going Down-But-Not-Out and must never disappear
+// with a corpse. Two behaviours (per user 07-10):
+//
+//  BINOCULARS + SIGNAL SMOKE (officer rewards, always "given"):
+//    - Their ownership (level.coop_binoc_owner / level.coop_smoke_player) already persists through
+//      DBNO (the owner is still isAlive while downed), so the owner-watch does NOT drop them on a
+//      down. They only "vanish" because dbno_enter's takeall strips the WEAPON and no revive path
+//      re-gives it. coop_key_guardian re-gives the weapon after any revive (all revive paths), so
+//      you keep them across a down. On a FULL death they still drop to the world for a teammate to
+//      recover (existing officer.scr owner-watch) - unchanged.
+//
+//  HEAVY WEAPONS (panzerschreck / bazooka):
+//    - No existing keep/drop system. coop_key_onDown drops them to the world where you fell the
+//      moment you go down (and removes them from your tracked inventory so a revive won't silently
+//      restore a weapon that's now lying on the ground). So the weapon is ALWAYS recoverable - a
+//      teammate can grab it while you're down, or you can pick it back up after being revived. It
+//      is never lost with you.
+//
+// NOTE: heavy weapons currently drop regardless of whether they were a map pickup or handed to you
+// (dropping is always safe + recoverable). If you'd rather a GIVEN heavy be auto-restored on revive
+// instead of dropped, that needs per-weapon source tracking - flagged as a follow-up.
+//=========================================================================
+
+// Known heavy/key weapon models. Checked with playerHasWeapon (exact model match after the mod's
+// makeWeaponStringValid). Add variants here if a map uses a different path.
+coop_key_heavyModels:{
+	local.m[1] = "models/weapons/panzerschreck.tik"
+	local.m[2] = "models/weapons/bazooka.tik"
+}end local.m
+
+//-------------------------------------------------------------------------
+// Called from dbno.scr::dbno_enter BEFORE takeall. Drop any heavy weapon the player is holding to
+// the world where they fell, and drop it from their tracked inventory so revive won't restore it.
+//-------------------------------------------------------------------------
+coop_key_onDown local.player:{
+	if( local.player == NULL ){ end }
+	local.mdls = waitthread coop_key_heavyModels
+	local.mi = 1
+	while( local.mi <= local.mdls.size ){
+		local.m = local.mdls[local.mi]
+		if( waitthread coop_mod/itemhandler.scr::playerHasWeapon local.player local.m ){
+			waitthread coop_key_dropWeapon local.m local.player.origin
+			waitthread coop_mod/itemhandler.scr::removeWeaponFromInventory local.player local.m
+			iprintlnbold ( local.player.netname + " dropped a heavy weapon where they fell - grab it to keep it in play." )
+		}
+		local.mi++
+	}
+}end
+
+//-------------------------------------------------------------------------
+// Per-spawn guardian (started from player.scr::manageAliveSpawning). While the player is alive and
+// NOT downed, make sure a reward item they still OWN is actually in their hands - re-give it if a
+// DBNO takeall stripped it. Does nothing during normal play (the owner always has the weapon) and
+// nothing while downed; it only heals the moment after a revive. Covers every revive path.
+//-------------------------------------------------------------------------
+coop_key_guardian local.player:{
+	if( local.player == NULL ){ end }
+	while( local.player != NULL && isAlive local.player ){
+		if( local.player.flags["coop_dbno_active"] != 1 ){
+			if( level.coop_binoc_owner == local.player ){
+				if( !( waitthread coop_mod/itemhandler.scr::playerHasWeapon local.player "weapons/coop_binoculars.tik" ) ){
+					local.player item weapons/coop_binoculars.tik
+				}
+			}
+			if( level.coop_smoke_player == local.player ){
+				if( !( waitthread coop_mod/itemhandler.scr::playerHasWeapon local.player "models/weapons/coop_smoke_grenade.tik" ) ){
+					local.player item models/weapons/coop_smoke_grenade.tik
+				}
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//-------------------------------------------------------------------------
+// Spawn a re-pickup-able weapon in the world at a position (mirrors officer.scr's binoc/smoke
+// re-drop: a visible model + a trigger_use that hands the weapon back on touch). Reused for any
+// heavy weapon so a dropped panzerschreck/bazooka is never lost.
+//-------------------------------------------------------------------------
+coop_key_dropWeapon local.model local.pos:{
+	local.gp = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.gp == NIL ){ local.gp = local.pos }
+
+	local.vis = spawn script_model
+	local.vis model local.model
+	local.vis.origin = local.gp
+	local.vis droptofloor
+	local.vis notsolid
+	local.vis rendereffects "+fullbright"
+
+	// [user 07-11] glow beacon so the dropped weapon is easy to spot on the ground (bug-555 "can't see it").
+	// Same proven recipe as officer.scr's smoke pickup glow.
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.vis.origin + (0 0 12)
+	local.glow light (1 0.7 0.2)
+	local.glow lightRadius 140
+	local.glow lightOn
+	local.glow notsolid
+
+	// [user 07-11] WALK-OVER pickup (trigger_multiple), NOT the old solid trigger_use. That trigger_use was
+	// spawned `solid` right where the player fell - a 48u INVISIBLE SOLID box - so the revived player was
+	// trapped inside it (bug-555). officer.scr can use a solid pickup trigger because it drops at the
+	// OFFICER's spot, not on a player. A non-solid touch trigger never blocks; walk over it to recover.
+	local.trig = spawn trigger_multiple
+	local.trig.origin = local.vis.origin
+	local.trig setsize ( -24 -24 0) (24 24 56)
+
+	thread coop_key_wait_pickup local.trig local.vis local.glow local.model
+}end
+
+//-------------------------------------------------------------------------
+// Re-pickup of a dropped heavy weapon: hand the weapon (with a little ammo) back and clean up.
+//-------------------------------------------------------------------------
+coop_key_wait_pickup local.trig local.vis local.glow local.model:{
+	// [user 07-11] loop until an ALIVE, non-downed player touches. The downed owner is lying on the drop
+	// spot, so an unguarded auto-pickup would fire on the corpse / instantly re-grab it. A teammate or the
+	// revived owner walking over the weapon is the valid picker.
+	local.player = NULL
+	while( local.trig != NULL ){
+		local.trig waittill trigger
+		local.who = parm.other
+		if( local.who != NULL && local.who.classname == "Player" && isAlive local.who && local.who.flags["coop_dbno_active"] != 1 ){
+			local.player = local.who
+			break
+		}
+	}
+
+	if( local.trig != NULL ){ local.trig remove }
+	if( local.vis != NULL ){ local.vis delete }
+	if( local.glow != NULL ){ local.glow delete }
+
+	if( local.player == NULL ){ end }
+	local.player item local.model
+	local.player ammo rocket 4		// a couple of rounds so the recovered weapon is usable
+	iprintlnbold ( local.player.netname + " recovered a heavy weapon!" )
+}end

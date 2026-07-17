@@ -426,6 +426,16 @@ state ATTACK_RIFLE_PRIMARY_AIM
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield"
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "DeLisle"
+		//[user 07-12] imported bolt guns: route into the bolt-cycle state after each shot. Their tiks
+		//all carry the 'rechamber' viewmodel anim - without these rows they fired but never bolted.
+		ATTACK_SPRINGFIELD_RECHAMBER	: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Springfield M1903"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Arisaka Type 99"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Arisaka Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Carcano Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Mosin-Nagant Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Silenced Mosin Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Silenced Kar98 Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield Sniper"
 
 		AIM				: ANIMDONE_TORSO COOP_ADS
 		STAND				: ANIMDONE_TORSO
@@ -647,6 +657,13 @@ state CHECK_PRIMARY_ATTACK_FULLAUTO
 		ATTACK_SMG_PRIMARY		: IS_WEAPON_READY_TO_FIRE      "mainhand" "Moschetto"
 		ATTACK_MG_PRIMARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg"
 
+		// HZM coop [user 07-12] SAFETY NET: full-auto-flagged guns that are neither smg nor mg class
+		// used to DEAD-END here (bounce to STAND = the "only fires in ADS" bug: the imported pistols
+		// shipped with 'semiauto' commented out, the StG44 Scoped and the vanilla FG42 are genuine
+		// full-auto rifle-class). Route them to their class attack states so they fire from the hip.
+		ATTACK_RIFLE_PRIMARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "rifle"
+		ATTACK_PISTOL_PRIMARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "pistol"
+
 		STAND				: !ATTACK_PRIMARY
 	}
 }
@@ -830,6 +847,16 @@ state ATTACK_RIFLE_PRIMARY
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield"
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
 		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "DeLisle"
+		//[user 07-12] imported bolt guns: route into the bolt-cycle state after each shot. Their tiks
+		//all carry the 'rechamber' viewmodel anim - without these rows they fired but never bolted.
+		ATTACK_SPRINGFIELD_RECHAMBER	: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Springfield M1903"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Arisaka Type 99"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Arisaka Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Carcano Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Mosin-Nagant Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Silenced Mosin Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Silenced Kar98 Sniper"
+		ATTACK_RIFLE_RECHAMBER		: ANIMDONE_TORSO IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield Sniper"
 		STAND				: ANIMDONE_TORSO 
 		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_READY_TO_FIRE "mainhand"
 	}

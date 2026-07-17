@@ -168,11 +168,91 @@ coop_reJoinTankDriver:{
 	}
 }end
 
+//coop [tank MG gunner] - lets a SECOND player man the tank's MG on turret slot 1, riding along while
+//another player drives (or the tank auto-drives on m5l2b). Parallel to coop_selectDriverForTank, but the
+//gunner is left EXPOSED + damageable (no nodamage/hide) - that's the risk/reward of manning the gun.
+//self is the tank. Uses level.coop_tankGunner (a player) - kept separate from level.coop_playerTank,
+//which is dual-meaning (a player when driven, the tank entity on auto-drive maps).
+//============================================================================
+coop_selectGunnerForTank:{
+//============================================================================
+	if( level.gametype == 0 ){ end }				//coop only
+	if( self QueryTurretSlotEntity 1 == NULL ){ end }	//only if this tank model actually has a 2nd (MG) slot
+
+	while( 1 ){
+		//offer the gun only once the tank is manned/driving (avoids racing the driver claim for the same USE press)
+		if( level.coop_tankGunner == NULL && level.coop_playerTank != NULL ){
+			if( (level.coop_tankLastGunnerTime + 2) < level.time ){
+				for( local.i = 1; local.i <= $player.size; local.i++ ){
+					local.player = $player[local.i]
+					if( local.player.health > 0 && local.player.dmteam == "allies" && local.player.flags["coop_isActive"] == 1 ){
+						//hold USE near the tank, and must not be the driver
+						if( local.player != level.coop_playerTank && local.player.useheld == 1 &&
+							$coop_tankOffset != NULL && vector_length( local.player.origin - $coop_tankOffset.origin ) < 300 ){
+							if( local.player.flags["coop_tankGunnerExitAt"] != NIL ){
+								if( level.time < int( local.player.flags["coop_tankGunnerExitAt"] ) ){ continue }
+							}
+							self thread coop_setGunnerForTank local.player
+							break
+						}
+					}
+				}
+			}
+		}
+		waitframe
+	}
+}end
+
+//coop - seat local.player on the tank's MG (turret slot 1). self is the tank.
+//============================================================================
+coop_setGunnerForTank local.player:{
+//============================================================================
+	level.coop_tankLastGunnerTime = ( level.time + 5 )
+	level.coop_tankGunner = local.player
+	local.player takeall				//[mirror driver] stop the carried weapon lingering while on the gun
+
+	local.turret = self QueryTurretSlotEntity 1
+	if( local.turret != NULL ){ local.turret unlock }
+	self attachturretslot 1 local.player
+	local.player perferredweapon ".30cal Machine Gun"
+	//gunner is deliberately VISIBLE + DAMAGEABLE (exposed MG) - NO nodamage/notsolid/hide, unlike the driver
+
+	//ride until the player dismounts (USE, after cooldown), dies, or leaves the team
+	while( isAlive local.player && local.player.flags["coop_isActive"] == 1 && local.player.dmteam == "allies" ){
+		if( local.player.useheld == 1 ){
+			if( level.time > level.coop_tankLastGunnerTime ){
+				break
+			}else{
+				exec coop_mod/main.scr::printInfo local.player "You need to wait before you can leave the gun again!" 1
+			}
+		}
+		waitframe
+	}
+
+	if( local.turret != NULL ){ local.turret lock }
+
+	if( local.player ){
+		local.player.flags["coop_tankGunnerExitAt"] = ( level.time + 5 )
+		self detachturretslot 1 ( $coop_tankExit.origin + (0 0 150) )	//explicit pos = eject the gunner
+		waitframe
+		if( local.player ){
+			local.player tele ( $coop_tankExit.origin + (0 0 150) )
+			local.player thread coop_reJoinTankDriver				//restore normal loadout/state
+		}
+	}else{
+		self detachturretslot 1 ( $coop_tankExit.origin + (0 0 150) )
+	}
+
+	level.coop_tankLastGunnerTime = level.time
+	level.coop_tankGunner = NULL
+}end
+
 
 player_tank_health:
 	//chrissstrahl - select driver for tank in mp
 	if(level.gametype != 0){
 		self thread coop_selectDriverForTank
+		self thread coop_selectGunnerForTank	//coop - a 2nd player can man the tank's MG (turret slot 1)
 	}
 	//chrissstrahl - keep sp as is
 	else{

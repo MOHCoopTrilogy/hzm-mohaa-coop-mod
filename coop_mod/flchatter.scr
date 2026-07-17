@@ -1,0 +1,140 @@
+//=========================================================================
+// HZM coop - FRONTLINE BATTLE CHATTER (user-approved VO expansion, 2026-07-13).
+//
+// During active combat, a random LIVING AI near the players occasionally barks one line from
+// the curated MOH Frontline pools (ubersound/coop_flvo.scr): German enemies from the de pool
+// (coop_flvo_de1..90), allied AI from the us pool (coop_flvo_us1..45). Positional on the actor,
+// so it reads as that soldier shouting. Blends WITH the native chatter (nothing is muted);
+// the global cooldown keeps it from turning into noise.
+//
+//   coop_flchatter 1/0        = master on/off (default on)
+//   coop_flchatter_range      = max distance actor->nearest player (default 2200)
+//
+// Actor registries are filled by aihandler.scr::actorHandler (every managed AI once, at setup).
+// Dead/removed entries stay in the arrays; the picker just retries a few random slots.
+//=========================================================================
+
+flchatter_init:{
+	if( level.coop_flchatterInit == 1 ){ end }
+	level.coop_flchatterInit = 1
+
+	level.coop_flchatDEn = 0
+	level.coop_flchatUSn = 0
+	level.coop_flchatCombat = 0 - 1000
+
+	thread flchatter_combat_monitor
+	thread flchatter_loop
+}end
+
+//=========================================================================
+// combat heat - same cheap proxy as ambience.scr (player firing / losing health)
+flchatter_combat_monitor:{
+	local.last[1] = 0
+	while( 1 ){
+		local.i = 1
+		while( $player != NULL && local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL && isAlive local.p ){
+				if( local.p.fireheld == 1 ){
+					level.coop_flchatCombat = level.time
+				}
+				local.h = local.p.health
+				if( local.last[local.i] != NIL && local.h < local.last[local.i] ){
+					level.coop_flchatCombat = level.time
+				}
+				local.last[local.i] = local.h
+			} else {
+				local.last[local.i] = 0
+			}
+			local.i++
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+flchatter_loop:{
+	while( 1 ){
+		wait ( 7 + randomfloat( 9 ) )
+
+		if( getcvar( "coop_flchatter" ) == "0" ){ continue }
+		if( ( level.time - level.coop_flchatCombat ) > 8 ){ continue }	// only during/just after a fight
+		if( $player == NULL || $player.size < 1 ){ continue }
+
+		local.range = 2200
+		if( getcvar( "coop_flchatter_range" ) != "" ){ local.range = float( getcvar( "coop_flchatter_range" ) ) }
+
+		// 70% german enemy chatter, 30% allied bark (allied AI are rarer anyway)
+		if( randomfloat( 1 ) < 0.7 ){
+			local.speaker = waitthread flchatter_pick_de local.range
+			if( local.speaker != NULL ){
+				local.speaker playsound ( "coop_flvo_de" + ( ( randomint 90 ) + 1 ) )
+			}
+		} else {
+			local.speaker = waitthread flchatter_pick_us local.range
+			if( local.speaker != NULL ){
+				local.speaker playsound ( "coop_flvo_us" + ( ( randomint 45 ) + 1 ) )
+			}
+		}
+	}
+}end
+
+//=========================================================================
+// pick a living registered GERMAN AI within range of any player (a few random retries; the
+// registry keeps dead refs, retrying is cheaper than compacting)
+flchatter_pick_de local.range:{
+	if( level.coop_flchatDEn < 1 ){ end NULL }
+	local.try = 0
+	while( local.try < 8 ){
+		local.try++
+		local.ai = level.coop_flchatDE[ randomint level.coop_flchatDEn ]
+		if( local.ai == NULL || local.ai == NIL ){ continue }
+		if( !( isAlive local.ai ) ){ continue }
+		local.i = 1
+		while( local.i <= $player.size ){
+			if( $player[local.i] != NULL ){
+				if( ( vector_length( $player[local.i].origin - local.ai.origin ) ) < local.range ){
+					end local.ai
+				}
+			}
+			local.i++
+		}
+	}
+	end NULL
+}end
+
+//=========================================================================
+flchatter_pick_us local.range:{
+	if( level.coop_flchatUSn < 1 ){ end NULL }
+	local.try = 0
+	while( local.try < 8 ){
+		local.try++
+		local.ai = level.coop_flchatUS[ randomint level.coop_flchatUSn ]
+		if( local.ai == NULL || local.ai == NIL ){ continue }
+		if( !( isAlive local.ai ) ){ continue }
+		local.i = 1
+		while( local.i <= $player.size ){
+			if( $player[local.i] != NULL ){
+				if( ( vector_length( $player[local.i].origin - local.ai.origin ) ) < local.range ){
+					end local.ai
+				}
+			}
+			local.i++
+		}
+	}
+	end NULL
+}end
+
+//=========================================================================
+// called by aihandler.scr::actorHandler once per managed actor
+flchatter_register:{
+	if( level.coop_flchatterInit != 1 ){ end }
+	if( self == NULL ){ end }
+	if( self.team == "german" ){
+		level.coop_flchatDE[level.coop_flchatDEn] = self
+		level.coop_flchatDEn++
+	} else if( self.team == "american" ){
+		level.coop_flchatUS[level.coop_flchatUSn] = self
+		level.coop_flchatUSn++
+	}
+}end

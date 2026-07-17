@@ -51,6 +51,8 @@ add_objectives local.index local.status local.objective local.location:
 		thread coop_mod/xp.scr::xp_primary_done local.index
 		//[303] HZM CHALLENGES - primary objective task progress (team)
 		thread coop_mod/challenges.scr::chal_primary_done local.index
+		//[311] FRONTLINE score layer - objective-complete sting (one-shot per index)
+		thread coop_mod/flmusic.scr::fl_sting_obj local.index
 	}
 	
 //08.Feb.2015 chrissstrahl - added for mohaa coop
@@ -438,9 +440,15 @@ coop_objectivesSendPlayer local.player local.index local.status local.objective:
 	
 //do not handle player that are not there
 	local.entity = $player[local.player]
-	
+
 	//check inside the function, as we can not garantee safe calls
 	if!( local.entity ){ end }
+
+	//[user 07-11] coop_objPanel: the script-drawn objectives panel (coop_mod/objectives.scr::coop_objPanel_*)
+	//owns the PRIMARY objective display and word-wraps long text, so suppress the single-line URC primary
+	//send here (the coop_oN cvars stay hidden from obj_reset.cfg). Side objectives (coop_soN) are unaffected.
+	//coop_objPanel 0 falls back to this URC path.
+	if( getcvar "coop_objPanel" == "1" ){ end }
 
 	if(local.index == NIL){
 		local.index = 0
@@ -484,8 +492,18 @@ coop_objectivesSendPlayer local.player local.index local.status local.objective:
 //make sure we only run this once untill all commands are processed
 	if(local.entity.flag[coopObjectivesSending] == NIL || local.entity.flag[coopObjectivesSending] == 0){
 		local.entity.flag[coopObjectivesSending] = 1
+		local.entity.flag[coopObjectivesSendingAt] = level.time
 	}else{
-		end
+		//[user 07-12] SELF-HEAL the sender latch: if a previous sender thread DIED mid-run (script
+		//error), 'Sending' stays latched 1 forever and every later objective push to this player
+		//silently ends here - the visible symptom is a PREVIOUS mission's objectives stuck on screen
+		//(quit mid-mission -> start a different mission). If the latch is older than 10s the owner
+		//thread is dead: take the latch over and process the queue ourselves.
+		if( local.entity.flag[coopObjectivesSendingAt] != NIL && level.time > (local.entity.flag[coopObjectivesSendingAt] + 10) ){
+			local.entity.flag[coopObjectivesSendingAt] = level.time
+		}else{
+			end
+		}
 	}
 
 //wait until the player is ready to receive the objectives
@@ -553,9 +571,34 @@ coop_objectivesSendPlayer local.player local.index local.status local.objective:
 			}
 		//check each time if he is even there (allways after any wait command)
 			if( local.entity == NULL ){	end	}
-			
+
 		//allways send objectives text
-			local.entity stufftext ("set coop_o" + local.index  + " " + local.objective)
+		//[user 07-12] WORD-WRAP for the URC menu: UILabel can't wrap on width, so split the text
+		//server-side. Line 1 -> coop_oN, line 2 -> coop_oNb (second-line label in coop_objectives.urc),
+		//coop_oNw gates the second grey plate. Texts are kept <= 2 lines (long ones reworded in the
+		//map scripts); any 3rd+ line is folded onto line 2 as a failsafe.
+		//[user 07-12] NIL-guard: a NIL/empty objective text must not kill this thread (a dead sender
+		//wedges the Sending latch above and freezes the display on stale rows). Skip the wrap and
+		//send the raw value exactly like vanilla did.
+			local.wl1 = local.objective
+			local.wlines = NIL
+			if( local.objective != NIL && local.objective != "" ){
+				local.wlines = waitthread coop_mod/objectives.scr::coop_objWrap local.objective 55
+				if( local.wlines != NIL && local.wlines[1] != NIL && local.wlines[1] != "" ){ local.wl1 = local.wlines[1] }
+			}
+			local.entity stufftext ("set coop_o" + local.index  + " " + local.wl1)
+			if( local.wlines != NIL && local.wlines.size >= 2 ){
+				local.wl2 = local.wlines[2]
+				local.wi = 3
+				while( local.wi <= local.wlines.size ){
+					local.wl2 = local.wl2 + " " + local.wlines[local.wi]
+					local.wi++
+				}
+				local.entity stufftext ("set coop_o" + local.index + "b " + local.wl2)
+				local.entity stufftext ("set coop_o" + local.index + "w 1")
+			}else{
+				local.entity stufftext ("exec ui/coop_objectives/obj_" + local.index + "clearb.cfg")
+			}
 		}
 		//else{
 			//println ("coop_objectivesSendPlayer: ABORTED (player is up to date) objective:"+local.index+" (status: " + local.status + ") to player["+local.player+"]")

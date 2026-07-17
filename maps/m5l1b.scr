@@ -180,6 +180,17 @@ main:{
 	$tank setcollisionentity $tank.target
 	$kingtank setcollisionentity $kingtank.target
 
+	// HZM coop [user 07-10] - arm the tank's death->wreck handler at LEVEL START, not only inside
+	// tankdrive (which is gated behind the scripted tankstart trigger). In coop a player can bazooka
+	// the tank BEFORE that scripted moment, and without tankdeath armed the Vehicle just vanishes with
+	// no wreck. tankdeath now self-guards so this + the tankdrive call don't double-spawn a wreck.
+	$tank thread tankdeath
+
+	// [coop] the map's own "reached the tank crew" trigger doesn't fire in coop, so obj1 (which completes
+	// "Find the tank crew" AND sets tankstart -> the tank starts driving) never ran -> mission hard-stuck
+	// at objective 1. Watch for a player reaching the crew leader (friendly2) and fire obj1 then.
+	if( level.gametype != 0 ){ thread coop_findcrew_watch }
+
 	thread tankstartwait
 
 	wait 2
@@ -824,26 +835,41 @@ disc_tank:{
 //============================================================================
 tankdeath:{
 //============================================================================
-	self waittill death
-	//	self disconnect_paths
+	// HZM coop - self-guard: armed at level start AND again in tankdrive; only one instance may run
+	// (else the tank spawns two wrecks / fires the objective twice).
+	if( self.coop_tankdeathArmed == 1 ){ end }
+	self.coop_tankdeathArmed = 1
+
+	// [user 07-10] POLL health instead of `self waittill death`. In coop the tank Vehicle is removed by
+	// the engine on destruction WITHOUT firing a script "death" event, so the old waittill never returned
+	// (tank vanished, no wreck, tankdead never set -> mission unfinishable). Capture the last live
+	// transform each tick so the wreck spawns even after the entity is gone.
+	local.lastorg = self.origin
+	local.lastang = self.angles
+	while( self != NULL && isAlive self ){
+		local.lastorg = self.origin
+		local.lastang = self.angles
+		wait 0.15
+	}
 
 	level.flags[tankdead] = 1
 	level.maxfriendlies = 2
 
 	local.ent = spawn script_model
-	local.ent.origin = self.origin
-	local.ent.angles = self.angles
-	//	local.ent model "vehicles/tigertank_d.tik"
+	local.ent.origin = local.lastorg
+	local.ent.angles = local.lastang
 	local.ent model "vehicles/panzer_iv_eud.tik"
 
-	$dead_panzer.origin = local.ent.origin
-	$dead_panzer.angles = local.ent.angles
-	
+	if( $dead_panzer != NULL ){
+		$dead_panzer.origin = local.lastorg
+		$dead_panzer.angles = local.lastang
+	}
+
 	thread disc_tank
 	local.ent notsolid
 
-	exec global/model.scr self.origin "models/fx/fx_tank_explosion"
-	waitthread global/objectives.scr::add_objectives 2 3 "Defeat the Panzer tank." $tank.origin
+	exec global/model.scr local.lastorg "models/fx/fx_tank_explosion"
+	waitthread global/objectives.scr::add_objectives 2 3 "Defeat the Panzer tank." local.lastorg
 	waitthread global/objectives.scr::current_objectives 3
 
 	level.completeobjs++
@@ -916,6 +942,7 @@ end
 obj1:{
 //============================================================================
 	if (game.medic != NIL)	{end}
+	if( level.flags[tankcrew] == 1 ){ end }		// [coop] run once - also invoked by coop_findcrew_watch
 
 	thread happysad level.friendly1
 	thread happysad level.friendly2
@@ -926,7 +953,28 @@ obj1:{
 
 	waitthread global/objectives.scr::add_objectives 1 3 "Find the tank crew." level.friendly2.origin
 	level.completeobjs++
-	thread newobjective		
+	thread newobjective
+}end
+
+//============================================================================
+// [coop] Complete "Find the tank crew" once a player reaches the crew leader (friendly2), because the
+// map's own reach-trigger doesn't fire in coop. obj1 is self-guarded so this can't double-fire.
+coop_findcrew_watch:{
+//============================================================================
+	while( level.flags[tankcrew] == 0 ){
+		wait 0.5
+		if( level.friendly2 == NULL ){ thread obj1; break }		// crew leader gone - don't hard-stick the map
+		local.i = 1
+		while( local.i <= $player.size ){
+			if( $player[local.i] != NULL && isAlive $player[local.i] ){
+				if( vector_length( $player[local.i].origin - level.friendly2.origin ) < 256 ){
+					thread obj1
+					break
+				}
+			}
+			local.i++
+		}
+	}
 }end
 
 //============================================================================
@@ -940,7 +988,44 @@ obj2:{
 		level.flags[cityhall] = 1
 		level.completeobjs++
 		waitthread global/objectives.scr::add_objectives 3 3 "Keep the tank crew alive and infiltrate city hall." $obj2.origin
-		thread newobjective		
+		if( level.gametype != 0 ){ thread coop_forceCrewToTiger }		// [user 07-11] force the crew all the way to the King Tiger so a stuck crewman can't soft-lock objective 4
+		thread newobjective
+	}
+}end
+
+//============================================================================
+// [user 07-11 - coop] After the city-hall objective completes, FORCE the tank crew to close on the King
+// Tiger. obj3 (below) only completes objective 4 when EVERY living crew member (friendly1/2/3) is within
+// 750u of the tiger ($obj3); the loose tether/friendlythink can stall a crewman in coop and soft-lock the
+// map (mission unfinishable). This re-kicks a straggler's follow (runtoClosest) every 3s, and once ANY
+// player has reached the tiger it sends any lagging crewman straight to it so the objective can close.
+//============================================================================
+coop_forceCrewToTiger:{
+	if( level.gametype == 0 ){ end }
+	if( level.coop_forceCrewRun == 1 ){ end }
+	level.coop_forceCrewRun = 1
+
+	while( 1 ){
+		local.remaining = 0
+		local.mi = 1
+		while( local.mi <= 3 ){
+			local.crew = level.friendly1
+			if( local.mi == 2 ){ local.crew = level.friendly2 }
+			if( local.mi == 3 ){ local.crew = level.friendly3 }
+			if( local.crew != NULL && isalive local.crew ){
+				if( vector_length( local.crew.origin - $obj3.origin ) > 700 ){
+					local.remaining = 1
+					if( exec coop_mod/replace.scr::withinDistanceOf $obj3 750 ){
+						local.crew runto $obj3							// a player is at the tiger - pull the straggler straight in
+					} else if !( exec coop_mod/replace.scr::withinDistanceOf local.crew 300 ){
+						local.crew exec coop_mod/replace.scr::runtoClosest	// crewman fell >300u behind the squad - re-kick the follow
+					}
+				}
+			}
+			local.mi++
+		}
+		if( local.remaining == 0 ){ end }		// everyone still alive is at the tiger - obj 4 can complete
+		wait 3
 	}
 }end
 

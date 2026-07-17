@@ -1,0 +1,328 @@
+//[305] HZM coop - LIVE HELMET SWITCHER
+//=========================================================================
+// Lets a player change the helmet on their soldier, live, and have every teammate see it.
+// It is server-authoritative (no client-only trick): the model's own baked helmet surface
+// (us_helmet) is hidden with a nodraw, and a chosen static US-helmet prop is attachmodel'd to
+// the head bone. Both the surface nodraw and the attached model replicate through entityState
+// to all clients (proven in _research/helmet_switcher.md - surfaces[] + attach fields are net-
+// coded in qcommon/msg.cpp).
+//
+// WHY static helmet props: the varied US helmets (netted, 29th, medic, sergeant...) are the
+// SAME us_helmetstatic.skd differing only by shader, and being skeleton-less their mesh sits at
+// the model origin, so attaching to "Bip01 Head" needs only a tiny offset and does NOT swing as
+// the head turns (a full-skeleton us_helmet.skd would sit a head-height above its root and
+// orbit the head). See the helmet-piece inventory in the research doc.
+//
+// Re-applied on EVERY (re)spawn (hook in player.scr::manageAliveSpawning) because InitModel
+// rebuilds the model each spawn and clears all surface flags + attachments.
+//
+// FITMENT TUNING: the attach offset is read live from coop_helmetX/Y/Z (units, head-bone LOCAL
+// frame - attach_use_angles is true) and scale from coop_helmetScale. If the helmet floats /
+// sits off to one side on the first test, nudge those cvars in the console and re-press the
+// helmet key to re-apply, then the winning values get baked as the defaults.
+//=========================================================================
+
+//-------------------------------------------------------------------------
+// Build the option list once (guarded). Index 1 = Standard Issue (the model's own issued
+// helmet, no change); index 2 = No Helmet (hide baked, attach nothing); index 3+ = hide baked
+// helmet and attach a static US-helmet prop.
+//-------------------------------------------------------------------------
+helmet_initList:{
+	if( level.coop_helmetCount != NIL ){ end }
+
+	// [user 07-12] Switchable helmets, follower edition: the prop is a free script_model driven per
+	// frame by helmet_follow (head-bone position + facing yaw + live fit cvars). Both engine attach
+	// flavors proved wrong for a worn item - see the helmet_apply comment.
+	level.coop_helmetName[1] = "Standard Issue"
+	level.coop_helmetTik[1]  = "std"
+
+	level.coop_helmetName[2] = "No Helmet"
+	level.coop_helmetTik[2]  = "none"
+
+	//[user 07-12] EXACT-FIT tiks (models/coop_helmets/): the worn us_helmet.skd's head-bone-local
+	//geometry transplanted into the static prop's UV layout (147/147 UV-matched, zero residual) -
+	//a plain attachmodel to "Bip01 Head" lands pixel-identical to the model's own helmet. No tuning.
+	level.coop_helmetName[3] = "Plain"
+	level.coop_helmetTik[3]  = "models/coop_helmets/coop_helmet_plain.tik"
+
+	level.coop_helmetName[4] = "Netted"
+	level.coop_helmetTik[4]  = "models/coop_helmets/coop_helmet_net.tik"
+
+	level.coop_helmetName[5] = "29th Infantry"
+	level.coop_helmetTik[5]  = "models/coop_helmets/coop_helmet_29th.tik"
+
+	level.coop_helmetName[6] = "29th Netted"
+	level.coop_helmetTik[6]  = "models/coop_helmets/coop_helmet_29thnet.tik"
+
+	level.coop_helmetName[7] = "Sergeant"
+	level.coop_helmetTik[7]  = "models/coop_helmets/coop_helmet_sergeant.tik"
+
+	level.coop_helmetName[8] = "Captain"
+	level.coop_helmetTik[8]  = "models/coop_helmets/coop_helmet_captain.tik"
+
+	level.coop_helmetName[9] = "Medic"
+	level.coop_helmetTik[9]  = "models/coop_helmets/coop_helmet_medic.tik"
+
+	level.coop_helmetName[10] = "Engineer"
+	level.coop_helmetTik[10]  = "models/coop_helmets/coop_helmet_engineer.tik"
+
+	//[user 07-12] ALL-FACTIONS HEADGEAR: every head-worn gear mesh in the trilogy paks (Brits,
+	//Germans, Italians, US tanker) run through the same exact-fit pipeline (head-bone-local geometry,
+	//scale 0.52, identity idle) + 3 bone-attached berets/hats tried directly. Shader skins voted from
+	//the player TIKs that actually wear each piece; report any wrong-looking texture and it's a
+	//one-line shader fix in that piece's coop_helmet_*.tik.
+	level.coop_helmetName[11] = "Brit Commando Hat"
+	level.coop_helmetTik[11]  = "models/coop_helmets/coop_helmet_brit_cmdhat.tik"
+	level.coop_helmetName[12] = "Brit Field Cap"
+	level.coop_helmetTik[12]  = "models/coop_helmets/coop_helmet_brit_plthat.tik"
+	level.coop_helmetName[13] = "Brit Officer Hat"
+	level.coop_helmetTik[13]  = "models/coop_helmets/coop_helmet_brit_offhat.tik"
+	level.coop_helmetName[14] = "Brit Tanker Hat"
+	level.coop_helmetTik[14]  = "models/coop_helmets/coop_helmet_brit_tankhat.tik"
+	level.coop_helmetName[15] = "Brit Helmet"
+	level.coop_helmetTik[15]  = "models/coop_helmets/coop_helmet_uk_helmet.tik"
+	level.coop_helmetName[16] = "US Tanker Helmet"
+	level.coop_helmetTik[16]  = "models/coop_helmets/coop_helmet_us_tankhat.tik"
+	level.coop_helmetName[17] = "German Helmet (SH)"
+	level.coop_helmetTik[17]  = "models/coop_helmets/coop_helmet_ger_helmet_sh.tik"
+	level.coop_helmetName[18] = "German Helmet"
+	level.coop_helmetTik[18]  = "models/coop_helmets/coop_helmet_ger_helmet.tik"
+	level.coop_helmetName[19] = "German Covered Helmet"
+	level.coop_helmetTik[19]  = "models/coop_helmets/coop_helmet_ger_covered.tik"
+	level.coop_helmetName[20] = "German Crease Cap"
+	level.coop_helmetTik[20]  = "models/coop_helmets/coop_helmet_ger_creasecap.tik"
+	level.coop_helmetName[21] = "Afrika Korps Cap"
+	level.coop_helmetTik[21]  = "models/coop_helmets/coop_helmet_dak_hat.tik"
+	level.coop_helmetName[22] = "German Officer Hat (SH)"
+	level.coop_helmetTik[22]  = "models/coop_helmets/coop_helmet_ger_offhat_sh.tik"
+	level.coop_helmetName[23] = "German Officer Cap"
+	level.coop_helmetTik[23]  = "models/coop_helmets/coop_helmet_ger_officercap.tik"
+	level.coop_helmetName[24] = "SS NCO Cap"
+	level.coop_helmetTik[24]  = "models/coop_helmets/coop_helmet_ssncocap.tik"
+	level.coop_helmetName[25] = "German Tanker Hat"
+	level.coop_helmetTik[25]  = "models/coop_helmets/coop_helmet_ger_tankhat.tik"
+	level.coop_helmetName[26] = "German Field Hat"
+	level.coop_helmetTik[26]  = "models/coop_helmets/coop_helmet_ger_hat.tik"
+	level.coop_helmetName[27] = "Italian Infantry Hat"
+	level.coop_helmetTik[27]  = "models/coop_helmets/coop_helmet_ital_infhat.tik"
+	level.coop_helmetName[28] = "Italian Volunteer Hat"
+	level.coop_helmetTik[28]  = "models/coop_helmets/coop_helmet_ital_volhat.tik"
+	level.coop_helmetName[29] = "Italian Para Helmet"
+	level.coop_helmetTik[29]  = "models/coop_helmets/coop_helmet_ital_para.tik"
+	level.coop_helmetName[30] = "Brit Beret"
+	level.coop_helmetTik[30]  = "models/coop_helmets/coop_helmet_brit_beret.tik"
+	level.coop_helmetName[31] = "German Beret"
+	level.coop_helmetTik[31]  = "models/coop_helmets/coop_helmet_ger_beret.tik"
+	level.coop_helmetName[32] = "Soviet Seaman Hat"
+	level.coop_helmetTik[32]  = "models/coop_helmets/coop_helmet_soviet_hat.tik"
+
+	//[user 07-13] last two unadopted US variants from the cut-content gear dig
+	level.coop_helmetName[33] = "Netted + Cigarettes"
+	level.coop_helmetTik[33]  = "models/coop_helmets/coop_helmet_net_cig.tik"
+
+	level.coop_helmetName[34] = "Lieutenant"
+	level.coop_helmetTik[34]  = "models/coop_helmets/coop_helmet_ltnt.tik"
+
+	level.coop_helmetCount = 34
+}end
+
+//-------------------------------------------------------------------------
+// Apply local.player's current helmet choice to their live model. Called on every spawn and
+// after a cycle. Server-side; the changes replicate to all clients.
+//-------------------------------------------------------------------------
+helmet_apply local.player:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_initList
+	waitframe	//let InitModel/setModel finish rebuilding the tiki after a (re)spawn
+	if( local.player == NULL ){ end }
+
+	local.idx = local.player.flags["coop_helmetIdx"]
+	if( local.idx == NIL ){ local.idx = 1 }
+
+	//UNTOUCHED default players: nothing to do. Skip all surface/attach work (and the harmless
+	//"group not found" warnings) so a player who never uses the switcher is a true no-op every spawn.
+	if( local.idx == 1 && local.player.flags["coop_helmetTouched"] != 1 ){ end }
+
+	local.tik = level.coop_helmetTik[local.idx]
+
+	//clear any helmet we previously attached: exact-fit props ride the head tag via attachmodel,
+	//so removal is by tag (safe no-op if nothing is attached there). Also free a legacy follower
+	//ent if one survived from the pre-exact-fit build.
+	local.player removeattachedmodel "Bip01 Head"
+	if( local.player.flags["coop_helmetEnt"] != NULL ){ local.player.flags["coop_helmetEnt"] delete }
+	local.player.flags["coop_helmetEnt"] = NULL
+
+	if( local.tik == "std" ){
+		//show the model's own issued helmet - the default, untouched look
+		local.player surface us_helmet "-nodraw"
+		local.player surface us_helmet_inside "-nodraw"
+		local.player surface bob_helmet_camo "-nodraw"
+		end
+	}
+
+	//every other option hides the baked helmet(s). us_helmet_inside / bob_helmet_camo only exist
+	//on the airborne skins (three stacked helmet surfaces); on all other models the engine simply
+	//warns "group not found" and no-ops - harmless (entity.cpp:4214).
+	local.player surface us_helmet "+nodraw"
+	local.player surface us_helmet_inside "+nodraw"
+	local.player surface bob_helmet_camo "+nodraw"
+
+	if( local.tik == "none" ){ end }	//bare-headed - nothing to attach
+
+	//[user 07-12, FINAL - exact-fit] attachmodel to the head bone with ZERO offset. This is correct
+	//now because the coop_helmets tiks carry the WORN helmet's geometry (head-bone-local coords from
+	//us_helmet.skd, which is what makes the model's own helmet sit perfectly) - so inheriting the
+	//bone's axes/position, the thing that broke the old attempts (bug-535 sideways / shot0077
+	//pancake), is exactly what we want. Follows every animation 1:1; no follower, no fit cvars.
+	local.player attachmodel local.tik "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
+}end
+
+//-------------------------------------------------------------------------
+// [RETIRED 07-12] Per-frame head follower - superseded by the EXACT-FIT meshes (models/coop_helmets/),
+// which bake the worn helmet's head-local geometry so a plain attachmodel is pixel-perfect. Kept only
+// as a reference recipe for future loose head-props; nothing threads it anymore.
+// origin = head-bone position + FACING-RELATIVE offset; angles = player
+// facing yaw + fixed corrections. All six fit cvars are LIVE for the one-time tune, then get baked:
+//   coop_helmetX = units toward the face (+) / back of head (-)     [default 0]
+//   coop_helmetY = units to the player's right (+) / left (-)       [default 0]
+//   coop_helmetZ = units up onto the crown                          [default 6]
+//   coop_helmetPitch / coop_helmetRoll = cancel the static prop's authored ground-pose tilt
+//   coop_helmetYaw = spin the brim to the front
+// Ends itself when the helmet is replaced/removed (helmet_apply deletes the old ent every spawn);
+// frees the model if the owner disconnects.
+//-------------------------------------------------------------------------
+helmet_follow local.player local.ent:{
+	while( local.player != NULL && local.ent != NULL && local.player.flags["coop_helmetEnt"] == local.ent ){
+		local.pos = local.player gettagposition "Bip01 Head"
+		if( local.pos != NIL ){
+			local.fU = int( getcvar "coop_helmetX" )
+			local.rU = int( getcvar "coop_helmetY" )
+			local.uS = getcvar "coop_helmetZ"
+			if( local.uS == "" ){ local.uS = 6 }
+			local.uU = int( local.uS )
+			if( local.uU == 0 ){ local.uU = 6 }
+
+			local.yaw = local.player.angles[1]
+			local.fwd = angles_toforward ( 0 local.yaw 0 )
+			local.right = angles_toforward ( 0 ( local.yaw - 90 ) 0 )
+			local.ent.origin = local.pos + ( vector_scale local.fwd local.fU ) + ( vector_scale local.right local.rU ) + ( 0 0 local.uU )
+
+			local.p = int( getcvar "coop_helmetPitch" )
+			local.yo = int( getcvar "coop_helmetYaw" )
+			local.r = int( getcvar "coop_helmetRoll" )
+			local.ent.angles = ( local.p ( local.yaw + local.yo ) local.r )
+		}
+		waitframe
+	}
+	//owner disconnected mid-follow: free the orphaned prop (a replace/respawn already deleted it)
+	if( local.player == NULL && local.ent != NULL ){ local.ent delete }
+}end
+
+//-------------------------------------------------------------------------
+// [user 07-12] NUMPAD FIT-TUNER (same idea as the build-mode / ADS weapon tuners). Keys ride the
+// name-append bus (tokens 37-41), the SERVER does real arithmetic on the fit cvars, and the
+// helmet_follow loop picks changes up the very next frame - live WYSIWYG tuning:
+//   KP_STAR  = next parameter (Roll -> Pitch -> Yaw -> Z up -> X fwd -> Y right)
+//   KP_PLUS / KP_MINUS = nudge the selected parameter
+//   KP_SLASH = fine/coarse step (angles 5/45 deg, offsets 1/4 units)
+//   KP_DEL   = print all six values (on screen + qconsole.log, ready to bake as defaults)
+// Values are SERVER cvars: one tune fits every helmet/player and every teammate sees it.
+//-------------------------------------------------------------------------
+helmet_tune_init:{
+	if( level.coop_helmetTuneName[1] != NIL ){ end }
+	level.coop_helmetTuneName[1] = "coop_helmetRoll"
+	level.coop_helmetTuneName[2] = "coop_helmetPitch"
+	level.coop_helmetTuneName[3] = "coop_helmetYaw"
+	level.coop_helmetTuneName[4] = "coop_helmetZ"
+	level.coop_helmetTuneName[5] = "coop_helmetX"
+	level.coop_helmetTuneName[6] = "coop_helmetY"
+	level.coop_helmetTuneFine[1] = 5
+	level.coop_helmetTuneFine[2] = 5
+	level.coop_helmetTuneFine[3] = 5
+	level.coop_helmetTuneFine[4] = 1
+	level.coop_helmetTuneFine[5] = 1
+	level.coop_helmetTuneFine[6] = 1
+	level.coop_helmetTuneCoarse[1] = 45
+	level.coop_helmetTuneCoarse[2] = 45
+	level.coop_helmetTuneCoarse[3] = 45
+	level.coop_helmetTuneCoarse[4] = 4
+	level.coop_helmetTuneCoarse[5] = 4
+	level.coop_helmetTuneCoarse[6] = 4
+	level.coop_helmetTuneParam = 1
+	level.coop_helmetTuneBig = 0
+}end
+
+helmet_tune_show local.player:{
+	local.p = level.coop_helmetTuneParam
+	local.cv = level.coop_helmetTuneName[local.p]
+	local.step = level.coop_helmetTuneFine[local.p]
+	if( level.coop_helmetTuneBig == 1 ){ local.step = level.coop_helmetTuneCoarse[local.p] }
+	local.player iprintlnbold ( "HELMET TUNE  " + local.cv + " = " + getcvar( local.cv ) + "   (step " + local.step + ")" )
+}end
+
+helmet_tune_mode local.player:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_tune_init
+	local.p = level.coop_helmetTuneParam + 1
+	if( local.p > 6 ){ local.p = 1 }
+	level.coop_helmetTuneParam = local.p
+	thread helmet_tune_show local.player
+}end
+
+helmet_tune_step local.player:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_tune_init
+	if( level.coop_helmetTuneBig == 1 ){ level.coop_helmetTuneBig = 0 } else { level.coop_helmetTuneBig = 1 }
+	thread helmet_tune_show local.player
+}end
+
+helmet_tune_nudge local.player local.dir:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_tune_init
+	local.p = level.coop_helmetTuneParam
+	local.cv = level.coop_helmetTuneName[local.p]
+	local.step = level.coop_helmetTuneFine[local.p]
+	if( level.coop_helmetTuneBig == 1 ){ local.step = level.coop_helmetTuneCoarse[local.p] }
+	local.v = int( getcvar( local.cv ) )
+	local.v = local.v + ( local.step * local.dir )
+	setcvar local.cv local.v
+	thread helmet_tune_show local.player
+}end
+
+helmet_tune_print local.player:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_tune_init
+	local.player iprintlnbold ( "HELMET FIT:  Roll " + getcvar( "coop_helmetRoll" ) + "  Pitch " + getcvar( "coop_helmetPitch" ) + "  Yaw " + getcvar( "coop_helmetYaw" ) )
+	local.player iprintlnbold ( "             Z " + getcvar( "coop_helmetZ" ) + "  X " + getcvar( "coop_helmetX" ) + "  Y " + getcvar( "coop_helmetY" ) )
+	//qconsole.log copy-paste block for baking the winners into autoexec.cfg
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetRoll " + getcvar( "coop_helmetRoll" ) )
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetPitch " + getcvar( "coop_helmetPitch" ) )
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetYaw " + getcvar( "coop_helmetYaw" ) )
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetZ " + getcvar( "coop_helmetZ" ) )
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetX " + getcvar( "coop_helmetX" ) )
+	println ( "^~^~^ HELMET FIT BAKE: seta coop_helmetY " + getcvar( "coop_helmetY" ) )
+}end
+
+//-------------------------------------------------------------------------
+// Cycle local.player to the next (dir=1) / previous (dir=-1) helmet and re-apply it live.
+// Bound to the name-append bus (tokens 35/36) via a key or the Coop settings menu.
+//-------------------------------------------------------------------------
+helmet_cycle local.player local.dir:{
+	if( local.player == NULL ){ end }
+	if( !isAlive local.player ){ local.player iprintlnbold "Can't change helmet while down/dead."; end }
+	waitthread helmet_initList
+
+	local.n = level.coop_helmetCount
+	if( local.n == NIL || local.n < 1 ){ end }
+
+	local.idx = local.player.flags["coop_helmetIdx"]
+	if( local.idx == NIL ){ local.idx = 1 }
+	local.idx = local.idx + local.dir
+	if( local.idx > local.n ){ local.idx = 1 }
+	if( local.idx < 1 ){ local.idx = local.n }
+	local.player.flags["coop_helmetIdx"] = local.idx
+	local.player.flags["coop_helmetTouched"] = 1	//from now on helmet_apply manages this player every spawn
+
+	waitthread helmet_apply local.player
+	local.player iprintlnbold ( "Helmet: " + level.coop_helmetName[local.idx] )
+}end

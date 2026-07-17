@@ -1,0 +1,279 @@
+//=========================================================================
+// [310] HZM coop ARMORY - per-player loadout picks (Phase 1).
+//
+// The client picks 2 primaries + 1 sidearm + 1 grenade in ui/coop_loadout.urc
+// (opened from the main menu ARMORY button or the lobby LOADOUT button). Each
+// assign click setas archived cvars (coop_lo1..4/coop_loN1..4/coop_loA1..4)
+// and fires a name-bus token ,w1<id>..,w4<id> (variables.scr 42-45; dispatch
+// player.scr::playerNameCommand). On every map join detectCoop re-requests the
+// picks via "vstr coop_loA1..4" (the FOV recipe) - the client cvars are the
+// persistent store, the server holds them only for the current map.
+//
+// Application: itemhandler.scr::spawnInventory tier 2 - picks replace the map
+// default kit (level.coop_weaponLoadout) on first spawn; the retain-inventory
+// respawn path then carries them like any other registered weapon. Objective
+// grants (replace.scr::givePlayerWeapon) run post-spawn and are untouched.
+// Maps with scripted kits can set level.coop_loadoutLocked = 1 to disable.
+//
+// Roster data: coop_mod/loadoutroster.scr (GENERATED - regen via
+// scratchpad/gen_loadout.py, do not hand-edit).
+//=========================================================================
+
+//self-insert for thread debug prints (level.cMTE_coop_loadoutpick = 1)
+//=========================================================================
+// Store one pick. local.slot: 1/2 = primary, 3 = sidearm, 4 = grenade.
+// local.data = 2-digit roster id from the name bus.
+//=========================================================================
+loadout_set local.player local.slot local.data:{
+//=========================================================================
+if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread loadoutpick/loadout_set->"+level.cMTE+"" )}
+	if(local.player == NULL){ end }
+	if(level.gametype == 0){ end }
+
+	local.r = waitthread coop_mod/loadoutroster.scr::roster_get local.data
+	if(local.r["give"] == ""){
+		local.player iprint ("Armory: unknown weapon id '" + local.data + "'")
+		end
+	}
+
+	//slot legality (the menu enforces this too - re-check server-side)
+	local.want = "p"
+	if(local.slot == 3){ local.want = "s" }
+	if(local.slot == 4){ local.want = "g" }
+	if(local.r["slot"] != local.want){
+		local.player iprint ("Armory: " + local.r["name"] + " does not fit that slot")
+		end
+	}
+
+	//NOTE: duplicate picks across the two primary slots are ALLOWED here - the client cfg
+	//has already seta'd its chip cvars by the time we validate, so denying created a
+	//client/server desync (chip said one gun, server kept another). loadout_rebuild
+	//collapses a duplicate to a single copy instead.
+
+	//unlock gate - DORMANT in Phase 1 (coop_lockLoadout defaults off). The unlock
+	//record is challenges.scr::chal_add_unlock's pipe-list of reward tik paths.
+	if(getcvar("coop_lockLoadout") == "1"){
+		if(!(waitthread loadout_isUnlocked local.player local.r["give"])){
+			local.player iprint ("Armory: " + local.r["name"] + " is locked - complete its challenge first")
+			end
+		}
+	}
+
+	local.player.flags["coop_loSlot" + local.slot]   = local.r["give"]
+	local.player.flags["coop_loSlotId" + local.slot] = local.data
+
+	waitthread loadout_rebuild local.player
+
+	local.player iprint ("Armory: " + local.r["name"] + " equipped")
+
+	//[310] the first spawn usually happens BEFORE the join-time resend delivers the picks
+	//(m1l1 spawn at +10s vs resend at +5..10s) - re-issue the kit once the pick burst
+	//settles so picks apply to THIS map, not just the next one. Debounced: the 4 resend
+	//tokens arrive staggered and must trigger only ONE regive.
+	local.player.flags["coop_loDirty"] = level.time
+	if(local.player.flags["coop_loRegivePending"] != 1){
+		local.player.flags["coop_loRegivePending"] = 1
+		thread loadout_regiveWatch local.player
+	}
+}end
+
+//=========================================================================
+// Debounced kit re-issue: wait for the pick burst to go quiet, then run the
+// player back through the fresh-kit spawn path (clearing the registered
+// inventory forces managePlayerInventory's default branch, where the picks
+// tier lives). Gated to the join window / the lobby so a mid-mission pick
+// can't be used as an anywhere-resupply.
+//=========================================================================
+loadout_regiveWatch local.player:{
+//=========================================================================
+	while(local.player != NULL && (level.time - local.player.flags["coop_loDirty"]) < 1.5){
+		wait 0.5
+	}
+	if(local.player == NULL){ end }
+	local.player.flags["coop_loRegivePending"] = NIL
+
+	if(local.player.flags["coop_loWeapons"].size == 0){ end }
+	if(level.coop_loadoutLocked == 1){ end }
+	if(!(isAlive local.player)){ end }
+	if(local.player.flags["coop_dbno_active"] == 1){ end }
+	local.inLobby = waitthread coop_mod/main.scr::containsText level.coop_mapname "co_lobby" 0
+	if(level.time > 120 && !local.inLobby){
+		local.player iprint "Armory: picks saved - they apply from your next mission"
+		end
+	}
+
+	local.player.flags["coop_inventoryWeapons"] = NIL
+	local.player waitthread coop_mod/itemhandler.scr::managePlayerInventory
+	local.player iprint "Armory: your loadout has been applied"
+}end
+
+//=========================================================================
+// Per-join pick re-request (launched from player.scr next to detectCoop so
+// nothing upstream can strangle it). The client's archived coop_loA1..4
+// cvars hold "append name ,wN<id>" commands; fire them staggered so the
+// name bus digests one token at a time. Clients without picks have no such
+// cvars - the vstr is a harmless no-op there.
+//=========================================================================
+loadout_resend local.player:{
+//=========================================================================
+	//TWO volleys: t+4s and t+15s. Server->client commands sent while the client is
+	//still LOADING the map appear to be dropped silently (bug-595 diagnosis run: zero
+	//detect.cfg/obj_setup execs client-side all boot) - the late volley lands after the
+	//client is fully active. Double delivery is harmless: loadout_set is idempotent and
+	//the regive is debounced.
+	wait 4
+	waitthread loadout_resendVolley local.player 1
+	if(local.player == NULL){ end }
+	wait 11
+	waitthread loadout_resendVolley local.player 2
+}end
+
+//=========================================================================
+loadout_resendVolley local.player local.volley:{
+//=========================================================================
+	if(local.player == NULL){ end }
+	for(local.s = 1; local.s <= 4; local.s++){
+		for(local.t = 10; local.t > 0; local.t--){
+			if(local.player == NULL){ end }
+			if(!(waitthread coop_mod/main.scr::containsText local.player.netname " ," 0)){ break }
+			wait 0.5
+		}
+		if(local.player == NULL){ end }
+		local.player stufftext ( "vstr coop_loA" + local.s )
+		wait 0.75
+	}
+}end
+
+//=========================================================================
+// Rebuild the give-array (same shape as level.coop_weaponLoadout: start
+// grenades at the low indexes, then guns). A custom kit needs at least one
+// picked PRIMARY - otherwise fall back to the map default (never spawn a
+// player without a main weapon).
+//=========================================================================
+loadout_rebuild local.player:{
+//=========================================================================
+if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread loadoutpick/loadout_rebuild->"+level.cMTE+"" )}
+	local.player.flags["coop_loWeapons"] = NIL
+
+	local.p1 = local.player.flags["coop_loSlot1"]
+	local.p2 = local.player.flags["coop_loSlot2"]
+	local.sc = local.player.flags["coop_loSlot3"]
+	local.gr = local.player.flags["coop_loSlot4"]
+
+	if(local.p1 == NIL && local.p2 == NIL){ end }
+
+	local.n = 0
+	if(local.gr != NIL){
+		local.n++
+		local.arr[local.n] = local.gr
+	}else{
+		//keep the map's default start grenades (loadout.scr always seeds [1] and [2])
+		if(level.coop_weaponLoadout[1] != NIL && !(waitthread coop_mod/itemhandler.scr::notStartGrenade level.coop_weaponLoadout[1])){
+			local.n++
+			local.arr[local.n] = level.coop_weaponLoadout[1]
+		}
+		if(level.coop_weaponLoadout[2] != NIL && !(waitthread coop_mod/itemhandler.scr::notStartGrenade level.coop_weaponLoadout[2])){
+			local.n++
+			local.arr[local.n] = level.coop_weaponLoadout[2]
+		}
+	}
+	if(local.sc != NIL){
+		local.n++
+		local.arr[local.n] = local.sc
+	}
+	if(local.p1 != NIL){
+		local.n++
+		local.arr[local.n] = local.p1
+	}
+	if(local.p2 != NIL && local.p2 != local.p1){ //same gun in both slots collapses to one copy
+		local.n++
+		local.arr[local.n] = local.p2
+	}
+	local.player.flags["coop_loWeapons"] = local.arr
+}end
+
+//=========================================================================
+// Clear all picks (client sent ,w0c via the USE MAP DEFAULT button).
+//=========================================================================
+loadout_clear local.player:{
+//=========================================================================
+	if(local.player == NULL){ end }
+	local.player.flags["coop_loSlot1"]   = NIL
+	local.player.flags["coop_loSlot2"]   = NIL
+	local.player.flags["coop_loSlot3"]   = NIL
+	local.player.flags["coop_loSlot4"]   = NIL
+	local.player.flags["coop_loSlotId1"] = NIL
+	local.player.flags["coop_loSlotId2"] = NIL
+	local.player.flags["coop_loSlotId3"] = NIL
+	local.player.flags["coop_loSlotId4"] = NIL
+	local.player.flags["coop_loWeapons"] = NIL
+	local.player iprint "Armory: picks cleared - using the standard mission kit"
+}end
+
+//=========================================================================
+// ,w0 menu-control token. data "x" = menu closed (hand the lobby cursor
+// back), data "c" = clear picks (menu stays open).
+//=========================================================================
+loadout_menuCtl local.player local.data:{
+//=========================================================================
+	if(local.player == NULL){ end }
+	if(local.data == "c"){
+		waitthread loadout_clear local.player
+		end
+	}
+	//menu closed - restore the clickable-lobby cursor if that UI is running
+	if(local.player.coop_lobbyUiOn == 1){
+		local.player coop_lobbycursor 1
+	}
+}end
+
+//=========================================================================
+// Is this (lowercase, makeWeaponStringValid'd) model one of the player's
+// picks? Used by itemhandler.scr::addWeaponToInventory to let two PICKED
+// weapons share an ammo class (two rifles etc.).
+//=========================================================================
+loadout_isPicked local.player local.model:{
+//=========================================================================
+	local.arr = local.player.flags["coop_loWeapons"]
+	for(local.i = 1; local.i <= local.arr.size; local.i++){
+		if(local.arr[local.i] == local.model){ end 1 }
+	}
+}end 0
+
+//=========================================================================
+// Top up the ammo classes of picked weapons. Runs INSIDE giveInventory's
+// changeGameType-0 window right after the map ammo table is applied - some
+// maps zero whole classes (m1l1 smg=0) and would hand out a dry picked gun.
+// Never lowers a map value ("max(map, standard)").
+//=========================================================================
+loadout_ammoTopup local.player:{
+//=========================================================================
+if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread loadoutpick/loadout_ammoTopup->"+level.cMTE+"" )}
+	if(local.player == NULL){ end }
+	for(local.s = 1; local.s <= 4; local.s++){
+		local.id = local.player.flags["coop_loSlotId" + local.s]
+		if(local.id != NIL){
+			local.r = waitthread coop_mod/loadoutroster.scr::roster_get local.id
+			if(local.r["give"] != ""){
+				local.aType = local.r["ammo"]
+				local.aN    = local.r["ammoN"]
+				local.have  = level.coop_ammoLoadout[local.aType]
+				if(local.have == NIL){ local.have = 0 }
+				if(local.have < local.aN){
+					local.player ammo local.aType local.aN
+				}
+			}
+		}
+	}
+}end
+
+//=========================================================================
+// Unlock membership test against challenges.scr's pipe-list of reward tik
+// paths (player.flags["coop_chal_unlocks"], e.g. "|models/weapons/x.tik|").
+//=========================================================================
+loadout_isUnlocked local.player local.tik:{
+//=========================================================================
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if(local.u == NIL || local.u == ""){ end 0 }
+	if(waitthread coop_mod/main.scr::containsText local.u ("|" + local.tik + "|") 0){ end 1 }
+}end 0

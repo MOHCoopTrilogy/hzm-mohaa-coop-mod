@@ -195,6 +195,11 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//[203] chrissstrahl - check for coop mod install
 	thread detectCoop local.player
 
+	//[310] armory loadout: re-request the client's saved picks on every join. Launched
+	//HERE (not inside detectCoop's tail) so a hiccup in fov/auth detection can never
+	//strangle it - the m1l1 carry-over failure was exactly that.
+	thread coop_mod/loadoutpick.scr::loadout_resend local.player
+
 	//[302] HZM XP - identity + record restore (cl_guid via userinfo, cvar cache, save file)
 	thread coop_mod/xp.scr::xp_identify local.player
 
@@ -304,8 +309,12 @@ detectCoop local.player:{
 	if(local.player && getCvar("coop_devKeys") != NIL){
 		if(!(waitthread coop_mod/main.scr::containsText local.player.netname " ," 0)){
 			if(local.player){ local.player stufftext ( "vstr g_m1l3" ) }
-		}	
+		}
 	}
+
+	//[310] armory loadout: the pick re-request now lives in loadoutpick.scr::loadout_resend,
+	//launched next to the detectCoop thread (manageSetup) - kept OUT of this tail so a
+	//fov/auth detection hiccup can never strangle it (that killed the m1l1 carry-over).
 }end
 
 //[203] chrissstrahl - upgraded to retrive all data at once then save it on player
@@ -550,6 +559,18 @@ playerNameCommand local.player:{
 	else if(local.arrayIndex==32){ local.player thread coop_mod/lobby.scr::lobbySkinCycle -1 } //[lobby] skin prev (A)
 	else if(local.arrayIndex==33){ local.player thread coop_mod/lobby.scr::lobbyReadyToggle }   //[lobby] ready toggle (F)
 	else if(local.arrayIndex==34){ thread coop_mod/challenges.scr::chal_menu local.player }   //[303] challenges - on-screen Service Record menu (cycles category pages; chal_review still callable for console dump)
+	else if(local.arrayIndex==35){ thread coop_mod/helmet.scr::helmet_cycle local.player 1 }  //[305] helmet switcher: next
+	else if(local.arrayIndex==36){ thread coop_mod/helmet.scr::helmet_cycle local.player -1 } //[305] helmet switcher: prev
+	else if(local.arrayIndex==37){ thread coop_mod/helmet.scr::helmet_tune_mode local.player }     //[305] helmet fit-tuner: next param (KP_STAR)
+	else if(local.arrayIndex==38){ thread coop_mod/helmet.scr::helmet_tune_nudge local.player 1 }  //[305] helmet fit-tuner: + (KP_PLUS)
+	else if(local.arrayIndex==39){ thread coop_mod/helmet.scr::helmet_tune_nudge local.player -1 } //[305] helmet fit-tuner: - (KP_MINUS)
+	else if(local.arrayIndex==40){ thread coop_mod/helmet.scr::helmet_tune_step local.player }     //[305] helmet fit-tuner: fine/coarse (KP_SLASH)
+	else if(local.arrayIndex==41){ thread coop_mod/helmet.scr::helmet_tune_print local.player }    //[305] helmet fit-tuner: print values (KP_DEL)
+	else if(local.arrayIndex==42){ thread coop_mod/loadoutpick.scr::loadout_set local.player 1 local.dataExtract } //[310] armory: primary 1
+	else if(local.arrayIndex==43){ thread coop_mod/loadoutpick.scr::loadout_set local.player 2 local.dataExtract } //[310] armory: primary 2
+	else if(local.arrayIndex==44){ thread coop_mod/loadoutpick.scr::loadout_set local.player 3 local.dataExtract } //[310] armory: sidearm
+	else if(local.arrayIndex==45){ thread coop_mod/loadoutpick.scr::loadout_set local.player 4 local.dataExtract } //[310] armory: grenade
+	else if(local.arrayIndex==46){ thread coop_mod/loadoutpick.scr::loadout_menuCtl local.player local.dataExtract } //[310] armory: menu closed / clear picks
 }end
 
 //[211] HZM coop - EMOTES: play a selection-screen anim on the player's own model via a
@@ -978,6 +999,27 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		thread coop_mod/ammobox.scr::ammobox_proximity_monitor local.player
 	}
 	thread coop_mod/ads.scr::coop_ads_monitor local.player
+	//[303] HZM CHALLENGES - per-level aim watcher: any ADS/scope/over-shoulder use fails the Schoolgirls feat
+	thread coop_mod/challenges.scr::chal_lvl_aim_monitor local.player
+	//[305] HZM coop - HELMET SWITCHER: re-apply this player's chosen helmet every (re)spawn, because
+	//InitModel rebuilds the model + clears all surface flags/attachments. helmet_apply is a no-op for
+	//the default "Standard Issue" choice, so untouched players stay vanilla.
+	thread coop_mod/helmet.scr::helmet_apply local.player
+	//[306] HZM coop - KEY ITEMS guardian: after a revive, re-give owned binoculars / signal smoke that
+	//a DBNO takeall stripped (idle during normal play + while downed).
+	thread coop_mod/keyitems.scr::coop_key_guardian local.player
+	//[user 07-10] OBJECTIVE BAR re-sync (trilogy-wide fix): maps set their MAIN objectives at prespawn
+	//(before players exist) and global/objectives.scr::coop_objectivesManage only re-pushes when the
+	//player COUNT changes - so a respawn or a campaign map-transition spawn can miss them, leaving the
+	//bar empty (e.g. m5l1b). Clear THIS player's setup flag + reset the tracked count so the manager
+	//re-pushes the active objectives to them next frame. (Side officer/radio lines already do this.)
+	local.player.flags[coopObjectiveSetupDone] = NIL
+	level.coopObjectivesPlayers = NIL
+	//[user 07-11] and clear any STALE objective left over from a previous map (a map with fewer objectives
+	//never overwrites the leftover higher client-cvar slots, e.g. m5l1b's "Steal the King Tiger" on coop_o4).
+	thread coop_mod/objectives.scr::coop_obj_reconcile local.player
+	//[user 07-11] script-drawn objectives panel with real word-wrap + dynamic spacing (coop_objPanel 1)
+	thread coop_mod/objectives.scr::coop_objPanel_monitor local.player
 	thread coop_mod/tinnitus.scr::coop_tinnitus_monitor local.player
 	thread coop_mod/tinnitus.scr::coop_injured_muffle_monitor local.player
 	// SAFETY-NET: every (re)spawn restores world SFX volume to baseline, so a DBNO death-fade or injured

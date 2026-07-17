@@ -89,10 +89,15 @@ coop_obj_repush_player local.ent:{
 	if( local.ent == NULL ){ end }
 	if( level.coop_sideObjReg != 1 ){ end }
 
-	if( level.coop_sideObjOfficerDone == 1 ){
-		waitthread coop_obj_push_one local.ent 1 3 "Eliminate the High-Ranking Officer"
-	} else {
-		waitthread coop_obj_push_one local.ent 1 2 "Eliminate the High-Ranking Officer"
+	// [user 07-10] only show the OFFICER line if an officer actually exists (or existed and was
+	// killed). Some maps have a non-"none" officer policy but never spawn a boss - that left a
+	// permanently-ACTIVE, never-completable "Eliminate the High-Ranking Officer" line.
+	if( level.coop_officer != NULL || level.coop_sideObjOfficerDone == 1 ){
+		if( level.coop_sideObjOfficerDone == 1 ){
+			waitthread coop_obj_push_one local.ent 1 3 "Eliminate the High-Ranking Officer"
+		} else {
+			waitthread coop_obj_push_one local.ent 1 2 "Eliminate the High-Ranking Officer"
+		}
 	}
 	if( level.coop_sideObjRadioDone == 1 ){
 		waitthread coop_obj_push_one local.ent 2 3 "Destroy the Radio to Stop Reinforcements"
@@ -172,7 +177,9 @@ coop_obj_register:{
 	}
 	level.coop_sideObjReg = 1
 
-	waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+	if( level.coop_officer != NULL || level.coop_sideObjOfficerDone == 1 ){
+		waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+	}
 	waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
 
 	// Re-assert a few times: a per-player obj_setup.cfg that runs slightly AFTER this
@@ -194,10 +201,12 @@ coop_obj_reassert:{
 	local.n = 0
 	while( local.n < 5 ){
 		wait 2
-		if( level.coop_sideObjOfficerDone == 1 ){
-			waitthread coop_obj_push 1 3 "Eliminate the High-Ranking Officer"
-		} else {
-			waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+		if( level.coop_officer != NULL || level.coop_sideObjOfficerDone == 1 ){
+			if( level.coop_sideObjOfficerDone == 1 ){
+				waitthread coop_obj_push 1 3 "Eliminate the High-Ranking Officer"
+			} else {
+				waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+			}
 		}
 		if( level.coop_sideObjRadioDone == 1 ){
 			waitthread coop_obj_push 2 3 "Destroy the Radio to Stop Reinforcements"
@@ -249,4 +258,278 @@ coop_obj_radio_done:{
 	level.coop_xp_sideObjPush = 1
 	waitthread coop_obj_push 2 3 "Destroy the Radio to Stop Reinforcements"
 	level.coop_xp_sideObjPush = 0
+}end
+
+
+//=========================================================================
+// [user 07-11] STALE-OBJECTIVE RECONCILE. The primary-objective client cvars (coop_o1..o8) persist across
+// map loads; a map with FEWER objectives than the previous one never overwrites the leftover higher slots,
+// and the manager's own obj_reset can be raced/skipped - so a previous mission's objective (e.g. m5l1b's
+// "Steal the King Tiger" on coop_o4) can linger on this map's panel. Threaded per (re)spawn from
+// player.scr::manageAliveSpawning. A few seconds in (after the map's add_objectives + the manager settle),
+// it HIDES every slot the CURRENT map is NOT actively using (level.coopObjectiveN status <= 1 = hidden/
+// unset). Active/completed slots (status 2/3) are left alone, and a legit later activation still shows via
+// add_objectives, so this only ever clears leftovers - it can never hide a real objective.
+//=========================================================================
+coop_obj_reconcile local.player:{
+	if( local.player == NULL ){ end }
+	//[user 07-12] THREE passes (~4s/8s/12s) instead of one: a single 6s pass could be raced by a
+	//late objective push (or a healed sender, see global/objectives.scr) re-showing a stale row
+	//after the pass already ran. Hides are never permanent - a real add_objectives re-shows the slot.
+	local.reconcilePass = 1
+	while( local.reconcilePass <= 3 ){
+	wait 4
+	if( local.player == NULL ){ end }
+
+	if( level.coopObjective1 == NIL ){ level.coopObjective1 = 0 }
+	if( level.coopObjective2 == NIL ){ level.coopObjective2 = 0 }
+	if( level.coopObjective3 == NIL ){ level.coopObjective3 = 0 }
+	if( level.coopObjective4 == NIL ){ level.coopObjective4 = 0 }
+	if( level.coopObjective5 == NIL ){ level.coopObjective5 = 0 }
+	if( level.coopObjective6 == NIL ){ level.coopObjective6 = 0 }
+	if( level.coopObjective7 == NIL ){ level.coopObjective7 = 0 }
+	if( level.coopObjective8 == NIL ){ level.coopObjective8 = 0 }
+
+	if( level.coopObjective1 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_1hidden.cfg" ) }
+	if( level.coopObjective2 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_2hidden.cfg" ) }
+	if( level.coopObjective3 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_3hidden.cfg" ) }
+	if( level.coopObjective4 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_4hidden.cfg" ) }
+	if( level.coopObjective5 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_5hidden.cfg" ) }
+	if( level.coopObjective6 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_6hidden.cfg" ) }
+	if( level.coopObjective7 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_7hidden.cfg" ) }
+	if( level.coopObjective8 <= 1 ){ local.player stufftext ( "exec ui/coop_objectives/obj_8hidden.cfg" ) }
+
+	local.reconcilePass++
+	}
+}end
+
+
+//=========================================================================
+// [user 07-11] SCRIPT-DRAWN OBJECTIVES PANEL with real WORD-WRAP + dynamic row spacing. MOHAA's URC UILabel
+// can't wrap, so a long objective was cut off (or would overlap the next row). This ihuddraw panel reads the
+// same data (level.coopObjectiveN status + level.coopObjectiveNText), wraps each objective to fit the width,
+// and stacks them with a Y offset that accounts for each objective's line count - so they never overlap.
+// Slots 175-215 (see _research/hud_slot_map.md). coop_objPanel 1 = this panel (URC primary suppressed in
+// global/objectives.scr::coop_objectivesSendPlayer); coop_objPanel 0 = the old single-line URC panel.
+//=========================================================================
+
+// Word-wrap: return an array of lines (1-indexed), each <= local.maxc chars, split at word boundaries.
+// MOHAA string char access is 0-indexed; .size is the length.
+coop_objWrap local.text local.maxc:{
+	local.nlines = 0
+	local.cur = ""
+	local.word = ""
+	local.len = local.text.size
+	local.i = 0
+	while( local.i <= local.len ){
+		if( local.i < local.len ){
+			local.ch = local.text[local.i]
+		} else {
+			local.ch = " "		// force a flush of the final word
+		}
+		if( local.ch == " " ){
+			if( local.word != "" ){
+				local.trial = local.word
+				if( local.cur != "" ){ local.trial = local.cur + " " + local.word }
+				if( local.trial.size <= local.maxc ){
+					local.cur = local.trial
+				} else {
+					if( local.cur != "" ){
+						local.nlines++
+						local.lines[local.nlines] = local.cur
+					}
+					local.cur = local.word		// word starts the next line (an over-long single word just overflows)
+				}
+				local.word = ""
+			}
+		} else {
+			local.word = local.word + local.ch
+		}
+		local.i++
+	}
+	if( local.cur != "" ){
+		local.nlines++
+		local.lines[local.nlines] = local.cur
+	}
+	if( local.nlines == 0 ){
+		local.lines[1] = local.text
+	}
+}end local.lines
+
+
+// Redraw the panel for one player from the current objective state.
+coop_objPanel_refresh local.player:{
+	if( local.player == NULL ){ end }
+
+	// clear the whole panel slot range first (156-215: bg plates, title bar, checkboxes, text)
+	local.s = 156
+	while( local.s <= 215 ){
+		ihuddraw_alpha  local.player local.s 0
+		ihuddraw_string local.player local.s ""
+		local.s++
+	}
+	if( getcvar "coop_objPanel" == "0" ){ end }
+
+	// copy the 8 status + text vars into 0-indexed arrays (no dynamic member access in GameScript)
+	local.st[0] = level.coopObjective1
+	local.st[1] = level.coopObjective2
+	local.st[2] = level.coopObjective3
+	local.st[3] = level.coopObjective4
+	local.st[4] = level.coopObjective5
+	local.st[5] = level.coopObjective6
+	local.st[6] = level.coopObjective7
+	local.st[7] = level.coopObjective8
+	local.tx[0] = level.coopObjective1Text
+	local.tx[1] = level.coopObjective2Text
+	local.tx[2] = level.coopObjective3Text
+	local.tx[3] = level.coopObjective4Text
+	local.tx[4] = level.coopObjective5Text
+	local.tx[5] = level.coopObjective6Text
+	local.tx[6] = level.coopObjective7Text
+	local.tx[7] = level.coopObjective8Text
+
+	local.any = 0
+	local.oi = 0
+	while( local.oi <= 7 ){
+		if( local.st[local.oi] != NIL && local.st[local.oi] >= 2 && local.tx[local.oi] != NIL && local.tx[local.oi] != "" ){ local.any = 1 }
+		local.oi++
+	}
+	if( local.any == 0 ){ end }
+
+	// title bar: grey plate + "Mission Objectives:" + separator line - matches ui/coop_objectives.urc
+	ihuddraw_virtualsize local.player 156 1
+	ihuddraw_align       local.player 156 left top
+	ihuddraw_shader      local.player 156 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.player 156 0.2 0.2 0.2
+	ihuddraw_rect        local.player 156 10 20 550 24
+	ihuddraw_alpha       local.player 156 0.8
+
+	ihuddraw_virtualsize local.player 157 1
+	ihuddraw_align       local.player 157 left top
+	ihuddraw_shader      local.player 157 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.player 157 0.7 0.7 0.7
+	ihuddraw_rect        local.player 157 10 43 550 1
+	ihuddraw_alpha       local.player 157 0.6
+
+	ihuddraw_virtualsize local.player 175 1
+	ihuddraw_align       local.player 175 left top
+	ihuddraw_font        local.player 175 "courier-16"
+	ihuddraw_color       local.player 175 1 1 1
+	ihuddraw_rect        local.player 175 14 22 540 20
+	ihuddraw_string      local.player 175 "Mission Objectives:"
+	ihuddraw_alpha       local.player 175 1
+
+	local.curObj = level.coopCurrentObjective
+	if( local.curObj == NIL ){ local.curObj = 0 }
+
+	local.y  = 50
+	local.bx = 158		// row background-plate slot pool (158-165), drawn BEHIND text (lower slot = behind)
+	local.cb = 176		// checkbox slot pool (176-183)
+	local.tl = 184		// text-line slot pool (184-215)
+	local.oi = 0
+	while( local.oi <= 7 ){
+		if( local.st[local.oi] != NIL && local.st[local.oi] >= 2 && local.tx[local.oi] != NIL && local.tx[local.oi] != "" ){
+			// wrap first so we know how tall this objective's row (and its grey plate) needs to be
+			local.lines = waitthread coop_objWrap local.tx[local.oi] 55
+			local.rowH  = ( local.lines.size * 18 ) + 4
+			local.by    = local.y - 2
+
+			// grey background plate behind the whole (possibly multi-line) row
+			if( local.bx <= 165 ){
+				ihuddraw_virtualsize local.player local.bx 1
+				ihuddraw_align       local.player local.bx left top
+				ihuddraw_shader      local.player local.bx "textures/hud/coop_bar_white"
+				ihuddraw_color       local.player local.bx 0.2 0.2 0.2
+				ihuddraw_rect        local.player local.bx 10 local.by 550 local.rowH
+				ihuddraw_alpha       local.player local.bx 0.8
+				local.bx++
+			}
+
+			// checkbox: filled when completed, empty when active
+			if( local.cb <= 183 ){
+				if( local.st[local.oi] == 3 ){
+					ihuddraw_shader local.player local.cb "textures/OBJECTIVES/filledbox.tga"
+				} else {
+					ihuddraw_shader local.player local.cb "textures/OBJECTIVES/emptybox.tga"
+				}
+				ihuddraw_virtualsize local.player local.cb 1
+				ihuddraw_align       local.player local.cb left top
+				ihuddraw_color       local.player local.cb 1 1 1
+				ihuddraw_rect        local.player local.cb 12 local.y 16 16
+				ihuddraw_alpha       local.player local.cb 1
+				local.cb++
+			}
+
+			// colour: completed = grey, current = yellow, active = white
+			local.colR = 1
+			local.colG = 1
+			local.colB = 1
+			if( local.st[local.oi] == 3 ){
+				local.colR = 0.6
+				local.colG = 0.6
+				local.colB = 0.6
+			} else if( ( local.oi + 1 ) == local.curObj ){
+				local.colB = 0
+			}
+
+			local.li = 1
+			while( local.li <= local.lines.size ){
+				if( local.tl <= 215 ){
+					ihuddraw_virtualsize local.player local.tl 1
+					ihuddraw_align       local.player local.tl left top
+					ihuddraw_font        local.player local.tl "courier-16"
+					ihuddraw_color       local.player local.tl local.colR local.colG local.colB
+					ihuddraw_rect        local.player local.tl 36 local.y 604 18
+					ihuddraw_string      local.player local.tl local.lines[local.li]
+					ihuddraw_alpha       local.player local.tl 1
+					local.tl++
+				}
+				local.y = local.y + 18
+				local.li++
+			}
+			local.y = local.y + 6		// gap between objectives
+		}
+		local.oi++
+	}
+}end
+
+
+// Per-player watcher (one guarded instance, started per (re)spawn from player.scr::manageAliveSpawning).
+// Redraws only when the objective state changes (status / current / count), so it is cheap.
+coop_objPanel_monitor local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.coop_objPanelRun == 1 ){ end }
+	local.player.coop_objPanelRun = 1
+	local.lastSig = "init"
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		if( getcvar "coop_objPanel" != "0" && level.coopObjectivesManager == 1 ){
+			local.c = level.coopCurrentObjective
+			if( local.c == NIL ){ local.c = 0 }
+			local.sig = "" + local.c + "_" + level.coopObjective1 + "_" + level.coopObjective2 + "_" + level.coopObjective3 + "_" + level.coopObjective4 + "_" + level.coopObjective5 + "_" + level.coopObjective6 + "_" + level.coopObjective7 + "_" + level.coopObjective8
+			if( local.sig != local.lastSig ){
+				local.lastSig = local.sig
+				waitthread coop_objPanel_refresh local.player
+			}
+		}
+		else if( getcvar "coop_objPanel" == "0" && local.lastSig != "panel_off" ){
+			//[user 07-12] panel disabled (default now) - clear our slots once so a live toggle can
+			//never leave the deprecated panel on screen alongside the URC menu (the double-display bug)
+			local.lastSig = "panel_off"
+			local.s = 156
+			while( local.s <= 215 ){
+				ihuddraw_alpha  local.player local.s 0
+				ihuddraw_string local.player local.s ""
+				local.s++
+			}
+		}
+		wait 0.5
+	}
+	if( local.player != NULL ){
+		local.player.coop_objPanelRun = NIL
+		local.s = 156
+		while( local.s <= 215 ){
+			ihuddraw_alpha local.player local.s 0
+			local.s++
+		}
+	}
 }end
