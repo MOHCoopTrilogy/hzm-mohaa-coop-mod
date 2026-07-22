@@ -1,0 +1,561 @@
+//=========================================================================
+// HZM coop - BLUEPRINT / PLAYER STRUCTURES (build-mode extension)
+// Design + wiring diffs: _research/player_structures_design.md
+//
+// INERT UNTIL WIRED: nothing threads into this file yet. The small
+// buildmode.scr / buildmode.cfg hook diffs live in the design doc and are
+// applied by the operator after review.
+//
+// What this file provides:
+//   SNAP      - grid snapping helpers (block-size grid, 45 deg yaw)
+//   CAPTURE   - save the placements since a marker as a NAMED template of
+//               anchor-relative offsets -> homepath coop_mod/save/bp_<name>.dat
+//               (no pk3 ever ships coop_mod/save/*, so the loose file always
+//               loads - bug-960 safe; curated templates can ship in the pk3
+//               under coop_mod/bp/<name>.dat, a different prefix = no twin)
+//   PLAYBACK  - bp_place <origin> <yaw> <name> [mult]: spawn a whole
+//               template (generalizes bunker.scr's grid playback to offset
+//               lists; mult scales offsets AND piece scales, matching the
+//               bunker v2 "build scale = whole-structure multiplier" UX)
+//   REGISTRY  - every composed structure's pieces tracked by structure id so
+//               a structure can be removed/undone as a unit
+//   CATALOG   - saved templates appended at runtime to the STRUCTURES
+//               category (level.coop_build_structCat) as "bp:<name>" items
+//
+// FILE FORMAT bp_<name>.dat (one ASCII line; "," = field, "|" = record):
+//   bpv1,<name>,<count>|<tik>,<fx>,<ry>,<dz>,<ryaw>,<pitch>,<scale>,<solid>|...
+//   fx/ry = units along the anchor's facing/right axes, dz = units up from
+//   the anchor origin, ryaw = piece yaw minus anchor yaw (0..360).
+//   Parsed with the challenges.scr char-walk recipe (chal_deserialize).
+//=========================================================================
+
+
+// Round local.v to the NEAREST multiple of local.g (no modulo operator in
+// morfuscript; int() truncates toward zero so both signs are handled).
+//=========================================================================
+bp_round local.v local.g:{
+//=========================================================================
+	if( local.g <= 0 ){ local.g = 16 }
+	local.q = local.v / local.g
+	local.r = int( local.q )
+	local.d = local.q - local.r
+	if( local.d >= 0.5 ){ local.r = local.r + 1 }
+	if( local.d <= -0.5 ){ local.r = local.r - 1 }
+	local.out = local.r * local.g
+}end local.out
+
+
+// Wrap a yaw into 0..359 (values arrive at most a few revolutions out).
+//=========================================================================
+bp_wrapyaw local.y:{
+//=========================================================================
+	while( local.y >= 360 ){ local.y = local.y - 360 }
+	while( local.y < 0 ){ local.y = local.y + 360 }
+}end local.y
+
+
+// Current snap grid size in units: measured box edge (bunker.scr reference
+// cube, cached once per map) * the current build scale, unless the operator
+// overrides with coop_build_gridsize > 0.
+//=========================================================================
+bp_gridB local.origin:{
+//=========================================================================
+	if( level.coop_bp_baseEdge == NIL ){
+		level.coop_bp_baseEdge = waitthread coop_mod/bunker.scr::measure local.origin
+	}
+	local.g = 0
+	local.ov = getcvar( "coop_build_gridsize" )
+	if( local.ov != "" ){ local.g = float( local.ov ) }
+	if( local.g <= 0 ){
+		local.s = level.coop_build_scale
+		if( local.s == NIL || local.s <= 0 ){ local.s = 1.0 }
+		local.g = level.coop_bp_baseEdge * local.s
+	}
+	if( local.g < 1 ){ local.g = 16 }
+}end local.g
+
+
+// Snap a ghost park point onto the grid. X/Y always; Z only when
+// coop_build_snapz is 1 (half-grid steps so half-height stacking works).
+// Called per-frame from the ghostFollow diff while snap mode is on.
+//=========================================================================
+bp_snapPos local.pos:{
+//=========================================================================
+	local.g = waitthread bp_gridB local.pos
+	local.out = local.pos
+	local.out[0] = waitthread bp_round local.pos[0] local.g
+	local.out[1] = waitthread bp_round local.pos[1] local.g
+	if( getcvar( "coop_build_snapz" ) == "1" ){
+		local.h = local.g * 0.5
+		local.out[2] = waitthread bp_round local.pos[2] local.h
+	}
+}end local.out
+
+
+// Snap a yaw to the nearest 45 degrees, wrapped 0..359.
+//=========================================================================
+bp_snapYaw local.yaw:{
+//=========================================================================
+	local.s = waitthread bp_round local.yaw 45
+	local.out = waitthread bp_wrapyaw local.s
+}end local.out
+
+
+//=========================================================================
+// CAPTURE SIDE
+//=========================================================================
+
+// Record structured data for placement #n (called from the place diff in
+// buildmode.scr right after level.coop_build_count = local.n). kind is
+// "model" / "actor" / "struct"; only "model" records enter templates (v1).
+//=========================================================================
+bp_record local.n local.tik local.pos local.yaw local.pitch local.scale local.solid local.kind:{
+//=========================================================================
+	level.coop_bp_tik[local.n]   = local.tik
+	level.coop_bp_pos[local.n]   = local.pos
+	level.coop_bp_yaw[local.n]   = local.yaw
+	level.coop_bp_pitch[local.n] = local.pitch
+	level.coop_bp_scale[local.n] = local.scale
+	level.coop_bp_solid[local.n] = local.solid
+	level.coop_bp_kind[local.n]  = local.kind
+}end
+
+
+// Forget placement #n (called from the undo diff).
+//=========================================================================
+bp_unrecord local.n:{
+//=========================================================================
+	level.coop_bp_kind[local.n] = NIL
+	level.coop_bp_sid[local.n] = NIL
+}end
+
+
+// Drop the "start recording" marker: pieces placed AFTER this go into the
+// next bp_save. Control-bus action "bpmark".
+//=========================================================================
+bp_mark local.player:{
+//=========================================================================
+	level.coop_bp_mark = level.coop_build_count
+	if( local.player != NULL ){
+		local.player iprint ( "BLUEPRINT: marker set at #" + level.coop_bp_mark + " - build, then: set coop_build_bpname <name>; bpsave" ) 1
+	}
+	println( "^~^~^ BUILD_BPMARK " + level.coop_bp_mark )
+}end
+
+
+// Save placements (marker+1 .. count, kind "model" only) as a named
+// template. Name comes from cvar coop_build_bpname (set in the console).
+// Control-bus action "bpsave".
+//=========================================================================
+bp_save local.player:{
+//=========================================================================
+	local.raw = getcvar( "coop_build_bpname" )
+	if( local.raw == "" ){
+		if( local.player != NULL ){ local.player iprint "BLUEPRINT: set coop_build_bpname <name> first" 1 }
+		end
+	}
+	local.name = waitthread coop_mod/strings.scr::clean_filename local.raw
+	if( local.name == NIL || local.name == "" ){
+		if( local.player != NULL ){ local.player iprint "BLUEPRINT: name has no safe characters" 1 }
+		end
+	}
+
+	local.from = level.coop_bp_mark
+	if( local.from == NIL ){ local.from = 0 }
+
+	local.cnt = 0
+	local.anchorset = 0
+	local.body = ""
+	local.i = local.from + 1
+	while( local.i <= level.coop_build_count ){
+		if( level.coop_bp_kind[local.i] == "model" && local.cnt < 256 ){		//[user 07-21] "if budget is the issue raise it" - was 128
+			if( local.anchorset == 0 ){
+				local.apos = level.coop_bp_pos[local.i]
+				local.ayaw = level.coop_bp_yaw[local.i]
+				local.fa = ( 0 0 0 )
+				local.fa[1] = local.ayaw
+				local.fwd = angles_toforward local.fa
+				local.ra = ( 0 0 0 )
+				local.ra[1] = local.ayaw - 90
+				local.rgt = angles_toforward local.ra
+				local.anchorset = 1
+			}
+			local.d = level.coop_bp_pos[local.i] - local.apos
+			local.fx = (local.d[0] * local.fwd[0]) + (local.d[1] * local.fwd[1])
+			local.ry = (local.d[0] * local.rgt[0]) + (local.d[1] * local.rgt[1])
+			local.dz = local.d[2]
+			local.ryaw = waitthread bp_wrapyaw ( level.coop_bp_yaw[local.i] - local.ayaw )
+			local.rec = level.coop_bp_tik[local.i] + "," + local.fx + "," + local.ry + "," + local.dz + "," + local.ryaw + "," + level.coop_bp_pitch[local.i] + "," + level.coop_bp_scale[local.i] + "," + level.coop_bp_solid[local.i]
+			local.body = local.body + "|" + local.rec
+			local.cnt++
+		}
+		local.i++
+	}
+
+	if( local.cnt < 1 ){
+		if( local.player != NULL ){ local.player iprint "BLUEPRINT: nothing recorded since the marker" 1 }
+		end
+	}
+
+	local.out = "bpv1," + local.name + "," + local.cnt + local.body
+	fs_write_content ( "coop_mod/save/bp_" + local.name + ".dat" ) ( local.out )
+
+	// index file (exact-name dedup, "|"-separated)
+	local.idx = fs_read_content ( "coop_mod/save/bp_index.dat" )
+	if( local.idx == NIL ){ local.idx = "" }
+	local.have = 0
+	if( local.idx != "" ){
+		local.names = waitthread coop_mod/strings.scr::split_string local.idx "|"
+		local.j = 1
+		while( local.j <= local.names.size ){
+			if( local.names[local.j] == local.name ){ local.have = 1 }
+			local.j++
+		}
+	}
+	if( local.have != 1 ){
+		if( local.idx == "" ){ local.idx = local.name }
+		else{ local.idx = local.idx + "|" + local.name }
+		fs_write_content ( "coop_mod/save/bp_index.dat" ) ( local.idx )
+	}
+
+	waitthread bp_catalogRefresh
+
+	if( local.player != NULL ){ local.player iprint ( "BLUEPRINT saved: " + local.name + " (" + local.cnt + " pieces) - now in STRUCTURES" ) 1 }
+	println( "^~^~^ BUILD_BPSAVE " + local.name + " pieces " + local.cnt )
+}end
+
+
+// Rebuild the tail of the STRUCTURES category from bp_index.dat: items
+// 1..4 stay the builtin bunker labels, saved templates append as
+// "bp:<name>" (cap 16). Runtime-only - the static catalog file is never
+// regenerated. Call once after catalog init and again after every bp_save.
+//=========================================================================
+bp_catalogRefresh:{
+//=========================================================================
+	if( level.coop_build_structCat == NIL ){ end }
+	local.cat = level.coop_build_structCat
+	local.base = 4
+	local.k = 0
+	// [agent 07-21] SHIPPED templates: curated pk3 blueprints under
+	// coop_mod/bp/<name>.dat (loaded by bp_readfile's second path). They never
+	// appear in the homepath bp_index.dat, so list them here ahead of the user
+	// saves - same "bp:" item form, counted against the same 16-slot cap.
+	// [user 07-21] bug-1002 RESOLVED: the crash was the converter's missing LOD
+	// collapse maps (engine reads them unconditionally); shapes regenerated with
+	// identity collapse data + validated field-identical to retail. Restored.
+	//[user 07-21] cover-pack batch (all gate-checked 100% one connected component).
+	//depot + logwall dropped for good: source geometry is authentically scattered /
+	//non-axial (bug-1009 / agent report). casemate = 256-piece detail re-emit.
+	local.shipcount = 5
+	local.ship[1] = "casemate"
+	local.ship[2] = "pillbox"
+	local.ship[3] = "coverwall"
+	local.ship[4] = "chestwall"
+	local.ship[5] = "cratestack"
+	local.s = 1
+	while( local.s <= local.shipcount ){
+		if( local.k < 16 ){
+			local.k++
+			level.coop_build_item[local.cat][local.base + local.k] = "bp:" + local.ship[local.s]
+		}
+		local.s++
+	}
+	local.idx = fs_read_content ( "coop_mod/save/bp_index.dat" )
+	if( local.idx != NIL && local.idx != "" ){
+		local.names = waitthread coop_mod/strings.scr::split_string local.idx "|"
+		local.i = 1
+		while( local.i <= local.names.size ){
+			local.nm = local.names[local.i]
+			// a user save named like a shipped template already shadows it in
+			// bp_readfile - skip the duplicate catalog entry
+			if( local.nm == "casemate" || local.nm == "pillbox" || local.nm == "coverwall" || local.nm == "chestwall" || local.nm == "cratestack" ){ local.nm = "" }
+			if( local.nm != NIL && local.nm != "" && local.k < 16 ){
+				local.k++
+				level.coop_build_item[local.cat][local.base + local.k] = "bp:" + local.nm
+			}
+			local.i++
+		}
+	}
+	level.coop_build_itemcount[local.cat] = local.base + local.k
+	if( level.coop_build_cat == local.cat && level.coop_build_idx > level.coop_build_itemcount[local.cat] ){
+		level.coop_build_idx = 1
+	}
+	println( "^~^~^ BUILD_BPCAT " + local.k + " templates" )
+}end
+
+
+//=========================================================================
+// PLAYBACK SIDE
+//=========================================================================
+
+// Read a template: user saves first (homepath, never pk3-shadowed), then
+// pk3-shipped curated templates under coop_mod/bp/.
+//=========================================================================
+bp_readfile local.name:{
+//=========================================================================
+	local.txt = fs_read_content ( "coop_mod/save/bp_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){
+		local.txt = fs_read_content ( "coop_mod/bp/" + local.name + ".dat" )
+	}
+}end local.txt
+
+
+// Char-walk parser (chal_deserialize recipe). Fills
+// level.coop_bpld_f[rec][field] (rec 0 = header) and returns the data
+// record count, or 0 on a bad/foreign file. Yields every ~1500 chars so a
+// big template cannot blow the per-frame op budget.
+//=========================================================================
+bp_parse local.txt:{
+//=========================================================================
+	local.rec = 0
+	local.fi = 0
+	local.field = ""
+	local.ops = 0
+	local.n = local.txt.size
+	local.i = 0
+	while( local.i < local.n ){
+		local.c = local.txt[local.i]
+		if( local.c == "," ){
+			level.coop_bpld_f[local.rec][local.fi] = local.field
+			local.fi++
+			local.field = ""
+		}else if( local.c == "|" ){
+			level.coop_bpld_f[local.rec][local.fi] = local.field
+			local.field = ""
+			local.fi = 0
+			local.rec++
+		}else{
+			local.field += local.c
+		}
+		local.i++
+		local.ops++
+		if( local.ops >= 1500 ){ local.ops = 0 ; waitframe }
+	}
+	if( local.field != "" ){
+		level.coop_bpld_f[local.rec][local.fi] = local.field
+	}
+	local.cnt = local.rec
+	if( level.coop_bpld_f[0][0] != "bpv1" ){ local.cnt = 0 }
+	if( local.cnt > 256 ){ local.cnt = 256 }		//[user 07-21] template cap raised with the capture cap - was 128
+}end local.cnt
+
+
+// Spawn one template piece (bunker.scr::piece + pitch support).
+//=========================================================================
+bp_piece local.tik local.pos local.pitch local.yaw local.scale:{
+//=========================================================================
+	local.e = spawn script_model
+	local.e model local.tik
+	local.e.origin = local.pos
+	local.ang = ( 0 0 0 )
+	local.ang[0] = local.pitch
+	local.ang[1] = local.yaw
+	local.e.angles = local.ang
+	if( local.scale != 1 ){ local.e scale local.scale }
+}end local.e
+
+
+// Place a whole template at origin/yaw. The anchor piece lands exactly at
+// origin; everything else follows its stored offsets rotated to yaw and
+// scaled by mult (bunker v2 pattern: build mode passes the current build
+// scale, so KP+/- sizes whole templates; mult 1 = exact reproduction).
+// Batched 8 spawns/frame; solidified with the coop_placements.scr recipe
+// (shared waitframe -> true bounds * scale -> setsize). Registers the
+// pieces as ONE structure so it can be removed as a unit.
+//=========================================================================
+bp_place local.origin local.yaw local.name local.mult:{
+//=========================================================================
+	// success flag: buildmode's structure branch checks this so a refused
+	// place (missing file / bad header / budget) is never recorded/captured
+	level.coop_bp_lastPlaceOk = 0
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.txt = waitthread bp_readfile local.name
+	if( local.txt == NIL || local.txt == "" ){
+		println( "^~^~^ BUILD_BP_MISSING " + local.name )
+		end
+	}
+	local.cnt = waitthread bp_parse local.txt
+	if( local.cnt < 1 ){
+		println( "^~^~^ BUILD_BP_BADFILE " + local.name )
+		end
+	}
+
+	// entity budget gate (see design doc section 5)
+	local.cap = int( getcvar( "coop_build_maxpieces" ) )
+	if( local.cap <= 0 ){ local.cap = 600 }		//[user 07-21] global default raised 400->600 (ent-pool 2048, worst-map headroom ~900)
+	if( level.coop_bs_pieces == NIL ){ level.coop_bs_pieces = 0 }
+	if( level.coop_bs_pieces + local.cnt > local.cap ){
+		println( "^~^~^ BUILD_BP_BUDGET refused " + local.name + " need " + local.cnt + " have " + level.coop_bs_pieces + " cap " + local.cap )
+		end
+	}
+
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.ra = ( 0 0 0 )
+	local.ra[1] = local.yaw - 90
+	local.rgt = angles_toforward local.ra
+
+	local.k = 0
+	local.batch = 0
+	local.r = 1
+	while( local.r <= local.cnt ){
+		local.tik = level.coop_bpld_f[local.r][0]
+		if( local.tik != NIL && local.tik != "" ){
+			local.fx    = float( level.coop_bpld_f[local.r][1] ) * local.mult
+			local.ry    = float( level.coop_bpld_f[local.r][2] ) * local.mult
+			local.dz    = float( level.coop_bpld_f[local.r][3] ) * local.mult
+			local.ryaw  = float( level.coop_bpld_f[local.r][4] )
+			local.pitch = float( level.coop_bpld_f[local.r][5] )
+			local.scl   = float( level.coop_bpld_f[local.r][6] )
+			local.solid = int( level.coop_bpld_f[local.r][7] )
+			if( local.scl <= 0 ){ local.scl = 1.0 }
+			local.scl = local.scl * local.mult
+
+			local.pos = local.origin + (vector_scale local.fwd local.fx) + (vector_scale local.rgt local.ry)
+			local.pos[2] = local.origin[2] + local.dz
+			local.pyaw = waitthread bp_wrapyaw ( local.yaw + local.ryaw )
+
+			local.k++
+			local.bm[local.k]   = waitthread bp_piece local.tik local.pos local.pitch local.pyaw local.scl
+			local.bsol[local.k] = local.solid
+			local.bscl[local.k] = local.scl
+
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0 ; waitframe }
+		}
+		local.r++
+	}
+
+	// solidify pass (coop_placements.scr recipe; bounds are BASE bounds so
+	// multiply by scale - engine setScale never touches r.mins/r.maxs)
+	waitframe
+	local.batch = 0
+	local.j = 1
+	while( local.j <= local.k ){
+		local.e = local.bm[local.j]
+		if( local.e != NULL ){
+			if( local.bsol[local.j] == 1 ){
+				local.mn = local.e.getmins
+				local.mx = local.e.getmaxs
+				local.mn = local.mn * local.bscl[local.j]
+				local.mx = local.mx * local.bscl[local.j]
+				local.e solid
+				if( local.mx[2] - local.mn[2] > 0 ){ local.e setsize local.mn local.mx }
+			}else{
+				local.e notsolid
+			}
+		}
+		local.j++
+		local.batch++
+		if( local.batch >= 8 ){ local.batch = 0 ; waitframe }
+	}
+
+	waitthread bs_register local.bm local.k 1 ( "bp:" + local.name )
+	level.coop_bp_lastPlaceOk = 1
+	println( "^~^~^ BUILD_BP_PLACED " + local.name + " pieces " + local.k + " at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
+}end
+
+
+//=========================================================================
+// STRUCTURE REGISTRY (remove/undo composed builds as a unit)
+//=========================================================================
+
+// Register a piece array as one structure. local.bm indices run
+// local.base .. local.base+local.bn-1 (bunker.scr arrays are 0-based,
+// bp_place's are 1-based). Sets level.coop_bs_count to the new sid.
+//=========================================================================
+bs_register local.bm local.bn local.base local.label:{
+//=========================================================================
+	local.sid = 1
+	if( level.coop_bs_count != NIL ){ local.sid = level.coop_bs_count + 1 }
+	local.k = 0
+	local.i = local.base
+	local.stop = local.base + local.bn
+	while( local.i < local.stop ){
+		if( local.bm[local.i] != NIL && local.bm[local.i] != NULL ){
+			local.k++
+			level.coop_bs_ent[local.sid][local.k] = local.bm[local.i]
+		}
+		local.i++
+	}
+	level.coop_bs_n[local.sid] = local.k
+	level.coop_bs_name[local.sid] = local.label
+	level.coop_bs_alive[local.sid] = 1
+	level.coop_bs_count = local.sid
+	if( level.coop_bs_pieces == NIL ){ level.coop_bs_pieces = 0 }
+	level.coop_bs_pieces = level.coop_bs_pieces + local.k
+	println( "^~^~^ BUILD_STRUCT_REG sid " + local.sid + " " + local.label + " pieces " + local.k + " total " + level.coop_bs_pieces )
+}end
+
+
+// Delete every piece of structure sid (batched so a 60-piece delete cannot
+// spike a frame).
+//=========================================================================
+bs_remove local.sid local.player:{
+//=========================================================================
+	if( local.sid == NIL || local.sid < 1 ){ end }
+	if( level.coop_bs_alive[local.sid] != 1 ){
+		if( local.player != NULL ){ local.player iprint "STRUCT: already removed" 1 }
+		end
+	}
+	local.n = level.coop_bs_n[local.sid]
+	local.batch = 0
+	local.i = 1
+	while( local.i <= local.n ){
+		local.e = level.coop_bs_ent[local.sid][local.i]
+		if( local.e != NIL && local.e != NULL ){ local.e delete }
+		level.coop_bs_ent[local.sid][local.i] = NIL
+		local.i++
+		local.batch++
+		if( local.batch >= 8 ){ local.batch = 0 ; waitframe }
+	}
+	level.coop_bs_alive[local.sid] = 0
+	if( level.coop_bs_pieces == NIL ){ level.coop_bs_pieces = 0 }
+	level.coop_bs_pieces = level.coop_bs_pieces - local.n
+	if( level.coop_bs_pieces < 0 ){ level.coop_bs_pieces = 0 }
+	if( local.player != NULL ){ local.player iprint ( "removed structure " + level.coop_bs_name[local.sid] + " (" + local.n + " pieces)" ) 1 }
+	println( "^~^~^ BUILD_STRUCT_REMOVE sid " + local.sid + " " + level.coop_bs_name[local.sid] + " pieces " + local.n )
+}end
+
+
+// Remove the structure the builder is AIMING at: trace the view ray, take
+// the hit entity, find which registered structure owns it. Control-bus
+// action "bpremove".
+//=========================================================================
+bs_removeAimed local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	if( level.coop_bs_count == NIL || level.coop_bs_count < 1 ){
+		local.player iprint "STRUCT: nothing registered" 1
+		end
+	}
+	local.eyepos = local.player.origin + ( 0 0 54 )
+	local.fwd = angles_toforward local.player.viewangles
+	local.traceend = local.eyepos + (vector_scale local.fwd 2048)
+	local.result = traced ( local.eyepos ) ( local.traceend )
+	local.hit = local.result["entity"]
+	if( local.hit == NIL || local.hit == NULL ){
+		local.player iprint "STRUCT: no entity under the crosshair" 1
+		end
+	}
+	local.found = 0
+	local.sid = 1
+	while( local.sid <= level.coop_bs_count ){
+		if( local.found == 0 && level.coop_bs_alive[local.sid] == 1 ){
+			local.i = 1
+			while( local.i <= level.coop_bs_n[local.sid] ){
+				if( local.found == 0 && level.coop_bs_ent[local.sid][local.i] == local.hit ){
+					local.found = local.sid
+				}
+				local.i++
+			}
+		}
+		local.sid++
+	}
+	if( local.found == 0 ){
+		local.player iprint "STRUCT: that is not a registered structure piece" 1
+		end
+	}
+	waitthread bs_remove local.found local.player
+}end

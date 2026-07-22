@@ -54,3 +54,147 @@ fl_sting_wave:{
 //NOTE: the war-ambience beds are integrated into coop_mod/ambience.scr (the existing
 //weather-themed bed system with combat/indoor ducking) as fl_* bed keywords - no
 //parallel loop lives here.
+
+
+//=========================================================================
+// FRONTLINE FILLER MUSIC (Phase 2: quiet-map tension bed).
+//
+// On maps that ship with little or no scored music, softly loop a Frontline OST
+// tension/ambient track WHEN THE MUSIC CHANNEL IS OTHERWISE SILENT, so a quiet
+// campaign map never plays in dead silence. This is DELIBERATELY conservative:
+// it starts a filler track ONLY when nothing scripted owns the music channel and
+// the map has been calm for ~20s, and it INSTANTLY yields (never tmstop's the
+// other track) the moment a map/officer/combat track takes the channel back.
+//
+// Busy signals (confirmed in replace.scr / officer.scr):
+//   level.coop_musicCommand      - set to the last "tmstart(loop) <file>" by
+//                                  replace.scr::tmstart/tmstartloop, cleared to NIL
+//                                  by tmstop. NIL == no scripted track owns the channel.
+//   level.coop_combatmusic_active - 1 while officer.scr::coop_officer_combat_music
+//                                  is running the boss track.
+//   level.coop_ambCombatTime     - level.time of the last detected combat, maintained
+//                                  by ambience.scr (only when coop_ambience 1). Reused
+//                                  when present; otherwise our own fire-held sense fills in.
+//
+// Gates: level.gametype != 0, cvar coop_musicFiller (unset/1 = on, 0 = off), and the
+// map must be on the conservative silent-map allow list (or opted in per-map via
+// level.coop_musicFiller set in maps/<map>.scr AFTER main.scr::main).
+//
+// Tracks live in sound/music/ (Emmerich.mp3, Kleveburg.mp3 - safe, understated picks).
+//=========================================================================
+coop_flmusic_filler:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( getcvar( "coop_musicFiller" ) == "0" ){ end }
+
+	// let the map finish its own setup and start its own music first (weather/ambience
+	// use the same waitTillPrespawn deferral; the extra 5s covers map main-track tmstart).
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	wait 5
+
+	if( ( waitthread coop_flmusic_mapAllowed ) != 1 ){
+		println "^~^~^ FLMUSIC filler off (map not on quiet-map list)"
+		end
+	}
+
+	// Conservative filler pool: understated tension/ambient cues only. Adding
+	// AfterTheDrop.mp3 / BorderTown.mp3 is a one-line bump of the count.
+	level.coop_flmusic_tracks[1] = "sound/music/Emmerich.mp3"
+	level.coop_flmusic_tracks[2] = "sound/music/Kleveburg.mp3"
+	level.coop_flmusic_track_count = 2
+
+	level.coop_flmusic_lastCombat = 0 - 1000		// long ago = start calm
+	level.coop_flmusic_playing = NIL			// exact tmstartloop command we last issued (NIL = nothing of ours playing)
+
+	println "^~^~^ FLMUSIC filler armed"
+
+	while( 1 ){
+		wait 4
+
+		// live master toggle: if turned off mid-map, retract our own track (but never
+		// stop a track something else owns) and idle.
+		if( getcvar( "coop_musicFiller" ) == "0" ){
+			if( level.coop_flmusic_playing != NIL && level.coop_musicCommand == level.coop_flmusic_playing ){
+				waitthread coop_mod/replace.scr::tmstop
+			}
+			level.coop_flmusic_playing = NIL
+			continue
+		}
+
+		// keep our own combat sense fresh (fallback for calm detection when ambience is off)
+		waitthread coop_flmusic_senseCombat
+
+		// STATE: our filler is playing -> keep it unless a scripted/combat track has taken
+		// the channel. If coop_musicCommand no longer matches what we sent, the map or the
+		// officer segue replaced it - yield silently (do NOT tmstop, they own it now).
+		if( level.coop_flmusic_playing != NIL ){
+			if( level.coop_musicCommand != level.coop_flmusic_playing || level.coop_combatmusic_active == 1 ){
+				level.coop_flmusic_playing = NIL
+			}
+			continue
+		}
+
+		// STATE: nothing of ours playing -> only start when the channel is truly free and calm.
+		if( level.coop_musicCommand != NIL ){ continue }		// a scripted track owns it
+		if( level.coop_combatmusic_active == 1 ){ continue }		// officer combat music running
+		if( ( waitthread coop_flmusic_isCalm ) != 1 ){ continue }	// been quiet ~20s
+
+		// FREE - loop a random filler track and remember EXACTLY what we sent, so we can tell
+		// our own track apart from a later scripted one (both live in level.coop_musicCommand).
+		local.pick = randomint( level.coop_flmusic_track_count ) + 1
+		local.file = level.coop_flmusic_tracks[local.pick]
+		waitthread coop_mod/replace.scr::tmstartloop local.file
+		level.coop_flmusic_playing = "tmstartloop " + local.file
+		println ( "^~^~^ FLMUSIC filler start " + local.file )
+	}
+}end
+
+//=========================================================================
+// Is this map on the conservative filler allow list? Per-map level.coop_musicFiller
+// (set in maps/<map>.scr) overrides both ways: 1 forces on, 0 forces off. Otherwise
+// only a small hand-picked set of known-quiet campaign maps qualifies.
+//=========================================================================
+coop_flmusic_mapAllowed:{
+//=========================================================================
+	if( level.coop_musicFiller == 1 ){ end 1 }
+	if( level.coop_musicFiller == 0 ){ end 0 }
+
+	local.m = level.coop_mapname
+	if( local.m == "m3l1a" ){ end 1 }
+	if( local.m == "m3l1b" ){ end 1 }
+	if( local.m == "t1l1" ){ end 1 }
+	if( local.m == "t2l3" ){ end 1 }
+	end 0
+}end
+
+//=========================================================================
+// Cheap combat sense (mirrors ambience.scr's proxy): any living player holding fire
+// stamps level.coop_flmusic_lastCombat. Used only as a fallback when ambience.scr
+// (which maintains level.coop_ambCombatTime) is disabled.
+//=========================================================================
+coop_flmusic_senseCombat:{
+//=========================================================================
+	local.i = 1
+	while( $player != NULL && local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && isAlive local.p && local.p.fireheld == 1 ){
+			level.coop_flmusic_lastCombat = level.time
+		}
+		local.i++
+	}
+}end
+
+//=========================================================================
+// Calm gate: at least ~20s since the last combat, using whichever combat clock is
+// newer - ambience.scr's level.coop_ambCombatTime (when present) or our own sense.
+// Returns 1 when calm, 0 otherwise.
+//=========================================================================
+coop_flmusic_isCalm:{
+//=========================================================================
+	local.ref = level.coop_flmusic_lastCombat
+	if( level.coop_ambCombatTime != NIL && level.coop_ambCombatTime > local.ref ){
+		local.ref = level.coop_ambCombatTime
+	}
+	if( ( level.time - local.ref ) < 20 ){ end 0 }
+	end 1
+}end

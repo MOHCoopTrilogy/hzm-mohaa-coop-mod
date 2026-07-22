@@ -1,0 +1,140 @@
+//=========================================================================
+// HZM coop - subtle WET BLEED-OUT GURGLE near a fresh corpse.
+//
+// play <corpse>:
+//   OCCASIONALLY (coop_gurgle_chance, default 0.35 -> ~35% of deaths) plays 1-2 quiet wet
+//   death-rattle SFX (coop_gurgle1..12 in ubersound/coop_gurgle.scr, files sound/coop_gurgle/
+//   cg_gurgle*.wav) positionally ON the corpse. It fires a beat AFTER death (1-3s) so it does not
+//   stack on the death grunt, then rides the tier-2 blood-drip bleed-out window
+//   (coop_goreDripCorpseTime ~12s) so the wet gurgle matches the visible blood. A second clip may
+//   follow, spaced later in that window. PROXIMITY-GATED (coop_gurgle_range, default 1200u) like
+//   deathvox so off-screen / distant corpses stay silent. Master toggle cvar coop_gurgle (1=on).
+//   Guards against a NULL / removed / despawned corpse at every step. Applies to AI corpses AND
+//   player corpses (any bleeding body).
+//
+// Called from coop_mod/aihandler.scr (threaded AFTER the bug-822 waitframe + self-null guard, so
+// only REAL corpses gurgle - a removed/non-combat actor is already NULL and never reaches here) and
+// coop_mod/player.scr::manageDead (after the deathvox call, player corpses).
+//=========================================================================
+play local.ent:{
+//=========================================================================
+	if( local.ent == NULL ){ end }
+
+	// HZM coop - continuous WET BLOOD-LEAK LOOP on this same corpse (separate feature, own toggle /
+	// range / concurrency cap). Forked HERE, before the occasional-gurgle toggle+chance gates below, so
+	// the trickle rides EVERY bleeding corpse (both AI and player, same hook path) independently of the
+	// rarer death-rattle gurgle - the two coexist on one body (leak = steady under-body trickle).
+	thread coop_mod/gurgle.scr::leak local.ent
+
+	// master toggle (default ON when unset)
+	if( getcvar( "coop_gurgle" ) == "0" ){ end }
+
+	// OCCASIONAL - only ~35% of deaths gurgle (subtle, atmospheric, not every body)
+	local.chance = 0.35
+	if( getcvar( "coop_gurgle_chance" ) != "" ){ local.chance = float( getcvar( "coop_gurgle_chance" ) ) }
+	if( ( randomfloat( 1 ) ) >= local.chance ){ end }
+
+	local.range = 1200
+	if( getcvar( "coop_gurgle_range" ) != "" ){ local.range = float( getcvar( "coop_gurgle_range" ) ) }
+
+	// let the death grunt finish first (1-3s), THEN the wet bleed-out gurgle begins
+	wait ( 1.0 + ( randomfloat( 2 ) ) )
+	if( local.ent == NULL ){ end }
+
+	// PROXIMITY GATE - only if the closest player is within range (off-screen corpses stay silent)
+	local.mindist = waitthread coop_mod/gurgle.scr::nearestPlayerDist local.ent
+	if( local.ent == NULL ){ end }
+	if( local.mindist > local.range ){ end }
+
+	// first wet gurgle (random 1..12 inline - matches the deathvox pattern; a variable randomint
+	// count was producing a NIL alias -> "Sound: NIL needs an alias" -> silence)
+	local.alias = "coop_gurgle" + ( ( randomint 12 ) + 1 )
+	local.ent playsound local.alias
+
+	// ~60% of the time a SECOND clip, spaced later in the bleed-out window (a few more seconds)
+	if( ( randomfloat( 1 ) ) < 0.6 ){
+		wait ( 2.5 + ( randomfloat( 3 ) ) )
+		if( local.ent == NULL ){ end }
+		local.mindist = waitthread coop_mod/gurgle.scr::nearestPlayerDist local.ent
+		if( local.ent == NULL ){ end }
+		if( local.mindist > local.range ){ end }
+		local.alias = "coop_gurgle" + ( ( randomint 12 ) + 1 )
+		local.ent playsound local.alias
+	}
+}end
+
+//=========================================================================
+// leak <corpse>:
+//   Continuous QUIET POSITIONAL WET TRICKLE (alias coop_bloodleak, sound/coop_gurgle/coop_bloodleak.wav)
+//   looped ON a fresh bleeding corpse for the tier-2 bleed-out window (~coop_goreDripCorpseTime, 12s),
+//   then STOPPED. Under-body counterpart to the occasional death-rattle gurgle - both coexist on one
+//   body. Master toggle coop_bloodleak (1=on). PROXIMITY-GATED (coop_bloodleak_range, default 900u) so
+//   off-screen corpses stay silent. CONCURRENCY CAP: only ~5 (coop_bloodleak_max) bleeding corpses
+//   trickle at once, tracked by level.coop_bloodleak_active (incremented on start, decremented on end)
+//   so a big firefight can't stack dozens of leak loops. Guards a NULL / removed corpse at every step;
+//   the increment/decrement are paired on one code path (no 'end' between them) so the counter can
+//   never leak or underflow. Fired from ::play, so it rides the same real-corpse hook path (AI corpses
+//   past the bug-822 guard in aihandler.scr + player corpses in player.scr::manageDead).
+//=========================================================================
+leak local.ent:{
+//=========================================================================
+	if( local.ent == NULL ){ end }
+
+	// master toggle (default ON when unset)
+	if( getcvar( "coop_bloodleak" ) == "0" ){ end }
+
+	local.range = 900
+	if( getcvar( "coop_bloodleak_range" ) != "" ){ local.range = float( getcvar( "coop_bloodleak_range" ) ) }
+
+	// concurrency cap (nearest ~5 audible corpses trickle at once)
+	local.max = 5
+	if( getcvar( "coop_bloodleak_max" ) != "" ){ local.max = int( getcvar( "coop_bloodleak_max" ) ) }
+	if( level.coop_bloodleak_active == NIL ){ level.coop_bloodleak_active = 0 }
+
+	// settle a beat after the death lands, THEN start the under-body trickle
+	wait ( 0.5 + ( randomfloat( 0.75 ) ) )
+	if( local.ent == NULL ){ end }
+
+	// PROXIMITY GATE - only trickle if the closest player is within range
+	local.mindist = waitthread coop_mod/gurgle.scr::nearestPlayerDist local.ent
+	if( local.ent == NULL ){ end }
+	if( local.mindist > local.range ){ end }
+
+	// CONCURRENCY CAP - bail (no slot claimed) if too many leaks already running
+	if( level.coop_bloodleak_active >= local.max ){ end }
+
+	// --- claim a slot and start the loop (no 'wait'/'end' between ++ and -- so the counter is safe) ---
+	level.coop_bloodleak_active++
+	local.ent loopsound coop_bloodleak
+
+	// hold for the bleed-out window (matches the tier-2 corpse drip)
+	local.dur = 12
+	if( getcvar( "coop_goreDripCorpseTime" ) != "" ){ local.dur = float( getcvar( "coop_goreDripCorpseTime" ) ) }
+	wait local.dur
+
+	// stop the loop (skip if the corpse is already gone - engine auto-stops a removed entity's loop)
+	if( local.ent != NULL ){ local.ent stoploopsound }
+
+	// release the slot unconditionally (even on a NULL corpse) and clamp so it can never underflow
+	level.coop_bloodleak_active--
+	if( level.coop_bloodleak_active < 0 ){ level.coop_bloodleak_active = 0 }
+}end
+
+//=========================================================================
+// Return the distance from <ent> to the CLOSEST connected player (999999 if none / ent gone).
+// Mirrors the deathvox proximity loop; $player is 1-indexed, $player.size = connected count.
+//=========================================================================
+nearestPlayerDist local.ent:{
+//=========================================================================
+	if( local.ent == NULL ){ end 999999 }
+	local.mindist = 999999
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			local.d = vector_length( $player[local.i].origin - local.ent.origin )
+			if( local.d < local.mindist ){ local.mindist = local.d }
+		}
+		local.i++
+	}
+	end local.mindist
+}end

@@ -18,14 +18,28 @@ coop_readyGateStart:{
 	level.coop_readyGateActive = 1
 	level.coop_readyGateDone = 0
 
-	// DEBUG (temporary) - confirms the gate actually starts during a briefing, and shows the gametype +
-	// player count. If you DON'T see this line on a briefing screen, briefingReadyGate never ran (gametype
-	// path); if you DO, the gate is running and the issue is downstream. Remove once the briefing gate is verified.
-	iprintlnbold ( "^3[coop] ready-gate START  players=" + $player.size + "  gametype=" + level.gametype )
+	// [user 07-17] the briefing map calls `drawhud 0` for the cinematic, which suppresses the CUSTOM
+	// ihuddraw slots (100-116) this gate draws the roster + "Press F to Ready Up" into - so the ready-up
+	// was invisible even though cg_huddraw_force showed the standard HUD (health/compass/score). Re-enable
+	// the level HUD so the ready-up ihuddraw actually renders.
+	drawhud 1
 
 	thread coop_readyGateHud
 
+	// force-resend cycle: every 7th loop pass (~2.1s at the 0.3s cadence) push EVERY gate cvar again,
+	// ignoring the coop_gateSet change-cache. stufftext to a client that is still LOADING is dropped
+	// silently (bug-595 pattern) while the cache would record it as delivered and never resend - this
+	// bounded periodic full push (~18 tiny `set`s per viewer) guarantees eventual delivery.
+	local.gateTick = 0
+
 	while( level.coop_readyGateActive == 1 ){
+		local.gforce = 0
+		local.gateTick = local.gateTick + 1
+		if( local.gateTick >= 7 ){
+			local.gateTick = 0
+			local.gforce = 1
+		}
+
 		// (re)arm every connected active player - covers late joiners too
 		for( local.i = 1; local.i <= $player.size; local.i++ ){
 			local.p = $player[local.i]
@@ -48,6 +62,45 @@ coop_readyGateStart:{
 			local.n = local.n + 1
 			if( local.p.flags["coop_gateReady"] == 1 ){ local.r = local.r + 1 }
 		}
+
+		// BRIEFING overlay bridge (UI/menu layer) - driven from THIS loop, not coop_readyGateHud.
+		// The briefing slide URCs (ui/briefing1a-g.urc) show the prompt + roster + ready checks via
+		// linkcvar/enabledcvar on coop_gate_* client cvars; the ihuddraw roster drawn by coop_readyGateHud
+		// is HIDDEN behind the briefing's fullscreen menu (bgfill), so these cvars are the ONLY path the
+		// player actually sees during a briefing. It used to live at the END of coop_readyGateHud - AFTER
+		// its ihuddraw + waitthread playerCleanName roster pass - so any stall in that (menu-covered, dead)
+		// pass meant the push never ran and the overlay never showed (health/compass still showed because
+		// those are UI-menu HUDs, unaffected by drawhud). Pushing from the arm loop guarantees it runs on
+		// the same cadence that arms F-to-ready. Raw netname (no playerCleanName) keeps this path stall-proof.
+		// `set` passes the servercmd filter (coop_* + first-time user-created); coop_gateSet change-tracks so
+		// the reliable-command buffer never floods.
+		for( local.v = 1; local.v <= $player.size; local.v++ ){
+			local.viewer = $player[local.v]
+			if( local.viewer == NULL ){ continue }
+			waitthread coop_gateSet local.viewer "coop_gate_active" 1 local.gforce
+			waitthread coop_gateSet local.viewer "coop_gate_tally" ( "Squad ready: " + local.r + " / " + local.n ) local.gforce
+			for( local.s = 1; local.s <= 4; local.s++ ){
+				local.sp = NULL
+				if( local.s <= $player.size ){ local.sp = $player[local.s] }
+				if( local.sp == NULL || local.sp.dmteam == "spectator" ){
+					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 0 local.gforce
+					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) 0 local.gforce
+					continue
+				}
+				local.srank = local.sp.flags["coop_xp_rank"]
+				if( local.srank == NIL ){ local.srank = 0 }
+				if( local.srank < 10 ){ local.srank = "0" + local.srank }
+				local.snm = local.sp.netname
+				if( local.snm == NIL ){ local.snm = "Player" }
+				local.srdy = local.sp.flags["coop_gateReady"]
+				if( local.srdy != 1 ){ local.srdy = 0 }
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 1 local.gforce
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s ) local.snm local.gforce
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "r" ) ( "textures/hud/coop_rank_" + local.srank ) local.gforce
+				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) local.srdy local.gforce
+			}
+		}
+
 		if( local.n >= 1 && local.r >= local.n ){
 			level.coop_readyGateDone = 1
 			level.coop_readyGateActive = 0
@@ -63,6 +116,10 @@ coop_readyGateStart:{
 		local.p.flags["coop_gatePoll"] = NIL
 		local.p.flags["coop_gateReady"] = NIL
 		ihuddraw_alpha local.p 115 0
+		// clear the briefing UI overlay here too - coop_readyGateHud's own teardown also does this, but if its
+		// (menu-covered, dead) ihuddraw pass stalled it may never reach teardown, so dismiss from this loop too.
+		// forced (4th arg 1): a dismiss must never be swallowed by a stale change-cache.
+		waitthread coop_gateSet local.p "coop_gate_active" 0 1
 	}
 }end
 
@@ -95,7 +152,6 @@ coop_readyGatePoll:{
 //=========================================================================
 coop_readyGateHud:{
 //=========================================================================
-	iprintlnbold "^2[coop] gateHud thread running"		// DEBUG (temporary)
 	// Same ready-up presentation as the pre-mission lobby: a top prompt telling players HOW to ready up,
 	// plus the bottom-left roster (rank emblem + name + green checkmark once readied). Uses ihuddraw slots
 	// 100-116 (>=100 so the HUD-fade leaves them fully on); coop_gateReady is this gate's per-player flag.
@@ -198,42 +254,16 @@ coop_readyGateHud:{
 				}
 			}
 		}
-		// BRIEFING overlay bridge: the ihuddraw roster above is HIDDEN behind the briefing's fullscreen menu
-		// (bgfill), so mirror the roster into per-client cvars that ui/missionbriefingback.inc reads (UI layer,
-		// on top). Pushed with `set` (filter allows user-created cvars) and ONLY on change (coop_gateSet caches
-		// last-sent) so the reliable-command buffer never floods. Harmless in the lobby (nothing reads these there).
-		for( local.v = 1; local.v <= $player.size; local.v++ ){
-			local.viewer = $player[local.v]
-			if( local.viewer == NULL ){ continue }
-			waitthread coop_gateSet local.viewer "coop_gate_active" 1
-			waitthread coop_gateSet local.viewer "coop_gate_tally" ( "Squad ready:   " + local.r + " / " + local.n )
-			for( local.s = 1; local.s <= 4; local.s++ ){
-				local.sp = NULL
-				if( local.s <= $player.size ){ local.sp = $player[local.s] }
-				if( local.sp == NULL || local.sp.dmteam == "spectator" ){
-					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 0
-					waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) 0
-					continue
-				}
-				local.srank = local.sp.flags["coop_xp_rank"]
-				if( local.srank == NIL ){ local.srank = 0 }
-				if( local.srank < 10 ){ local.srank = "0" + local.srank }
-				local.snm = waitthread game.player::playerCleanName local.sp.netname
-				if( local.snm == NIL ){ local.snm = local.sp.netname }
-				local.srdy = local.sp.flags["coop_gateReady"]
-				if( local.srdy != 1 ){ local.srdy = 0 }
-				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "on" ) 1
-				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s ) local.snm
-				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "r" ) ( "textures/hud/coop_rank_" + local.srank )
-				waitthread coop_gateSet local.viewer ( "coop_gate_p" + local.s + "c" ) local.srdy
-			}
-		}
+		// (The coop_gate_* UI/menu bridge the briefing slide URCs read is now pushed from coop_readyGateStart's
+		// arm loop - guaranteed to run - so it is NOT duplicated here; that avoids two writers racing the same
+		// cvars with different name spellings. This loop only owns the ihuddraw roster above, kept for any future
+		// gate use without a covering menu.)
 		wait 0.4
 	}
 	// teardown: wipe every slot we own (roster 100-114 + prompt 115/116) on all viewers
 	for( local.v = 1; local.v <= $player.size; local.v++ ){
 		if( $player[local.v] == NULL ){ continue }
-		waitthread coop_gateSet $player[local.v] "coop_gate_active" 0
+		waitthread coop_gateSet $player[local.v] "coop_gate_active" 0 1
 		for( local.s = 100; local.s <= 116; local.s++ ){
 			ihuddraw_alpha $player[local.v] local.s 0
 		}
@@ -241,24 +271,31 @@ coop_readyGateHud:{
 }end
 
 //=========================================================================
-// coop_gateSet local.gv local.gc local.gx  - push a single client cvar for the briefing ready overlay,
-// but ONLY when the value changed since we last sent it to this viewer (cached in gv.flags["gu_"+name]).
-// The value is quoted so player names with spaces survive the `set`. Uses plain `set` (not seta) so the
-// servercmd filter permits it as a user-created cvar.
+// coop_gateSet local.gv local.gc local.gx local.gf  - push a single client cvar for the briefing ready
+// overlay. Skips the send when the value matches the last one sent to this viewer (cached in
+// gv.flags["gu_"+name]) UNLESS local.gf == 1 (force - used by the ~2s full-resend cycle and teardown).
+//
+// [bug D root cause] The value must NOT be wrapped in quotes: Player::EventStuffText transmits the whole
+// command as `stufftext "<cmd>"` (player.cpp SendServerCommand "stufftext \"%s\""), so any embedded "
+// inside <cmd> ENDS the wire-level quoted argument early - the client's cgi.Argv(1) truncates at the
+// first inner quote and executes `set coop_gate_x` with NO value. Cvar_Set_f with only a name falls
+// through to Cvar_Print_f, which just prints "Cvar coop_gate_x does not exist." (the exact log spam)
+// and never creates the cvar - so the URC enabledcvar/linkcvar widgets never lit up. Unquoted is safe:
+// this path sends exactly ONE statement per stufftext, and Cvar_Set_f takes Cmd_ArgsFrom(2), so values
+// with spaces (player names, the tally) still arrive whole (runs of spaces collapse to one).
+// Uses plain `set` (not seta) so the servercmd filter permits it as a user-created cvar.
 //=========================================================================
-coop_gateSet local.gv local.gc local.gx:{
+coop_gateSet local.gv local.gc local.gx local.gf:{
 //=========================================================================
 	if( local.gv == NULL ){ end }
 	local.gukey = "gu_" + local.gc
 	// change-tracking: skip only if we ALREADY sent this exact value. MUST check NIL explicitly - a raw
 	// `flags[key] != local.gx` compares NIL(unset) vs e.g. 1, which GameScript does NOT treat as "changed",
-	// so the very first push was being skipped and the cvar was never created (that's why the briefing gate
-	// ran but coop_gate_* stayed "does not exist"). This matches the itemhandler/xp `!= NIL` pattern.
-	if( local.gv.flags[local.gukey] != NIL ){
+	// so the very first push was being skipped and the cvar was never created. Matches the itemhandler/xp
+	// `!= NIL` pattern.
+	if( local.gf != 1 && local.gv.flags[local.gukey] != NIL ){
 		if( local.gv.flags[local.gukey] == local.gx ){ end }
 	}
 	local.gv.flags[local.gukey] = local.gx
-	// DEBUG (temporary): confirm the send is actually reached for the master flag
-	if( local.gc == "coop_gate_active" ){ iprintlnbold ( "^5[coop] gateSet SEND active=" + local.gx ) }
-	local.gv stufftext ( "set " + local.gc + " \"" + local.gx + "\"" )
+	local.gv stufftext ( "set " + local.gc + " " + local.gx )
 }end

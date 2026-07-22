@@ -42,6 +42,7 @@ coop_build_monitor:{
 	waitthread coop_mod/buildmode_catalog.scr::catalog_init
 	waitthread coop_mod/buildmode_actors.scr::actor_catalog_init		//HZM coop BUILD MODE: append the ALLIED ACTORS category + anim catalog
 	waitthread coop_mod/buildmode_sounds.scr::sound_catalog_init		//HZM coop BUILD MODE: parallel SOUND-emitter catalog (SOUND mode)
+	waitthread coop_mod/blueprint.scr::bp_catalogRefresh		//HZM coop BLUEPRINT: append saved templates to STRUCTURES (bp_index.dat)
 
 	while( 1 ){
 		if( getcvar( "coop_build" ) == "1" ){
@@ -116,6 +117,8 @@ coop_build_session local.player:{
 	if( level.coop_build_solid == NIL ){ level.coop_build_solid = 0 }
 	if( level.coop_build_yaw == NIL ){ level.coop_build_yaw = int( local.player.viewangles[1] ) }
 	if( level.coop_build_animIdx == NIL ){ level.coop_build_animIdx = 1 }		//HZM coop BUILD MODE: selected actor animation (actor category only)
+	if( level.coop_build_snap == NIL ){ level.coop_build_snap = 0 }		//HZM coop BLUEPRINT: grid snap (x/y block grid + 45 deg yaw), SEMICOLON toggles
+	if( level.coop_build_name == NIL ){ level.coop_build_name = "" }	//[user 07-21] first HUD paint can beat the first ghost spawn - NIL here concat-killed the paint thread (qconsole 18:36:23)
 
 	// capture file: continue any existing capture for this map (never clobber old sessions)
 	level.coop_build_file = "coop_mod/save/build_" + level.coop_mapname + ".dat"
@@ -136,7 +139,7 @@ coop_build_session local.player:{
 	setcvar "coop_build_cmd" ""
 	local.player iprint "BUILD MODE: ON (numpad controls)" 1
 	println( "^~^~^ BUILD_ON " + level.coop_mapname )
-	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo"
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo, SEMICOLON snap, ' bpmark; console: set coop_build_bpname <n> + coop_build_cmd bpsave / bpremove"
 
 	thread coop_build_hud local.player
 	waitthread coop_build_ghostRefresh local.player
@@ -205,6 +208,8 @@ coop_build_doCmd local.player local.cmd:{
 		level.coop_build_cat++
 		if( level.coop_build_cat > level.coop_build_catcount ){ level.coop_build_cat = 1 }
 		level.coop_build_idx = 1
+		// [user 07-18] COVER categories (COVER OBJECTS + 1936 COVER) default to SOLID (they exist to build working cover)
+		if( level.coop_build_catIsCover[level.coop_build_cat] == 1 ){ level.coop_build_solid = 1 }
 		waitthread coop_build_ghostRefresh local.player
 		local.player iprint ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ":  " + level.coop_build_catname[level.coop_build_cat] ) 1
 	}
@@ -212,15 +217,20 @@ coop_build_doCmd local.player local.cmd:{
 		level.coop_build_cat--
 		if( level.coop_build_cat < 1 ){ level.coop_build_cat = level.coop_build_catcount }
 		level.coop_build_idx = 1
+		if( level.coop_build_catIsCover[level.coop_build_cat] == 1 ){ level.coop_build_solid = 1 }
 		waitthread coop_build_ghostRefresh local.player
 		local.player iprint ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ":  " + level.coop_build_catname[level.coop_build_cat] ) 1
 	}
 	else if( local.cmd == "yawplus" ){
-		level.coop_build_yaw = level.coop_build_yaw + 15
+		local.step = 15
+		if( level.coop_build_snap == 1 ){ local.step = 45 }		//HZM coop BLUEPRINT: 45 deg steps while snapped
+		level.coop_build_yaw = level.coop_build_yaw + local.step
 		if( level.coop_build_yaw >= 360 ){ level.coop_build_yaw = level.coop_build_yaw - 360 }
 	}
 	else if( local.cmd == "yawminus" ){
-		level.coop_build_yaw = level.coop_build_yaw - 15
+		local.step = 15
+		if( level.coop_build_snap == 1 ){ local.step = 45 }
+		level.coop_build_yaw = level.coop_build_yaw - local.step
 		if( level.coop_build_yaw < 0 ){ level.coop_build_yaw = level.coop_build_yaw + 360 }
 	}
 	else if( local.cmd == "pitchplus" ){
@@ -249,7 +259,11 @@ coop_build_doCmd local.player local.cmd:{
 	}
 	else if( local.cmd == "scaleup" ){
 		level.coop_build_scale = waitthread coop_build_round1 ( level.coop_build_scale + 0.1 )
-		if( level.coop_build_scale > 5.0 ){ level.coop_build_scale = 5.0 }
+		//[user 07-17] cap raised 5.0 -> 8.0 so GEOMETRY boxes reach FULL STANDING COVER: the unit cube is
+		// ~16u at scale 1, so 3.0 = ~48u crouch cover, 4.0 = ~64u chest-high (the baked map crates), and
+		// 6.0-8.0 = 96-128u full standing cover / walls. Cover mechanics are trace-based vs solid bbox,
+		// so a SOLID-placed box works with lean/blindfire/low-cover at the right height.
+		if( level.coop_build_scale > 8.0 ){ level.coop_build_scale = 8.0 }
 		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){ level.coop_build_ghost scale level.coop_build_scale }
 	}
 	else if( local.cmd == "scaledown" ){
@@ -282,6 +296,24 @@ coop_build_doCmd local.player local.cmd:{
 			if( level.coop_build_animIdx > level.coop_build_animCount ){ level.coop_build_animIdx = 1 }
 			waitthread coop_build_ghostRefresh local.player
 		}
+	}
+	//HZM coop BLUEPRINT: snap toggle + template capture/remove bus actions
+	else if( local.cmd == "snap" ){
+		if( level.coop_build_snap == 1 ){ level.coop_build_snap = 0 }
+		else{
+			level.coop_build_snap = 1
+			level.coop_build_yaw = waitthread coop_mod/blueprint.scr::bp_snapYaw level.coop_build_yaw
+		}
+		local.player iprint ( "SNAP: " + level.coop_build_snap ) 1
+	}
+	else if( local.cmd == "bpmark" ){
+		waitthread coop_mod/blueprint.scr::bp_mark local.player
+	}
+	else if( local.cmd == "bpsave" ){
+		waitthread coop_mod/blueprint.scr::bp_save local.player
+	}
+	else if( local.cmd == "bpremove" ){
+		waitthread coop_mod/blueprint.scr::bs_removeAimed local.player
 	}
 	else if( local.cmd == "place" ){
 		waitthread coop_build_place local.player
@@ -321,7 +353,18 @@ coop_build_ghostRefresh local.player:{
 	level.coop_build_tik = level.coop_build_item[level.coop_build_cat][level.coop_build_idx]
 	level.coop_build_name = waitthread coop_mod/strings.scr::remove level.coop_build_tik "models/"
 
-	local.g = spawn script_model model level.coop_build_tik
+	//[user 07-21] STRUCTURES category: composed multi-piece builds (bunker.scr labels, not
+	//tik paths) - preview as a single anchor cube at the aim point; the real placement
+	//threads the labelled builder.
+	local.gtik = level.coop_build_tik
+	if( level.coop_build_cat == level.coop_build_structCat ){
+		local.gtik = "models/coop_build/box_concrete.tik"
+		//[user 07-21] the cube is only an AIM MARKER - say so, or the item reads as broken
+		level.coop_build_name = level.coop_build_tik + "  [KP_ENTER = BUILD IT HERE]"
+		local.player iprint ( "STRUCTURE TEMPLATE: cube = aim marker. KP_ENTER builds " + level.coop_build_tik ) 1
+	}
+
+	local.g = spawn script_model model local.gtik
 	local.g notsolid
 	local.g alpha 0.55
 	if( level.coop_build_scale != 1.0 ){ local.g scale level.coop_build_scale }
@@ -369,6 +412,10 @@ coop_build_ghostFollow local.player:{
 		local.dvec = local.fwd * level.coop_build_dist
 		local.hitpos = local.hitpos + local.dvec
 	}
+	//HZM coop BLUEPRINT: optional grid snap (x/y to the block grid; z opt-in via coop_build_snapz)
+	if( level.coop_build_snap == 1 ){
+		local.hitpos = waitthread coop_mod/blueprint.scr::bp_snapPos local.hitpos
+	}
 	local.hitpos[2] = local.hitpos[2] + level.coop_build_zofs
 
 	local.ang = ( 0 0 0 )
@@ -393,6 +440,50 @@ coop_build_place local.player:{
 	if( level.coop_build_lastpos == NIL ){ end }
 	local.n = level.coop_build_count + 1
 
+	//[user 07-21] STRUCTURES: thread the composed builder at the ghost pos/yaw, capture a
+	//one-line paste-ready call, and skip the single-model path entirely.
+	if( level.coop_build_cat == level.coop_build_structCat ){
+		local.sx = level.coop_build_lastpos[0]
+		local.sy = level.coop_build_lastpos[1]
+		local.sz = level.coop_build_lastpos[2]
+		//[user 07-21 v2] the current build scale rides along as a whole-structure size
+		//multiplier - KP+/- sizes forts the same way it sizes props
+		//[agent 07-21] BLUEPRINT: "bp:" items = saved templates (blueprint.scr); builders run
+		//waitthread (not thread) so bs_register has finished and the sid is known for unit-undo.
+		//Ghost freezes ~8-15 frames during a build - accepted tradeoff (design doc section 8).
+		local.pfx = waitthread coop_mod/strings.scr::left 3 level.coop_build_tik
+		if( local.pfx == "bp:" ){
+			local.bpname = waitthread coop_mod/strings.scr::remove level.coop_build_tik "bp:"
+			waitthread coop_mod/blueprint.scr::bp_place level.coop_build_lastpos level.coop_build_yaw local.bpname level.coop_build_scale
+		}
+		else if( level.coop_build_tik == "bunker_pillbox" ){ waitthread coop_mod/bunker.scr::bunker_pillbox level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "bunker_nest" ){ waitthread coop_mod/bunker.scr::bunker_nest level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "bunker_wall" ){ waitthread coop_mod/bunker.scr::bunker_wall level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "bunker_tower" ){ waitthread coop_mod/bunker.scr::bunker_tower level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else{ local.player iprint "unknown structure" 1 ; end }
+		//HZM coop BLUEPRINT: a refused template place (missing file / budget) must not be
+		//recorded or captured - the sid would point at an OLDER structure and undo would eat it
+		if( local.pfx == "bp:" && level.coop_bp_lastPlaceOk != 1 ){
+			local.player iprint ( "blueprint place failed: " + local.bpname + " (see console)" ) 1
+			end
+		}
+		//HZM coop BLUEPRINT: record as a unit (builder just registered -> sid = coop_bs_count)
+		waitthread coop_mod/blueprint.scr::bp_record local.n level.coop_build_tik level.coop_build_lastpos level.coop_build_yaw 0 level.coop_build_scale 1 "struct"
+		level.coop_bp_sid[local.n] = level.coop_bs_count
+		local.block = "// coop_build STRUCTURE #" + local.n + " " + level.coop_build_tik + "\n"
+		if( local.pfx == "bp:" ){
+			local.block = local.block + "thread coop_mod/blueprint.scr::bp_place ( " + local.sx + " " + local.sy + " " + local.sz + " ) " + level.coop_build_yaw + " \"" + local.bpname + "\" " + level.coop_build_scale + "\n\n"
+		}else{
+			local.block = local.block + "thread coop_mod/bunker.scr::" + level.coop_build_tik + " ( " + local.sx + " " + local.sy + " " + local.sz + " ) " + level.coop_build_yaw + " " + level.coop_build_scale + "\n\n"
+		}
+		level.coop_build_dumpline[local.n] = local.block
+		level.coop_build_count = local.n
+		waitthread coop_build_save
+		println( "^~^~^ BUILD_PLACE_STRUCT " + local.n + " " + level.coop_build_tik + " org " + local.sx + " " + local.sy + " " + local.sz + " yaw " + level.coop_build_yaw )
+		local.player iprint ( "built " + level.coop_build_tik + " #" + local.n ) 1
+		end
+	}
+
 	local.isActor = 0
 	if( level.coop_build_cat == level.coop_build_actorCat ){ local.isActor = 1 }
 
@@ -402,6 +493,25 @@ coop_build_place local.player:{
 	if( level.coop_build_scale != 1.0 ){ local.m scale level.coop_build_scale }
 	if( level.coop_build_solid == 1 ){ local.m solid }
 	else{ local.m notsolid }
+
+	// [bug-829] SOLID HULL AT SCALE: in MOHAA 'scale' resizes only the VISUAL mesh - the collision
+	// bbox stays the model's BASE bounds (engine entity.cpp setScale never touches r.mins/r.maxs), so
+	// a scaled SOLID object clips at its tiny unscaled size and the cover system's world traces walk
+	// straight through the big visual (a scale-8 box renders ~128u but clips at ~16u). Fix: resize the
+	// solid hull with setsize = base_bounds * scale. The base bounds are read off the already-loaded
+	// GHOST (the just-spawned model's 'model' keyvalue is POSTED, so its getmins/getmaxs can still be
+	// zero this same frame). Non-actor props only - skeletal actors keep their own bounds.
+	local.didSetsize = 0
+	if( local.isActor == 0 && level.coop_build_solid == 1 ){
+		if( level.coop_build_ghost != NIL && level.coop_build_ghost != NULL ){
+			local.smins = level.coop_build_ghost.getmins * level.coop_build_scale
+			local.smaxs = level.coop_build_ghost.getmaxs * level.coop_build_scale
+			if( local.smaxs[2] - local.smins[2] > 0 ){
+				local.m setsize local.smins local.smaxs
+				local.didSetsize = 1
+			}
+		}
+	}
 
 	// resolve the actor anim + prop (empty for a plain prop placement)
 	local.anim = ""
@@ -427,6 +537,12 @@ coop_build_place local.player:{
 
 	level.coop_build_ent[local.n] = local.m
 	level.coop_build_count = local.n
+
+	//HZM coop BLUEPRINT: structured record (template capture + unit undo); kind "model"
+	//pieces are what bp_save templates - actors are recorded but skipped (v1 geometry-only)
+	local.kind = "model"
+	if( local.isActor == 1 ){ local.kind = "actor" }
+	waitthread coop_mod/blueprint.scr::bp_record local.n level.coop_build_tik level.coop_build_lastpos level.coop_build_yaw level.coop_build_pitch level.coop_build_scale level.coop_build_solid local.kind
 
 	// capture: paste-ready script block (spaces inside the parens keep vector literals
 	// safe from the paren-minus parse killer when pasted back into a map script)
@@ -458,6 +574,7 @@ coop_build_place local.player:{
 		if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
 		if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
 		else{ local.block = local.block + "local.m notsolid\n" }
+		if( local.didSetsize == 1 ){ local.block = local.block + "local.m setsize ( " + local.smins[0] + " " + local.smins[1] + " " + local.smins[2] + " ) ( " + local.smaxs[0] + " " + local.smaxs[1] + " " + local.smaxs[2] + " )\n" }
 		local.block = local.block + "\n"
 	}
 	level.coop_build_dumpline[local.n] = local.block
@@ -482,14 +599,20 @@ coop_build_undo local.player:{
 		end
 	}
 	local.n = level.coop_build_count
-	local.m = level.coop_build_ent[local.n]
-	if( local.m != NIL && local.m != NULL ){
-		// detach an actor prop first so it is removed with the model, not orphaned
-		if( local.m.coop_buildPropTag != NIL && local.m.coop_buildPropTag != "" ){
-			local.m removeattachedmodel local.m.coop_buildPropTag
+	//HZM coop BLUEPRINT: structure placements undo as a UNIT (registry delete, batched)
+	if( level.coop_bp_kind[local.n] == "struct" ){
+		waitthread coop_mod/blueprint.scr::bs_remove level.coop_bp_sid[local.n] local.player
+	}else{
+		local.m = level.coop_build_ent[local.n]
+		if( local.m != NIL && local.m != NULL ){
+			// detach an actor prop first so it is removed with the model, not orphaned
+			if( local.m.coop_buildPropTag != NIL && local.m.coop_buildPropTag != "" ){
+				local.m removeattachedmodel local.m.coop_buildPropTag
+			}
+			local.m delete
 		}
-		local.m delete
 	}
+	waitthread coop_mod/blueprint.scr::bp_unrecord local.n
 	level.coop_build_ent[local.n] = NIL
 	level.coop_build_dumpline[local.n] = NIL
 	level.coop_build_count = local.n - 1
@@ -552,7 +675,7 @@ coop_build_hud local.player:{
 	ihuddraw_alpha       local.player 61 0
 
 	ihuddraw_string local.player 54 "BUILD MODE"
-	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z  , / . dist  KP+/- scale KP0 solid KPEnter place KPDel undo"
+	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z  , / . dist  KP+/- scale KP0 solid KPEnter place KPDel undo  ; snap  ' bpmark"
 
 	while( level.coop_build_active == 1 && local.player != NULL ){
 		if( level.coop_build_hudDirty == 1 ){
@@ -569,7 +692,7 @@ coop_build_hud local.player:{
 			}else{
 				ihuddraw_string local.player 55 ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ": " + level.coop_build_catname[level.coop_build_cat] )
 				ihuddraw_string local.player 56 ( "[" + level.coop_build_idx + "/" + level.coop_build_itemcount[level.coop_build_cat] + "] " + level.coop_build_name )
-				ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " dist " + level.coop_build_dist + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid )
+				ihuddraw_string local.player 57 ( "yaw " + level.coop_build_yaw + " pitch " + level.coop_build_pitch + " zofs " + level.coop_build_zofs + " dist " + level.coop_build_dist + " scale " + level.coop_build_scale + " solid " + level.coop_build_solid + " snap " + level.coop_build_snap )
 				ihuddraw_string local.player 58 ( "placed " + level.coop_build_count + " -> " + level.coop_build_file )
 
 				// actor anim line (54 title gets an [ACTOR] tag too)

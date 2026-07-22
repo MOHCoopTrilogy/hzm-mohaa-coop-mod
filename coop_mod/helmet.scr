@@ -149,7 +149,9 @@ helmet_apply local.player:{
 	//so removal is by tag (safe no-op if nothing is attached there). Also free a legacy follower
 	//ent if one survived from the pre-exact-fit build.
 	local.player removeattachedmodel "Bip01 Head"
-	if( local.player.flags["coop_helmetEnt"] != NULL ){ local.player.flags["coop_helmetEnt"] delete }
+	//NIL guard: a flag never assigned reads NIL, and NIL is NOT equal to NULL - a bare
+	//`!= NULL` test passes for NIL and the command then errors "applied to NIL". Test both.
+	if( local.player.flags["coop_helmetEnt"] != NIL && local.player.flags["coop_helmetEnt"] != NULL ){ local.player.flags["coop_helmetEnt"] delete }
 	local.player.flags["coop_helmetEnt"] = NULL
 
 	if( local.tik == "std" ){
@@ -175,6 +177,54 @@ helmet_apply local.player:{
 	//bone's axes/position, the thing that broke the old attempts (bug-535 sideways / shot0077
 	//pancake), is exactly what we want. Follows every animation 1:1; no follower, no fit cvars.
 	local.player attachmodel local.tik "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-17] TIER 1 helmet visibility: mirror the player's helmet choice onto their LOBBY MANNEQUIN
+// (same rig, same exact-fit attach recipe as helmet_apply, targeted at the script_model). Called from
+// helmet_cycle and from armory_skin_cycle's mannequin re-model (a model swap wipes attachments).
+// Also pushes coop_loHelm to the client for the armory HELMET preview tile: the current helmet tik,
+// mapped std->the plain exact-fit (that IS the standard look), none->"" (blank tile).
+//-------------------------------------------------------------------------
+helmet_applyMannequin local.player:{
+	if( local.player == NULL ){ end }
+	local.man = local.player.flags["coop_lobbyMannequin"]
+	waitthread helmet_initList
+	local.idx = local.player.flags["coop_helmetIdx"]
+	if( local.idx == NIL ){ local.idx = 1 }
+	local.tik = level.coop_helmetTik[local.idx]
+
+	//armory preview tile cvar (client-side; the loadout menu's HELMET tile renders it)
+	local.prev = local.tik
+	if( local.prev == "std" ){ local.prev = "models/coop_helmets/coop_helmet_plain.tik" }
+	if( local.prev == "none" ){ local.prev = "" }
+	//[user 07-18] bug-773: an EMPTY value cannot ride a raw `set` push - "set coop_loHelm " arrives
+	//as a 2-arg set, and Cvar_Set_f with argc==2 PRINTS the cvar instead of setting it (seen live:
+	//qconsole 07-18 10:45:37 '"coop_loHelm" is:...'). Exec the generated tile-clear cfg instead
+	//(server->client exec of ui/loadout/* is whitelisted, bug-597).
+	if( local.prev == "" ){
+		local.player stufftext "exec ui/loadout/helm/hclear.cfg"
+	}
+	else{
+		local.player stufftext ( "set coop_loHelm " + local.prev )
+	}
+
+	//mid-mission there IS no mannequin: the flag was never assigned, so it reads NIL - and
+	//NIL == NULL is FALSE, so the old NULL-only guard fell through and every command below
+	//errored "applied to NIL" (qconsole 07-20, armory used from an m/t/e map). Test both.
+	if( local.man == NIL || local.man == NULL ){ end }
+	local.man removeattachedmodel "Bip01 Head"
+	if( local.tik == "std" ){
+		local.man surface us_helmet "-nodraw"
+		local.man surface us_helmet_inside "-nodraw"
+		local.man surface bob_helmet_camo "-nodraw"
+		end
+	}
+	local.man surface us_helmet "+nodraw"
+	local.man surface us_helmet_inside "+nodraw"
+	local.man surface bob_helmet_camo "+nodraw"
+	if( local.tik == "none" ){ end }
+	local.man attachmodel local.tik "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
 }end
 
 //-------------------------------------------------------------------------
@@ -317,14 +367,59 @@ helmet_cycle local.player local.dir:{
 
 	local.idx = local.player.flags["coop_helmetIdx"]
 	if( local.idx == NIL ){ local.idx = 1 }
-	local.idx = local.idx + local.dir
-	if( local.idx > local.n ){ local.idx = 1 }
-	if( local.idx < 1 ){ local.idx = local.n }
+	//[user 07-16] advance to the next UNLOCKED helmet in the requested direction (earned via challenges/ranks)
+	local.tries = 0
+	local.found = 0
+	while( local.tries < local.n ){
+		local.idx = local.idx + local.dir
+		if( local.idx > local.n ){ local.idx = 1 }
+		if( local.idx < 1 ){ local.idx = local.n }
+		if( waitthread cosmetic_isUnlocked local.player level.coop_helmetTik[local.idx] ){ local.found = 1; break }
+		local.tries = local.tries + 1
+	}
+	if( local.found == 0 ){ local.player iprintlnbold "No other helmets unlocked yet."; end }
+	waitthread armory_helmet_applyIdx local.player local.idx
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-18] bug-772: shared apply tail for helmet_cycle + armory_helmet_set (factored like
+// armory_skin_applyIdx - byte-identical behavior to the old helmet_cycle tail).
+//-------------------------------------------------------------------------
+armory_helmet_applyIdx local.player local.idx:{
+	if( local.player == NULL ){ end }
 	local.player.flags["coop_helmetIdx"] = local.idx
 	local.player.flags["coop_helmetTouched"] = 1	//from now on helmet_apply manages this player every spawn
 
 	waitthread helmet_apply local.player
+	if( local.player == NULL ){ end }	//helmet_apply waits a frame - the player can disconnect during it
+	thread helmet_applyMannequin local.player	//[user 07-17] tier 1: mannequin wears it + armory tile cvar
 	local.player iprintlnbold ( "Helmet: " + level.coop_helmetName[local.idx] )
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-18] bug-772: ABSOLUTE armory helmet apply. The armory HELMET buttons' old bare ,hn/,hp
+// tokens carried NO data char, so player.scr::playerExtract returned NIL and the bus NEVER
+// dispatched - the buttons only ran the client h-page preview chain and nothing was ever applied.
+// The client now sends the EXACT h-page id it is showing via the ,hn<NN> bus token (fired from the
+// archived coop_loAHelm cvar - the armory_skin_set recipe, bug-755/759). Non-numeric or
+// out-of-range data is inert ("seta coop_loAHelm 0" is the documented cleared state).
+//-------------------------------------------------------------------------
+armory_helmet_set local.player local.data:{
+	if( local.player == NULL ){ end }
+	if( !isAlive local.player ){ end }	//silent (unlike cycle): the join-resend push may land while dead - the spawn re-apply covers it
+	waitthread helmet_initList
+	local.idx = int( local.data )
+	if( local.idx < 1 || local.idx > level.coop_helmetCount ){ end }	//non-numeric/cleared token ("0") - inert
+	//server-side unlock gate: the client pages preview ALL helmets including LOCKED ones - refuse
+	//to apply a locked pick. [user 07-18 pre-release] SHOW-ALL-WITH-LOCK: NO snap-back revert
+	//anymore (supersedes the bug-755 recipe) - the preview may PARK on a locked helmet (the page's
+	//lock icon + requirement caption explain why); the archived token simply keeps getting refused
+	//here on close-commit/join-resend, so the WORN helmet never changes.
+	if( !(waitthread cosmetic_isUnlocked local.player level.coop_helmetTik[local.idx]) ){
+		local.player iprintlnbold ( "Helmet locked: " + level.coop_helmetName[local.idx] + " - earn it via challenges/ranks" )
+		end
+	}
+	waitthread armory_helmet_applyIdx local.player local.idx
 }end
 
 //-------------------------------------------------------------------------
@@ -365,6 +460,22 @@ armory_skin_build:{
 	level.coop_armorySkins[28] = "american_army3"
 }end
 
+//-------------------------------------------------------------------------
+//[user 07-17] Is local.skin a real armory roster skin (bare name, no path/ext)?
+// Used by the spawn re-force + resend capture so a blank/stale/garbage cvar can
+// never be fed to `model`. Membership in the roster guarantees a loadable
+// models/player/<x>.tik. Returns 1 valid / 0 invalid.
+//-------------------------------------------------------------------------
+armory_skin_isValid local.skin:{
+	if( local.skin == NIL ){ end 0 }
+	if( local.skin == "" ){ end 0 }
+	waitthread armory_skin_build
+	local.n = level.coop_armorySkins.size
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		if( level.coop_armorySkins[local.i] == local.skin ){ end 1 }
+	}
+}end 0
+
 armory_skin_cycle local.player local.dir:{
 	if( local.player == NULL ){ end }
 	if( !isAlive local.player ){ local.player iprintlnbold "Can't change skin while down/dead."; end }
@@ -375,14 +486,69 @@ armory_skin_cycle local.player local.dir:{
 
 	local.idx = local.player.flags["coop_armorySkinIdx"]
 	if( local.idx == NIL ){ local.idx = 1 }
-	local.idx = local.idx + local.dir
-	if( local.idx > local.n ){ local.idx = 1 }
-	if( local.idx < 1 ){ local.idx = local.n }
+	//[user 07-16] advance to the next UNLOCKED skin in the requested direction (earned via challenges/ranks)
+	local.tries = 0
+	local.found = 0
+	while( local.tries < local.n ){
+		local.idx = local.idx + local.dir
+		if( local.idx > local.n ){ local.idx = 1 }
+		if( local.idx < 1 ){ local.idx = local.n }
+		if( waitthread cosmetic_isUnlocked local.player ("models/player/" + level.coop_armorySkins[local.idx] + ".tik") ){ local.found = 1; break }
+		local.tries = local.tries + 1
+	}
+	if( local.found == 0 ){ local.player iprintlnbold "No other skins unlocked yet."; end }
+	waitthread armory_skin_applyIdx local.player local.idx
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-18] bug-B: ABSOLUTE armory skin apply. The v3.2 armory previews skins 100% client-side
+// (ui/loadout/skin/sNN.cfg pages), so the server can no longer track a NEXT/PREV cycle in lockstep
+// (locked-skin skipping + differing start points desync a +1/-1 cycle from the shown page). The
+// client instead sends the EXACT page id it is showing via the ,sn<NN> bus token (fired from the
+// archived coop_loASkin cvar, weapon-pick recipe). Non-numeric or out-of-range data is inert
+// ("seta coop_loASkin 0" is the documented cleared state).
+//-------------------------------------------------------------------------
+armory_skin_set local.player local.data:{
+	if( local.player == NULL ){ end }
+	if( !isAlive local.player ){ end }	//silent (unlike cycle): the join-resend push may land while dead - the spawn re-force covers it
+	waitthread armory_skin_build
+	local.idx = int( local.data )
+	if( local.idx < 1 || local.idx > level.coop_armorySkins.size ){ end }	//non-numeric/cleared token ("0") - inert
+	//server-side unlock gate: the client cfg pages preview LOCKED skins freely - refuse to apply one.
+	//[user 07-18 pre-release] SHOW-ALL-WITH-LOCK: NO snap-back revert anymore (supersedes the
+	//bug-755 recipe) - the preview may PARK on a locked skin (the page's lock icon + requirement
+	//caption explain why); the archived token simply keeps getting refused here on close-commit/
+	//join-resend, so the WORN skin never changes (the spawn re-force reads flags["coop_armorySkin"],
+	//which only armory_skin_applyIdx writes).
+	if( !(waitthread cosmetic_isUnlocked local.player ("models/player/" + level.coop_armorySkins[local.idx] + ".tik")) ){
+		local.player iprintlnbold ( "Skin locked: " + level.coop_armorySkins[local.idx] + " - earn it via challenges/ranks" )
+		end
+	}
+	waitthread armory_skin_applyIdx local.player local.idx
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-18] shared apply tail for armory_skin_cycle + armory_skin_set (factored, identical behavior)
+//-------------------------------------------------------------------------
+armory_skin_applyIdx local.player local.idx:{
+	if( local.player == NULL ){ end }
 	local.player.flags["coop_armorySkinIdx"] = local.idx
 
 	local.skin = level.coop_armorySkins[local.idx]
 	local.player model ( "models/player/" + local.skin + ".tik" )
 	local.player stufftext ( "seta dm_playermodel " + local.skin )
+	//[user 07-17] SERVER-AUTHORITATIVE skin persist: dm_playermodel alone loses the race (the client
+	//re-seats a default preview each menu open + two writers fight it), so also record the pick on the
+	//player + in an archived cvar the spawn re-force reads (player.scr::manageAliveSpawning). This flag
+	//is the authoritative source; coop_loSkin is the across-session fallback (listen host).
+	local.player.flags["coop_armorySkin"] = local.skin
+	local.player stufftext ( "seta coop_loSkin " + local.skin )
+	//[user 07-17] in the LOBBY the visible body is the MANNEQUIN (the player entity is hidden) - mirror
+	//the new skin onto it so the armory SKIN buttons visibly work there too (bug: buttons changed nothing).
+	if( local.player.flags["coop_lobbyMannequin"] != NIL && local.player.flags["coop_lobbyMannequin"] != NULL ){
+		local.player.flags["coop_lobbyMannequin"] model ( "models/player/" + local.skin + ".tik" )
+		thread helmet_applyMannequin local.player	//[user 07-17] re-model wiped attachments - re-hat the mannequin
+	}
 	//[user 07-16] update the armory OPERATOR render (coop_loChar) so the menu preview reflects the
 	//new skin live while the loadout menu is open, not just the world player.
 	local.player stufftext ( "set coop_loChar models/player/" + local.skin + ".tik" )
@@ -390,3 +556,211 @@ armory_skin_cycle local.player local.dir:{
 	//re-apply the helmet choice on top of the new model (InitModel wiped attachments)
 	thread helmet_apply local.player
 }end
+
+//-------------------------------------------------------------------------
+//[user 07-18] bug-759: zero-pad a 1-based armory roster index to the 2-digit page id
+// used by the generated ui/loadout/skin/sNN.cfg + ui/loadout/helm/hNN.cfg files (bug-772)
+// and the per-page archived lock cvars (coop_loSkLkA/coop_loHmLkA<NN>).
+//-------------------------------------------------------------------------
+armory_skin_pg local.idx:{
+	local.pg = string(local.idx)
+	if( local.idx < 10 ){ local.pg = ( "0" + local.pg ) }
+}end local.pg
+
+//-------------------------------------------------------------------------
+//[user 07-18 pre-release] SHOW-ALL-WITH-LOCK (design REVERSAL, supersedes the bug-759 hidden-locked
+// redirect chains): the generated s-pages hard-link their literal neighbours again (every skin
+// shows), and this export - repurposed from the old armory_skin_exportChain - pushes each GATED
+// page's LOCK STATE instead, one archived command cvar per page:
+//   seta coop_loSkLkA<NN> set coop_loCosLk 0|1
+// Every gated s-page cfg does `set coop_loCosLk 1` (baked fail-LOCKED default) then
+// `vstr coop_loSkLkA<NN>` - so the lock icon + requirement caption are correct on page visit,
+// with no server (fail-LOCKED), across sessions (seta persists), and live after this push.
+// FREE pages bake coop_loCosLk 0 and are never pushed. Values UNQUOTED on the wire (bug-742:
+// embedded quotes truncate; the client's Cvar_Set_f rejoins argv 2..). DIFF-ONLY per player
+// (flags coop_loSkLkL<i>) + generation stamp + 8 stufftexts/frame pacing = the exportUnlocks
+// reliable-command recipe. Re-runs on: armory open (,w0o), join resend, and skin unlock grants
+// (chal_add_unlock). armory_skin_set's unlock gate stays the enforcement (preview may park on a
+// locked skin by design; it just never applies).
+//-------------------------------------------------------------------------
+armory_skin_exportLocks local.player:{
+	if( local.player == NULL ){ end }
+	waitthread armory_skin_build
+	waitthread cosmetic_gatedBuild
+	if( local.player.flags["coop_loSkLkGen"] == NIL ){ local.player.flags["coop_loSkLkGen"] = 0 }
+	local.player.flags["coop_loSkLkGen"] = local.player.flags["coop_loSkLkGen"] + 1
+	local.gen = local.player.flags["coop_loSkLkGen"]
+	local.n = level.coop_armorySkins.size
+	local.w = 0
+	local.any = 0
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.tok = ( "models/player/" + level.coop_armorySkins[local.i] + ".tik" )
+		if( level.coop_cosmeticGatedTok[local.tok] == NIL ){ continue }	//free skin - page bakes coop_loCosLk 0, nothing to push
+		local.lk = 1
+		if( waitthread cosmetic_isUnlocked local.player local.tok ){ local.lk = 0 }
+		if( local.player == NULL ){ end }
+		if( local.player.flags["coop_loSkLkGen"] != local.gen ){ end }	//superseded while chal_ensure waited
+		if( local.player.flags["coop_loSkLkL" + local.i] != local.lk ){
+			local.player.flags["coop_loSkLkL" + local.i] = local.lk
+			local.pg = waitthread armory_skin_pg local.i
+			local.player stufftext ( "seta coop_loSkLkA" + local.pg + " set coop_loCosLk " + local.lk )
+			local.w = local.w + 1
+			local.any = 1
+		}
+		if( local.w >= 8 ){
+			local.w = 0
+			waitframe
+			if( local.player == NULL ){ end }
+			if( local.player.flags["coop_loSkLkGen"] != local.gen ){ end }	//a newer export took over
+		}
+	}
+	//something changed: re-exec the s-page the armory is currently showing (archived open-replay)
+	//so its lock icon reflects the fresh truth without navigating. Menu closed -> the page cfg just
+	//re-sets preview cvars, inert. vstr of an unset coop_loOpenSkin is a harmless no-op.
+	if( local.any == 1 ){
+		local.player stufftext "vstr coop_loOpenSkin"
+	}
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-18 pre-release] SHOW-ALL-WITH-LOCK for the HELMET row (supersedes the bug-772
+// hidden-locked redirect chains) - the exact armory_skin_exportLocks recipe: h-pages hard-link
+// their literal neighbours (every helmet shows) and this export - repurposed from the old
+// armory_helmet_exportChain - pushes each GATED page's lock state:
+//   seta coop_loHmLkA<NN> set coop_loCosLk 0|1
+// (gated h-pages bake `set coop_loCosLk 1` then `vstr coop_loHmLkA<NN>`; free pages
+// [Standard Issue / No Helmet / Plain] bake 0 and are never pushed). Same wire rules
+// (unquoted, bug-742), diff-only (flags coop_loHmLkL<i>), generation stamp, 8 stufftexts/frame.
+// Re-runs on: armory open (,w0o), join resend, and helmet unlock grants (chal_add_unlock).
+// armory_helmet_set's unlock gate stays the enforcement.
+//-------------------------------------------------------------------------
+armory_helmet_exportLocks local.player:{
+	if( local.player == NULL ){ end }
+	waitthread helmet_initList
+	waitthread cosmetic_gatedBuild
+	if( local.player.flags["coop_loHmLkGen"] == NIL ){ local.player.flags["coop_loHmLkGen"] = 0 }
+	local.player.flags["coop_loHmLkGen"] = local.player.flags["coop_loHmLkGen"] + 1
+	local.gen = local.player.flags["coop_loHmLkGen"]
+	local.n = level.coop_helmetCount
+	local.w = 0
+	local.any = 0
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.tok = level.coop_helmetTik[local.i]
+		if( level.coop_cosmeticGatedTok[local.tok] == NIL ){ continue }	//free helmet ("std"/"none"/plain) - page bakes 0
+		local.lk = 1
+		if( waitthread cosmetic_isUnlocked local.player local.tok ){ local.lk = 0 }
+		if( local.player == NULL ){ end }
+		if( local.player.flags["coop_loHmLkGen"] != local.gen ){ end }	//superseded while chal_ensure waited
+		if( local.player.flags["coop_loHmLkL" + local.i] != local.lk ){
+			local.player.flags["coop_loHmLkL" + local.i] = local.lk
+			local.pg = waitthread armory_skin_pg local.i
+			local.player stufftext ( "seta coop_loHmLkA" + local.pg + " set coop_loCosLk " + local.lk )
+			local.w = local.w + 1
+			local.any = 1
+		}
+		if( local.w >= 8 ){
+			local.w = 0
+			waitframe
+			if( local.player == NULL ){ end }
+			if( local.player.flags["coop_loHmLkGen"] != local.gen ){ end }	//a newer export took over
+		}
+	}
+	//refresh the currently shown h-page's lock icon (see armory_skin_exportLocks tail)
+	if( local.any == 1 ){
+		local.player stufftext "vstr coop_loOpenHelm"
+	}
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-16] Shared unlock gate for cosmetics (skins + helmets). Mirrors
+// loadoutpick.scr::loadout_isUnlocked but with the cosmetic free-starter set.
+// token = a skin model path ("models/player/<id>.tik") or a helmet tik
+// ("std" / "none" / "models/coop_helmets/*.tik"). Earned tokens are stored by
+// challenges.scr::chal_add_unlock + xp.scr rank grants in flags["coop_chal_unlocks"]
+// (pipe-separated, no outer pipes) and persist across sessions.
+//-------------------------------------------------------------------------
+cosmetic_gatedBuild:{
+	if( level.coop_cosmeticGated != NIL ){ end }
+	//[user 07-16] GENERATED (scratchpad/gen_cosmetic_unlocks.py): the exact set of cosmetics that
+	//require unlocking. Anything NOT in this dict is free (lobby-only extras, base looks). Skins +
+	//helmets earned via challenges.scr rewards + xp.scr rank grants.
+	level.coop_cosmeticGated = 1   //non-NIL marker so the guard above trips on re-entry
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_29th.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_29thnet.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_beret.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_cmdhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_offhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_plthat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_tankhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_captain.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_dak_hat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_engineer.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_beret.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_covered.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_creasecap.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_hat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_helmet.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_helmet_sh.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_offhat_sh.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_officercap.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_tankhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ital_infhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ital_para.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ital_volhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ltnt.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_medic.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_net.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_net_cig.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_sergeant.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_soviet_hat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ssncocap.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_uk_helmet.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_us_tankhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_101st_captain.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_101st_infantry.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_101st_scout.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_501st_pir_scout.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_501st_pir_soldier.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_101st_1.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_101st_2.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_101st_sgt.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_82nd_1.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_82nd_2.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_82nd_3.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_airborne_82nd_sgt.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_british_6th_airborne_captain.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_british_6th_airborne_paratrooper.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_british_cmd.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_british_tank.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_manon.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_norwegian_resistance.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_pilot.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_russian_corporal.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_russian_recon_scout.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_sas.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_tanker.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/allied_technician.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/american_army2.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/american_army3.tik"] = 1
+}end
+
+//-------------------------------------------------------------------------
+//[user 07-16] Is this cosmetic available to local.player? A token is LOCKED
+// only if it is in the gated set (cosmetic_gatedBuild) AND has not been earned.
+// Everything outside the gated set (base looks, the 48 lobby-only extras, the
+// free starters) is always free. Used by armory_skin_cycle / helmet_cycle /
+// lobbySkinCycle so no path can equip a gated cosmetic before it is unlocked.
+//-------------------------------------------------------------------------
+cosmetic_isUnlocked local.player local.token:{
+	if( local.player == NULL ){ end 0 }
+	waitthread cosmetic_gatedBuild
+	if( level.coop_cosmeticGatedTok[local.token] != 1 ){ end 1 }		//not gated -> free
+	//[user 07-17] the unlock record loads LAZILY (first kill / challenges menu) - ensure it's present
+	//before reading, or every EARNED cosmetic reads locked until the player's first kill (same bug the
+	//weapon gate had - loadoutpick bug-646). chal_ensure early-outs once loaded, so per-item calls are cheap.
+	waitthread coop_mod/challenges.scr::chal_ensure local.player
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if( local.u == NIL || local.u == "" ){ end 0 }
+	local.hay = "|" + local.u + "|"
+	if( waitthread coop_mod/main.scr::containsText local.hay ("|" + local.token + "|") 0 ){ end 1 }
+}end 0

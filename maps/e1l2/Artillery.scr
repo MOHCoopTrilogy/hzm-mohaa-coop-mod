@@ -66,6 +66,27 @@ WakeMe local.trigger:
 	self ai_off
 	local.trigger waittill trigger
 	self ai_on
+
+	//chrissstrahl - coop [E-02]: this MG42 turret gunner was gunning down his OWN German crew.
+	//Root cause: he was running as TEAM_AMERICAN (the Sentient default, sentient.cpp:845) instead
+	//of TEAM_GERMAN. The engine friend/foe filter is a HARD m_Team test (Sentient::IsTeamMate,
+	//sentient.cpp:3813), so as an american the westward cannonguys were his ENEMIES and the players
+	//were his TEAM-MATES - which is exactly why the earlier attackPlayer pin never took (CheckEnemies
+	//rejected the player as same-team, and he fell through to the germans).
+	//Forcing him German (EventGerman -> m_Team=TEAM_GERMAN, sentient.cpp:3556) fixes both directions:
+	//germans become teammates he can neither target NOR damage (same-team bullet damage is filtered
+	//engine-side, sentient.cpp:1607), and the player becomes a valid enemy so the pin now sticks.
+	//`german` also runs ClearEnemies() engine-side, wiping any wrong target he grabbed on ai_on.
+	//SP path (bare ai_on above) is untouched.
+	if(level.gametype != 0){
+		//force TEAM_GERMAN so he can never target or damage his own crew
+		self german
+
+		local.pinplayer = waitthread coop_mod/replace.scr::player_closestTo self
+		if(local.pinplayer != NULL){
+			self thread coop_mod/aihandler.scr::attackPlayer local.pinplayer
+		}
+	}
 }end
 
 //=========================================================================
@@ -129,6 +150,16 @@ artilleryStopOnProximity:
 //=========================================================================
 {
 	$deletetrigger1 waittill trigger
+
+	//chrissstrahl - coop [E-13]: deletetrigger1 is a trigger_multiple that fires on the FIRST
+	//player. Don't let one player stop the barrage for everyone - wait until every live active
+	//player has reached the line. SP keeps the original immediate behavior. Backstop: an
+	//artillery gun being destroyed also clears level.pinBackTanks (ArtilleryDeath), so this
+	//never hard-locks progression.
+	if(level.gametype != 0){
+		waitthread coop_waitAllPlayersReached $deletetrigger1 1024
+	}
+
 	level.pinBackTanks = 0
 }end
 
@@ -263,10 +294,29 @@ CleanupArtillery:
 //=========================================================================
 {
 	$deletetrigger2 waittill trigger
+
+	//chrissstrahl - coop [E-13]: deletetrigger2 is a trigger_multiple firing on the FIRST
+	//player. Gate the delete on the objective being complete AND no live player still near the
+	//group, so one player can't delete the crew mid-fight for everyone. SP path is unchanged.
+	if(level.gametype != 0){
+		while(!level.artilleryDestroyed){ waitframe }
+		waitthread coop_waitGroupClearOfPlayers "campguys" 1000
+		waitthread coop_waitGroupClearOfPlayers "tentguys" 1000
+	}
+
 	thread global/EntityCleanup.scr::EntityCleanup "campguys" 1000
 	thread global/EntityCleanup.scr::EntityCleanup "tentguys" 1000
 	
 	$deletetrigger3 waittill trigger
+
+	//chrissstrahl - coop [E-13]: same first-player gate as deletetrigger2, protecting the
+	//artillery-gun defenders (cannonguys) and the parade guys. SP path is unchanged.
+	if(level.gametype != 0){
+		while(!level.artilleryDestroyed){ waitframe }
+		waitthread coop_waitGroupClearOfPlayers "cannonguys" 1000
+		waitthread coop_waitGroupClearOfPlayers "t233_paradeguys" 1000
+	}
+
 	thread global/EntityCleanup.scr::EntityCleanup "cannonguys" 1000
 	thread global/EntityCleanup.scr::EntityCleanup "t233_paradeguys" 1000	
 }end
@@ -379,6 +429,15 @@ InitGun local.turret local.charge local.offset:
 	self.turret.collisionent = $15cm_collide
 	self.destroyedmodel = "statweapons/AX_W_15cmCannon_d.tik"
 	self.destroyedcollision = $15cm_d_collide
+
+	//chrissstrahl - coop: invisible walls around each emplacement (trace-scan verified, bug-942).
+	//The 15cm TIK ships setsize ( -80 -80 0 )( 80 80 80 ) on the base and that box stays SOLID
+	//(diag-verified live: base bounds -80..80, turret is a harmless 16x16x32). The 15cm_collide*
+	//brush proxies retail intended never take effect on this engine path, so the raw 160x160 box
+	//is the player collision - ~40u of invisible wall on every side of the visible carriage.
+	//One-way feel = start-inside-solid traces pass out. Tighten to the mount footprint; setsize
+	//persists through the destroyed-model swap and the gun stays shootable/plantable.
+	self setsize ( -48 -48 0 ) ( 48 48 80 )
 	self.turret maxyawoffset local.offset
 	self.turret turnspeed 15
 	self.turret pitchspeed 15
@@ -823,4 +882,80 @@ varcheck:{
 	}
 }end
 */
+
+//chrissstrahl - coop [E-13] helper: block until NO live active player is within local.radius
+//of ANY entity in the named group. Gates enemy cleanup so a rushing / respawning player can't
+//delete a group the rest of the team is still fighting. SP is a no-op.
+//=========================================================================
+coop_waitGroupClearOfPlayers local.groupname local.radius:
+//=========================================================================
+{
+	if(level.gametype == 0){
+		end
+	}
+	if(local.radius == NIL){
+		local.radius = 1000
+	}
+
+	local.waiting = 1
+	while(local.waiting){
+		local.waiting = 0
+		for (local.g = 1;local.g <= $(local.groupname).size;local.g++){
+			local.ent = $(local.groupname)[local.g]
+			if(local.ent == NULL){
+				continue
+			}
+			for (local.p = 1;local.p <= $player.size;local.p++){
+				local.player = $player[local.p]
+				if(local.player.health > 0 && local.player.dmteam != "spectator" && local.player.flags["coop_isActive"] == 1){
+					if(vector_length(local.player.origin - local.ent.origin) <= local.radius){
+						local.waiting = 1
+					}
+				}
+			}
+		}
+		if(local.waiting){
+			waitframe
+		}
+	}
+}end
+
+//chrissstrahl - coop [E-13] helper: block until EVERY live active player is within local.radius
+//of local.ref. Gates the barrage-stop so one player crossing can't stop it for the whole team.
+//SP is a no-op. Callers always keep an independent backstop, so this never hard-locks progress.
+//=========================================================================
+coop_waitAllPlayersReached local.ref local.radius:
+//=========================================================================
+{
+	if(level.gametype == 0){
+		end
+	}
+	if(local.ref == NULL || local.ref == NIL){
+		end
+	}
+	if(local.radius == NIL){
+		local.radius = 1024
+	}
+
+	local.waiting = 1
+	while(local.waiting){
+		if(local.ref == NULL){
+			local.waiting = 0
+		}
+		else{
+			local.waiting = 0
+			for (local.p = 1;local.p <= $player.size;local.p++){
+				local.player = $player[local.p]
+				if(local.player.health > 0 && local.player.dmteam != "spectator" && local.player.flags["coop_isActive"] == 1){
+					if(vector_length(local.player.origin - local.ref.origin) > local.radius){
+						local.waiting = 1
+					}
+				}
+			}
+			if(local.waiting){
+				waitframe
+			}
+		}
+	}
+}end
 

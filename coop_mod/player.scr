@@ -199,8 +199,11 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//HERE (not inside detectCoop's tail) so a hiccup in fov/auth detection can never
 	//strangle it - the m1l1 carry-over failure was exactly that.
 	thread coop_mod/loadoutpick.scr::loadout_resend local.player
-	//[user 07-16] push the per-weapon armory LOCK state to this client (padlock tiles)
-	thread coop_mod/loadoutpick.scr::loadout_ui_exportUnlocks local.player
+	//[user 07-17] DO NOT push the 69-command armory LOCK export on JOIN - combined with the
+	//service-record UI export it overflowed the reliable-command buffer and dropped the client
+	//("Server disconnected", bug: campaign launch). The client-side lktab cfgs use the PERSISTENT
+	//coop_loLkA snapshot (seta), refreshed when the armory MENU opens (,w0o -> loadout_menuCtl ->
+	//exportUnlocks). Locks are only needed when the menu is actually open, so the join push was waste.
 
 	//[302] HZM XP - identity + record restore (cl_guid via userinfo, cvar cache, save file)
 	thread coop_mod/xp.scr::xp_identify local.player
@@ -215,7 +218,15 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		//[200] Smithy - as this is a bool, just do it in one line
 		local.player.flags["coop_isHost"] = local.player.entnum == 0
 	}
-	
+
+	//[user 07-18] bug-802 INSTANT HOST LOADOUT: the LISTEN host's archived armory picks are
+	//readable server-side RIGHT NOW (getcvar coop_lo1..4) - seed them through the validated
+	//pick pipeline before the first real team spawn, so spawnInventory gives the picked kit
+	//directly (no map-default-then-armory swap). Host-gated inside (the bug-715 rule);
+	//remote clients rely on the loadout_resend volleys above. Launched AFTER the host
+	//detection block on purpose - the seed reads flags["coop_isHost"] immediately.
+	thread coop_mod/loadoutpick.scr::loadout_hostSeed local.player
+
 	//println "CONNECTED PLAYER ENTNUM IS: " local.player.entnum
 	
 	waitthread reinitialiseData local.player //[202][hotfix] Smithy	
@@ -557,13 +568,24 @@ playerNameCommand local.player:{
 	else if(local.arrayIndex==28){ thread playerEmote local.player "COOP_ANIMTEST2" } //[231] sprint candidate A
 	else if(local.arrayIndex==29){ thread playerEmote local.player "COOP_ANIMTEST3" } //[231] sprint candidate B
 	else if(local.arrayIndex==30){ thread playerEmote local.player "COOP_ANIMTEST4" } //[231] sprint candidate C
-	//[user 07-16] skin cycle: lobby uses the mannequin path, in-mission (armory menu) re-models the live player
-	else if(local.arrayIndex==31){ if(level.coop_lobbyActive == 1){ local.player thread coop_mod/lobby.scr::lobbySkinCycle 1 } else { thread coop_mod/helmet.scr::armory_skin_cycle local.player 1 } }
-	else if(local.arrayIndex==32){ if(level.coop_lobbyActive == 1){ local.player thread coop_mod/lobby.scr::lobbySkinCycle -1 } else { thread coop_mod/helmet.scr::armory_skin_cycle local.player -1 } }
+	//[user 07-17] bus 31/32 = the ARMORY's SKIN buttons ONLY now (the lobby A/D bridge no longer reaches
+	//the bus - lobbyInputPoll consumes it with a hint, bug-654). Route straight to the armory cycle in
+	//EVERY context - the earlier lobby-branch hint here ate the armory's own buttons when the menu was
+	//opened from the lobby (bug: skin buttons changed nothing).
+	//[user 07-18] bug-B: ,sn now carries the ABSOLUTE 2-digit armory page id (fired via the archived
+	//coop_loASkin cvar - weapon-pick recipe): the v3.2 client-side preview pages (ui/loadout/skin/sNN.cfg)
+	//can't stay in lockstep with a server-side +1 cycle. Non-numeric/out-of-range data is inert.
+	else if(local.arrayIndex==31){ thread coop_mod/helmet.scr::armory_skin_set local.player local.dataExtract }
+	else if(local.arrayIndex==32){ thread coop_mod/helmet.scr::armory_skin_cycle local.player -1 }
 	else if(local.arrayIndex==33){ local.player thread coop_mod/lobby.scr::lobbyReadyToggle }   //[lobby] ready toggle (F)
 	else if(local.arrayIndex==34){ thread coop_mod/challenges.scr::chal_menu local.player }   //[303] challenges - on-screen Service Record menu (cycles category pages; chal_review still callable for console dump)
-	else if(local.arrayIndex==35){ thread coop_mod/helmet.scr::helmet_cycle local.player 1 }  //[305] helmet switcher: next
-	else if(local.arrayIndex==36){ thread coop_mod/helmet.scr::helmet_cycle local.player -1 } //[305] helmet switcher: prev
+	//[user 07-18] bug-772: ,hn now carries the ABSOLUTE 2-digit armory helmet page id (fired via the
+	//archived coop_loAHelm cvar - the ,sn recipe above). The armory HELMET buttons' old bare ,hn/,hp
+	//tokens had NO data char, so playerExtract returned NIL and this dispatch NEVER ran (the buttons
+	//only cycled the client preview). Non-numeric/out-of-range data is inert; ,hp keeps the legacy
+	//relative cycle for the in-world console bind (,hpx).
+	else if(local.arrayIndex==35){ thread coop_mod/helmet.scr::armory_helmet_set local.player local.dataExtract }  //[305]+[310] armory helmet: absolute apply
+	else if(local.arrayIndex==36){ thread coop_mod/helmet.scr::helmet_cycle local.player -1 } //[305] helmet switcher: prev (legacy relative cycle)
 	else if(local.arrayIndex==37){ thread coop_mod/helmet.scr::helmet_tune_mode local.player }     //[305] helmet fit-tuner: next param (KP_STAR)
 	else if(local.arrayIndex==38){ thread coop_mod/helmet.scr::helmet_tune_nudge local.player 1 }  //[305] helmet fit-tuner: + (KP_PLUS)
 	else if(local.arrayIndex==39){ thread coop_mod/helmet.scr::helmet_tune_nudge local.player -1 } //[305] helmet fit-tuner: - (KP_MINUS)
@@ -934,6 +956,9 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 
 	//[209] HZM coop - spawn protection window for human players (coop_spawnProtect seconds, default 8)
 	thread spawnProtection local.player
+	//[user 07-20] bug-940 belt-and-braces: brief falling-damage immunity on every (re)spawn,
+	//independent of coop_spawnProtect (nodamage does cover falling, but only while that cvar is on).
+	thread spawnFallProtection local.player
 
 	//INVENTORY
 	waitthread coop_mod/itemhandler.scr::managePlayerInventory
@@ -1004,6 +1029,61 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	thread coop_mod/ads.scr::coop_ads_monitor local.player
 	//[303] HZM CHALLENGES - per-level aim watcher: any ADS/scope/over-shoulder use fails the Schoolgirls feat
 	thread coop_mod/challenges.scr::chal_lvl_aim_monitor local.player
+	//[user 07-17] ARMORY SKIN re-force: the engine's Player::InitModel already chose the spawn model from
+	//dm_playermodel, but the client re-seats a default preview each menu open and two writers race that
+	//cvar, so the armory pick often loses. Re-apply the chosen skin here (after the team-force above) so
+	//it wins. Prefer the server-authoritative flag (set live by helmet.scr::armory_skin_cycle), then the
+	//archived coop_loSkin cvar as an across-session fallback (meaningful for the listen host; a stale/empty
+	//server value is rejected by the roster validity check, so remote clients on dedicated stay untouched).
+	//Only runs for a valid allied player and a real roster skin; helmet_apply (threaded just below) re-hats
+	//on top since the model swap wipes attachments.
+	local.forceSkin = local.player.flags["coop_armorySkin"]
+	//[user 07-17] bug-715: coop_loSkin is a SERVER-GLOBAL cvar holding the HOST client's chosen skin. Only
+	// fall back to it for the HOST - otherwise on a listen server every skinless REMOTE player would be
+	// cloned to the host's look (their coop_armorySkin flag is NIL, and the host's skin passes validity).
+	if( (local.forceSkin == NIL || local.forceSkin == "") && local.player.flags["coop_isHost"] == 1 ){
+		local.forceSkin = getcvar "coop_loSkin"
+	}
+	if( local.forceSkin != NIL && local.forceSkin != "" && local.player.dmteam != "axis" && local.player.dmteam != "spectator" ){
+		if( waitthread coop_mod/helmet.scr::armory_skin_isValid local.forceSkin ){
+			//[user 07-18] bug-B: coop_loSkin is now seta'd by the CLIENT preview pages (ui/loadout/skin/
+			//sNN.cfg), which can browse LOCKED skins - gate the re-force on the unlock record too.
+			if( waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.forceSkin + ".tik") ){
+				local.player model ( "models/player/" + local.forceSkin + ".tik" )
+			}
+		}
+	}
+	//[user 07-18] bug-803 LOCKED-SKIN LEAK heal: the pre-fix armory preview pages seta'd dm_playermodel
+	//on every page VISIT, so merely browsing a locked skin archived it - the engine's InitModel then
+	//spawned the player WEARING it next mission even though every armory apply path correctly refused
+	//it (user report: lobby snapped back, "but once I got into the actual level I have the skin I
+	//haven't unlocked yet"). The gated re-force above only DECLINES a locked candidate - it never
+	//removed what InitModel already dressed. So check what this player is ACTUALLY wearing: if it is
+	//a LOCKED armory roster skin, strip it back to their worn/unlocked skin (or the free default) and
+	//self-heal the archived client cvars so the next InitModel cannot re-leak. Works for host AND
+	//remote (the current model is server-known; the heal setas ride stufftext to the owning client).
+	//Disguise/axis/briefing models are not roster skins and pass through untouched.
+	if( local.player.dmteam != "axis" && local.player.dmteam != "spectator" ){
+		local.curSkin = waitthread coop_mod/itemhandler.scr::getPlayerUniform local.player
+		if( waitthread coop_mod/helmet.scr::armory_skin_isValid local.curSkin ){
+			if( !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.curSkin + ".tik")) ){
+				local.heal = local.player.flags["coop_armorySkin"]	//worn = last SUCCESSFUL gated apply (armory_skin_applyIdx)
+				local.healOk = 0
+				if( local.heal != NIL && local.heal != "" ){
+					if( waitthread coop_mod/helmet.scr::armory_skin_isValid local.heal ){
+						if( waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.heal + ".tik") ){
+							local.healOk = 1
+						}
+					}
+				}
+				if( local.healOk == 0 ){ local.heal = "american_army" }	//free ungated roster default
+				local.player model ( "models/player/" + local.heal + ".tik" )
+				local.player stufftext ( "seta dm_playermodel " + local.heal )
+				local.player stufftext ( "seta coop_loSkin " + local.heal )
+				local.player iprint ( "Armory: that skin is still locked - wearing " + local.heal )
+			}
+		}
+	}
 	//[305] HZM coop - HELMET SWITCHER: re-apply this player's chosen helmet every (re)spawn, because
 	//InitModel rebuilds the model + clears all surface flags/attachments. helmet_apply is a no-op for
 	//the default "Standard Issue" choice, so untouched players stay vanilla.
@@ -1106,9 +1186,13 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		thread coop_mod/main.scr::playerMakeSolidAsap local.player
 		
 		//remember when we last respawned, prevent placeing to close at spawnlocation
-		local.player.flags["coop_lastRespawn"] = level.time 
+		local.player.flags["coop_lastRespawn"] = level.time
 		local.player origin ( local.player.flags["coop_respawnOrigin"] )
-		
+		//[user 07-20] bug-940: ground-snap the respawn warp too - the saved origin can be airborne
+		//(the manage loop snapshots it mid-jump/fall) and any Z above the floor costs percent-based
+		//fall damage on materialize. Range-capped so a warp over a drop cannot pull the player down.
+		local.player droptofloor 512
+
 		//set angle - need to call this delayed or it will not work most of the time in mp
 		if(local.player.flags["coop_respawnAngle"] != 0){
 			local.player thread coop_mod/main.scr::playerFace ( 0 local.player.flags["coop_respawnAngle"] 0 )
@@ -1152,6 +1236,25 @@ spawnProtection local.player:{
 	}
 }end
 
+//[user 07-20] bug-940 - falling-damage immunity window on every (re)spawn. The placement ground-snap
+//(droptofloor after the origin set) fixes the usual eye-height spawn Z, but any remaining drop
+//(unsnappable spawn, airborne saved origin, engine DM spawn float) must not cost health on
+//materialize. Engine events (fgame/entity.cpp): "immune falling" adds MOD_FALLING to the immunity
+//list (idempotent - AddUniqueObject), "removeimmune falling" is a safe no-op if the immunity is
+//already gone (the engine strips falling immunity itself on knockback damage). Timestamp re-arm so
+//overlapping windows from a fast respawn cycle can never cut the newest window short.
+//=========================================================================
+spawnFallProtection local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.player.flags["coop_fallProtUntil"] = level.time + 2
+	local.player immune falling
+	wait 2
+	if( local.player == NULL ){ end }
+	if( level.time < local.player.flags["coop_fallProtUntil"] ){ end }	//a newer window re-armed - it does the removal
+	local.player removeimmune falling
+}end
+
 
 /* [202] chrissstrahl - THIS WAS MOVED TO player.scr::manage
 - reason 1: this function is only called there
@@ -1190,7 +1293,9 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 
 	thread coop_mod/deathvox.scr::play local.player	//[208] HZM coop - varied death voice (random from coop_deathvox pool) on player death/down
 
-	if( local.player.flags["coop_dbno_dead"] != 1 ){
+	thread coop_mod/gurgle.scr::play local.player	//[209] HZM coop - occasional subtle wet bleed-out gurgle near a player corpse
+
+	if( local.player.flags["coop_dbno_dead"] != 1 && isAlive local.player ){	//[user 07-20] bug-924: killing hit can outrun this branch - healthonly on a dead player threw "cannot give health to dead entities" and aborted one manageDead pass (mirrors dbno_enter's own death_outran guard)
 		local.cumulative = local.player.flags["coop_dbno_cumulative"]
 		if( local.cumulative > 0 ){
 			local.player.flags["coop_dbno_active"] = 1
@@ -1201,6 +1306,10 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		}
 	}
 	local.player.coop_wentDownMap = level.coop_mapname	// true death: disqualify from "no-down" campaign feats this map (challenges.scr::cc_award_clean)
+	//[user 07-17] DDA death stamp (true death - the DBNO path stamps in dbno_enter; director.scr S1/S2)
+	level.coop_dda_lastDownTime = level.time
+	if( level.coop_dda_downs == NIL ){ level.coop_dda_downs = 0 }
+	level.coop_dda_downs++
 	local.player.flags["coop_iAmTruelyActive"] = 0
 	if(	local.player.flags["coop_isActive"] != -2 ){
 		//[202] chrissstrahl - reset last selected spawnlocation

@@ -74,7 +74,7 @@ InitIntro:
 	level.tank4trigger = waitthread global/FindTrigger.scr::FindTrigger "jeeptrigger"
 
 	for(local.i = 1; local.i <= $tank3guys.size; local.i++){
-		$tank3guys[local.i] attackplayer
+		$tank3guys[local.i] exec coop_mod/replace.scr::attackplayer //[HZM coop E-09] route through client-0-safe shim
 	}
 
 	$jeep.speed 		= 100
@@ -803,6 +803,7 @@ PlayerOnJeep:
 			exec coop_mod/replace.scr::hide	
 			exec coop_mod/replace.scr::glue local.tankseat 0
 			thread coop_startJeepSpawnManager
+			thread coop_introFailsafeWatchdog //[HZM coop E-10] force the intro hand-back on a failsafe if the scripted intro stalls
 		}
 	}
 end
@@ -1062,7 +1063,7 @@ ReplaceMg42guy:
 		local.whatever type_idle machinegunner
 		local.whatever thread global/mg42init.scr::gunner_think
 		//$mg42 thread global/mg42init.scr::AttachGuyToMG42	local.whatever
-		local.whatever attackplayer
+		local.whatever exec coop_mod/replace.scr::attackplayer //[HZM coop E-09] route through client-0-safe shim
 		wait 2.0
 		local.whatever targetname "mg42guy"
 			
@@ -1144,7 +1145,7 @@ Tank3KillAxis:
 	wait 2.0
 	self waitthread TanksKill $tank1guys3
 
-	$towerguy attackplayer
+	$towerguy exec coop_mod/replace.scr::attackplayer //[HZM coop E-09] route through client-0-safe shim
 
 	wait 4.0
 
@@ -1305,6 +1306,7 @@ end
 playerExitTank:
 //---------------------------
 
+	println "^~^~^ INTRO exitTank_entered"
 	thread coop_stopJeepSpawnManager //[202][hotfix] Smithy
 
 	local.hackedOffset = (0 -100 0)
@@ -1318,25 +1320,10 @@ playerExitTank:
 
 	//chrissstrahl - handle mp/sp
 	if(level.gametype != 0){
-		//chrissstrahl - update spawn location
-		waitthread coop_mod/spawnlocations.scr::e1l2_update1
-		//local.player = waitexec coop_mod/replace.scr::player_closestTo $jeep NIL
-		//exec coop_mod/bt_playerTank.scr::playerExitTank local.player local.exitpos $jeep
-		
-		//chrissstrahl - debug test, do not run this code during debug
-		if( level.coop_debugLevel == NIL ){
-			level.coop_playerGlue = 0
-			waitexec coop_mod/replace.scr::unglue
-			waitexec coop_mod/main.scr::playersWarpto NIL NIL NIL //warps players to their spawn
-			exec coop_mod/replace.scr::show	
-		}
-
-		//[user 07-16] bug-620: MISSION ITEM registration - the one-shot give was stripped by any
-		//armory regive / DBNO revive / respawn takeall ("are we taking the mine detector in e1l2?").
-		//addMissionItemToEveryone issues it on top of EVERY loadout source, current and future.
-		thread coop_mod/itemhandler.scr::addMissionItemToEveryone "weapons/US_W_MineDetector.tik"
-		thread coop_mod/replace.scr::ammo "landmine" 4
-		thread coop_mod/replace.scr::ammo "landmine" -4
+		//[HZM coop E-10] the coop hand-back (spawn update, unglue/warp, mine-detector give) now
+		//lives in the idempotent coop_introHandoff so coop_introFailsafeWatchdog can run the exact
+		//same handoff if the scripted intro stalls before ever reaching playerExitTank.
+		waitthread coop_introHandoff
 	}else{
 		$player unglue
 		$player notsolid
@@ -1377,6 +1364,101 @@ playerExitTank:
 
 	thread IfPlayerRetreatEndMission
 	//thread global/MaintainCamera.scr::StopMaintainCamera
+end
+
+//---------------------------
+//[HZM coop E-10/E-11] idempotent hand-back of control after the on-rails intro.
+//The three intro-exit handoffs (clip1-9 removal, mine-detector give, player unglue/warp)
+//used to live ONLY inside playerExitTank, which is reached only after the entire scripted
+//intro completes. If any intro sub-thread stalls in coop the handoff never ran, leaving the
+//clip walls up and players glued. This runs the handoff exactly once - whether fired by the
+//normal playerExitTank path or by coop_introFailsafeWatchdog. Re-runs are harmless.
+//---------------------------
+coop_introHandoff:
+//---------------------------
+	println "^~^~^ INTRO handoff_entered"
+	//clip1-9 removal is cheap and idempotent - always run it (belt-and-suspenders, E-11)
+	local.ci = 1
+	while( local.ci <= 9 ){
+		local.cb = $( "clip" + local.ci )
+		if( local.cb != NULL ){
+			local.cb remove
+		}
+		local.ci++
+	}
+
+	//the spawn-update + unglue/warp + mine-detector give must run exactly once
+	if( level.coop_introHandoffDone == 1 ){
+		end
+	}
+	level.coop_introHandoffDone = 1
+
+	//[user 07-16] bug-620 / [user 07-19] bug-898: MISSION ITEM registration - do this FIRST, BEFORE the
+	//hang-prone spawn-update/unglue/warp calls below. coop_introHandoffDone is already latched here, so
+	//if any of those waitthread/waitexec calls stalled, the failsafe watchdog's re-entry would be blocked
+	//by the one-shot guard and the detector would NEVER get registered -> coop_reissueMissionItems then
+	//finds an EMPTY level.coop_missionItems on every revive and the minesweeper is permanently lost.
+	//Registering up front makes it robust to a stalled warp. addMissionItemToEveryone is idempotent and
+	//gives to all current players immediately, so running it before the unglue/warp is harmless.
+	thread coop_mod/itemhandler.scr::addMissionItemToEveryone "weapons/US_W_MineDetector.tik"
+	thread coop_mod/replace.scr::ammo "landmine" 4
+	thread coop_mod/replace.scr::ammo "landmine" -4
+
+	//chrissstrahl - update spawn location before warping players onto it
+	waitthread coop_mod/spawnlocations.scr::e1l2_update1
+
+	//chrissstrahl - debug test, do not run this code during debug
+	if( level.coop_debugLevel == NIL ){
+		level.coop_playerGlue = 0
+		waitexec coop_mod/replace.scr::unglue
+		waitexec coop_mod/main.scr::playersWarpto NIL NIL NIL //warps players to their spawn
+		exec coop_mod/replace.scr::show
+	}
+end
+
+//---------------------------
+//[HZM coop E-10] independent failsafe watchdog. playerExitTank (the sole place the intro hands
+//control back) is only reached after the whole scripted intro finishes. If any intro sub-thread
+//stalls in coop (desynced jeep-camera clock) players are left glued with the clip walls up and
+//no mine detector. This thread starts with the jeep scene and, if the hand-back has not happened
+//by the failsafe deadline, forces the same idempotent handoff so a stalled intro can never
+//soft-lock the players. Tunable via level.coop_introFailsafeTime (seconds; default 240).
+//---------------------------
+coop_introFailsafeWatchdog:
+//---------------------------
+	//prevent a duplicate watchdog if the scene ever re-enters
+	if( level.thread["coop_introFailsafeWatchdog"] ){
+		end
+	}
+	level.thread["coop_introFailsafeWatchdog"] = local
+
+	if( level.coop_introFailsafeTime == NIL ){
+		level.coop_introFailsafeTime = 240
+	}
+	local.deadline = level.time + level.coop_introFailsafeTime
+
+	while( 1 ){
+		//normal playerExitTank path already handed control back - nothing to do
+		if( level.coop_introHandoffDone == 1 ){
+			end
+		}
+
+		//time failsafe: a healthy intro finishes well under the deadline; only a genuine stall
+		//reaches it. Players are glued to the moving jeep during the intro, so a player-position
+		//proximity test tracks the jeep and is unreliable here - time is the robust signal.
+		if( level.time > local.deadline ){
+			//stop the jeep camera scene, then force the hand-back
+			thread coop_stopJeepSpawnManager
+			println "^~^~^ INTRO failsafe_forcing_handoff"
+			waitthread coop_introHandoff
+			//restore the state the stalled DoIntro never reached after playerExitTank
+			drawhud 1
+			level.dontdropweapons = 0
+			end
+		}
+
+		wait 1
+	}
 end
 
 //---------------------------

@@ -33,6 +33,12 @@ coop_officer_policy:{
 	// HZM coop pre-mission lobby - no combat phase, so no officer waves / weapon-ban / spawn-policy spam
 	if( level.coop_lobbyMap == 1 ){ end "none" }
 
+	// [user 07-18 bug-789] BRIEFING maps (maps/briefing/briefing1-6) are pure slide/cinematic
+	// screens - no combat, no spawn infrastructure. The 07-18 12:00 log shows briefing1 got
+	// policy=combat, a 25s settle, then a doomed dynamic spawn hunt. Silent-none like the lobby
+	// (containsText briefing = the bug-722 challenges guard pattern).
+	if( waitthread coop_mod/main.scr::containsText local.m "briefing" 0 ){ end "none" }
+
 	// ---- NONE: pure cinematic / vehicle-only maps with no go-loud combat phase ----
 	// Per user rule, NONE is reserved for pure-cinematic or pure-vehicle maps that
 	// never expose a stealth->loud combat phase the officer could respond to.
@@ -155,9 +161,13 @@ coop_officer_init:{
 	// Decided BEFORE the intro/ride waits so NONE maps exit instantly and never
 	// spawn a boss into a stealth/cinematic sequence (e1l4 truck-stop bug).
 	local.policy = exec coop_mod/officer.scr::coop_officer_policy
-	if( !level.coop_lobbyMap ){ iprintlnbold ("OFFICER: spawn policy = " + local.policy) }	// silent in the lobby
+	// [user 07-18 bug-789] quiet on lobbies AND briefings - no bold spam over the lobby scene / briefing slides
+	local.coop_offQuiet = 0
+	if( level.coop_lobbyMap == 1 ){ local.coop_offQuiet = 1 }
+	if( waitthread coop_mod/main.scr::containsText level.coop_mapname "briefing" 0 ){ local.coop_offQuiet = 1 }
+	if( local.coop_offQuiet == 0 ){ iprintlnbold ("OFFICER: spawn policy = " + local.policy) }
 	if( local.policy == "none" ){
-		if( !level.coop_lobbyMap ){ iprintlnbold "OFFICER: policy NONE - officer disabled on this map" }	// silent in the lobby
+		if( local.coop_offQuiet == 0 ){ iprintlnbold "OFFICER: policy NONE - officer disabled on this map" }
 		end
 	}
 	if( local.policy == "deferred" ){
@@ -417,7 +427,12 @@ coop_officer_init:{
 	while( level.coop_officer_hold == 1 || getcvar( "coop_build" ) == "1" ){
 		wait 2
 	}
-	thread coop_radio_init local.base_pos
+	//[user 07-21] per-map radio position override: lets the OFFICER anchor move while the
+	//radio station (table/radio/canteen) stays at its established spot (e1l2: user relocating
+	//the boss away from the walled SW corner but keeping the radio there).
+	local.radio_pos = local.base_pos
+	if( level.coop_officer_radio_pos != NIL ){ local.radio_pos = level.coop_officer_radio_pos }
+	thread coop_radio_init local.radio_pos
 	iprintlnbold "OFFICER: spawn pos found, spawning"
 	thread coop_officer_spawn local.base_pos
 }end
@@ -741,6 +756,7 @@ coop_officer_canteen local.officer:{
 		local.newhp = local.officer.health + 100
 		if( local.newhp > 1500 ){ local.newhp = 1500 }
 		local.officer.health = local.newhp
+		local.officer gore_reset 100	// HZM coop - gore tier 1: canteen sip washes some blood off
 	}
 	level.coop_officer_busy = 0
 }end
@@ -912,14 +928,17 @@ coop_officer_medkit_retreat local.officer:{
 	local.officer.enableEnemy = 0
 	local.officer.movedoneradius = 64
 	local.timer = level.time + 35
+	// [user 07-18] PATHING FIX: issue runto ONCE, re-issue ONLY when genuinely stalled (pain cleared the
+	// path), detected by origin delta. Re-issuing every tick re-allocated the destination waypoint each
+	// poll -> walk-back-and-forth stutter. Still robust vs pain interruption (a real stall re-asserts).
+	local.prev = local.officer.origin
+	local.officer forceactivate
+	local.officer runto local.heal_pos
 	while( isAlive local.officer && level.coop_officer_alive == 1 && level.time < local.timer ){
-		local.officer forceactivate
-		local.officer runto local.heal_pos
-		// POLL + re-issue every 0.4s instead of `waittill movedone`. Under heavy fire the move keeps
-		// getting interrupted by pain (no cleanly-completed movedone), which HUNG this loop and left
-		// the officer standing still. Re-issuing runto each tick keeps him pushing to the medkit.
 		wait 0.4
 		if( vector_length( local.officer.origin - local.heal_pos ) < 200 ){ break }
+		if( vector_length( local.officer.origin - local.prev ) < 24 ){ local.officer forceactivate ; local.officer runto local.heal_pos }
+		local.prev = local.officer.origin
 	}
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ level.coop_officer_busy = 0; end }
 
@@ -939,6 +958,7 @@ coop_officer_medkit_retreat local.officer:{
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
 
 	local.officer.health = 1200	// [209] -20% HP (was 1500)
+	local.officer gore_reset	// HZM coop - gore tier 1: full heal = clean uniform + stop dripping
 	iprintlnbold "The Officer has been fully healed! Thresholds reset!"
 	level.coop_xp_heal_pending = 0	// [302] HZM XP - heal completed, denial window over
 	level.coop_officer_threshold_reset = 1
@@ -946,11 +966,15 @@ coop_officer_medkit_retreat local.officer:{
 	if( level.coop_radio != NULL ){
 		local.officer.movedoneradius = 128
 		local.rtimer = level.time + 20
+		// [user 07-18] PATHING FIX: issue runto once, re-issue only when stalled (see heal-retreat loop).
+		local.prev = local.officer.origin
+		local.officer forceactivate
+		local.officer runto level.coop_radio.origin
 		while( isAlive local.officer && level.coop_officer_alive == 1 && level.time < local.rtimer ){
-			local.officer forceactivate
-			local.officer runto level.coop_radio.origin
-			wait 0.4		// poll + re-issue (see heal-retreat loop above) - robust vs pain/path interruption
+			wait 0.4
 			if( vector_length( local.officer.origin - level.coop_radio.origin ) < 200 ){ break }
+			if( vector_length( local.officer.origin - local.prev ) < 24 ){ local.officer forceactivate ; local.officer runto level.coop_radio.origin }
+			local.prev = local.officer.origin
 		}
 	}
 	level.coop_officer_busy = 0
@@ -964,15 +988,15 @@ coop_officer_reinforcements local.officer:{
 	// Per-map feature toggle: skip reinforcement waves entirely (default coop_feature_waves=1
 	// keeps AA behavior). Officer still exists/fights, just calls no waves.
 	if( level.coop_feature_waves == 0 ){
-		iprintlnbold "REINF STATE: waves disabled for this map (coop_feature_waves=0)"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: waves disabled for this map (coop_feature_waves=0)" }
 		level.coop_reinforcements_active = 0
 		end
 	}
-	iprintlnbold "REINF STATE: thread started"
+	if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: thread started" }
 	level.coop_reinforcements_active = 1
 
 	// STATE: IDLE - poll until officer has spotted a player
-	iprintlnbold "REINF STATE: idle - waiting for first contact"
+	if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: idle - waiting for first contact" }
 	while( isAlive local.officer && level.coop_officer_alive == 1 ){
 		if( local.officer.enemy != NULL ){ break }
 		if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
@@ -980,7 +1004,7 @@ coop_officer_reinforcements local.officer:{
 	}
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
 
-	iprintlnbold "REINF STATE: spotted - first wave"
+	if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: spotted - first wave" }
 	thread coop_reinf_call_wave_gated local.officer
 
 	// HP thresholds. 75% / 50% = call a reinforcement wave IN PLACE (he keeps fighting - no chained
@@ -994,10 +1018,10 @@ coop_officer_reinforcements local.officer:{
 	local.t50_done   = 0
 	local.poor_done  = 0
 
-	iprintlnbold "REINF STATE: active - monitoring HP thresholds"
+	if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: active - monitoring HP thresholds" }
 	while( isAlive local.officer && level.coop_officer_alive == 1 ){
 		if( level.coop_radio_destroyed == 1 ){
-			iprintlnbold "REINF STATE: radio destroyed, halting"
+			if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: radio destroyed, halting" }
 			end
 		}
 		if( level.coop_officer_threshold_reset == 1 ){
@@ -1021,10 +1045,10 @@ coop_officer_reinforcements local.officer:{
 			local.t75_done  = 1
 			local.fired     = 1
 			if( level.coop_feature_battalion != 0 ){
-				iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - BATTALION called, falling back to heal")
+				if(level.cMTE_coop_officer){ iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - BATTALION called, falling back to heal") }
 				thread coop_spawn_battalion
 			} else {
-				iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - reinforcements called, falling back to heal")
+				if(level.cMTE_coop_officer){ iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - reinforcements called, falling back to heal") }
 				thread coop_call_reinforcements
 			}
 			thread coop_officer_medkit_retreat local.officer
@@ -1033,13 +1057,13 @@ coop_officer_reinforcements local.officer:{
 			local.t50_done = 1
 			local.t75_done = 1
 			local.fired    = 1
-			iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (50%) - reinforcement wave")
+			if(level.cMTE_coop_officer){ iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (50%) - reinforcement wave") }
 			thread coop_call_reinforcements
 		}
 		if( local.fired == 0 && local.t75_done == 0 && local.hp <= local.thresh75 ){
 			local.t75_done = 1
 			local.fired    = 1
-			iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (75%) - reinforcement wave")
+			if(level.cMTE_coop_officer){ iprintlnbold ("REINF STATE: threshold hit at HP " + local.hp + " (75%) - reinforcement wave") }
 			thread coop_call_reinforcements
 		}
 		wait 0.1
@@ -1049,7 +1073,7 @@ coop_officer_reinforcements local.officer:{
 
 coop_reinf_retreat_and_wave local.officer:{
 	if( level.coop_radio == NULL || level.coop_radio_destroyed == 1 ){
-		iprintlnbold "REINF STATE: no radio, calling wave in place"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: no radio, calling wave in place" }
 		thread coop_reinf_call_wave_gated local.officer
 		end
 	}
@@ -1064,7 +1088,7 @@ coop_reinf_retreat_and_wave local.officer:{
 		local.officer runto local.radio_pos
 		wait 0.4		// poll + re-issue instead of waittill movedone - robust vs pain/path interruption under fire
 		if( vector_length( local.officer.origin - local.radio_pos ) < 128 ){
-			iprintlnbold "REINF STATE: reached radio, calling wave"
+			if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: reached radio, calling wave" }
 			local.break = 1
 		}
 	}
@@ -1072,7 +1096,7 @@ coop_reinf_retreat_and_wave local.officer:{
 		level.coop_officer_busy = 0
 		end
 	}
-	if( local.break == 0 ){ iprintlnbold "REINF STATE: retreat timeout, calling wave anyway" }
+	if( local.break == 0 ){ if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: retreat timeout, calling wave anyway" } }
 	level.coop_officer_busy = 0
 	local.officer.enableEnemy = 1
 	thread coop_reinf_call_wave_gated local.officer
@@ -1081,13 +1105,13 @@ coop_reinf_retreat_and_wave local.officer:{
 
 coop_reinf_call_wave_gated local.officer:{
 	if( !(exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000) ){
-		iprintlnbold "REINF STATE: wave postponed, no sight"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: wave postponed, no sight" }
 		while( isAlive local.officer && level.coop_officer_alive == 1 ){
 			wait 0.5
 			if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
 		}
 		if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
-		iprintlnbold "REINF STATE: sight restored, firing postponed wave"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: sight restored, firing postponed wave" }
 	}
 	// German radio alarm from the radio itself when reinforcements are called (loud).
 	if( level.coop_radio != NULL ){
@@ -1292,7 +1316,7 @@ coop_call_reinforcements:{
 		local.ztol = 128
 		if( level.coop_officer_reinf_ztol != NIL ){ local.ztol = level.coop_officer_reinf_ztol }
 		if( local.sz_diff > local.ztol ){
-			iprintlnbold ("REINF: spawn Z diff " + int(local.sz_diff) + " too large, using officer pos")
+			if(level.cMTE_coop_officer){ iprintlnbold ("REINF: spawn Z diff " + int(local.sz_diff) + " too large, using officer pos") }
 			local.spawn_pos = NIL
 		}
 	}
@@ -1301,7 +1325,7 @@ coop_call_reinforcements:{
 		local.spawn_pos = exec coop_mod/officer.scr::coop_find_ground local.safe_fallback
 	}
 	if( local.spawn_pos == NIL ){
-		iprintlnbold "REINF: no valid ground for spawn, aborting wave"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF: no valid ground for spawn, aborting wave" }
 		end
 	}
 	// Wave-mask reroll: only dispatch wave types whose bit is set in level.coop_wave_mask
@@ -1797,7 +1821,7 @@ coop_spawn_elite_squad local.pos:{
 		thread coop_elite_smoke_barrage local.last_pos
 		thread coop_squad_monitor local.sq1 local.sq2 local.sq3 "Elite Squad" local.sq4 local.sq5 local.sq6
 	}
-	iprintlnbold ("REINF: wave elite squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave elite squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1])) }
 }end
 
 
@@ -1911,7 +1935,7 @@ coop_spawn_infantry_squad local.pos:{
 	if( local.count > 0 ){
 		thread coop_squad_monitor local.s1 local.s2 local.s3 "Wehrmacht Squad" local.s4 local.s5 local.s6
 	}
-	iprintlnbold ("REINF: wave Wehrmacht squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave Wehrmacht squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1])) }
 }end
 
 
@@ -1986,7 +2010,7 @@ coop_spawn_mg_team local.pos:{
 	thread coop_wave_glow local.spot
 
 	thread coop_squad_monitor local.mg local.spot NIL "MG42 Nest"
-	iprintlnbold ("REINF: wave MG42 nest spawned at " + int(local.gnd[0]) + " " + int(local.gnd[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave MG42 nest spawned at " + int(local.gnd[0]) + " " + int(local.gnd[1])) }
 }end
 
 
@@ -2031,7 +2055,7 @@ coop_spawn_sniper local.pos:{
 		local.gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
 	}
 	if( local.gnd == NIL ){
-		iprintlnbold "REINF: wave sniper - no ground, skipped"
+		if(level.cMTE_coop_officer){ iprintlnbold "REINF: wave sniper - no ground, skipped" }
 		end
 	}
 	local.snmodel = exec coop_mod/officer.scr::coop_model_for "sniper"
@@ -2056,7 +2080,7 @@ coop_spawn_sniper local.pos:{
 	thread coop_wave_glow local.sniper
 	thread coop_sniper_approach local.sniper
 	thread coop_squad_monitor local.sniper NIL NIL "Elite Sniper"
-	iprintlnbold ("REINF: wave sniper spawned 1 at " + int(local.gnd[0]) + " " + int(local.gnd[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave sniper spawned 1 at " + int(local.gnd[0]) + " " + int(local.gnd[1])) }
 }end
 
 
@@ -2220,7 +2244,7 @@ coop_spawn_grenadiers local.pos:{
 	if( local.count > 0 ){
 		thread coop_squad_monitor local.g1 local.g2 local.g3 "Grenadier Squad" local.g4 local.g5 local.g6
 	}
-	iprintlnbold ("REINF: wave grenadiers spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave grenadiers spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1])) }
 }end
 
 
@@ -2664,7 +2688,7 @@ coop_spawn_at_team local.spawn_pos:{
 	thread coop_wave_hunt local.loader
 
 	thread coop_squad_monitor local.gunner local.loader NIL "AT Team"
-	iprintlnbold ("REINF: wave AT team spawned at " + int(local.gnd1[0]) + " " + int(local.gnd1[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave AT team spawned at " + int(local.gnd1[0]) + " " + int(local.gnd1[1])) }
 }end
 
 
@@ -2899,7 +2923,7 @@ coop_spawn_dogs local.spawn_pos:{
 	}
 
 	thread coop_squad_monitor local.dog1 local.dog2 local.handler "Attack Dogs" local.dog3 local.dog4 local.dog5
-	iprintlnbold ("REINF: wave Dogs spawned at " + int(local.dog_pos1[0]) + " " + int(local.dog_pos1[1]))
+	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave Dogs spawned at " + int(local.dog_pos1[0]) + " " + int(local.dog_pos1[1])) }
 }end
 
 
@@ -2942,7 +2966,9 @@ coop_officer_death_monitor local.officer:{
 	// death (grenade=14 / rocket=16) dealt by a non-player AI (not himself). Bait his men into
 	// nading you next to him and their splash finishes him.
 	if( local.officer.fact != NIL && local.officer.fact != NULL ){
-		if( ( local.officer.fact.meansofdeath == 14 || local.officer.fact.meansofdeath == 16 ) && local.officer.fact.attacker != NULL && local.officer.fact.attacker != local.officer && local.officer.fact.attacker.classname != "Player" ){
+		//[user 07-17] bug-723 (audit): the attacker must be one of HIS OWN men (axis) - an allied
+		// paratrooper's grenade/rocket finishing the officer is not "his own reinforcements".
+		if( ( local.officer.fact.meansofdeath == 14 || local.officer.fact.meansofdeath == 16 ) && local.officer.fact.attacker != NULL && local.officer.fact.attacker != local.officer && local.officer.fact.attacker.classname != "Player" && local.officer.fact.attacker.team == "german" ){
 			thread coop_mod/challenges.scr::chal_mein_kampf
 		}
 	}
@@ -3024,11 +3050,14 @@ coop_officer_combat_music:{
 				level.coop_music_saved = level.coop_music_track	// base track to revert to
 				local.pick = randomint( level.coop_combat_track_count ) + 1
 				waitthread coop_mod/replace.scr::tmsegue level.coop_combat_tracks[local.pick]
+				level.coop_officer_combat_track = level.coop_combat_tracks[local.pick]	//[user 07-17] for the fade-out's map-owns-music check
+				level.coop_officer_musicvol = 1						//[user 07-17] tracked so death/fade paths start from the REAL volume
 			}
 		} else if( level.coop_combatmusic_active == 1 ){
 			if( (level.time - level.coop_officer_lastseen) > 6 ){
-				level.coop_combatmusic_active = 0
-				waitthread coop_mod/replace.scr::tmsegue level.coop_music_saved
+				//[user 07-17] lost sight: SLOW 15s interruptible fade into the base track (was an abrupt
+				//0.5s dip). If he re-spots a player mid-fade the boss track swells back up instead.
+				waitthread coop_officer_music_fadeout
 			}
 		}
 		wait 0.5
@@ -3039,7 +3068,11 @@ coop_officer_combat_music:{
 	// back in. (tmvolume is whitelisted on this build, so tmfade works.)
 	if( level.coop_combatmusic_active == 1 ){
 		level.coop_combatmusic_active = 0
-		waitthread coop_mod/replace.scr::tmfade 1 0 3		// fade the officer track down to silence (~3s)
+		//[user 07-17] start the death-fade from the TRACKED volume (a sight-loss fade may already be
+		//partway down); tmfade from a hardcoded 1 would snap the volume back up for a beat.
+		local.dv = level.coop_officer_musicvol
+		if( local.dv == NIL ){ local.dv = 1 }
+		waitthread coop_mod/replace.scr::tmfade local.dv 0 3	// fade the officer track down to silence (~3s)
 		waitthread coop_mod/replace.scr::tmstop			// then stop it
 		wait 2							// quiet beat after the officer is killed
 		// HZM coop - ONLY restore the pre-fight ambient track if the MAP hasn't started its own post-officer-death
@@ -3052,6 +3085,49 @@ coop_officer_combat_music:{
 			waitthread coop_mod/replace.scr::tmfade 0 1 1.5	// ease the base/ambient track back in
 		}
 	}
+}end
+
+
+//[user 07-17] SIGHT-LOSS MUSIC FADE: ramp the boss track down over ~15s in small steps, watching for
+// a re-spot every step. Re-spotted -> swell the SAME boss track back to full (2s) and stay in combat
+// (returns with combatmusic still active). Fade completes -> switch to the saved base track and ease it
+// in (~3s), clearing the combat flag. Officer dies mid-fade -> bail; the death path picks up from the
+// tracked volume (coop_officer_musicvol). One music channel = fade-through, no true crossfade.
+//=========================================================================
+coop_officer_music_fadeout:{
+//=========================================================================
+	local.steps = 30					// 30 x 0.5s = ~15 seconds
+	local.vol = level.coop_officer_musicvol
+	if( local.vol == NIL ){ local.vol = 1 }
+	local.step = local.vol / local.steps
+	local.i = 0
+	while( local.i < local.steps ){
+		if( level.coop_officer == NULL || level.coop_officer_alive != 1 ){ end }	// death path takes over
+		if( exec coop_mod/replace.scr::player_anyCanBeSeen level.coop_officer 3000 ){
+			// re-spotted mid-fade: swell the boss track back up and stay in combat
+			level.coop_officer_lastseen = level.time
+			waitthread coop_mod/replace.scr::tmfade local.vol 1 2
+			level.coop_officer_musicvol = 1
+			end
+		}
+		local.vol = local.vol - local.step
+		if( local.vol < 0 ){ local.vol = 0 }
+		level.coop_officer_musicvol = local.vol
+		waitthread coop_mod/replace.scr::tmvolume local.vol
+		wait 0.5
+	}
+
+	// fade complete: hand the channel back. If the MAP started its own track mid-fight (coop_music_track
+	// no longer the combat track we started), defer to the map - just restore the volume for its track.
+	level.coop_combatmusic_active = 0
+	if( level.coop_music_saved != NIL && level.coop_music_track == level.coop_officer_combat_track ){
+		waitthread coop_mod/replace.scr::tmvolume 0
+		waitthread coop_mod/replace.scr::tmstartloop level.coop_music_saved
+		waitthread coop_mod/replace.scr::tmfade 0 1 3	// ease the level's own track back in
+	} else {
+		waitthread coop_mod/replace.scr::tmfade 0 1 1.5	// map owns the music now - just bring volume back
+	}
+	level.coop_officer_musicvol = 1
 }end
 
 
@@ -3587,6 +3663,8 @@ coop_drop_bombs local.center local.fwd local.alt local.wide:{
 		wait 0.14
 		local.i++
 	}
+	// One short-lived scorched crater at the aim point after the whole stick lands (NOT per-bomb).
+	thread coop_bomb_aftermath local.center
 }end
 
 
@@ -3626,6 +3704,90 @@ coop_one_bomb local.airpos local.gnd local.alt:{
 		local.blast playsound explo_close
 	}
 	radiusdamage local.gnd 600 900
+}end
+
+
+// === COOP BOMBING-RUN AFTERMATH ===
+// After a bombing-run stick finishes (player binoc strike OR officer airstrike), leave a brief
+// scorched crater at the aim point: ONE lingering smoke column, a few ground fires that burn any
+// player who lingers in them, and a couple of dirt-debris puffs. Everything self-cleans after a
+// random 7-10s so nothing accumulates (perf: at most 1 smoke + 3 fires + 2 debris per strike).
+// All FX are notsolid; TIKs (linger_smoke/firegood/explosion_bombdirt) are stock, verified present.
+coop_bomb_aftermath local.center:{
+	if( local.center == NIL ){ end }
+	local.life = 7 + randomfloat 3
+	local.deadline = level.time + local.life
+	local.cg = exec coop_mod/officer.scr::coop_find_ground local.center
+	if( local.cg == NIL ){ local.cg = local.center }
+
+	// One lingering smoke column rising from the crater.
+	local.smoke = spawn "models/emitters/linger_smoke.tik"
+	local.smoke.origin = local.cg + (0 0 8)
+	local.smoke notsolid
+	local.smoke anim start
+
+	// A few scattered ground fires -- each runs its own hurt loop until the deadline.
+	local.fi = 0
+	while( local.fi < 3 ){
+		local.fp = exec coop_mod/officer.scr::coop_strike_scatter local.cg 24 96
+		local.fg = exec coop_mod/officer.scr::coop_find_ground local.fp
+		if( local.fg == NIL ){ local.fg = local.fp }
+		local.fire = spawn "models/emitters/firegood.tik"
+		local.fire.origin = local.fg + (0 0 4)
+		local.fire notsolid
+		local.fire anim start
+		//[user 07-17] bug-717: fire_med is aliascache-gated to m-series/train/t2l1/t2l3 only, so the bombing
+		// aftermath was silent on Breakthrough (e) + most Spearhead (t) maps. coop_snd_fire_small is loaded on
+		// ALL theaters (maps "m e t dm obj train") - use it so the crater fires sound everywhere.
+		local.fire loopsound coop_snd_fire_small
+		local.fire thread coop_fire_hurt local.deadline
+		local.fi++
+	}
+
+	// A couple of dirt-debris puffs for weight -- purely visual, they just expire.
+	local.di = 0
+	while( local.di < 2 ){
+		local.dp = exec coop_mod/officer.scr::coop_strike_scatter local.cg 16 72
+		local.dg = exec coop_mod/officer.scr::coop_find_ground local.dp
+		if( local.dg == NIL ){ local.dg = local.dp }
+		local.deb = spawn "models/emitters/explosion_bombdirt.tik"
+		local.deb.origin = local.dg
+		local.deb notsolid
+		local.deb anim start
+		local.deb thread coop_fx_expire local.deadline
+		local.di++
+	}
+
+	// Hold the smoke column for the crater's lifetime, then clear it (fires + debris self-clean).
+	wait local.life
+	if( local.smoke != NULL ){
+		local.smoke stoploopsound
+		local.smoke delete
+	}
+}end
+
+
+// Runs on a crater fire (self = the fire ent): burns any player standing in the flames every 0.5s
+// until the deadline, then removes the fire. 15 dmg per tick over radius 96 = a hazard that clearly
+// hurts but never instakills vs coop_health 750 (worst case ~20 ticks = ~300 dmg over the burn).
+coop_fire_hurt local.deadline:{
+	if( self == NULL ){ end }
+	while( self != NULL && level.time < local.deadline ){
+		radiusdamage self.origin 15 96
+		wait 0.5
+	}
+	if( self != NULL ){
+		self stoploopsound coop_snd_fire_small
+		self delete
+	}
+}end
+
+
+// Runs on a debris FX ent (self = the debris): waits out its lifetime, then removes it.
+coop_fx_expire local.deadline:{
+	local.wt = local.deadline - level.time
+	if( local.wt > 0 ){ wait local.wt }
+	if( self != NULL ){ self delete }
 }end
 
 

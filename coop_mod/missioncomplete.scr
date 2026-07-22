@@ -7,7 +7,18 @@ main local.nextlevel local.bsp local.skipFade:{
 if(level.cMTE_coop_missioncomplete){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread missioncomplete/main->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	//[200] Smithy - store the thread name
 	local.threadName = "coop_mod/missioncomplete.scr::main"
-	
+
+	//[user 07-18 bug-818] IDEMPOTENT per map. This path is not re-entrant, but an end trigger touched by
+	//two players the same frame (or a mission-end threaded twice) fires main() twice. Before bug-804 both
+	//invocations ran the full ~coop_xpSummaryTime xp_summary, so the transition waited for the debrief.
+	//After bug-804's xp_summary singleton (level.coop_xp_summaryRun) the SECOND main() finds the debrief
+	//already running, xp_summary returns in the same frame, and this call races straight to bsptransition -
+	//tearing the level down mid-debrief (user: "the rank up post level moves on too fast"). Guard so only the
+	//FIRST completion runs the debrief AND the single transition; duplicates end here. level.* is wiped on
+	//every map (game.dll reload on transition), so this flag can never leak into the next mission.
+	if( level.coop_missionCompleteRan == 1 ){ end }
+	level.coop_missionCompleteRan = 1
+
 	//[200] chrissstrahl - set next map to be active map for dedicated server reboot
 	if(level.coop_dedicated != 0){
 		setcvar "ui_startmap" local.nextlevel
@@ -38,7 +49,17 @@ if(level.cMTE_coop_missioncomplete){if(!level.cMTE){level.cMTE=0}; level.cMTE++;
 	//[302] HZM XP - end-of-map debrief (awards mission/no-death/paratrooper bonuses, then the
 	//animated XP card for ~coop_xpSummaryTime sec), then persist everyone. Card skipped for the
 	//automated map tester; awards+flush always run.
-	if( (getcvar "coop_maptest") == "0" || (getcvar "coop_maptest") == "" ){
+	//[user 07-18 bug-788] BRIEFINGS + LOBBIES are not missions (bug-722 pattern): briefing1-6
+	//route through missioncomplete to launch the NEXT map, so after the readygate all-ready skip
+	//the full ~coop_xpSummaryTime (28s) rank-up card ran ON TOP of the briefing with the squad
+	//frozen - and paid the mission/deathless/made-it awards (+225 XP for watching slides, log
+	//07-18 12:00). All-ready on a briefing must advance with no debrief; the debrief still runs
+	//at real mission end. xp_flush always runs.
+	local.coop_skipDebrief = 0
+	if( waitthread coop_mod/main.scr::containsText level.coop_mapname "briefing" 0 ){ local.coop_skipDebrief = 1 }
+	if( level.coop_lobbyMap == 1 ){ local.coop_skipDebrief = 1 }
+	if( (getcvar "coop_maptest") != "0" && (getcvar "coop_maptest") != "" ){ local.coop_skipDebrief = 1 }
+	if( local.coop_skipDebrief == 0 ){
 		waitthread coop_mod/xp.scr::xp_summary
 	}
 	waitthread coop_mod/xp.scr::xp_flush

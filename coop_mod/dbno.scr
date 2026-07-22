@@ -109,6 +109,7 @@ dbno_monitor local.player:{
 			local.hitclass = waitthread dbno_classifyHit local.player
 
 			if( local.hitclass == "head" && getcvar "coop_dbnoHitLocation" == "1" ){
+				println "^~^~^ DBNO death_headshot"
 				local.player.flags["coop_dbno_active"] = NIL
 				local.player.flags["coop_dbno_dead"]   = 1
 				local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
@@ -140,6 +141,7 @@ dbno_enter local.player local.hitclass:{
 	// guard: if the player actually died in the frame between the monitor's check and here (the killing hit
 	// outran DBNO), don't try to set health on a corpse ("cannot give health to dead entities"). Bail out.
 	if( !isAlive local.player ){
+		println "^~^~^ DBNO death_outran"
 		local.player.flags["coop_dbno_active"] = NIL
 		local.player.flags["coop_dbno_dead"]   = 1
 		end
@@ -159,6 +161,10 @@ dbno_enter local.player local.hitclass:{
 	local.player.flags["coop_dbno_timer_actual"] = local.actual_timer
 	local.player.flags["coop_dbno_elapsed"]      = 0
 	local.player.coop_wentDownMap                = level.coop_mapname	// disqualify from "no-down" campaign feats this map (challenges.scr::cc_award_clean)
+	//[user 07-17] DDA down stamp (director.scr S1/S2: downs window + time-since-down)
+	level.coop_dda_lastDownTime = level.time
+	if( level.coop_dda_downs == NIL ){ level.coop_dda_downs = 0 }
+	level.coop_dda_downs++
 
 	local.detail = "chest wound"
 	if( local.hitclass == "arm" ){ local.detail = "arm wound" }
@@ -187,17 +193,23 @@ dbno_enter local.player local.hitclass:{
 	waitthread coop_mod/keyitems.scr::coop_key_onDown local.player
 
 	local.player takeall
+	println ( "^~^~^ DBNO down p=" + local.player.netname )
 	//[user 07-16] DBNO uses the sidearm the player picked in the armory (flags coop_loSlot3),
 	//so a downed player fights with THEIR pistol. Falls back to the dedicated weak dbno_pistol
 	//when no sidearm was picked / armory locked. dbno_pistol keeps its intentional bad-aim tuning
 	//as the default; a real picked pistol is a small reward for customizing.
-	local.dbnoGun = "weapons/dbno_pistol.tik"
-	if( level.coop_loadoutLocked != 1 && local.player.flags["coop_loSlot3"] != NIL && local.player.flags["coop_loSlot3"] != "" ){
-		local.dbnoGun = local.player.flags["coop_loSlot3"]
+	//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: while weapons are locked out (coop_noWeapon) a downed
+	//player gets NO sidearm either - stay consistent with "no weapon to draw" until cover breaks /
+	//mission ends. Cleared in courtyard.scr::enableEnemyOnAll.
+	if( !level.coop_noWeapon ){
+		local.dbnoGun = "weapons/dbno_pistol.tik"
+		if( level.coop_loadoutLocked != 1 && local.player.flags["coop_loSlot3"] != NIL && local.player.flags["coop_loSlot3"] != "" ){
+			local.dbnoGun = local.player.flags["coop_loSlot3"]
+		}
+		local.player item local.dbnoGun
+		local.player ammo pistol 20
+		local.player useweaponclass pistol
 	}
-	local.player item local.dbnoGun
-	local.player ammo pistol 20
-	local.player useweaponclass pistol
 	local.player.flags["coop_dbno_origin"] = local.player.origin
 
 	thread dbno_bleedout_timer local.player
@@ -239,6 +251,7 @@ dbno_corpse_monitor local.player:{
 				local.player.flags["coop_dbno_corpseTime"]   = level.time
 				local.player.flags["coop_dbno_dead"]   = 1
 				local.player.flags["coop_dbno_active"] = NIL
+				println "^~^~^ DBNO death_killedWhileDown"
 			}
 			end
 		}
@@ -276,6 +289,7 @@ dbno_corpse_revive local.player:{
 	wait 0.5
 	if( local.player == NULL ){ end }
 	local.player respawn
+	println "^~^~^ DBNO getup_corpserevive"
 
 	wait 0.2
 	if( local.player != NULL ){
@@ -458,6 +472,7 @@ dbno_crawl_manager local.player:{
 
 
 dbno_die local.player:{
+	println "^~^~^ DBNO death_bledout"
 	local.player.flags["coop_dbno_dead"]   = 1
 	local.player.flags["coop_dbno_active"] = NIL
 	local.player forcelegsstate DBNO_BLEEDOUT	//[213] final slump before the kill lands
@@ -616,13 +631,22 @@ dbno_ai_revive local.player:{
 	local.player stoplocalsound coop_shellshock_dbno
 
 	local.player modheight "stand"
+	println ( "^~^~^ DBNO getup_teamrevive p=" + local.player.netname )
 	local.player forcelegsstate STAND
 	local.player health level.coop_health
+	local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
 	wait 0.1
 	local.player takeall
+	//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: skip the ENTIRE weapon re-give (registered inv > picks >
+	//map default > failsafe kit) while weapons are locked out (coop_noWeapon). The revived player comes
+	//back papers-only - papers are re-given by keyitems.scr::coop_key_guardian -> main.scr::itemGetAll.
+	//Mission items further below are still restored. This guard closes just before the mission-item
+	//block. Cleared in courtyard.scr::enableEnemyOnAll.
+	if( !level.coop_noWeapon ){
 	local.inv  = local.player.flags["coop_inventoryWeapons"]
 	local.gave = 0
+	waitthread coop_mod/main.scr::changeGameType 0 0	//[user 07-19] bug-912: revive re-gives can hand out 2 primaries - run under the gametype-0 weapon-give hack like KITBACKFILL/REISSUE so none are dropped
 	if( local.inv != NIL ){
 		local.wi = 1
 		while( local.wi <= local.inv.size ){
@@ -664,17 +688,14 @@ dbno_ai_revive local.player:{
 		local.player item "weapons/colt45.tik"
 		local.player item "weapons/frag_grenade.tik"
 	}
-	//[user 07-16] bug-620: mission-critical map gear (e1l2 minedetector etc.) survives the revive
-	if( level.coop_missionItems.size > 0 ){
-		local.mi = 1
-		while( local.mi <= level.coop_missionItems.size ){
-			if( level.coop_missionItems[local.mi] != NIL ){
-				local.player item level.coop_missionItems[local.mi]
-			}
-			local.mi++
-		}
-	}
-	local.player useweaponclass rifle
+	waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
+	}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
+	//[user 07-16] bug-620 / [user 07-19] bug-893: mission-critical map gear (e1l2 minedetector etc.)
+	//survives the revive. Uses the shared restore so the WEAPON-class detector is re-given under the
+	//coop weapon-give gametype-0 hack (a bare `item` in gametype 2 did not reliably persist the detector).
+	local.player waitthread coop_mod/main.scr::coop_reissueMissionItems
+	if( !level.coop_noWeapon ){ local.player useweaponclass rifle }	//[user 07-19] papers-only: no rifle to raise while locked out
+	local.player thread coop_mod/itemhandler.scr::coop_ammoRestore	//[user 07-19] bug-913: revive-in-place re-gives handed DEFAULT ammo - re-apply the exact reserve snapshotted when the player went down (snapshot pauses during DBNO, so it holds the down-moment values)
 	local.player playsound coop_exhale1
 	local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )	// restore world SFX after AI revive
 
@@ -771,6 +792,7 @@ dbno_letgo_monitor:{
 						ihuddraw_alpha  self local.hud_slot 0
 						self.flags["coop_dbno_letgo"] = 1
 						self.flags["coop_dbno_active"] = NIL
+						println "^~^~^ DBNO death_letgo"
 						self.flags["coop_dbno_dead"]   = 1
 						self forcelegsstate DBNO_BLEEDOUT	//[213] slump during the give-up fade
 						self stoplocalsound coop_dbno_breath1

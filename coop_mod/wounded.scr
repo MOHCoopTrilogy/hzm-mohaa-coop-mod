@@ -1,0 +1,361 @@
+//[user 2026-07-17] WOUNDED GERMAN LIMP-AWAY.
+//=========================================================================
+// When a rank-and-file German soldier drops below a low-HP threshold, SOME of them break off combat and
+// withdraw toward the FURTHEST medkit on the map (away from the players). On arrival they SUCCUMB to their
+// wounds - killed through the real engine death path (NOT a live `remove`, which would delete the actor's
+// parked `waittill death` thread and stall an "eliminate all enemies" objective + leak the german array).
+// If they can't reach a kit in time they rejoin the fight instead of vanishing. Reuses the officer
+// heal-retreat recipe (coop_mod/officer.scr::coop_officer_medkit_retreat):
+// a fresh classname=="Health" scan for the furthest kit + a poll+re-issue move loop (NEVER `waittill
+// movedone` - under fire, pain never fires a clean movedone and the loop would hang).
+//
+// KEY FACT (why a naive self.health check would never fire): rank-and-file German .health is BUFFERED to
+// 5000 by the coop pain handler; the REAL running HP is self.flags["coop_actorActualHealth"], decremented
+// in aihandler.scr::handlePain. So the trigger is hooked in handlePain (one line, on the survival path)
+// and thresholds on coop_actorActualHealth, and the % denominator (coop_woundedMaxHp) is snapshotted in
+// initialisePainVars. Officer/VIP/wave/turret actors carry coop_actorStopPainHandler and never reach
+// handlePain, so they physically cannot trigger this - the team/flag guards below are belt-and-suspenders.
+//
+// GAIT: `walkto` (slower than the combat run = a laboured withdrawal, robust real nav). A distinct limp
+// animation (walk_injured_forward, defined on every German rig via new_generic_human.tik) can be overlaid
+// via coop_woundedLimpAnim 1, but the engine re-drives the legs anim during active pathing so it is
+// best-effort and OFF by default (the safe, guaranteed-moving path is plain walkto).
+//
+// [user 07-19] FLEE-TO-REAR (coop_woundedFlee, default ON): instead of limping to a medkit, the withdrawing
+// soldier now BREAKS FOR THE MAP REAR - the furthest point directly AWAY from the players (no medkit needed,
+// so it works on the 7 kitless maps too) - and DESPAWNS as "escaped" on arrival/timeout. The despawn is a
+// self-`damage 150000` through the REAL engine death path (identical to the succumb-on-arrival above), so
+// Killed() fires, `waittill death` resumes, removeActorFromArray + kill accounting + every objective death-
+// hook run, and an "eliminate all enemies" gate still completes. It is NEVER a live `remove`. Two variants:
+//   * LIMP  - upright: the proven walkto (poll + re-issue) with a walk_injured_forward overlay.
+//   * CRAWL - prone belly-crawl (coop_dbno_crawl). MOHAA's nav has a CRASH history with prone AI, so a
+//             crawler is NEVER walkto'd; it is driven by manual ORIGIN-STEPPING toward the rear each ~0.2s
+//             tick (small ground-snapped step, faced at the target, with a forward wall-trace), AI disabled
+//             (enableEnemy=0 + nolongpain) so the nav never fights the origin writes. Bounded to ~40s.
+// Both variants carry the same bullet-sponge guard as the medkit limp (un-buffer to coop_actorActualHealth +
+// coop_actorStopPainHandler=1 before nolongpain) so players can still gun the fleeing soldier down for real.
+//
+// cvars (getcvar-fallback; defaults also seta'd in autoexec.cfg):
+//   coop_woundedRetreat    1     master on/off
+//   coop_woundedThreshold  0.30  fraction of the actor's own max HP that triggers a break-off
+//   coop_woundedChance     25    % of eligible low-HP Germans that actually withdraw (the rest fight on)
+//   coop_woundedMax        3     concurrent withdrawers cap (bounds the scans / origin loops)
+//   coop_woundedLimpAnim   0     overlay the walk_injured_forward gait on the LEGACY medkit limp (may fight nav)
+//   coop_woundedFlee       1     flee to the map rear + escape-despawn (0 = legacy limp to furthest medkit)
+//   coop_woundedCrawlChance 40   % of fleers that belly-CRAWL (origin-stepped) vs upright LIMP (walkto)
+//=========================================================================
+
+//-------------------------------------------------------------------------
+// Threaded from aihandler.scr::handlePain (survival path) after coop_actorActualHealth is decremented.
+// All gating lives here so handlePain stays clean. Decides ONCE per actor and latches permanently
+// (coop_limping: NIL=undecided, 1=limping, 2=declined) so a low-HP soldier never re-rolls on every hit.
+//-------------------------------------------------------------------------
+coop_checkWoundedRetreat local.actor:{
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	if( getcvar "coop_woundedRetreat" == "0" ){ end }			// master gate (default ON when unset)
+	if( local.actor.flags["coop_limping"] != NIL ){ end }			// already decided - never re-decide
+
+	// ELIGIBILITY - mirror the count-scaling exclusions (aihandler.scr::coop_tryDuplicateActor)
+	if( local.actor.team != "german" ){ end }				// enemies only, never allies
+	if( local.actor.flags["coop_actorStopPainHandler"] == 1 ){ end }	// officer / VIP / bespoke-HP actors
+	if( local.actor.flags["coop_waveActor"] == 1 ){ end }			// officer reinforcement waves
+	if( level.coop_officer != NULL && local.actor == level.coop_officer ){ end }
+	if( local.actor.turret != NULL ){ end }					// turret gunners stay put
+
+	// REAL HP vs % threshold (denominator snapshotted in initialisePainVars as coop_woundedMaxHp)
+	local.hp = local.actor.flags["coop_actorActualHealth"]
+	if( local.hp == NIL || local.hp <= 0 ){ end }				// dead / not pain-handled
+	local.maxhp = local.actor.flags["coop_woundedMaxHp"]
+	if( local.maxhp == NIL || local.maxhp <= 0 ){ local.maxhp = local.hp }
+	local.frac = getcvar "coop_woundedThreshold"
+	if( local.frac == "" ){ local.frac = "0.30" }
+	local.frac = float( local.frac )
+	if( local.frac <= 0 ){ local.frac = 0.30 }
+	if( local.hp > (local.maxhp * local.frac) ){ end }			// not low enough yet - keep checking (no latch)
+
+	// -- below threshold: make ONE decision and latch it permanently --
+	local.chance = int( getcvar "coop_woundedChance" )
+	if( local.chance <= 0 ){ local.chance = 25 }
+	if( (randomint 100) >= local.chance ){ local.actor.flags["coop_limping"] = 2; end }	// this one fights on
+
+	local.cap = int( getcvar "coop_woundedMax" )
+	if( local.cap <= 0 ){ local.cap = 3 }
+	if( level.coop_limperCount == NIL ){ level.coop_limperCount = 0 }
+	if( level.coop_limperCount >= local.cap ){ local.actor.flags["coop_limping"] = 2; end }	// no free slot
+
+	// COMMIT
+	local.actor.flags["coop_limping"] = 1
+	level.coop_limperCount = level.coop_limperCount + 1
+	if( getcvar "coop_woundedFlee" == "0" ){
+		thread coop_woundedLimpAway local.actor		// legacy: limp to the furthest medkit, then succumb
+	} else {
+		thread coop_woundedFleeAway local.actor		// flee to the map rear + escape (upright limp or belly crawl)
+	}
+}end
+
+//-------------------------------------------------------------------------
+// The limp-away mover: disengage -> pick the furthest medkit AWAY from the players -> walkto (poll +
+// re-issue) -> evacuate (fade + remove) on arrival. Releases the concurrency slot on EVERY exit path.
+//-------------------------------------------------------------------------
+coop_woundedLimpAway local.actor:{
+	if( local.actor == NULL || !isAlive local.actor ){ waitthread coop_woundedRelease; end }
+
+	// nearest LIVING player - measured from the SOLDIER (not the officer) so we can pick a kit "behind" him
+	local.np = NIL
+	local.npd = 999999
+	local.pi = 1
+	while( $player != NULL && local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL && isAlive local.p ){
+			local.pd = vector_length( local.p.origin - local.actor.origin )
+			if( local.pd < local.npd ){ local.npd = local.pd; local.np = local.p.origin }
+		}
+		local.pi++
+	}
+	local.fx = 0
+	local.fy = 0
+	if( local.np != NIL ){
+		local.fx = local.np[0] - local.actor.origin[0]
+		local.fy = local.np[1] - local.actor.origin[1]
+	}
+
+	// scan every map Health entity: track furthest overall + furthest BEHIND (dot<0 = away from players).
+	// getentbyentnum (NOT getentarray - that misses item entities) matching the runtime classname "Health".
+	local.maxent = int( getcvar "maxentities" )
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	local.ei = 0
+	local.far_pos = NIL
+	local.far_dist = 0
+	local.bf_pos = NIL
+	local.bf_dist = 0
+	while( local.ei < local.maxent ){
+		local.e = getentbyentnum local.ei
+		if( local.e != NULL ){
+			if( local.e.classname == "Health" ){
+				local.d = vector_length( local.e.origin - local.actor.origin )
+				if( local.d > local.far_dist ){ local.far_dist = local.d; local.far_pos = local.e.origin }
+				local.mx = local.e.origin[0] - local.actor.origin[0]
+				local.my = local.e.origin[1] - local.actor.origin[1]
+				local.dot = (local.fx * local.mx) + (local.fy * local.my)
+				if( local.np == NIL || local.dot < 0 ){
+					if( local.d > local.bf_dist ){ local.bf_dist = local.d; local.bf_pos = local.e.origin }
+				}
+			}
+		}
+		local.ei++
+	}
+
+	// prefer the furthest medkit BEHIND him (away from the players). If a player exists but NOTHING is
+	// behind him (every kit lies toward/past the players), do NOT limp into the squad - abort, he fights on.
+	local.dest = local.bf_pos
+	if( local.dest == NIL ){
+		if( local.np != NIL ){ waitthread coop_woundedRelease; end }	// players ahead, no kit behind -> don't flee toward them
+		local.dest = local.far_pos					// no players (0-player / dedicated) -> furthest overall is fine
+	}
+	if( local.dest == NIL ){ waitthread coop_woundedRelease; end }		// no medkit on this map (7 maps) - skip
+
+	// floor-snap the target so the nav move has a valid ground point (reuse the officer helper)
+	local.grn = exec coop_mod/officer.scr::coop_find_ground local.dest
+	if( local.grn != NIL ){ local.dest = local.grn }
+
+	// DISENGAGE + limp there. enableEnemy=0 stops him shooting but he stays damageable (players can gun him
+	// down mid-retreat, which is the point). nolongpain keeps him moving instead of freezing on every hit.
+	// [user 07-18] BULLET-SPONGE FIX: un-buffer to REAL hp + detach the coop pain handler BEFORE nolongpain.
+	// nolongpain suppresses the engine pain-event dispatch (actor.cpp), the ONLY path that decrements
+	// coop_actorActualHealth - so the 5000-buffered body was unkillable mid-retreat. Mirror the officer
+	// heal-retreat: plain health + coop_actorStopPainHandler + nolongpain, so engine Damage() kills normally.
+	if( local.actor.flags["coop_actorActualHealth"] != NIL && local.actor.flags["coop_actorActualHealth"] > 0 ){
+		local.actor.health = local.actor.flags["coop_actorActualHealth"]
+	}
+	local.actor.flags["coop_actorStopPainHandler"] = 1
+	local.actor.enableEnemy = 0
+	local.actor.nolongpain = 1
+	local.actor.movedoneradius = 64
+	if( getcvar "coop_woundedLimpAnim" == "1" ){ local.actor setanim walk_injured_forward }
+	local.reached = 0
+	local.timer = level.time + 35
+	// [user 07-18] PATHING FIX (walk-back-and-forth): issue walkto ONCE, then re-issue ONLY when the actor
+	// has genuinely stalled (pain cleared its path) - comparing origin across polls. Re-issuing every tick
+	// made MoveTo re-allocate the destination waypoint each poll -> the stutter/oscillation.
+	local.prev = local.actor.origin
+	local.actor forceactivate
+	local.actor walkto local.dest
+	while( isAlive local.actor && level.time < local.timer ){
+		wait 0.4
+		if( vector_length( local.actor.origin - local.dest ) < 200 ){ local.reached = 1; break }
+		if( vector_length( local.actor.origin - local.prev ) < 24 ){		// stalled -> re-assert path
+			local.actor forceactivate
+			local.actor walkto local.dest
+		}
+		local.prev = local.actor.origin
+	}
+
+	if( local.actor != NULL && isAlive local.actor ){
+		if( local.reached == 1 ){
+			// REACHED the aid post -> succumb to wounds. Kill through the REAL damage path (mirrors
+			// aihandler.scr::handlePain's kill) so the engine Killed() fires: this resumes the actor's
+			// `waittill death` -> removeActorFromArray + kill accounting + every map objective death-hook.
+			// A plain `remove` on a LIVE actor DELETES those parked threads (listener.cpp bDeleting=true)
+			// and would stall an "eliminate all enemies" gate + leak a NULL into coop_actorArray["german"].
+			local.actor damage local.actor 150000 local.actor local.actor.origin (0 0 0) (0 0 0) 0 0 0 0
+		} else {
+			// couldn't reach a kit in 35s (too far / nav-wedged) -> DON'T dissolve in plain sight. Rejoin
+			// the fight so he dies for real to a player (still objective-safe) instead of vanishing.
+			local.actor.enableEnemy = 1
+			local.actor.nolongpain = 0
+			local.actor forceactivate
+			local.actor attackplayer
+		}
+	}
+	waitthread coop_woundedRelease
+}end
+
+//-------------------------------------------------------------------------
+// FLEE dispatcher: disengage -> aim at the map REAR (furthest point away from the players) -> roll CRAWL vs
+// LIMP -> hand off to the mover -> escape-despawn on arrival/timeout. Releases the concurrency slot on every
+// exit path. Same bullet-sponge guard as coop_woundedLimpAway so a fleeing soldier stays killable by players.
+//-------------------------------------------------------------------------
+coop_woundedFleeAway local.actor:{
+	if( local.actor == NULL || !isAlive local.actor ){ waitthread coop_woundedRelease; end }
+
+	// rear destination: the furthest reachable ground point directly AWAY from the players (no medkit needed)
+	local.dest = waitthread coop_woundedRearPoint local.actor
+	if( local.dest == NIL ){ waitthread coop_woundedRelease; end }		// nowhere to flee -> abort, he fights on
+
+	// DISENGAGE + un-sponge. Mirror coop_woundedLimpAway: nolongpain suppresses the pain-event dispatch (the
+	// only path that decrements coop_actorActualHealth), so we un-buffer to REAL hp + detach the coop pain
+	// handler FIRST, otherwise the 5000-buffered body would be unkillable mid-flight. enableEnemy=0 stops him
+	// shooting but he stays damageable (players can gun him down, which is the point).
+	if( local.actor.flags["coop_actorActualHealth"] != NIL && local.actor.flags["coop_actorActualHealth"] > 0 ){
+		local.actor.health = local.actor.flags["coop_actorActualHealth"]
+	}
+	local.actor.flags["coop_actorStopPainHandler"] = 1
+	local.actor.enableEnemy = 0
+	local.actor.nolongpain = 1
+
+	// CRAWL vs LIMP. String-check the cvar so an explicit "0" (never crawl) is honoured, unset -> 40.
+	local.crawls = getcvar "coop_woundedCrawlChance"
+	if( local.crawls == "" ){ local.crawls = "40" }
+	local.crawlch = int( local.crawls )
+	if( (randomint 100) < local.crawlch ){
+		waitthread coop_woundedFleeCrawl local.actor local.dest
+	} else {
+		waitthread coop_woundedFleeLimp local.actor local.dest
+	}
+	waitthread coop_woundedRelease
+}end
+
+//-------------------------------------------------------------------------
+// Pick the furthest reachable GROUND point in the direction AWAY from the players (the map rear). Returns a
+// floor-snapped destination, or NIL if none is found (caller aborts). Flattens to XY, marches the ray outward
+// and takes the longest candidate that has ground under it (reuses the officer coop_find_ground down-trace).
+//-------------------------------------------------------------------------
+coop_woundedRearPoint local.actor:{
+	if( local.actor == NULL ){ end NIL }
+
+	// nearest LIVING player - the rear is the direction pointing away from him
+	local.np = NIL
+	local.npd = 999999
+	local.pi = 1
+	while( $player != NULL && local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL && isAlive local.p ){
+			local.pd = vector_length( local.p.origin - local.actor.origin )
+			if( local.pd < local.npd ){ local.npd = local.pd; local.np = local.p.origin }
+		}
+		local.pi++
+	}
+
+	// rear direction (flattened to XY). No players (0-player / dedicated) -> use the actor's own facing.
+	if( local.np != NIL ){
+		local.dir = local.actor.origin - local.np
+		local.dir = ( local.dir[0] local.dir[1] 0 )
+	} else {
+		local.fwd = angles_toforward local.actor.angles
+		local.dir = ( local.fwd[0] local.fwd[1] 0 )
+	}
+	if( vector_length( local.dir ) < 1 ){
+		local.fwd = angles_toforward local.actor.angles
+		local.dir = ( local.fwd[0] local.fwd[1] 0 )
+	}
+	if( vector_length( local.dir ) < 1 ){ end NIL }
+	local.dir = vector_normalize local.dir
+
+	// march the ray outward; the longest candidate with ground beneath it wins
+	local.try = 6000
+	local.best = NIL
+	while( local.try >= 1000 ){
+		local.cand = local.actor.origin + ( vector_scale local.dir local.try )
+		local.g = exec coop_mod/officer.scr::coop_find_ground local.cand
+		if( local.g != NIL ){ local.best = local.g; break }
+		local.try = local.try - 1000
+	}
+	end local.best
+}end
+
+//-------------------------------------------------------------------------
+// LIMP flee: upright walkto the rear (poll + re-issue only when genuinely stalled, so MoveTo doesn't stutter)
+// with a walk_injured_forward overlay. On arrival OR the 40s timeout he ESCAPES -> self-damage through the
+// real death path (never a live remove) so kill accounting + objective death-hooks still fire.
+//-------------------------------------------------------------------------
+coop_woundedFleeLimp local.actor local.dest:{
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.actor.movedoneradius = 64
+	local.actor setanim walk_injured_forward
+	local.timer = level.time + 40
+	local.prev = local.actor.origin
+	local.actor forceactivate
+	local.actor walkto local.dest
+	while( isAlive local.actor && level.time < local.timer ){
+		wait 0.4
+		if( vector_length( local.actor.origin - local.dest ) < 200 ){ break }		// reached the rear
+		if( vector_length( local.actor.origin - local.prev ) < 24 ){			// stalled -> re-assert path
+			local.actor forceactivate
+			local.actor walkto local.dest
+		}
+		local.prev = local.actor.origin
+	}
+	if( local.actor != NULL && isAlive local.actor ){
+		local.actor damage local.actor 150000 local.actor local.actor.origin (0 0 0) (0 0 0) 0 0 0 0
+	}
+}end
+
+//-------------------------------------------------------------------------
+// CRAWL flee: prone belly-crawl (coop_dbno_crawl), driven by manual ORIGIN-STEPPING - MOHAA's nav has a crash
+// history with prone AI so this is NEVER walkto'd. Each ~0.2s tick: re-assert the crawl anim (idle AI would
+// override it), face the rear, forward-trace for a wall, ground-snap one small step, write origin. Bounded to
+// ~40s / a blocked wall / arrival, then ESCAPE -> self-damage through the real death path (never a live remove).
+//-------------------------------------------------------------------------
+coop_woundedFleeCrawl local.actor local.dest:{
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.step = 12				// ~12u per 0.2s tick (~60 u/s) laboured belly crawl
+	local.timer = level.time + 40
+	while( isAlive local.actor && level.time < local.timer ){
+		local.actor setanim coop_dbno_crawl
+		local.flat = local.dest - local.actor.origin
+		local.flat = ( local.flat[0] local.flat[1] 0 )				// flatten to XY (crawl stays on the floor)
+		if( vector_length( local.flat ) < 48 ){ break }				// arrived at the rear
+		local.dir = vector_normalize local.flat
+		local.ang = vector_toangles local.dir					// face the target (yaw only, stay flat)
+		local.actor.angles = ( 0 local.ang[1] 0 )
+		local.nxt = local.actor.origin + ( vector_scale local.dir local.step )
+		local.tr = traced ( local.actor.origin + (0 0 16) ) ( local.nxt + (0 0 16) )
+		if( local.tr["fraction"] < 1.0 ){ break }				// wall ahead -> stop here (escaped)
+		local.g = exec coop_mod/officer.scr::coop_find_ground local.nxt		// keep the belly on the floor
+		if( local.g != NIL ){ local.nxt = local.g }
+		local.actor.origin = local.nxt
+		wait 0.2
+	}
+	if( local.actor != NULL && isAlive local.actor ){
+		local.actor damage local.actor 150000 local.actor local.actor.origin (0 0 0) (0 0 0) 0 0 0 0
+	}
+}end
+
+//-------------------------------------------------------------------------
+// Release one concurrency slot (clamped at 0). Called exactly once per coop_woundedLimpAway invocation.
+//-------------------------------------------------------------------------
+coop_woundedRelease:{
+	if( level.coop_limperCount == NIL ){ level.coop_limperCount = 0; end }
+	level.coop_limperCount = level.coop_limperCount - 1
+	if( level.coop_limperCount < 0 ){ level.coop_limperCount = 0 }
+}end

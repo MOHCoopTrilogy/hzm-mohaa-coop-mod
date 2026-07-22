@@ -92,6 +92,7 @@ medkit_hud_monitor local.player:{
 							if( local.sent != NULL ){
 								if( local.sent.classname == "Health" ){
 									if( vector_length(local.player.origin - local.sent.origin) <= 100 ){
+										println "^~^~^ DBNO health_pickup_while_down"
 										local.player.flags["coop_medkits"] = 1
 										local.player iprint "Medkit refilled!" 1
 										local.si = local.maxent
@@ -193,6 +194,7 @@ medkit_use local.player:{
 	}
 
 	local.player health level.coop_health
+	local.player gore_reset	// HZM coop - gore tier 1: fully patched up = clean uniform + stop dripping
 	local.player.flags["coop_medkits"]      = local.player.flags["coop_medkits"] - 1
 
 	ihuddraw_alpha  local.player 33 0
@@ -295,6 +297,7 @@ dbno_selfrevive local.player:{
 				local.hold_frames++
 
 				if( local.hold_frames >= 200 ){
+					println ( "^~^~^ DBNO getup_selfrevive p=" + local.player.netname )
 					local.player.flags["coop_dbno_letgo"]   = 1
 					local.player.flags["coop_medkits"]      = local.player.flags["coop_medkits"] - 1
 					local.player.flags["coop_dbno_dead"]    = 1
@@ -320,17 +323,26 @@ dbno_selfrevive local.player:{
 					local.player modheight "stand"
 					local.player forcelegsstate STAND
 					local.player health level.coop_health
+					local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
 					wait 0.1
 
 					local.player takeall
+					//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: skip the ENTIRE weapon re-give while weapons are
+					//locked out (coop_noWeapon) - a self-revived player comes back papers-only (papers are
+					//re-given by keyitems.scr::coop_key_guardian -> main.scr::itemGetAll). Mission items below
+					//are still restored. This guard closes just before the mission-item block. Cleared in
+					//courtyard.scr::enableEnemyOnAll.
+					if( !level.coop_noWeapon ){
 					local.inv  = local.player.flags["coop_inventoryWeapons"]
 					local.gave = 0
+					waitthread coop_mod/main.scr::changeGameType 0 0	//[user 07-19] bug-912: revive re-gives can hand out 2 primaries - run under the gametype-0 weapon-give hack like KITBACKFILL/REISSUE so none are dropped
 					if( local.inv != NIL ){
 						local.wi = 1
 						while( local.wi <= local.inv.size ){
 							if( local.inv[local.wi] != NIL ){
 								local.player item local.inv[local.wi]
+								println ( "^~^~^ SELFREV give_inv " + local.inv[local.wi] )
 								local.gave = 1
 							}
 							local.wi++
@@ -367,19 +379,15 @@ dbno_selfrevive local.player:{
 						local.player item "weapons/colt45.tik"
 						local.player item "weapons/frag_grenade.tik"
 					}
-					//[user 07-16] bug-625: mission-critical map gear (bug-620, e1l2 minedetector etc.)
-					//was appended to dbno_ai_revive's chain but NOT to this self-revive chain - a
-					//self-revived carrier lost the detector. Same append as dbno.scr:662.
-					if( level.coop_missionItems.size > 0 ){
-						local.mi = 1
-						while( local.mi <= level.coop_missionItems.size ){
-							if( level.coop_missionItems[local.mi] != NIL ){
-								local.player item level.coop_missionItems[local.mi]
-							}
-							local.mi++
-						}
-					}
-					local.player useweaponclass rifle
+					waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
+					}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
+					//[user 07-16] bug-625 / [user 07-19] bug-893: mission-critical map gear (bug-620,
+					//e1l2 minedetector etc.) was lost on the self-revive chain. Shared restore re-gives
+					//the WEAPON-class detector under the coop weapon-give gametype-0 hack (a bare `item`
+					//in gametype 2 did not reliably persist it). Same call as dbno.scr / itemGetAll.
+					local.player waitthread coop_mod/main.scr::coop_reissueMissionItems
+					if( !level.coop_noWeapon ){ local.player useweaponclass rifle }	//[user 07-19] papers-only: no rifle to raise while locked out
+					local.player thread coop_mod/itemhandler.scr::coop_ammoRestore	//[user 07-19] bug-913: revive-in-place re-gives handed DEFAULT ammo - re-apply the exact reserve snapshotted when the player went down (snapshot pauses during DBNO, so it holds the down-moment values)
 					thread coop_mod/xp.scr::xp_award local.player 10 "revive"	// [302] HZM XP - self-revive
 					wait 0.1
 					local.player playsound coop_exhale1
@@ -389,7 +397,7 @@ dbno_selfrevive local.player:{
 					ihuddraw_alpha  local.player 39 0
 					ihuddraw_string local.player 38 ""
 					ihuddraw_align  local.player 33 center center
-					ihuddraw_font   local.player 33 "handle-23"
+					ihuddraw_font   local.player 33 "verdana-14"
 					ihuddraw_color  local.player 33 0.4 1.0 0.4
 					ihuddraw_rect   local.player 33 0 0 0 0
 					ihuddraw_string local.player 33 "You have bandaged yourself up."

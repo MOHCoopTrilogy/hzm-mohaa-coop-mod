@@ -1,0 +1,56 @@
+//-----------------------------------------------------------------------------
+// coop_mod/voidguard.scr - universal out-of-bounds safety net (all maps)
+// [user 07-21] "why wouldn't we have that in all of our maps?" - the classic
+// mod-native answer to collision holes: POSITION correction, not collision
+// editing. Every 0.5s each active player's on-ground position is recorded
+// (2-deep history, so the restore point is never the ledge they slipped from).
+// If a player ever falls below the map's self-calibrated floor (lowest ground
+// any player has stood on, minus 1200u), they are warped back to their older
+// good position with brief fall immunity - nobody ever falls into the void,
+// regardless of what collision quirk opened the hole.
+// Self-calibrating: no per-map setup. coop_voidGuard 0 disables.
+//-----------------------------------------------------------------------------
+
+main:{
+	if( level.gametype == 0 ){ end }
+	if( getcvar( "coop_voidGuard" ) == "0" ){ end }
+
+	// let spawns/intro settle before calibrating
+	wait 8
+	level.coop_voidZ = 999999
+
+	while( 1 ){
+		wait 0.5
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.p.flags["coop_isActive"] != 1 ){ continue }
+
+			// world-only ground check just below the feet
+			local.top = local.p.origin + ( 0 0 4 )
+			local.bot = local.p.origin - ( 0 0 10 )
+			local.fl  = trace local.top local.bot 1
+
+			if( local.fl[2] > (local.p.origin[2] - 9.5) ){
+				// standing on (or a hair above) real ground: record history + calibrate
+				local.p.coop_goodPosA = local.p.coop_goodPosB
+				local.p.coop_goodPosB = local.p.origin
+				if( (local.p.origin[2] - 1200) < level.coop_voidZ ){
+					level.coop_voidZ = local.p.origin[2] - 1200
+				}
+			} else if( level.coop_voidZ < 999999 && local.p.origin[2] < level.coop_voidZ ){
+				// in the void: restore the OLDER good position (never the slip edge)
+				local.back = local.p.coop_goodPosA
+				if( local.back == NIL ){ local.back = local.p.coop_goodPosB }
+				if( local.back != NIL ){
+					local.p.origin   = local.back
+					local.p droptofloor 512
+					local.p.velocity = ( 0 0 0 )
+					thread coop_mod/player.scr::spawnFallProtection local.p
+					println( "^~^~^ VOIDGUARD recovered player at " + local.back )
+				}
+			}
+		}
+	}
+}end

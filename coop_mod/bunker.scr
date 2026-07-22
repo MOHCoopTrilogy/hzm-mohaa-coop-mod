@@ -1,0 +1,306 @@
+//=========================================================================
+// HZM coop - COMPOSED STRUCTURES v2 (build-mode geometry construction kit)
+// [user 07-21] Reusable fortifications from coop_build cube primitives.
+// v2 (user feedback "same model + really small"): base block = 64u (bs 4.0 -
+// the cube is only ~16u at scale 1), PER-VARIANT MATERIAL MIXES, and every
+// variant takes an optional size MULTIPLIER (build mode passes the current
+// build scale, so KP+/- scales whole structures).
+//   <label> <origin> <yaw> [mult]
+//   bunker_pillbox - concrete walls, stone corner columns + roof rim, slit
+//                    front, full-height rear doorway, sandbags, ammo crate
+//   bunker_nest    - open-top U of SANDBAG-texture blocks + crate
+//   bunker_wall    - stone rampart 6 long x 2 high, perpendicular to facing
+//   bunker_tower   - brick column, stone platform, jumpable stacked stair
+// Self-measuring (bug-910 property syntax); solidify multiplies bounds by
+// each entity's own scale (agent design review - bug-829 class).
+//=========================================================================
+
+piece local.tik local.pos local.yaw local.scale:{
+	local.e = spawn script_model
+	local.e model local.tik
+	local.e.origin = local.pos
+	local.e.angles = ( 0 local.yaw 0 )
+	local.e scale local.scale
+	end local.e
+}end
+
+measure local.origin:{
+	local.ref = spawn script_model
+	local.ref model "models/coop_build/box_concrete.tik"
+	local.ref.origin = local.origin + ( 0 0 -2000 )
+	waitframe
+	local.mn = local.ref.getmins
+	local.mx = local.ref.getmaxs
+	local.s1 = local.mx[0] - local.mn[0]
+	local.ref delete
+	if( local.s1 < 4 ){ local.s1 = 16 }
+	end local.s1
+}end
+
+groundz local.origin:{
+	local.gtop = local.origin + ( 0 0 128 )
+	local.gbot = local.origin - ( 0 0 512 )
+	local.gnd  = trace local.gtop local.gbot 1
+	end local.gnd[2]
+}end
+
+// place one block of the given material at grid (fx, ry, row)
+block local.tik local.origin local.base local.fwd local.rgt local.B local.fx local.ry local.row local.yaw local.bs:{
+	local.pos = local.origin + (vector_scale local.fwd (local.fx * local.B)) + (vector_scale local.rgt (local.ry * local.B))
+	local.pos[2] = local.base + (local.row * local.B) + (local.B * 0.5)
+	local.e = waitthread piece local.tik local.pos local.yaw local.bs
+	end local.e
+}end
+
+solidify local.bm local.bn:{
+	waitframe
+	local.i = 0
+	local.batch = 0
+	while( local.i < local.bn ){
+		local.e = local.bm[local.i]
+		if( local.e != NULL ){
+			//[agent 07-21] bug-829 class: base bounds x entity scale, or scale-N blocks
+			//clip at 1/N of their visual size
+			local.emn = local.e.getmins
+			local.emx = local.e.getmaxs
+			local.es = local.e.scale
+			if( local.es == NIL || local.es <= 0 ){ local.es = 1.0 }
+			local.emn = local.emn * local.es
+			local.emx = local.emx * local.es
+			local.e solid
+			if( local.emx[2] - local.emn[2] > 0 ){ local.e setsize local.emn local.emx }
+		}
+		local.i++
+		local.batch++
+		if( local.batch >= 8 ){ local.batch = 0; waitframe }
+	}
+}end
+
+//=========================================================================
+bunker_pillbox local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.s1 = waitthread measure local.origin
+	local.bs = 4.0 * local.mult
+	local.B  = local.s1 * local.bs
+	local.base = waitthread groundz local.origin
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.ra = ( 0 0 0 )
+	local.ra[1] = local.yaw - 90
+	local.rgt = angles_toforward local.ra
+
+	local.wallTik = "models/coop_build/box_concrete.tik"
+	local.trimTik = "models/coop_build/box_stone.tik"
+
+	local.bn = 0
+	local.batch = 0
+	// FRONT (fx +2): 2 rows, 5 cols; slit = row 1 center; corners = stone
+	for( local.row = 0; local.row < 2; local.row++ ){
+		for( local.c = -2; local.c <= 2; local.c++ ){
+			if( local.row == 1 && local.c == 0 ){ continue }
+			local.tik = local.wallTik
+			if( local.c == -2 || local.c == 2 ){ local.tik = local.trimTik }
+			local.bm[local.bn] = waitthread block local.tik local.origin local.base local.fwd local.rgt local.B 2 local.c local.row local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	// SIDES (ry +-2): fx -1..1, 2 rows, concrete
+	for( local.row = 0; local.row < 2; local.row++ ){
+		for( local.f = -1; local.f <= 1; local.f++ ){
+			local.bm[local.bn] = waitthread block local.wallTik local.origin local.base local.fwd local.rgt local.B local.f -2 local.row local.yaw local.bs
+			local.bn++
+			local.bm[local.bn] = waitthread block local.wallTik local.origin local.base local.fwd local.rgt local.B local.f 2 local.row local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	// BACK (fx -2): 2 rows, full-height doorway center; corners stone
+	for( local.row = 0; local.row < 2; local.row++ ){
+		for( local.c = -2; local.c <= 2; local.c++ ){
+			if( local.c == 0 ){ continue }
+			local.tik = local.wallTik
+			if( local.c == -2 || local.c == 2 ){ local.tik = local.trimTik }
+			local.bm[local.bn] = waitthread block local.tik local.origin local.base local.fwd local.rgt local.B -2 local.c local.row local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	// ROOF (row 2): 5x5 - stone rim, concrete center
+	for( local.f = -2; local.f <= 2; local.f++ ){
+		for( local.c = -2; local.c <= 2; local.c++ ){
+			local.tik = local.wallTik
+			if( local.f == -2 || local.f == 2 || local.c == -2 || local.c == 2 ){ local.tik = local.trimTik }
+			local.bm[local.bn] = waitthread block local.tik local.origin local.base local.fwd local.rgt local.B local.f local.c 2 local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	// sandbag flanks + ammo crate (scale with mult)
+	local.sp = local.origin + (vector_scale local.fwd (2.7 * local.B)) + (vector_scale local.rgt (1.4 * local.B))
+	local.sp[2] = local.base
+	local.e = waitthread piece "models/static/sandbag_large_semicircle.tik" local.sp (local.yaw + 180) (1.2 * local.mult)
+	local.e droptofloor
+	local.bm[local.bn] = local.e; local.bn++
+	local.sp = local.origin + (vector_scale local.fwd (2.7 * local.B)) - (vector_scale local.rgt (1.4 * local.B))
+	local.sp[2] = local.base
+	local.e = waitthread piece "models/static/sandbag_large_semicircle.tik" local.sp (local.yaw + 180) (1.2 * local.mult)
+	local.e droptofloor
+	local.bm[local.bn] = local.e; local.bn++
+	local.cp = local.origin - (vector_scale local.fwd (0.8 * local.B)) + (vector_scale local.rgt (0.9 * local.B))
+	local.cp[2] = local.base
+	local.e = waitthread piece "models/coop_build/box_crate_mg.tik" local.cp (local.yaw + 35) (2.0 * local.mult)
+	local.e droptofloor
+	local.bm[local.bn] = local.e; local.bn++
+
+	waitthread solidify local.bm local.bn
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "bunker_pillbox"		//[agent 07-21] BLUEPRINT registry: removable as a unit
+	println( "^~^~^ BUNKER pillbox: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
+}end
+
+//=========================================================================
+bunker_nest local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.s1 = waitthread measure local.origin
+	local.bs = 4.0 * local.mult
+	local.B  = local.s1 * local.bs
+	local.base = waitthread groundz local.origin
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.ra = ( 0 0 0 )
+	local.ra[1] = local.yaw - 90
+	local.rgt = angles_toforward local.ra
+
+	local.bagTik = "models/coop_build/box_sandbag.tik"
+
+	local.bn = 0
+	// chest-high sandbag front (fx +1): 5 cols
+	for( local.c = -2; local.c <= 2; local.c++ ){
+		local.bm[local.bn] = waitthread block local.bagTik local.origin local.base local.fwd local.rgt local.B 1 local.c 0 local.yaw local.bs
+		local.bn++
+	}
+	waitframe
+	// short sandbag sides
+	for( local.f = -1; local.f <= 0; local.f++ ){
+		local.bm[local.bn] = waitthread block local.bagTik local.origin local.base local.fwd local.rgt local.B local.f -2 0 local.yaw local.bs
+		local.bn++
+		local.bm[local.bn] = waitthread block local.bagTik local.origin local.base local.fwd local.rgt local.B local.f 2 0 local.yaw local.bs
+		local.bn++
+	}
+	waitframe
+	local.cp = local.origin - (vector_scale local.fwd (0.6 * local.B))
+	local.cp[2] = local.base
+	local.e = waitthread piece "models/coop_build/box_crate_mg.tik" local.cp (local.yaw - 25) (2.0 * local.mult)
+	local.e droptofloor
+	local.bm[local.bn] = local.e; local.bn++
+
+	waitthread solidify local.bm local.bn
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "bunker_nest"		//[agent 07-21] BLUEPRINT registry: removable as a unit
+	println( "^~^~^ BUNKER nest: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
+}end
+
+//=========================================================================
+bunker_wall local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.s1 = waitthread measure local.origin
+	local.bs = 4.0 * local.mult
+	local.B  = local.s1 * local.bs
+	local.base = waitthread groundz local.origin
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.ra = ( 0 0 0 )
+	local.ra[1] = local.yaw - 90
+	local.rgt = angles_toforward local.ra
+
+	local.stoneTik = "models/coop_build/box_stone.tik"
+
+	local.bn = 0
+	local.batch = 0
+	// 6 long x 2 high stone rampart, PERPENDICULAR to facing
+	for( local.row = 0; local.row < 2; local.row++ ){
+		for( local.c = 0; local.c < 6; local.c++ ){
+			local.ry = local.c - 2.5
+			local.bm[local.bn] = waitthread block local.stoneTik local.origin local.base local.fwd local.rgt local.B 0 local.ry local.row local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	waitthread solidify local.bm local.bn
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "bunker_wall"		//[agent 07-21] BLUEPRINT registry: removable as a unit
+	println( "^~^~^ BUNKER wall: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
+}end
+
+//=========================================================================
+bunker_tower local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.s1 = waitthread measure local.origin
+	local.bs = 4.0 * local.mult
+	local.B  = local.s1 * local.bs
+	local.base = waitthread groundz local.origin
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.ra = ( 0 0 0 )
+	local.ra[1] = local.yaw - 90
+	local.rgt = angles_toforward local.ra
+
+	local.brickTik = "models/coop_build/box_brick.tik"
+	local.stoneTik = "models/coop_build/box_stone.tik"
+
+	local.bn = 0
+	local.batch = 0
+	// brick column 2x2, 3 rows
+	for( local.row = 0; local.row < 3; local.row++ ){
+		for( local.f = 0; local.f <= 1; local.f++ ){
+			for( local.c = 0; local.c <= 1; local.c++ ){
+				local.ry = local.c - 0.5
+				local.fx = local.f - 0.5
+				local.bm[local.bn] = waitthread block local.brickTik local.origin local.base local.fwd local.rgt local.B local.fx local.ry local.row local.yaw local.bs
+				local.bn++
+				local.batch++
+				if( local.batch >= 8 ){ local.batch = 0; waitframe }
+			}
+		}
+	}
+	// stone 3x3 platform at row 3
+	for( local.f = -1; local.f <= 1; local.f++ ){
+		for( local.c = -1; local.c <= 1; local.c++ ){
+			local.bm[local.bn] = waitthread block local.stoneTik local.origin local.base local.fwd local.rgt local.B local.f local.c 3 local.yaw local.bs
+			local.bn++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+	}
+	// jumpable stacked-step stair up the BACK: half-scale stone columns, step k = k half-blocks
+	local.hb = local.bs * 0.5
+	local.k = 1
+	while( local.k <= 7 ){
+		local.sy = (local.k * 0.55) - 2.2
+		local.j = 0
+		while( local.j < local.k ){
+			local.pos = local.origin - (vector_scale local.fwd (1.6 * local.B)) + (vector_scale local.rgt (local.sy * local.B))
+			local.pos[2] = local.base + (local.j * local.B * 0.5) + (local.B * 0.25)
+			local.bm[local.bn] = waitthread piece local.stoneTik local.pos local.yaw local.hb
+			local.bn++
+			local.j++
+			local.batch++
+			if( local.batch >= 8 ){ local.batch = 0; waitframe }
+		}
+		local.k++
+	}
+	waitthread solidify local.bm local.bn
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "bunker_tower"		//[agent 07-21] BLUEPRINT registry: removable as a unit
+	println( "^~^~^ BUNKER tower: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
+}end

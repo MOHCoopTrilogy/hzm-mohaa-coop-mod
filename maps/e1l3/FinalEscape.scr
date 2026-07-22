@@ -697,6 +697,16 @@ getUniform:
 	}
 	//chrissstrahl - coop handle
 	else{
+		//[user 07-19] PAPERS-ONLY DISGUISE: snapshot the map's weapon loadout BEFORE it is stripped so
+		//courtyard.scr::enableEnemyOnAll can re-arm everyone the instant cover breaks. Copy
+		//element-by-element - never alias the live level array.
+		level.coop_e1l3RestoreWeapons = NIL
+		if( level.coop_weaponLoadout != NIL ){
+			for (local.rw = 1; local.rw <= level.coop_weaponLoadout.size; local.rw++){
+				level.coop_e1l3RestoreWeapons[local.rw] = level.coop_weaponLoadout[local.rw]
+			}
+		}
+
 		//take all weapons
 		//[202][hotfix] Smithy
 		if (!level.coop_e1l3Save){
@@ -709,23 +719,28 @@ getUniform:
 			thread game.replace::takePlayerWeapon models/weapons/m2frag_grenade_sp_start.tik
 			thread game.replace::ammo "grenade" 0
 			thread game.replace::ammo "agrenade" 0
-				
-			//[200] Smithy - give them the weapons
-			//waitframe
-			//iprintlnbold_noloc "********************* weapons/silencedpistol.tik HIT FOR COOP_SAVE !!!!! !!!! !!!!!"
-			thread coop_mod/replace.scr::givePlayerWeapon "weapons/silencedpistol.tik" NIL "all" 0.5 //[200] Smithy - give current and future players the pistol and use it
-			thread coop_mod/replace.scr::ammo "pistol" 16
+
+			//[user 07-19] PAPERS-ONLY DISGUISE: the silenced-pistol give was REMOVED here. Coop players
+			//now carry ONLY the papers during the escape - no weapon to accidentally draw and blow the
+			//disguise. The pistol is NOT scripted for any stealth kill or event (papers-showing is a
+			//separate primaryfire path via itemhandler.scr::enableClickablePapers), so removing it is safe.
 		}
 
-		//force papers to inventory
-		//level.coop_forcePrimary = "models/items/papers.tik" //[200] Smithy - not needed now
-		//level.coop_forceInventory = "models/items/papers.tik"
-		//level.coop_forceSecondary = "models/items/papers.tik"
-		//waitframe
+		//[user 07-19] PAPERS-ONLY DISGUISE: lock out weapons for every current AND future spawn. With
+		//this set, itemhandler.scr::managePlayerInventory early-exits before granting any weapon, so
+		//respawn / spectate-return land empty-handed (papers only). Cleared in courtyard::enableEnemyOnAll.
+		level.coop_noWeapon = game.true
+		//[user 07-19] PAPERS-ONLY DISGUISE: force the papers to be DRAWN in-hand on every spawn
+		//(main.scr::itemGetAll reads this flag) so players hold papers instead of empty hands.
+		level.coop_forcePapersEquip = game.true
 
 		//give papers to all players
 		thread coop_mod/replace.scr::item "models/items/papers.tik" 0
-				
+		//[user 07-19] register papers as the active mission item + flag every connected player so the
+		//clickable "show papers" (itemhandler.scr::enableClickablePapers -> use level.coop_itemPapers)
+		//works. Deterministic (waitthread) so level.coop_itemPapers is set before we force-equip below.
+		waitthread coop_mod/itemhandler.scr::givePapersFlagToAll "models/items/papers.tik"
+
 		//chrissstrahl - make ai ignore players, i think this is the only way for stealth
 		//thread coop_mod/replace.scr::notarget 1
 		//thread coop_mod/replace.scr::threatbias ignoreme //[200] Smithy - not needed now
@@ -755,6 +770,19 @@ getUniform:
 
 	fadein 1 0 0 0 1
 	waitthread global/items.scr::add_item "papers_level1" noMessage
+
+	//[user 07-19] PAPERS-ONLY DISGUISE: draw the papers in-hand NOW for everyone already connected.
+	//Respawns / spectate-returns / late-joiners are covered by main.scr::itemGetAll's coop_forcePapersEquip hook.
+	if(level.gametype != 0){
+		for (local.pf = 1; local.pf <= $player.size; local.pf++){
+			local.pfp = $player[local.pf]
+			if( local.pfp != NULL && isAlive local.pfp && local.pfp.dmteam != "spectator" ){
+				local.pfp.flags["coop_hasPapers"] = game.true
+				local.pfp thread coop_mod/main.scr::forcePapersInHand
+			}
+		}
+	}
+
 	$clausFullyDisguised waittill trigger
 
 	//chrissstrahl - keep for sp

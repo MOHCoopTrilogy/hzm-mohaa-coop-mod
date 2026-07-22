@@ -26,9 +26,21 @@ coop_tinnitus_monitor local.player:{
 				local.nextok = level.time + 3		// one ring per blast (no re-trigger for 3s)
 			}
 			local.last = local.h
+
+			// BLAST-PROXIMITY ping from the engine: RadiusDamage sets self.coop_blastPing = closeness (0..1) for
+			// ANY explosion within coop_tinnitusBlastRange, even a near-miss / behind cover / one that dealt no
+			// damage. Ring scaled by closeness. Shares the 3s cooldown so a direct hit and its own blast wave
+			// don't double up. (coop_bf_t-style NIL guard - do NOT compare an unset field to a number.)
+			local.ping = local.player.coop_blastPing
+			if( int( getcvar( "coop_tinnitusBlast" ) ) && local.ping != NIL && local.ping > 0 && level.time >= local.nextok ){
+				local.player thread coop_tinnitus_triggerBlast local.ping
+				local.nextok = level.time + 3
+			}
 		} else {
 			local.last = local.player.health
 		}
+		// ALWAYS consume the engine ping so a stale value never re-fires a frame later
+		if( local.player != NULL && local.player.coop_blastPing != NIL ){ local.player.coop_blastPing = 0 }
 		waitframe
 	}
 }end
@@ -68,6 +80,62 @@ coop_tinnitus_trigger:{
 	wait local.step
 	if( self == NULL ){ end }
 	self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+}end
+
+
+//=========================================================================
+coop_tinnitus_triggerBlast local.close:{
+//=========================================================================
+	// self = a player a blast just went off NEAR (local.close = 0..1 closeness from the engine RadiusDamage
+	// proximity ping; 1 = point-blank). The ring ALWAYS plays; a close blast (>= coop_tinnitusBlastFull) also
+	// gets the 10s shellshock concussion wash and a deeper/longer world-SFX duck, a far near-miss just a light
+	// quick duck. s_volume steps are LITERAL strings (no float-cvar math - script coercion gotcha).
+	if( self == NULL ){ end }
+	if( local.close == NIL ){ local.close = 0.5 }
+
+	local.full = getcvar( "coop_tinnitusBlastFull" )
+	if( local.full == "" ){ local.full = 0.5 } else { local.full = float( local.full ) }
+
+	self playlocalsound coop_tinnitus_ring
+
+	// NEAR blast: layer the concussion wash, like a big direct hit (own 10s gate so a 2nd blast keeps washing)
+	if( local.close >= local.full ){
+		if( self.flags["coop_shellshockUntil"] == NIL || level.time >= self.flags["coop_shellshockUntil"] ){
+			self.flags["coop_shellshockUntil"] = ( level.time + 10 )
+			self playlocalsound coop_shellshock
+		}
+	}
+
+	// muffle is optional - ring-only if coop_tinnitusMuffle is 0
+	if( int( getcvar( "coop_tinnitusMuffle" ) ) == 0 ){ end }
+
+	local.dur = int( getcvar( "coop_tinnitusTime" ) )
+	if( local.dur <= 0 ){ local.dur = 4 }
+
+	if( local.close >= local.full ){
+		// deep, full-length duck (point-blank)
+		local.step = local.dur * 0.33
+		self stufftext "s_volume 0.50"
+		wait local.step
+		if( self == NULL ){ end }
+		self stufftext "s_volume 0.68"
+		wait local.step
+		if( self == NULL ){ end }
+		self stufftext "s_volume 0.82"
+		wait local.step
+		if( self == NULL ){ end }
+		self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+	} else {
+		// light, quick duck (farther near-miss)
+		local.step = local.dur * 0.25
+		self stufftext "s_volume 0.72"
+		wait local.step
+		if( self == NULL ){ end }
+		self stufftext "s_volume 0.85"
+		wait local.step
+		if( self == NULL ){ end }
+		self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+	}
 }end
 
 

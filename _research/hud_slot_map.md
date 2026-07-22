@@ -26,23 +26,26 @@ import struct. This is the **authoritative allocation** for the coop mod.
 | 62-75     | **XP system**                           | xp.scr                           | gain popup 62-69, promo ceremony 70-73, micro popup 73-75; **debrief card reuses 62-71 SEQUENTIALLY** (gated by `coop_xp_summaryActive` — see bug-553) |
 | 76-78     | challenge completion toast              | challenges.scr                   | |
 | 84-87     | challenge progress popup                | challenges.scr                   | |
-| 112-114   | lobby roster / help / countdown         | lobby.scr                        | fade-exempt persistent-UI range (>=100) |
+| 100-114   | lobby roster (100-111, 3 per row x 4 rows) + help (112-113) + countdown (114) | lobby.scr | fade-exempt persistent-UI range (>=100); wiped 100-114 on lobby end |
 | 115-116   | briefing / lobby ready gate             | readygate.scr                    | |
-| 150-155   | challenge service-record panel          | challenges.scr                   | menu-time only |
-| 174       | challenge SR + lobby UI                  | challenges.scr, lobbyui.scr      | menu/lobby-time only — never concurrent |
-| 156-165, 175-215 | **script-drawn objectives panel** (word-wrap, styled like the old URC menu) | objectives.scr | coop_objPanel 1; grey plates 156(title bar)+158-165(row plates), separator 157, title text 175, checkboxes 176-183, wrapped text 184-215 |
+| 117-126   | **lobby NEW UNLOCKS list** (header 117, 8 lines 118-125, "+N more" 126) | lobby.scr (lobbyUnlockList), fed by challenges.scr | lobby-time only; fade-exempt; wiped on lobby end |
+| 127-134   | **debrief "UNLOCKED THIS MISSION" list** (header 127, 6 lines 128-133, "+N more" 134) | xp.scr (xp_card_unlocks), fed by challenges.scr (per-map accumulator) | MISSION-END only, co-displays WITH the debrief card 62-73; fade-exempt (>=100); wiped when the card ends. Distinct from the lobby list 117-126 (never concurrent) |
+| 150-174   | challenge service-record panel (chrome 150-155, row names 156-173, footer 174) | challenges.scr, lobbyui.scr (174) | menu/lobby-time only — shares 156-173 with the mission-time objectives panel, never concurrent |
+| 156-165, 175-215 | **script-drawn objectives panel** (word-wrap, styled like the old URC menu) | objectives.scr | coop_objPanel 1; grey plates 156(title bar)+158-165(row plates), separator 157, title text 175, checkboxes 176-183, wrapped text 184-215; MISSION-time only (menu-time SR panel reuses these numbers) |
+| 196-249   | challenge SR panel progress bars (tracks 196-213, fills 214-231, counts 232-249) | challenges.scr | menu/lobby-time only — overlaps objectives 196-215 by the same never-concurrent gating |
 | 251-253   | lobby UI cursor / misc                  | lobbyui.scr                      | |
 
-## Free ranges (~180 slots)
+## Free ranges
 
-`2-9 · 11-19 · 21-26 · 30 · 48-49 · 60 · 79-83 · 88-111 · 117-149 · 166-173 · 216-250 · 254-255`
+`2-9 · 11-19 · 21-26 · 30 · 48-49 · 60 · 79-83 · 88-99 · 135-149 · 250 · 254-255`
+
+(156-249 are double-booked mission-time vs menu/lobby-time — see rows above; do not add a third tenant.)
 
 ## Reserved for the next features (claim top-down from here)
 
 - **88-99** — next feature's exclusive block
-- **100-111** — reserved (persistent-UI range, >=100 is HUD-fade-exempt like the lobby)
-- **117-149** — mid overlays
-- **200-250** — large transient overlays
+- **135-149** — mid overlays (fade-exempt >=100) (127-134 now taken by the debrief unlock list)
+- **250, 254-255** — spares
 
 ## Rules
 

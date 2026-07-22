@@ -29,6 +29,25 @@ main:{
 	level.coop_hasCallback["coop_playerJustLeft"] = 1
 	level.coop_hasCallback["coop_playerJustRespawned"] = 1
 
+	//HZM coop bug-946 - the artillery plateau is criss-crossed by retail SP boundary
+	//playerclip (full-map trace census + exact BSP brush extraction 2026-07-20: a diagonal
+	//fence of ~27 large clip volumes across open ground = the "invisible walls" reports;
+	//one even covers the officer anchor corner). These zones tell the engine to ignore
+	//PLAYERCLIP while a player is inside them; visible rocks/fences stay solid. Zone 1 =
+	//plateau web (high band, excludes the valley's visible barbed-wire fences at z<400).
+	//Zone 2 = NE descent tail. Verified vs brush data: all 27 web brushes contained, 0
+	//visible fences included; only intended boundary clip remains (SW rim, E valley wall,
+	//NW summit crown).
+	//Six zones (bug-949, from the player's wall-probe trail 2026-07-21 + brush data):
+	//plateau web, NE descent, SW ascent (incl. nodraw/bspindleclip FENCE brushes - the
+	//"silent" wall species; zones now strip FENCE too), canyon west path, artillery3
+	//south canyon, tank road north edge. Actors also drop MONSTERCLIP inside (bug-949).
+	//[07-21 pm] ZONES RETIRED (bug-951): region-based mask stripping also removed the
+	//map-boundary clip in the canyons = players clipped out of bounds. Replaced by exact
+	//brush surgery: cmpatch/e1l2.txt lists 74 probe-confirmed fence brushes the engine
+	//neutralizes at collision load (cm_load.c). Boundary clip fully restored.
+	setcvar "coop_clipStripZones" ""
+
 	/* chrissstrahl - we don't need that
 	println "-----------------------------------------------"
 	println "-----------------------------------------------"
@@ -46,8 +65,15 @@ main:{
 
 	//chrissstrahl - coop compatible
 	waitthread coop_mod/replace.scr::waitForPlayer
+	println "^~^~^ E1L2MAIN wfp_done"
+
+	thread coop_mod/coop_placements.scr::e1l2	//[user 07-19] baked build-mode cover objects (build_e1l2.dat); thread self-gates on level.coop_introHandoffDone so cover spawns AFTER the on-rails intro (else the intro warp/entity churn lost them), not during it
+	//[user 07-21] auto-spawn demo pillbox REMOVED (user verdict: "kinda shit") - the four
+	//composed structures remain placeable on demand via build mode cat 41 (bunker.scr).
+	println "^~^~^ E1L2MAIN placements_hooked"
 
 	waitthread maps/e1l2/Intro.scr::InitIntro
+	println "^~^~^ E1L2MAIN initintro_done"
 	waitthread maps/e1l2/Artillery.scr::InitArtillery
 	waitthread maps/e1l2/Crab.scr::InitCrab
 	waitthread maps/e1l2/Hideout.scr::InitHideout
@@ -68,6 +94,7 @@ main:{
 	fadein 5.0 0 0 0 1
 
 	waitthread InitLevel
+	println "^~^~^ E1L2MAIN initlevel_done"
 
 	//chrissstrahl - manage spawnpoints at mines
 	thread coop_updateSpawn2
@@ -76,6 +103,7 @@ main:{
 
 	thread startMusic_e1l2_main
 	waitthread maps/e1l2/Intro.scr::DoIntro
+	println "^~^~^ E1L2MAIN dointro_done"
 	waitthread maps/e1l2/Artillery.scr::ObjectiveArtillery
 	waitthread global/objectives.scr::add_objectives level.ObjDestroyArtillery 3 "Destroy Enemy Artillery"
 	waitthread global/objectives.scr::add_objectives level.ObjEscortColumn 2 level.ObjEscortColumnText $commander
@@ -323,6 +351,11 @@ coop_updateSpawn5:{
 	//2128 -4720 544 barricade2 after artillery
 	//3760 -3248 544 barricade3 after artillery
 	// after barricade3
+
+	//[E-04] hideout handoff - e1l2_update5 now returns once the convoy stops (level.crabdead==1),
+	//so chain into coop_updateSpawn6. This unpins respawns from the parked minesweeper tank and
+	//re-enables the spawn warper (e1l2_update6 sets level.coop_disableSpawnWarper = game.false).
+	thread coop_updateSpawn6
 }end
 
 //hideout

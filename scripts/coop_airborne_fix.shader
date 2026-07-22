@@ -18,3 +18,16 @@ air_helm
 // shader NAME lost the race (HRRTM's allied_bob_pack.shader loads later and, via ScanAndLoadShaderFiles'
 // reverse concatenation, wins the duplicate name). The fix now lives in a whole-file override:
 // scripts/allied_bob_pack.shader (coop pk3 mounts after HRRTM -> FS de-dupes to our copy). See bug-499.
+
+// HZM bug-922: the chest/shoulder first-aid pouch (dmedipack.skd). Rounds 1-4 fought over the
+// dday_medipack-1 NAME; the black pouch still shaded like it had a lit default shader, proving our
+// def never won at runtime. This name + texture path exist ONLY in the coop pk3 - nothing can race
+// or shadow them. rgbGen identity because the skd's normals are bad (spherical lighting -> black).
+coop_dmedipack
+{
+	qer_editorimage textures/models/coop_dmedipack.tga
+	{
+		map textures/models/coop_dmedipack.tga
+		rgbGen identity
+	}
+}

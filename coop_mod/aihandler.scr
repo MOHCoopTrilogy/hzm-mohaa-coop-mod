@@ -100,14 +100,25 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 	self waittill death 				//'death' event is unregistered if an AI is killed or if they are removed
 
-	thread coop_mod/deathvox.scr::play self 1	//[208] HZM coop - varied death voice + mute native German/Italian death VO (every AI death)
-
 	waitframe 							//[200] Smithy - fixes NULL entities in array and other abnormalities
 
 	thread addKillToPlayer
 	thread removeActorFromArray
 
 	if (!self){ end }
+
+	//[209] HZM coop - DEATH VOICE fires HERE (past the waitframe + self-null guard), NOT the instant the
+	//'death' event resumes. Engine truth (openmohaa actor.cpp Actor::Remove, which BOTH `delete` and
+	//`remove` route to): removing a LIVE actor sets health=0 + Unregister(STRING_DEATH) - i.e. it fires
+	//this very `waittill death` for a NON-combat REMOVAL (m1l1 intro 'walker' patrol self-deletes after
+	//walking; ~27 maps dispose of scenic/intro/cutscene actors the same way) - then Delete()s the entity
+	//that SAME frame. A genuine kill instead leaves a persistent CORPSE. So an actor that SURVIVES the
+	//waitframe above == a real death (voice it); a removed actor is already gone (self==NULL, ended above)
+	//== stays silent. Preserves every combat/scripted KILL voice; kills the "random death grunts at level
+	//start". (A health test can't tell them apart - Actor::Remove zeroes health on removal too.)
+	thread coop_mod/deathvox.scr::play self 1	//[208] HZM coop - varied death voice + mute native German/Italian death VO (real deaths only)
+
+	thread coop_mod/gurgle.scr::play self		//[209] HZM coop - occasional subtle wet bleed-out gurgle near this fresh corpse (real deaths only - past the same bug-822 guard)
 
 	thread coop_mod/itemhandler.scr::enableWeapon 		//[200] Smithy - make it so their weapon can now be triggered (thus picked up)
 
@@ -174,6 +185,11 @@ coop_tryDuplicateActor:{
 	if( local.ohealth == NIL || local.ohealth <= 0 || local.ohealth >= 1000 ){ local.ohealth = 100 }
 	local.oorigin = self.origin
 	local.oangles = self.angles
+	// HZM coop [configstring-churn]: snapshot the parent's RESOLVED head model + head skin so the replica can
+	// reuse the parent's already-registered model configstring instead of the engine minting a fresh RANDOM
+	// head/skin combo (a new CS_MODELS slot) for every clone. Getter returns "" if unset - gated on the set side.
+	local.ohead = self.headmodel
+	local.oskin = self.headskin
 
 	local.made = 0
 	local.i = 0
@@ -181,7 +197,7 @@ coop_tryDuplicateActor:{
 		// live-actor hardcap so a full lobby + duplication can't overflow the entity budget
 		if( level.coop_aiScaleHardCap != NIL && level.coop_actorArray["german"] != NIL && level.coop_actorArray["german"].size >= level.coop_aiScaleHardCap ){ break }
 		if( (randomint 100) < local.chance ){
-			thread coop_spawnReplica local.omodel local.ogun local.oacc local.ohealth local.oorigin local.oangles local.made
+			thread coop_spawnReplica local.omodel local.ogun local.oacc local.ohealth local.oorigin local.oangles local.made local.ohead local.oskin
 			local.made++
 			wait 0.2 		// stagger successive copies so they don't pop simultaneously
 		}
@@ -194,7 +210,7 @@ coop_tryDuplicateActor:{
 //then forceactivate + attackplayer. The clone's own actorHandler still runs the full coop pipeline
 //(pain handler, accuracy scaling, array registration) - only the duplication sub-step is skipped.
 //=========================================================================
-coop_spawnReplica local.model local.gun local.acc local.health local.origin local.angles local.idx:{
+coop_spawnReplica local.model local.gun local.acc local.health local.origin local.angles local.idx local.hm local.hs:{
 //=========================================================================
 	if( local.model == NIL ){ end }
 	local.spreadidx = local.idx + 1
@@ -203,6 +219,12 @@ coop_spawnReplica local.model local.gun local.acc local.health local.origin loca
 	local.r = spawn local.model
 	if( local.r == NULL ){ end }
 	local.r.flags["coop_isReplica"] = 1		// CRITICAL recursion guard - set BEFORE this thread yields
+	// HZM coop [configstring-churn]: pin the clone's head model + head skin to the PARENT's resolved pick BEFORE
+	// the gun command (whose setModel bakes the weapon+head+skin configstring). With both pinned, the clone's
+	// final model string equals the parent's already-registered one - dedupes, no new CS_MODELS slot minted.
+	// Gated on non-empty so a parent with an unresolved pick just falls back to the old random behaviour.
+	if( local.hm != NIL && local.hm != "" ){ local.r.headmodel = local.hm }
+	if( local.hs != NIL && local.hs != "" ){ local.r.headskin = local.hs }
 	local.r.origin = local.gnd
 	local.r droptofloor
 	local.r.angles = local.angles
@@ -233,7 +255,9 @@ coop_reinf_brain:{
 		while( local.i <= local.arr.size ){
 			local.a = local.arr[local.i]
 			if( local.a != NULL && isAlive local.a ){
-				if( local.a.flags["coop_personality_set"] == 1 && local.a.flags["coop_hurt_covered"] != 1 ){
+				if( local.a.flags["coop_personality_set"] == 1 && local.a.flags["coop_hurt_covered"] != 1 && local.a.flags["coop_limping"] != 1 ){
+					//[user 2026-07-17] a committed wounded-limper (wounded.scr) is already withdrawing to a
+					//medkit - don't ALSO cover-seek + canteen-heal him here (they'd fight the same actor).
 					// real HP: pain-handler troops store it in coop_actorActualHealth (self.health is the
 					// 5000 buffer); coop_actorStopPainHandler troops use self.health directly.
 					local.hp = local.a.flags["coop_actorActualHealth"]
@@ -285,6 +309,7 @@ coop_trooper_canteen local.a:{
 	} else {
 		local.a.health = local.a.health + 60
 	}
+	local.a gore_reset 60	// HZM coop - gore tier 1: canteen heal credits the gore counter
 }end
 
 //[200] Smithy - new func
@@ -480,6 +505,10 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 		self.flags["coop_actorActualHealth"] = 100
 	}
 
+	//[user 2026-07-17] snapshot the real starting HP as the % denominator for the wounded-limp trigger
+	//(coop_mod/wounded.scr). self.health is about to be buffered to 5000 below, so it can't be used later.
+	self.flags["coop_woundedMaxHp"] = self.flags["coop_actorActualHealth"]
+
 	//we don't want anyone to kill him outright
 	self health 5000
 }end
@@ -591,6 +620,8 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 	//nope, not enough damage has been done
 	if(self.flags["coop_actorActualHealth"] > 0){
+		//[user 2026-07-17] survived the hit - maybe break off and limp to the furthest medkit (low HP + roll)
+		thread coop_mod/wounded.scr::coop_checkWoundedRetreat self
 		end
 	}
 
@@ -875,6 +906,9 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	if (!self){ end }
 	if (self.fact && self.fact.attacker && self.fact.attacker.classname == "Player"){
 		self.fact.attacker addkills 1
+		//[user 07-17] DDA kill tap (own counter - coop_xp_teamkills is XP-gated; director.scr windows this)
+		if( level.coop_dda_kills == NIL ){ level.coop_dda_kills = 0 }
+		level.coop_dda_kills++
 		// [302] HZM XP - kill + bonuses + assists (reads pain facts, class tag and assist ledger)
 		thread coop_mod/xp.scr::xp_ai_killed self self.fact.attacker
 		// [303] HZM CHALLENGES - weapon mastery + kill-type challenge progress (self-contained, guarded)

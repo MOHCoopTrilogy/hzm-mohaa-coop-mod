@@ -1,0 +1,227 @@
+//[user 2026-07-17] REACTIVE DIFFICULTY DIRECTOR - Phase 1 (plan: _research/director_dda_plan.md).
+//=========================================================================
+// Watches squad performance and quietly nudges pressure: up when they're steamrolling, off when
+// they're drowning. INVISIBLE - no HUD, no announcements; every adjustment reads as a plausible
+// event (the officer called more men / reinforcements thinned). A thin DYNAMIC layer on top of the
+// static player-count scaling - it only dials cvars that existing code already re-reads fresh:
+//   coop_officerWaveCooldown   (officer.scr reads per wave call)  - THE pacing lever + relax valve
+//   coop_officerSquadPer / coop_officerBattalionPer (wave sizes)  - "he called in more men"
+//   coop_aiScaleChance         (aihandler clone density, 2+ players only)
+// Never touches: player HP, coop_maxPlayerScalar (triple double-dial), stats of enemies already
+// in a firefight (levers affect FUTURE waves/spawns only by construction).
+//
+// EASE INDEX (EI) 0..1: 0 = squad struggling, 1 = facerolling. EWMA-smoothed pressure from:
+//   S1 downs/deaths in a rolling 60s window  (stamps: dbno.scr::dbno_enter + player.scr true death)
+//   S2 time since the last down              (quiet streak = too easy)
+//   S3 average team HP fraction              (everyone healthy = too easy; everyone red = ease off)
+//   S4 team kills/min                        (stamp: aihandler.scr::addKillToPlayer)
+//   S5 near-wipe -> SNAP EI to floor + forced relax valley (waves suppressed ~40s)
+// Asymmetric: eases off FAST (0.15/tick), ramps up SLOW (0.05/tick) - the death-spiral guard.
+// Deadband so normal fluctuation moves nothing. Floor/ceiling so it's never crushing nor trivial.
+//
+// CAMPAIGN-PERSISTENT (user decision 07-17): EI seeds from the ARCHIVED cvar coop_ddaSkill at map
+// start and writes back every tick - the squad's skill estimate carries across maps AND sessions.
+//
+// cvars (defaults seeded in autoexec.cfg; in-code fallbacks match):
+//   coop_ddaEnabled 0 (SHIP DEFAULT OFF - flip to 1 to run; safe to toggle live)
+//   coop_ddaBias 0 (-1 easier .. +1 harder), coop_ddaSkill 0.5 (the persistent estimate)
+//   coop_ddaCadence 10, coop_ddaSmooth 0.15, coop_ddaBand 0.1
+//   coop_ddaEaseRate 0.15, coop_ddaRampRate 0.05, coop_ddaFloor 0.15, coop_ddaCeiling 0.85
+//   coop_ddaValley 40, coop_ddaQuietPar 120, coop_ddaHpPar 0.6, coop_ddaKillPar 8, coop_ddaDownPar 2
+//   coop_ddaDebug 0 (console-only EI/lever trace)
+//=========================================================================
+
+director_main:{
+//=========================================================================
+	// wait for the mission to actually start (first player active) - clean elapsed anchor
+	while( level.coop_gameStartedAt == NIL ){ wait 2 }
+
+	// counters the hook stamps feed (guarded init - stamps may have fired already)
+	if( level.coop_dda_kills == NIL ){ level.coop_dda_kills = 0 }
+	if( level.coop_dda_downs == NIL ){ level.coop_dda_downs = 0 }
+	if( level.coop_dda_lastDownTime == NIL ){ level.coop_dda_lastDownTime = level.time }
+
+	// 6-slot rings = rolling 60s window at the 10s cadence
+	local.ring = 6
+	local.ki = 0
+	local.prevKills = level.coop_dda_kills
+	local.prevDowns = level.coop_dda_downs
+	for( local.i = 0; local.i < local.ring; local.i++ ){
+		level.coop_dda_kwin[local.i] = 0
+		level.coop_dda_dwin[local.i] = 0
+	}
+
+	// CAMPAIGN-PERSISTENT seed: archived coop_ddaSkill carries the squad estimate across maps/sessions
+	local.ei = waitthread dda_getf "coop_ddaSkill" 0.5
+	local.pSmooth = 0
+	local.lastDir = 0
+	local.valleyUntil = 0
+	local.wipeLatched = 0
+	local.wasEnabled = 0
+
+	while( 1 ){
+		local.cad = waitthread dda_getf "coop_ddaCadence" 10
+		if( local.cad < 5 ){ local.cad = 5 }
+		wait local.cad
+
+		// live-toggle gate: when off, restore the levers to their code fallbacks ONCE and idle
+		if( getcvar "coop_ddaEnabled" != "1" ){
+			if( local.wasEnabled == 1 ){ waitthread dda_releaseLevers; local.wasEnabled = 0 }
+			continue
+		}
+		local.wasEnabled = 1
+
+		local.floor = waitthread dda_getf "coop_ddaFloor" 0.15
+		local.ceil  = waitthread dda_getf "coop_ddaCeiling" 0.85
+
+		// ---- census: active players, up players, avg HP fraction --------------------------
+		local.activeN = 0
+		local.upN = 0
+		local.hpSum = 0
+		local.hpN = 0
+		local.pi = 1
+		while( $player != NIL && local.pi <= $player.size ){
+			local.p = $player[local.pi]
+			if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
+				local.activeN++
+				if( isAlive local.p && local.p.flags["coop_dbno_active"] != 1 ){
+					local.upN++
+					local.maxhp = level.coop_health
+					if( local.maxhp == NIL || local.maxhp <= 0 ){ local.maxhp = 100 }
+					local.frac = local.p.health / local.maxhp
+					if( local.frac > 1 ){ local.frac = 1 }
+					if( local.frac > 0 ){ local.hpSum = local.hpSum + local.frac; local.hpN++ }
+				}
+			}
+			local.pi++
+		}
+		if( local.activeN == 0 ){ continue }		// empty server - nothing to judge
+
+		// ---- rolling windows (kills + downs over the last 6 ticks) ------------------------
+		local.dk = level.coop_dda_kills - local.prevKills
+		local.dd = level.coop_dda_downs - local.prevDowns
+		local.prevKills = level.coop_dda_kills
+		local.prevDowns = level.coop_dda_downs
+		level.coop_dda_kwin[local.ki] = local.dk
+		level.coop_dda_dwin[local.ki] = local.dd
+		local.ki = (local.ki + 1) % 6
+		local.winKills = 0
+		local.winDowns = 0
+		for( local.i = 0; local.i < 6; local.i++ ){
+			local.winKills = local.winKills + level.coop_dda_kwin[local.i]
+			local.winDowns = local.winDowns + level.coop_dda_dwin[local.i]
+		}
+
+		// ---- S5 near-wipe: snap to floor + forced relax valley ----------------------------
+		if( local.upN == 0 ){
+			if( local.wipeLatched == 0 ){
+				local.wipeLatched = 1
+				local.ei = local.floor
+				local.valley = waitthread dda_getf "coop_ddaValley" 40
+				local.valleyUntil = level.time + local.valley
+				setcvar "coop_officerWaveCooldown" (int(local.valley))
+				setcvar "coop_aiScaleChance" 0
+				if( getcvar "coop_ddaDebug" == "1" ){ println ( "DDA: WIPE -> ei floor + valley " + local.valley + "s" ) }
+			}
+			setcvar "coop_ddaSkill" local.ei
+			continue
+		}
+		local.wipeLatched = 0
+
+		// ---- signals -> signed deviations (+ = too easy, - = too hard) --------------------
+		local.downPar = waitthread dda_getf "coop_ddaDownPar" 2
+		if( local.downPar < 1 ){ local.downPar = 1 }
+		local.dDown = 0 - (local.winDowns / (local.downPar * local.activeN))
+		if( local.dDown < -1 ){ local.dDown = -1 }
+
+		local.quietPar = waitthread dda_getf "coop_ddaQuietPar" 120
+		local.dQuiet = ((level.time - level.coop_dda_lastDownTime) - local.quietPar) / local.quietPar
+		if( local.dQuiet > 1 ){ local.dQuiet = 1 }
+		if( local.dQuiet < -1 ){ local.dQuiet = -1 }
+
+		local.dHP = 0
+		if( local.hpN > 0 ){
+			local.hpPar = waitthread dda_getf "coop_ddaHpPar" 0.6
+			local.dHP = ((local.hpSum / local.hpN) - local.hpPar) / local.hpPar
+			if( local.dHP > 1 ){ local.dHP = 1 }
+			if( local.dHP < -1 ){ local.dHP = -1 }
+		}
+
+		local.killPar = waitthread dda_getf "coop_ddaKillPar" 8
+		local.kpm = local.winKills		// 6 ticks x 10s = per minute already
+		local.dKill = (local.kpm - (local.killPar * local.activeN)) / (local.killPar * local.activeN)
+		if( local.dKill > 1 ){ local.dKill = 1 }
+		if( local.dKill < -1 ){ local.dKill = -1 }
+
+		// ---- weighted pressure + slight-hard bias -----------------------------------------
+		local.bias = waitthread dda_getf "coop_ddaBias" 0
+		local.pressure = (0.45 * local.dQuiet) + (0.3 * local.dHP) + (0.25 * local.dKill) + (1.0 * local.dDown)
+		local.pressure = local.pressure + (0 - 0.05) + (local.bias * 0.2)
+
+		local.alpha = waitthread dda_getf "coop_ddaSmooth" 0.15
+		local.pSmooth = local.pSmooth + (local.alpha * (local.pressure - local.pSmooth))
+
+		// ---- deadband + hysteresis (reversal needs 1.5x band) + asymmetric rate-limit -----
+		local.band = waitthread dda_getf "coop_ddaBand" 0.1
+		local.dir = 0
+		if( local.pSmooth > local.band ){ local.dir = 1 }
+		if( local.pSmooth < (0 - local.band) ){ local.dir = -1 }
+		if( local.dir != 0 && local.lastDir != 0 && local.dir != local.lastDir ){
+			if( local.pSmooth < (local.band * 1.5) && local.pSmooth > (0 - (local.band * 1.5)) ){ local.dir = 0 }
+		}
+		if( local.dir != 0 ){ local.lastDir = local.dir }
+
+		if( local.dir == 1 ){
+			local.ramp = waitthread dda_getf "coop_ddaRampRate" 0.05
+			local.step = local.pSmooth * local.ramp
+			if( local.step > local.ramp ){ local.step = local.ramp }
+			local.ei = local.ei + local.step
+		} else if( local.dir == -1 ){
+			local.ease = waitthread dda_getf "coop_ddaEaseRate" 0.15
+			local.step = (0 - local.pSmooth) * local.ease
+			if( local.step > local.ease ){ local.step = local.ease }
+			local.ei = local.ei - local.step
+		}
+		if( local.ei < local.floor ){ local.ei = local.floor }
+		if( local.ei > local.ceil ){ local.ei = local.ceil }
+
+		// CAMPAIGN-PERSISTENT write-back (archived cvar - survives map changes and sessions)
+		setcvar "coop_ddaSkill" local.ei
+
+		// ---- levers (skip while a wipe valley is active - it owns the cvars) --------------
+		if( level.time < local.valleyUntil ){ continue }
+		local.cd = 75 - (local.ei * 55)			// EI 0 -> 75s breathing room, EI 1 -> 20s relentless
+		setcvar "coop_officerWaveCooldown" (int(local.cd))
+		local.sq = 1 + int( local.ei * 2.49 )		// 1..3
+		setcvar "coop_officerSquadPer" local.sq
+		local.bt = 2 + int( local.ei * 3.49 )		// 2..5
+		setcvar "coop_officerBattalionPer" local.bt
+		local.ch = 30 + int( local.ei * 45 )		// 30..75
+		setcvar "coop_aiScaleChance" local.ch
+
+		if( getcvar "coop_ddaDebug" == "1" ){
+			println ( "DDA: ei=" + local.ei + " p=" + local.pSmooth + " downs60=" + local.winDowns + " kpm=" + local.kpm + " cd=" + int(local.cd) + " sq=" + local.sq + " bt=" + local.bt + " ch=" + local.ch )
+		}
+	}
+}end
+
+//=========================================================================
+// Restore every dialed lever to its in-code fallback (empty cvar) - used when
+// the director is toggled off live so the static baseline rules again.
+//=========================================================================
+dda_releaseLevers:{
+	setcvar "coop_officerWaveCooldown" ""
+	setcvar "coop_officerSquadPer" ""
+	setcvar "coop_officerBattalionPer" ""
+	setcvar "coop_aiScaleChance" ""
+}end
+
+//=========================================================================
+// float(getcvar) with a fallback for ""/unset/garbage.
+//=========================================================================
+dda_getf local.cv local.fb:{
+	local.s = getcvar local.cv
+	if( local.s == "" ){ end local.fb }
+	local.f = float( local.s )
+	end local.f
+}end

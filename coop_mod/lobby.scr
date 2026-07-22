@@ -142,6 +142,7 @@ lobbyMapMain:{
 	thread lobbyCamSway
 	thread lobbyAutoSpawnLoop
 	thread lobbyRoster
+	thread lobbyUnlockList
 	thread lobbyReadyWatch
 
 	// staging music. Precedence: the coop_lobbyMusic cvar (live override) wins; else a per-lobby track the
@@ -430,8 +431,15 @@ lobbyInputPoll:{
 		local.cmd = self.coop_lobbyInput
 		if( local.cmd != NIL && local.cmd != 0 ){
 			self.coop_lobbyInput = 0
-			if( local.cmd == 31 ){ self thread lobbySkinCycle 1 }
-			else if( local.cmd == 32 ){ self thread lobbySkinCycle -1 }
+			//[user 07-17] uniform switching moved to the ARMORY (Loadout menu) - the lobby A/D bridge
+			//no longer cycles skins (this was the missed second route; the name-bus route was closed
+			//in player.scr the same day). Rate-limited hint so A/D spam doesn't flood the screen.
+			if( local.cmd == 31 || local.cmd == 32 ){
+				if( self.coop_lobbySkinHintT == NIL || (level.time - self.coop_lobbySkinHintT) > 3 ){
+					self.coop_lobbySkinHintT = level.time
+					self iprintlnbold "Change your uniform in the ARMORY (Loadout menu)."
+				}
+			}
 			else if( local.cmd == 33 ){ self thread lobbyReadyToggle }
 		}
 		waitframe
@@ -495,16 +503,27 @@ lobbySkinCycle local.dir:{
 
 	local.idx = self.flags["coop_lobbySkinIdx"]
 	if( local.idx == NIL ){ local.idx = 1 }
-	local.idx = local.idx + local.dir
-	if( local.idx > local.n ){ local.idx = 1 }
-	if( local.idx < 1 ){ local.idx = local.n }
+	//[user 07-16] skip skins still locked behind challenge/rank unlocks. The 48 lobby-only extras are
+	//outside the gated set (cosmetic_gatedBuild) so they stay free; only the shared armory "premium"
+	//skins require earning - this closes the bypass where the lobby set dm_playermodel into the mission.
+	local.tries = 0
+	local.found = 0
+	while( local.tries < local.n ){
+		local.idx = local.idx + local.dir
+		if( local.idx > local.n ){ local.idx = 1 }
+		if( local.idx < 1 ){ local.idx = local.n }
+		if( waitthread coop_mod/helmet.scr::cosmetic_isUnlocked self ("models/player/" + level.coop_lobbySkins[local.idx] + ".tik") ){ local.found = 1; break }
+		local.tries = local.tries + 1
+	}
+	if( local.found == 0 ){ self iprintlnbold "No other skins unlocked yet."; end }
 	self.flags["coop_lobbySkinIdx"] = local.idx
 
 	local.skin = level.coop_lobbySkins[local.idx]
 	local.mdl = "models/player/" + local.skin + ".tik"
 
-	// the VISIBLE body is the mannequin - swap its model live
-	if( self.flags["coop_lobbyMannequin"] != NULL ){
+	// the VISIBLE body is the mannequin - swap its model live (NIL guard: an unassigned flag
+	// reads NIL, and NIL != NULL passes - see the helmet.scr mannequin fix, qconsole 07-20)
+	if( self.flags["coop_lobbyMannequin"] != NIL && self.flags["coop_lobbyMannequin"] != NULL ){
 		self.flags["coop_lobbyMannequin"] model local.mdl
 	}
 	// LOCK the choice as this player's default: seta dm_playermodel (CVAR_ARCHIVE|USERINFO) carries into the
@@ -547,7 +566,8 @@ lobbyAllReady:{
 }end local.all
 
 //=========================================================================
-// Squad ready-watch. When ALL connected players are ready, count down (coop_lobbyCountdown secs, default 10)
+// Squad ready-watch. When ALL connected players are ready, count down (coop_lobbyCountdown secs, default 5
+// [user 07-18]: was 10 - the post-ready launch countdown should be 5 seconds)
 // broadcast to every screen; if anyone un-readies the countdown aborts and resets. At 0, launch the campaign.
 // Started once from lobbyMapMain.
 //=========================================================================
@@ -558,7 +578,7 @@ lobbyReadyWatch:{
 		local.ready = waitthread lobbyAllReady
 		if( local.ready == 1 ){
 			local.secs = getcvar "coop_lobbyCountdown"
-			if( local.secs == "" ){ local.secs = "10" }
+			if( local.secs == "" ){ local.secs = "5" }	//[user 07-18] was 10: post-ready launch countdown = 5s
 			local.t = int( local.secs )
 			local.abort = 0
 			while( local.t > 0 && local.abort == 0 && level.coop_lobbyActive == 1 ){
@@ -628,6 +648,10 @@ lobbyLaunch:{
 		local.pl iprintlnbold "Launching campaign..."
 		local.pl coop_lobbyinput 0
 		local.pl stufftext "set cg_huddraw_force 0"
+		//[user 07-18] the NEW UNLOCKS list was on screen for the whole lobby stay - launching is the
+		//acknowledgment. Empty each player's pending queue (flag + session cvar + save file) so the
+		//next lobby starts clean; lobbyUnlockList wipes its slots on lobby end.
+		waitthread coop_mod/challenges.scr::chal_pend_clear local.pl
 	}
 	waitthread lobbyCountdownClear
 	level.coop_lobbyActive = 0		// stops the roster/help/input loops; lobbyRoster wipes slots 100-114 on exit
@@ -686,7 +710,7 @@ lobbyRoster:{
 			ihuddraw_align local.viewer 112 left top
 			ihuddraw_rect local.viewer 112 12 12 0 0
 			ihuddraw_font local.viewer 112 "verdana-12"
-			ihuddraw_string local.viewer 112 "A + D   Switch Uniform"
+			ihuddraw_string local.viewer 112 "Uniforms + Loadout: the ARMORY"
 			ihuddraw_color local.viewer 112 1 1 1
 			ihuddraw_alpha local.viewer 112 1
 
@@ -779,6 +803,110 @@ lobbyRoster:{
 	for( local.p = 1; local.p <= $player.size; local.p++ ){
 		if( $player[local.p] == NULL ){ continue }
 		for( local.s = 100; local.s <= 114; local.s++ ){
+			ihuddraw_alpha $player[local.p] local.s 0
+		}
+	}
+}end
+
+//=========================================================================
+//[user 07-18] LEFT-SIDE "NEW UNLOCKS" LIST - ihuddraw slots 117-126 (claimed in
+// _research/hud_slot_map.md; >= 100 = HUD-fade-exempt, clear of the roster 100-111,
+// help/countdown 112-114, readygate 115-116 and the SR panel 150-174/196-249).
+// Shows everything THIS player unlocked since their last lobby visit (challenge
+// rewards + rank-up grants - challenges.scr::chal_add_unlock queues the names and
+// persists them across the mission->lobby map change). PER-VIEWER: each player only
+// sees their own list. Small verdana-12 stack under the top-left help text: header +
+// up to 8 "New Unlock: <Name>" lines + a "+N more" overflow line. Stays up for the
+// whole lobby stay; lobbyLaunch empties the queue (chal_pend_clear) and this thread
+// wipes the slots when the lobby ends. Refresh loop = late joiners + live grants.
+//=========================================================================
+lobbyUnlockList:{
+//=========================================================================
+	while( level.coop_lobbyActive == 1 ){
+		for( local.v = 1; local.v <= $player.size; local.v++ ){
+			local.viewer = $player[local.v]
+			if( local.viewer == NULL ){ continue }
+
+			// the queue loads with the challenge save (chal_ensure). Not loaded yet (fresh joiner):
+			// kick the load off NON-blocking and try again next refresh - never stall the loop.
+			if( local.viewer.flags["coop_chal_loaded"] != 1 ){
+				thread coop_mod/challenges.scr::chal_ensure local.viewer
+				continue
+			}
+
+			local.pd = local.viewer.flags["coop_unlockPend"]
+			if( local.pd == NIL ){ local.pd = "" }
+
+			// split the "~"-separated names into up to 8 lines + an overflow count
+			local.n = 0
+			local.extra = 0
+			local.field = ""
+			local.i = 0
+			while( local.i <= local.pd.size ){
+				local.done = 0
+				if( local.i == local.pd.size ){ local.done = 1 }
+				else if( local.pd[local.i] == "~" ){ local.done = 1 }
+				if( local.done == 1 ){
+					if( local.field != "" ){
+						if( local.n < 8 ){ local.line[local.n] = local.field; local.n++ }
+						else { local.extra++ }
+					}
+					local.field = ""
+				} else {
+					local.field += local.pd[local.i]
+				}
+				local.i++
+			}
+
+			if( local.n <= 0 ){
+				for( local.s = 117; local.s <= 126; local.s++ ){ ihuddraw_alpha local.viewer local.s 0 }
+				continue
+			}
+
+			// header - sits below the two help lines (y=12/26), well above the roster rows (y=410+)
+			ihuddraw_virtualsize local.viewer 117 1
+			ihuddraw_align local.viewer 117 left top
+			ihuddraw_rect local.viewer 117 12 46 0 0
+			ihuddraw_font local.viewer 117 "verdana-12"
+			ihuddraw_string local.viewer 117 "NEW UNLOCKS"
+			ihuddraw_color local.viewer 117 1 0.85 0.4
+			ihuddraw_alpha local.viewer 117 0.9
+
+			for( local.j = 0; local.j < 8; local.j++ ){
+				local.s = 118 + local.j
+				if( local.j < local.n ){
+					local.ly = 60 + ( local.j * 14 )
+					ihuddraw_virtualsize local.viewer local.s 1
+					ihuddraw_align local.viewer local.s left top
+					ihuddraw_rect local.viewer local.s 12 local.ly 0 0
+					ihuddraw_font local.viewer local.s "verdana-12"
+					ihuddraw_string local.viewer local.s ( "New Unlock: " + local.line[local.j] )
+					ihuddraw_color local.viewer local.s 0.85 0.95 0.85
+					ihuddraw_alpha local.viewer local.s 0.9
+				} else {
+					ihuddraw_alpha local.viewer local.s 0
+				}
+			}
+
+			if( local.extra > 0 ){
+				ihuddraw_virtualsize local.viewer 126 1
+				ihuddraw_align local.viewer 126 left top
+				ihuddraw_rect local.viewer 126 12 172 0 0
+				ihuddraw_font local.viewer 126 "verdana-12"
+				ihuddraw_string local.viewer 126 ( "+" + local.extra + " more" )
+				ihuddraw_color local.viewer 126 0.7 0.8 0.7
+				ihuddraw_alpha local.viewer 126 0.9
+			} else {
+				ihuddraw_alpha local.viewer 126 0
+			}
+		}
+		wait 1
+	}
+
+	// lobby ended - wipe the whole list block so nothing bleeds into the launched mission
+	for( local.p = 1; local.p <= $player.size; local.p++ ){
+		if( $player[local.p] == NULL ){ continue }
+		for( local.s = 117; local.s <= 126; local.s++ ){
 			ihuddraw_alpha $player[local.p] local.s 0
 		}
 	}

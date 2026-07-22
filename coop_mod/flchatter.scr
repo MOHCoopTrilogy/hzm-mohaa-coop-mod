@@ -7,8 +7,16 @@
 // so it reads as that soldier shouting. Blends WITH the native chatter (nothing is muted);
 // the global cooldown keeps it from turning into noise.
 //
+// Occasionally (~25%, on its own longer cooldown) the bark is swapped for an MP TAUNT: German
+// AI jeer with the axis taunt pool, allied AI with the US pool (ubersound/coop_taunt.scr,
+// coop_taunt_de1..33 / coop_taunt_us1..29). bug-775: pools REBUILT 2026-07-18 - the original
+// wrappers copied retail alias lines whose WAVs were DELETED from the shipped paks (ghost
+// subtitles), so no taunt ever played. Only the surviving GRden/AMdfr _r_14/17/18/21 + _v_
+// victory-jeer files are aliased now.
+//
 //   coop_flchatter 1/0        = master on/off (default on)
 //   coop_flchatter_range      = max distance actor->nearest player (default 2200)
+//   coop_flchatDebug 1        = greppable ^~^~^ TAUNT trace of every roll/skip/play
 //
 // Actor registries are filled by aihandler.scr::actorHandler (every managed AI once, at setup).
 // Dead/removed entries stay in the arrays; the picker just retries a few random slots.
@@ -21,6 +29,7 @@ flchatter_init:{
 	level.coop_flchatDEn = 0
 	level.coop_flchatUSn = 0
 	level.coop_flchatCombat = 0 - 1000
+	level.coop_flchatTaunt = 0 - 1000		// last MP-taunt time; taunts get a longer cooldown than normal chatter
 
 	thread flchatter_combat_monitor
 	thread flchatter_loop
@@ -57,23 +66,64 @@ flchatter_loop:{
 	while( 1 ){
 		wait ( 7 + randomfloat( 9 ) )
 
-		if( getcvar( "coop_flchatter" ) == "0" ){ continue }
-		if( ( level.time - level.coop_flchatCombat ) > 8 ){ continue }	// only during/just after a fight
+		//[bug-775] opt-in greppable trace so silent-taunt reports come with evidence next time
+		local.dbg = 0
+		if( getcvar( "coop_flchatDebug" ) == "1" ){ local.dbg = 1 }
+
+		if( getcvar( "coop_flchatter" ) == "0" ){
+			if( local.dbg == 1 ){ println( "^~^~^ TAUNT skip: coop_flchatter is 0" ) }
+			continue
+		}
+		if( ( level.time - level.coop_flchatCombat ) > 8 ){	// only during/just after a fight
+			if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: no combat for " + ( level.time - level.coop_flchatCombat ) + "s" ) }
+			continue
+		}
 		if( $player == NULL || $player.size < 1 ){ continue }
 
 		local.range = 2200
 		if( getcvar( "coop_flchatter_range" ) != "" ){ local.range = float( getcvar( "coop_flchatter_range" ) ) }
 
+		// occasional MP taunt instead of a normal bark. [user 07-17] PER-SIDE frequency: the GERMANS
+		// jeer noticeably more often (45% roll / 12s cooldown - "make the axis use the taunts a
+		// little more often"), allied banter stays rarer (40% / 15s). Pools: coop_taunt_de1..33 /
+		// coop_taunt_us1..29 (ubersound/coop_taunt.scr, bug-775 rebuilt sizes).
+		local.taunt = 0
+
 		// 70% german enemy chatter, 30% allied bark (allied AI are rarer anyway)
 		if( randomfloat( 1 ) < 0.7 ){
+			if( randomfloat( 1 ) < 0.45 && ( level.time - level.coop_flchatTaunt ) > 12 ){ local.taunt = 1 }
 			local.speaker = waitthread flchatter_pick_de local.range
 			if( local.speaker != NULL ){
-				local.speaker playsound ( "coop_flvo_de" + ( ( randomint 90 ) + 1 ) )
+				if( local.taunt == 1 ){
+					level.coop_flchatTaunt = level.time
+					local.snd = ( "coop_taunt_de" + ( ( randomint 33 ) + 1 ) )
+					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT play de: " + local.snd + " speaker " + local.speaker.model ) }
+					local.speaker playsound local.snd
+				} else {
+					local.snd = ( "coop_flvo_de" + ( ( randomint 90 ) + 1 ) )
+					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark de: " + local.snd ) }
+					local.speaker playsound local.snd
+				}
+			} else if( local.dbg == 1 ){
+				println ( "^~^~^ TAUNT skip: no de speaker in range (registry " + level.coop_flchatDEn + ")" )
 			}
 		} else {
+			//[user 07-17] allied taunts bumped too (actors + paratroopers - all managed allied AI register)
+			if( randomfloat( 1 ) < 0.40 && ( level.time - level.coop_flchatTaunt ) > 15 ){ local.taunt = 1 }
 			local.speaker = waitthread flchatter_pick_us local.range
 			if( local.speaker != NULL ){
-				local.speaker playsound ( "coop_flvo_us" + ( ( randomint 45 ) + 1 ) )
+				if( local.taunt == 1 ){
+					level.coop_flchatTaunt = level.time
+					local.snd = ( "coop_taunt_us" + ( ( randomint 29 ) + 1 ) )
+					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT play us: " + local.snd + " speaker " + local.speaker.model ) }
+					local.speaker playsound local.snd
+				} else {
+					local.snd = ( "coop_flvo_us" + ( ( randomint 45 ) + 1 ) )
+					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark us: " + local.snd ) }
+					local.speaker playsound local.snd
+				}
+			} else if( local.dbg == 1 ){
+				println ( "^~^~^ TAUNT skip: no us speaker in range (registry " + level.coop_flchatUSn + ")" )
 			}
 		}
 	}
@@ -88,6 +138,7 @@ flchatter_pick_de local.range:{
 	while( local.try < 8 ){
 		local.try++
 		local.ai = level.coop_flchatDE[ randomint level.coop_flchatDEn ]
+		if( local.ai != NULL && local.ai != NIL && local.ai.coop_noChatter == 1 ){ continue }	//bug-725
 		if( local.ai == NULL || local.ai == NIL ){ continue }
 		if( !( isAlive local.ai ) ){ continue }
 		local.i = 1
@@ -111,6 +162,7 @@ flchatter_pick_us local.range:{
 		local.try++
 		local.ai = level.coop_flchatUS[ randomint level.coop_flchatUSn ]
 		if( local.ai == NULL || local.ai == NIL ){ continue }
+		if( local.ai.coop_noChatter == 1 ){ continue }	//[user 07-17] story actors stay silent (bug-725)
 		if( !( isAlive local.ai ) ){ continue }
 		local.i = 1
 		while( local.i <= $player.size ){
@@ -130,11 +182,64 @@ flchatter_pick_us local.range:{
 flchatter_register:{
 	if( level.coop_flchatterInit != 1 ){ end }
 	if( self == NULL ){ end }
+	//[user 07-17] bug-725: STORY/NAMED characters must never use the generic soldier chatter or MP
+	// taunts (Grillo was dropping random American lines). Two gates: the per-actor opt-out flag
+	// (maps set actor.coop_noChatter = 1 - m2l1 tags Grillo) and a model blocklist for civilians/
+	// named allies. The pick loops re-check the flag so a late tag still silences a registered actor.
+	if( self.coop_noChatter == 1 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "grillo" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "manon" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "civil" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "village" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "priest" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "nun_" 0 ){ end }
 	if( self.team == "german" ){
 		level.coop_flchatDE[level.coop_flchatDEn] = self
 		level.coop_flchatDEn++
 	} else if( self.team == "american" ){
 		level.coop_flchatUS[level.coop_flchatUSn] = self
 		level.coop_flchatUSn++
+	}
+}end
+
+//=========================================================================
+// HZM coop - silence an actor's NATIVE ENGINE auto-combat dialogue while it is
+// alive, WITHOUT muting its scripted story lines. [bug-839]
+//
+// The generic "sighted / curious / grenade / kill" soldier barks are picked by the
+// engine say-anim system from the actor's voicetype (see Actor::Anim_Say). They are
+// sound aliases authored on CHAN_DIALOG(8) / CHAN_DIALOG_SECONDARY(7) - NOT our
+// flchatter/taunt system, so coop_noChatter alone does not stop them (that gate only
+// covers OUR coop_flvo_/coop_taunt_ rolls). Major Grillo (m2l1, ai_allied_oss-man_
+// disguised) is turned `american` mid-mission and so was shouting random generic US
+// combat lines (dfr_sighted_/dfr_generic_, on channel `dialog`=8).
+//
+// We stop channels 7 and 8 every frame while the actor lives, killing each bark the
+// frame it starts. We NEVER touch CHAN_VOICE(4): scripted story lines are authored
+// there (e.g. M2L1_grillo_dies "Powell, go on without me." is `voice`=4) and survive
+// untouched. Pain/death vocals are a separate path and are unaffected.
+//
+// ACTIVATION IS GATED on self.coop_noChatter, so this is safe to launch from the
+// actor's EARLIEST thread: the mute does not begin until the map sets
+// self.coop_noChatter = 1. Set that flag the instant the actor's scripted CHAN_DIALOG(8)
+// story lines are done - Grillo's escort intro (dfr_M2L1_20xm) are ALSO on channel 8,
+// so muting 8 before they finish would eat them. Actors whose scripted lines are all
+// on CHAN_VOICE(4) can set coop_noChatter = 1 at spawn and this activates immediately.
+//
+// Reuse for the other coop_noChatter story actors (manon, civilians, priest, nun):
+//   <actor> thread coop_mod/flchatter.scr::silenceNativeDialog
+// (plus keep setting <actor>.coop_noChatter = 1 after their scripted dialog-channel lines).
+//=========================================================================
+silenceNativeDialog:{
+	// hold through the scripted-dialogue phase (uses == 1 only, NIL-safe)
+	while( self != NULL ){
+		if( self.coop_noChatter == 1 ){ break }
+		waitframe
+	}
+	// then kill native combat barks (dialog channels) for the rest of this life
+	while( self != NULL && isAlive self ){
+		self stopsound 7
+		self stopsound 8
+		waitframe
 	}
 }end

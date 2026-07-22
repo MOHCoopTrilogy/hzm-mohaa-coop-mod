@@ -1,0 +1,132 @@
+//-----------------------------------------------------------------------------
+// coop_mod/tracescan.scr - server-side collision grid scanner (dev tool)
+// Gated from main.scr by cvar coop_tracescan == 1. Zero effect in normal play.
+// Region cvars (optional, defaults = full e1l2 playable extents):
+//   coop_ts_x0 coop_ts_y0 coop_ts_x1 coop_ts_y1 coop_ts_step
+// Every grid segment is probed with the PLAYER-MOVEMENT mask (trace mode 2,
+// engine bug-945 upgrade: MASK_PLAYERSOLID minus bodies - sees playerclip and
+// fence, which MASK_SOLID cannot). Blocked segments are then classified:
+//   solid 1 = also blocked under MASK_SOLID with entities (real solid)
+//   world 1 = also blocked under MASK_SOLID world-only (map geometry)
+//   solid 0 = clip-only wall (playerclip/fence species, invisible to guns too)
+//   fwd/rev asymmetry = start-inside-solid entity escape semantics
+// Output: ^~^~^ TS ... lines (needs developer 1 to print).
+//-----------------------------------------------------------------------------
+
+scan:{
+	wait 3
+
+	local.x0 = -8000
+	local.y0 = -8500
+	local.x1 = 5200
+	local.y1 = 6500
+	local.step = 64
+
+	if(getcvar("coop_ts_x0") != ""){ local.x0 = int( getcvar("coop_ts_x0") ) }
+	if(getcvar("coop_ts_y0") != ""){ local.y0 = int( getcvar("coop_ts_y0") ) }
+	if(getcvar("coop_ts_x1") != ""){ local.x1 = int( getcvar("coop_ts_x1") ) }
+	if(getcvar("coop_ts_y1") != ""){ local.y1 = int( getcvar("coop_ts_y1") ) }
+	if(getcvar("coop_ts_step") != ""){ local.step = int( getcvar("coop_ts_step") ) }
+
+	// e1l2 artillery diagnostics: identify which entity owns the fat box, and
+	// (coop_ts_fix==1) apply the InitGun-style tighten before scanning so the
+	// fix can be verified on a playerless dedicated boot where InitGun has not
+	// run yet (it is downstream of the intro sequence).
+	if($artillery1 != NULL){
+		println("^~^~^ TS DIAG a1 base " + $artillery1.getmins + " " + $artillery1.getmaxs)
+	}
+	if($artillery1_turret0 != NULL){
+		println("^~^~^ TS DIAG a1 turret " + $artillery1_turret0.getmins + " " + $artillery1_turret0.getmaxs)
+	}
+	if(getcvar("coop_ts_fix") == "1"){
+		if($artillery1 != NULL){ $artillery1 setsize ( -48 -48 0 ) ( 48 48 80 ) }
+		if($artillery2 != NULL){ $artillery2 setsize ( -48 -48 0 ) ( 48 48 80 ) }
+		if($artillery3 != NULL){ $artillery3 setsize ( -48 -48 0 ) ( 48 48 80 ) }
+		println("^~^~^ TS FIX applied")
+	}
+
+	level.coop_ts_blocks = 0
+
+	println("^~^~^ TS START region " + local.x0 + " " + local.y0 + " to " + local.x1 + " " + local.y1 + " step " + local.step)
+
+	local.batch = 0
+	for(local.x = local.x0; local.x <= local.x1; local.x = local.x + local.step){
+		for(local.y = local.y0; local.y <= local.y1; local.y = local.y + local.step){
+			waitthread scanPoint local.x local.y local.step
+			local.batch = local.batch + 1
+			if(local.batch >= 8){
+				local.batch = 0
+				waitframe
+			}
+		}
+	}
+	println("^~^~^ TS DONE blocked_segments " + level.coop_ts_blocks)
+}end
+
+// probe the two grid segments leaving (x y): east (+step 0) and north (0 +step)
+scanPoint local.x local.y local.step:{
+	local.flA = waitthread floorAt local.x local.y
+	if(local.flA == -99){ end }
+
+	local.ex = local.x + local.step
+	local.ny = local.y + local.step
+	waitthread scanSeg local.x local.y local.flA local.ex local.y
+	waitthread scanSeg local.x local.y local.flA local.x local.ny
+}end
+
+// returns floor z at (x y), or -99 if none found in the probe band
+floorAt local.x local.y:{
+	local.top = ( local.x local.y 1600 )
+	local.bot = ( local.x local.y -400 )
+	local.hit = trace local.top local.bot 1
+	if(local.hit[2] <= -399){ end -99 }
+	end local.hit[2]
+}end
+
+scanSeg local.ax local.ay local.flA local.bx local.by:{
+	local.flB = waitthread floorAt local.bx local.by
+	if(local.flB == -99){ end }
+
+	// skip cliff/steep-slope segments - blocking there is legit geometry
+	local.dz = local.flA - local.flB
+	if(local.dz < 0){ local.dz = 0 - local.dz }
+	if(local.dz > 60){ end }
+
+	local.az = local.flA + 40
+	local.bz = local.flB + 40
+	local.a = ( local.ax local.ay local.az )
+	local.b = ( local.bx local.by local.bz )
+
+	// primary probe: PLAYER-MOVEMENT mask (mode 2) both directions
+	local.h1 = trace local.a local.b 2
+	local.d1 = vector_length( local.h1 - local.b )
+	local.h2 = trace local.b local.a 2
+	local.d2 = vector_length( local.h2 - local.a )
+
+	if(local.d1 < 8 && local.d2 < 8){ end }
+
+	local.fwd = 0
+	local.rev = 0
+	if(local.d1 >= 8){ local.fwd = 1 }
+	if(local.d2 >= 8){ local.rev = 1 }
+
+	// classify: also blocked under MASK_SOLID (entities included)?
+	local.solid = 0
+	local.s1 = trace local.a local.b
+	if(vector_length( local.s1 - local.b ) >= 8){ local.solid = 1 }
+	else{
+		local.s2 = trace local.b local.a
+		if(vector_length( local.s2 - local.a ) >= 8){ local.solid = 1 }
+	}
+	// and under MASK_SOLID world-only (pure map geometry)?
+	local.world = 0
+	local.w1 = trace local.a local.b 1
+	if(vector_length( local.w1 - local.b ) >= 8){ local.world = 1 }
+	else{
+		local.w2 = trace local.b local.a 1
+		if(vector_length( local.w2 - local.a ) >= 8){ local.world = 1 }
+	}
+
+	println("^~^~^ TS BLOCK a " + local.a + " b " + local.b + " fwd " + local.fwd + " rev " + local.rev + " solid " + local.solid + " world " + local.world + " hit " + local.h1)
+	level.coop_ts_blocks = level.coop_ts_blocks + 1
+}end

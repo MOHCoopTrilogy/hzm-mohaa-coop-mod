@@ -131,9 +131,11 @@ main:{
 
 	thread coop_mod/medkit.scr::coop_scan_health_entities
 	thread coop_mod/officer.scr::coop_officer_init
+	thread coop_mod/director.scr::director_main	//[user 07-17] reactive difficulty (coop_ddaEnabled gates; default OFF)
 	thread coop_mod/weather.scr::coop_weather_init	//[v1] dynamic rain/snow storms (theme-gated; no-op unless coop_dynWeather 1 + themed/forced)
 	thread coop_mod/ambience.scr::coop_ambience_init	// HZM coop - ambience beds + combat mixing (no-op unless coop_ambience 1; bed picked from level.coop_weatherTheme)
 	thread coop_mod/flchatter.scr::flchatter_init	// HZM coop - Frontline battle chatter (coop_flchatter 0 disables)
+	thread coop_mod/flmusic.scr::coop_flmusic_filler	// HZM coop - Frontline filler OST on quiet maps when the music channel is silent (coop_musicFiller 0 disables)
 	// 50/50 objective binoc/smoke drop DISABLED for now (its pickup re-granted on every
 	// touch -> infinite grenades). Re-enable by uncommenting once the pickup is one-shot.
 	// thread coop_mod/objective_drop.scr::coop_objective_drop_init
@@ -161,6 +163,13 @@ main:{
 	if( getcvar( "coop_maptest_vehicle" ) == "1" ){
 		thread coop_mod/maptest_vehicle.scr::coop_maptest_vehicle_tick
 	}
+	// Server-side collision grid scanner (dev tool). Off unless coop_tracescan==1.
+	if( getcvar( "coop_tracescan" ) == "1" ){
+		thread coop_mod/tracescan.scr::scan
+	}
+	// Universal out-of-bounds safety net (all maps): a player who falls into the void
+	// is warped back to their last good ground position. coop_voidGuard 0 disables.
+	thread coop_mod/voidguard.scr::main
 
 	//[200] Smithy - used by waitForMainScript to check if main has loaded
 	level.coop_mainScriptLoaded = game.true
@@ -558,6 +567,14 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 			local.spawnNewOrigin = level.flags["coop_spawn"+local.i+"origin"]
 			local.player.flags["coop_spawnlocPreviouse"] = local.spawnNewOrigin
 			local.player origin	local.spawnNewOrigin
+			//[user 07-20] bug-940 AIR SPAWN: the hand-authored coop_spawnNorigin coords carry an
+			//eye-height Z (viewpos capture workflow), so players materialized in the air, fell and
+			//took engine fall damage (percent of max_health since the 2.0 percent rule). Snap to the
+			//actual floor like playersWarpto and the tank-exit branch already do; range-capped so a
+			//spawn over a gap can never be pulled down a pit, and the previous-spawn record is
+			//refreshed to the REAL post-snap position so preventSpawnStuck keeps working.
+			local.player droptofloor 512
+			local.player.flags["coop_spawnlocPreviouse"] = local.player.origin
 
 			if(level.flags["coop_spawn"+local.i+"angles"] != NIL){
 				//need to call this delayed or it will not work most of the time in mp
@@ -751,6 +768,115 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	if(level.coop_playerItem4 != NIL ){	self item level.coop_playerItem4 }
 	if(level.coop_playerItem5 != NIL ){	self item level.coop_playerItem5 }
 	if(level.coop_playerItem6 != NIL ){	self item level.coop_playerItem6 }
+
+	//[user 07-19] bug-871/bug-893: MISSION ITEMS (level.coop_missionItems, e.g. the e1l2 mine detector)
+	//are restored through the single shared helper coop_reissueMissionItems (self = player). itemGetAll
+	//runs on EVERY spawn (player.scr::manageAliveSpawning) and on the armory regive (loadoutpick.scr);
+	//the same helper is called by dbno.scr + medkit.scr on revive, so every path is identical.
+	self waitthread coop_reissueMissionItems
+
+	//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: while weapons are locked out (coop_noWeapon), force the
+	//papers to be the active in-hand item on EVERY spawn (respawn / spectate-return) so players hold
+	//papers instead of empty hands and primaryfire still shows them. Also (re)set coop_hasPapers,
+	//which managePlayerInventory's coop_noWeapon early-exit skips - this covers late-joiners.
+	if( level.coop_forcePapersEquip && level.coop_itemPapers != NIL && isAlive self && self.dmteam != "spectator" ){
+		self.flags["coop_hasPapers"] = game.true
+		self thread forcePapersInHand
+	}
+}end
+
+//[user 07-19] bug-893: SHARED mission-item restore (self = player). Called by EVERY revive/respawn path
+//(itemGetAll on every spawn + armory regive, dbno.scr::dbno_ai_revive on AI/team revive, medkit.scr
+//self-revive) so there is one source of truth and no path can drift out of sync.
+//
+//Root cause of the DBNO loss: the e1l2 mine detector (models/weapons/US_W_MineDetector.tik) is a WEAPON
+//(classname Weapon, weapontype grenade, firetype landmine). The map issues it via the coop weapon-give
+//pipeline (giveInventory), which hands weapons out UNDER the changeGameType-0 hack so the engine's
+//team-mode (g_gametype 2) weapon handling does not fight the give. Every revive path instead re-gave it
+//with a BARE `item` in gametype 2. Ordinary rifles/pistols tolerate that, but the special detector did
+//not reliably survive - so after a DBNO revive the player lost their minesweeper. Give mission items
+//under the SAME gametype-0 hack the loadout give uses. `item` works for weapons and inventory items
+//alike, so this stays correct for non-weapon mission items (papers/binoculars). The changeGameType wrap
+//is gated on mission items existing, so maps without them incur no gametype churn; if changeGameType is
+//disallowed (map load) it no-ops and the plain `item` give still runs.
+//=========================================================================
+coop_reissueMissionItems:{
+//=========================================================================
+	//[user 07-19] bug-898 INSTRUMENT: LOUD + UNCONDITIONAL (NOT gated on coop_missionItemDebug and
+	//NOT gated on the size check below) so the next run is black-and-white about whether this helper
+	//runs on the revive/respawn path AT ALL and exactly how many mission items are registered. If the
+	//count reads 0 here, the detector was never registered (coop_missionItems empty) - a registration
+	//bug, not a give bug. If it reads >0 but the detector is still gone, the give itself is failing.
+	println ( "^~^~^ REISSUE called player=" + self.netname + " n=" + level.coop_missionItems.size )
+	if( level.coop_missionItems.size > 0 ){
+		waitthread changeGameType 0 0
+		//[user 07-19] bug-898 DIAGNOSTIC (gated: set coop_missionItemDebug 1) - confirm the gametype-0
+		//wrap actually took for the give. Should read 0; a 2 means changeGameType no-op'd (e.g.
+		//coop_preventGameTypeChanges set / concurrency), which would make the bare give run in team mode.
+		if( getcvar( "coop_missionItemDebug" ) == "1" ){
+			println ( "^~^~^ MISSIONITEM_GIVE player=" + self.netname + " gametypeDuringGive=" + getcvar( "g_gametype" ) )
+		}
+		local.mi = 1
+		while( local.mi <= level.coop_missionItems.size ){
+			if( level.coop_missionItems[local.mi] != NIL ){
+				//[user 07-19] bug-898 INSTRUMENT: LOUD per-item give line - proves each mission item
+				//(e.g. the e1l2 mine detector) is actually handed out on this revive/respawn pass.
+				println ( "^~^~^ REISSUE give " + level.coop_missionItems[local.mi] + " to " + self.netname )
+				self item level.coop_missionItems[local.mi]
+			}
+			local.mi++
+		}
+		waitthread changeGameType 2 0
+		//[user 07-19] bug-898 DIAGNOSTIC (gated: set coop_missionItemDebug 1) - after the re-give, prove
+		//for THIS player whether each mission WEAPON is actually in inventory (PRESENT) or missing (ABSENT):
+		//`use` it then read the active weapon (returnActiveWeapon only returns Weapons, so a non-weapon
+		//mission item such as papers cannot be confirmed here and reads ABSENT-or-not-a-weapon). The
+		//caller's useweaponclass re-raises the normal gun immediately after, so this only perturbs one
+		//frame. Distinguishes present-but-holstered (detector IS there, just not the active gun) from
+		//genuinely-absent (the give is failing). containsText is case-sensitive, so both sides are
+		//normalized with makeWeaponStringValid first.
+		if( getcvar( "coop_missionItemDebug" ) == "1" ){
+			local.dmi = 1
+			while( local.dmi <= level.coop_missionItems.size ){
+				local.dwant = level.coop_missionItems[local.dmi]
+				if( local.dwant != NIL ){
+					self use local.dwant
+					wait game.ms
+					local.daw = waitthread coop_mod/itemhandler.scr::returnActiveWeapon self
+					local.dawm = "none"
+					local.dverdict = "ABSENT-or-not-a-weapon"
+					if( local.daw != NULL ){
+						local.dawm = local.daw.model
+						local.dwn = waitthread coop_mod/itemhandler.scr::makeWeaponStringValid local.dwant
+						local.dan = waitthread coop_mod/itemhandler.scr::makeWeaponStringValid local.dawm
+						local.dc1 = waitthread containsText local.dan local.dwn 0
+						local.dc2 = waitthread containsText local.dwn local.dan 0
+						if( local.dc1 || local.dc2 ){ local.dverdict = "PRESENT" }
+					}
+					self iprintlnbold ( "MISSIONITEM " + local.dwant + " -> " + local.dverdict + " (active=" + local.dawm + ")" )
+					println ( "^~^~^ MISSIONITEM player=" + self.netname + " want=" + local.dwant + " verdict=" + local.dverdict + " active=" + local.dawm )
+				}
+				local.dmi++
+			}
+		}
+	}
+}end
+
+//draws the papers as the active in-hand item for the e1l3 papers-only disguise. self = player.
+//itemGetAll re-gave the physical papers this frame; we wait a moment (use fails silently if the item
+//is not yet in the player's inventory) then `use` it so the papers are held in-hand and primaryfire
+//(itemhandler.scr::enableClickablePapers) shows them. Papers are an InventoryItem, not a Weapon, so
+//holding them does NOT break the engine disguise (is_disguised only trips on a held Weapon).
+//=========================================================================
+forcePapersInHand:{
+//=========================================================================
+if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread main/forcePapersInHand->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
+	if( self == NULL ){ end }
+	wait game.ms
+	wait game.ms
+	if( self == NULL || !isAlive self || self.dmteam == "spectator" ){ end }
+	if( !level.coop_forcePapersEquip || level.coop_itemPapers == NIL ){ end }
+	self use level.coop_itemPapers
 }end
 
 //=========================================================================
