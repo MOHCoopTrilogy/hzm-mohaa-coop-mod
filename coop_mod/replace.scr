@@ -2849,12 +2849,32 @@ useWeaponClass local.class:{
 //=========================================================================
 coop_trackTankTarget:{
 //=========================================================================
+	//HZM coop [2026-07-22] Keep a PERSISTENT script_origin MARKER as the tank target, moved to the current
+	//valid player each tick. A raw player ref goes 'pointer'-stale the instant that player respawns/disconnects
+	//WITHIN the 0.5s window and the enemy_tank_attack_loop then derefs a freed 'pointer' that !()/==NULL/==NIL/==0
+	//all fail to catch (sweep-confirmed). We read the player position through the coop-safe player_origin shim
+	//(returns ( 0 0 0 ), never throws, when the player is mid-respawn) so this thread never derefs a stale ref,
+	//and the marker (a script_origin, never freed) is what tanks aim at - its .origin is always valid. When no
+	//player is valid we set playertanktarget=0 so the loop's ==0 guard skips deterministically.
+	if (level.coop_tankTargetMarker == NIL || level.coop_tankTargetMarker == NULL){
+		level.coop_tankTargetMarker = spawn script_origin
+	}
 	while (self && self.health > 0){
 		local.pt = exec coop_mod/replace.scr::player_closestTargetable self
-		if (local.pt != NULL){ level.playertanktarget = local.pt }
-		else{
+		if (local.pt == NULL){
 			local.pt = exec coop_mod/replace.scr::player_anyValid
-			if (local.pt != NULL){ level.playertanktarget = local.pt }
+		}
+		if (local.pt != NULL && local.pt != NIL && isAlive local.pt){
+			//isAlive gates the .origin read: player_closestTargetable/anyValid can hand back a mid-respawn or
+			//just-freed player that passes !=NULL/!=NIL but whose .origin casts 'none'/'pointer' (the exact leak
+			//the sweep showed). isAlive is false for those and safe to call on a stale ref, so we only read
+			//.origin when it is guaranteed valid THIS frame; the marker then carries a stable position for the
+			//faster-ticking tank loop, which never touches a raw player ref.
+			level.coop_tankTargetMarker.origin = local.pt.origin
+			level.playertanktarget = level.coop_tankTargetMarker
+		}
+		else{
+			level.playertanktarget = 0
 		}
 		wait 0.5
 	}

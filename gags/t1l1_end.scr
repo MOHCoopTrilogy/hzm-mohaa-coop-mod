@@ -1,0 +1,1079 @@
+// HZM coop [user 07-22 bug-1031] override of retail gags/T1L1_End.Scr: the British-attack
+// proximity gag used single-entity $player (turnto + distance) -> array-cast throw with 2+
+// players (t1l1 242x). Use the CLOSEST player so any player triggers the attack.
+//---------------------------------------------------------------------------------
+//	T1L1_End.Scr
+//
+//	The ending scene with the nazi's, brits and tanks...
+//---------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------
+main:
+//---------------------------------------------------------------------------------
+
+	level.brits_attacking = 0
+
+		// we have two of these guys?  Delete one!
+	if ( $nazi3.size > 1 )
+		$nazi3[1] delete
+
+	level.nazi[1]	= $nazi1
+	level.nazi[2]	= $nazi2
+	level.nazi[3]	= $nazi3
+	level.nazi[4]	= $nazi4
+	level.nazi[5]	= $nazi5
+
+	level.nazi_count = 0	// auto-updated...
+
+	// initialize the nazi's
+	for (local.i=1;local.i<=5;local.i++)
+	{
+		level.nazi[local.i] thread InitNazi
+	}
+
+	// this guy doesn't have a weapon..  he tries to go pick a weapon up when
+	// the gag starts...
+	$nazi3 holster
+
+	thread InitWindmill
+	thread ProximityCheck
+	thread InitEndTank
+
+	level.shoot_at_end_tank = 1
+
+end
+
+//---------------------------------------------------------------------------------
+InitWindmill:
+//---------------------------------------------------------------------------------
+
+	$windmillguy nodamage
+	$windmillguy physics_off
+	$windmillguy.origin = $windmillguyorigin.origin
+
+	end
+
+//---------------------------------------------------------------------------------
+InitNazi:
+//
+//	Turn these guys all off until they are needed...
+//---------------------------------------------------------------------------------
+
+	self exec global/disable_ai.scr
+
+	self turnto $windmillguyorigin
+	self lookat $windmillguyorigin
+
+	// let them get there...
+	wait 0.4
+
+	self rendereffects "+dontdraw"
+	self ai_off
+
+	end
+
+//---------------------------------------------------------------------------------
+StartGag:
+//
+//	Trigger calls this to start the gag when the player get's close...
+//---------------------------------------------------------------------------------
+
+	for (local.i=1;local.i<=5;local.i++)
+	{
+		// allow them to animate and think..
+		level.nazi[local.i] rendereffects "-dontdraw"
+		level.nazi[local.i] ai_on
+
+		if ( local.i!=3 )
+			level.nazi[local.i] exec global/enable_ai.scr
+
+		// turn on some player checking...
+		level.nazi[local.i] thread NaziPainCheck
+		level.nazi[local.i] thread NaziDeathCheck
+		level.nazi[local.i] thread NaziEnemyCheck
+	}
+
+//	$nazi1 thread ProximityCheck
+
+	$nazi1 thread global/LoopAnim.Scr::LoopAnim 11G001_Nazi01LookIdle
+	$nazi2 thread ShootAtWindmillGuy
+	$nazi3 thread global/LoopAnim.Scr::LoopAnim 11G021_Nazi03LookIdle
+	$nazi4 thread global/LoopAnim.Scr::LoopAnim 11G001_Nazi01LookIdle
+	$nazi5 thread global/LoopAnim.Scr::LoopAnim 11G021_Nazi03LookIdle
+
+	$windmillguy thread global/LoopAnim.Scr::LoopAnim 11A001_DeadParaHanging
+
+	end
+
+//-------------------------------------------------------------------
+DeathCheck:
+//
+// death check for the captain...
+//-------------------------------------------------------------------
+	
+	self waittill death
+
+	iprintlnbold "The Captain has been killed in action."
+	iprintlnbold "You failed the mission."
+//	fadeout 3 0 0 0 1
+	wait 3
+	missionfailed
+
+	End
+
+//---------------------------------------------------------------------------------
+NaziPainCheck:
+// if we get shot, startup the british attack
+//---------------------------------------------------------------------------------
+
+	self waittill pain
+	thread DoBritishAttack 1
+
+	end
+
+//---------------------------------------------------------------------------------
+NaziDeathCheck:
+// if we get killed, startup the british attack
+//---------------------------------------------------------------------------------
+
+	level.nazi_count ++
+	self waittill death
+
+	level.nazi_count --
+
+	thread DoBritishAttack 1
+
+	end
+
+//---------------------------------------------------------------------------------
+NaziEnemyCheck:
+// if player becomes our enemy...
+//---------------------------------------------------------------------------------
+
+	self waittill hasenemy
+	thread DoBritishAttack 1
+
+	end
+
+//---------------------------------------------------------------------------------
+ProximityCheck:
+// if player gets close enough, startup the british attack
+//---------------------------------------------------------------------------------
+
+	// wait for our trigger
+	$spawnbritishbuddies waittill trigger
+
+	// spawn the attack if it hasn't already started...
+	thread DoBritishAttack 0
+
+	end
+
+//---------------------------------------------------------------------------------
+WindmillGuyShot:
+//---------------------------------------------------------------------------------
+
+	if ( self.getting_shot==1 )
+		end
+
+	self.getting_shot = 1
+
+	self thread global/LoopAnim.Scr::LoopAnimStop
+	self anim 11A002_DeadParaHit
+	self waittill animdone
+
+	self.getting_shot = 0
+
+	// go back to our hanging anim..
+	$windmillguy thread global/LoopAnim.Scr::LoopAnim 11A001_DeadParaHanging
+
+	end
+
+//---------------------------------------------------------------------------------
+ShootAtWindmillGuy:
+//---------------------------------------------------------------------------------
+	self.shooting_thread = local
+
+//	self thread global/LoopAnim.Scr::LoopAnim 11G011_Nazi02LookIdle
+
+	while ( isAlive self )
+	{
+		self turnto $windmillguyorigin
+		self exec global/aimat.scr $windmillguyorigin
+		wait 3
+		//self exec global/shoot.scr
+		self fire
+		$windmillguy thread WindmillGuyShot
+	}
+
+	end
+
+//---------------------------------------------------------------------------------
+DoBritishAttack local.player_did_it:
+//
+//	Begin british attack...
+//---------------------------------------------------------------------------------
+
+	level.player_did_it = local.player_did_it
+
+	if ( level.brits_attacking == 1 )
+	{
+		// already doing this...
+
+		if ( level.player_did_it==1 )
+		{
+			// enable all the nazi's AI.. (except 3 cuz he's getting his weapon)
+			for (local.i=1;local.i<=5;local.i++)
+			{
+				if ( local.i!=3 )
+					level.nazi[local.i] exec global/enable_ai.scr
+			}
+		}
+
+		end
+	}
+
+	level.brits_attacking = 1
+
+	$nazi3 thread Nazi3Reaction
+
+	if ( level.player_did_it==1 )
+	{
+		thread NaziSmokeReaction
+		thread BritishSmoke
+		wait 4
+		thread BritishGo
+	}
+	else
+	{
+		thread BritishSmoke
+		wait 4
+		thread BritishGo
+
+		wait 1
+		thread NaziSmokeReaction
+	}
+
+	end
+
+//---------------------------------------------------------------------------------
+BritishSmoke:
+// spew out the smoke...
+//---------------------------------------------------------------------------------
+
+$End_smoke TurnOn
+
+//	local.ent = spawn models/projectiles/M18_Smoke_grenade_primary.tik
+//	local.ent.origin = $brit_smoke_1.origin
+//	local.ent explode
+	
+//	local.ent2 = spawn models/projectiles/M18_Smoke_grenade_primary.tik
+//	local.ent2.origin = $brit_smoke_2.origin
+//	local.ent2 explode
+	
+end
+
+//---------------------------------------------------------------------------------
+NaziSmokeReaction:
+//---------------------------------------------------------------------------------
+
+	// give smoke a little time to get going...
+	if ( $nazi2.shooting_thread!=NIL )
+		$nazi2.shooting_thread delete
+
+	if ( level.player_did_it==0 )
+	{
+		$nazi1 thread NaziReaction 11G002_Nazi01React
+		$nazi2 thread NaziReaction 11G013_Nazi02React
+		$nazi4 thread NaziReaction 11G002_Nazi01React
+		$nazi5 thread NaziReaction 11G013_Nazi02React
+	}
+	else
+	{
+		// just enable everyone's AI... (except for #3...)
+		for (local.i=1;local.i<=5;local.i++)
+		{
+			level.nazi[local.i] thread global/LoopAnim.Scr::LoopAnimStop
+			level.nazi[local.i] anim idle
+
+			if ( local.i!=3 )
+			{
+				level.nazi[local.i] exec global/enable_ai.scr
+			}
+		}
+	}
+
+	end
+
+//---------------------------------------------------------------------------------
+NaziReaction local.anim:
+// play reaction anim and enable ai...
+//---------------------------------------------------------------------------------
+//	self anim local.anim
+//	self waittill animdone
+	
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+	self anim idle
+
+	wait 0.5
+	
+	self exec global/enable_ai.scr
+	end
+
+//---------------------------------------------------------------------------------
+Nazi3Reaction:
+// run to our weapon pile, pickup the anim, do a reaction anim, and enable ai...
+//---------------------------------------------------------------------------------
+//	if ( level.player_did_it==0 )
+//		wait 0.5
+
+	local.start_time = level.time + 5
+	while ( level.player_did_it==0 && level.time < local.start_time )
+	{
+		wait 0.1
+	}
+
+	self waitthread global/LoopAnim.Scr::LoopAnimStop
+	self waitthread RunTo $nazigetgunhere
+
+	self anim 11G023_Nazi03GrabWeap
+	self waittill animdone	
+	self unholster
+
+//	self anim 11G022_Nazi03React
+//	self waittill animdone
+	self exec global/enable_ai.scr
+	end
+
+//---------------------------------------------------------------------------------
+BritishGo:
+//
+//	spawn in the brits and have them attack the germans...
+//
+//---------------------------------------------------------------------------------
+
+	level.cappy = thread SpawnBrit models/human/allied_uk_capt-paratrooper.tik $britishcaptain.origin "sten" "cappy"
+	level.cappy thread DeathCheck
+
+	level.brit1 = thread SpawnBrit models/human/allied_uk_paratrooper2.tik $private1.origin "enfield" "brit1"
+	level.brit2 = thread SpawnBrit models/human/allied_uk_radio_paratrooper.tik $radioman.origin "enfield" "brit2"
+
+	// they're spawned, now make them run where they're supposed to...
+	level.cappy exec global/disable_ai.scr
+	level.brit1 exec global/disable_ai.scr
+	level.brit2 exec global/disable_ai.scr
+
+	level.cappy thread BritRunTo $britishcaptaindestination
+	level.brit1 thread BritRunTo $private1destination
+	level.brit2 thread BritRunTo $radiomandestination
+
+	// make sure they get thru the smoke before their AI is enabled...
+	level.cappy thread BritEnableAI 3.0 4 0.15 10
+	level.brit1 thread BritEnableAI 2.5 5 0.45 3
+	level.brit2 thread BritEnableAI 3.5 1 0.45 3
+
+//	level.cappy thread CappyWaitForPlayer
+	
+	end
+
+//---------------------------------------------------------------------------------
+BritEnableAI local.time local.start local.fire_delay local.maxshots:
+//---------------------------------------------------------------------------------
+	self.ainododge = 1
+	self.ainostrafe = 1
+	self.ainobackward = 1
+	self.ainointerval = 1
+	wait local.time
+	//// self exec global/enable_ai.scr
+	
+	self waitthread AttackNazis local.start local.fire_delay local.maxshots
+
+	end
+
+//---------------------------------------------------------------------------------
+BritPickTarget:
+//---------------------------------------------------------------------------------
+
+	// make sure they aren't all dead...
+	if ( level.nazi_count==0 )
+		end 0
+
+	// randomly pick where we start looking
+	local.rand = randomint 5
+	if ( local.rand==0 )
+		local.rand++
+
+		// make sure we get a live one...
+	for ( local.i=local.rand;local.i<=5;local.i++ )
+	{
+		if ( isAlive level.nazi[local.i] )
+			end local.i
+	}
+
+	for ( local.i=1;local.i<=local.rand;local.i++ )
+	{
+		if ( isAlive level.nazi[local.i] )
+			end local.i
+	}
+
+	end 0
+
+//---------------------------------------------------------------------------------
+AttackNazi local.nazi local.fire_pause local.maxshots:
+//---------------------------------------------------------------------------------
+
+	self aimat local.nazi
+	wait 0.2
+
+	local.num_shots = 0
+
+	while ( isAlive local.nazi && local.num_shots < local.maxshots )
+	{
+		self fire
+
+		local.num_shots	++
+
+		local.time = level.time + local.fire_pause
+
+		while ( level.time < local.time && isAlive local.nazi )
+		{
+			wait 0.05
+		}
+
+//		wait local.fire_pause
+	}
+
+	end
+
+//---------------------------------------------------------------------------------
+AttackNazis local.start local.fire_pause local.maxshots:
+//---------------------------------------------------------------------------------
+
+	self.no_idle = 1
+	local.index = local.start
+
+	while ( local.index!=0 )
+	{
+		local.index = waitthread BritPickTarget
+
+		if ( local.index>0 )
+		{
+			self waitthread AttackNazi level.nazi[local.index] local.fire_pause local.maxshots
+		}
+	}
+
+	self.no_idle = 0
+	self aimat NULL
+
+	end
+
+
+//---------------------------------------------------------------------------------
+CappyWaitForPlayer:
+//
+//	wait for the player and tell them hello.  (when all germans are dead)
+//---------------------------------------------------------------------------------
+	local.done = 0
+
+	while(local.done == 0)
+	{
+		if ( level.nazi_count==0 )
+		{
+			level.cappy exec global/disable_ai.scr
+			level.brit1 exec global/disable_ai.scr
+			level.brit2 exec global/disable_ai.scr
+
+			level.cappy physics_on
+			level.brit1 physics_on
+			level.brit2 physics_on
+
+			self turnto $player[1]
+			local.dist = vector_length($player[1].origin - self.origin)
+			if (local.dist < 256)
+				local.done = 1
+		}
+		wait 0.25
+	}
+
+	waitthread global/objectives.scr::add_objectives 1 3
+	self anim 11b100_BritCaptGreet
+	$end_tank thread EndTankGo
+	self waittill animdone
+	thread DoEndTank
+
+	end
+
+//---------------------------------------------------------------------------------
+BritRunTo local.dest:
+//---------------------------------------------------------------------------------
+
+	self waitthread RunTo local.dest
+//	self physics_off
+
+	if ( self==level.cappy )
+		self thread CappyWaitForPlayer
+
+	end
+
+//---------------------------------------------------------------------------------
+SpawnBrit local.type local.origin local.gun local.targetname:
+//---------------------------------------------------------------------------------
+
+	local.guy = spawn local.type "targetname" local.targetname "type_attack" "cover"
+	local.guy nodamage
+	local.guy.accuracy = 100	
+	local.guy.origin = local.origin
+	local.guy gun local.gun
+
+	end local.guy
+
+//---------------------------------------------------------------------------------
+ShootAt local.target:
+//---------------------------------------------------------------------------------
+
+	self setaimtarget local.target 1
+
+	end
+
+
+//------------------------------------------------------------------------------
+InitEndTank:
+//
+//	hide the tank and make it non-solid.  (Like we do in t3l2...)
+//------------------------------------------------------------------------------
+
+	$end_tank thread gags/T3L2_KingTiger.scr::HideTank
+	$end_tank health 4500
+
+	level.end_tank_destroyed = 0
+
+	End
+
+//------------------------------------------------------------------------------
+DoEndTank:
+//
+//	important targetnames:
+//
+//		end_tank		- the end tank
+//		end_tank_path		- the end tank's path
+//		end_tank_target0	- first target the end tank shoots at
+//		end_tank_target1	- second target the end tank shoots at
+//		end_tank_target2	- third target the end tank shoots at. This kills the friendlies and ends level...
+//------------------------------------------------------------------------------
+	level.brit1 lookat $end_tank
+	wait 0.25
+	
+	level.brit1 turnto $end_tank
+	wait 0.25
+
+	level.brit1 anim 11A999_soldier_tigertank
+	wait 1.0
+
+	level.cappy lookat $aagun3
+	wait 0.25
+	level.cappy turnto $tiger
+
+	// make sure they don't shoot anything we don't want them to...
+	level.cappy exec global/disable_ai.scr
+	level.brit1 exec global/disable_ai.scr
+	level.brit2 exec global/disable_ai.scr
+
+
+	// play captains new dialog "Look out for that tank!"
+	level.cappy anim 11B102_BritCaptdial
+	wait 2	
+
+	level.brit1 turnto NULL
+	level.brit1 lookat NULL
+
+	level.cappy turnto NULL
+	level.cappy lookat NULL
+
+	level.brit1 physics_on
+	level.brit2 physics_on
+	level.brit1 fixedleash 0
+	level.brit2 fixedleash 0
+
+	level.brit1 thread TakeCover 0.5 $brit1_hide
+	level.brit2 thread TakeCover 1.0 $brit2_hide
+
+	// enable objective 2
+	waitthread global/objectives.scr::add_objectives 2 2
+	waitthread global/objectives.scr::current_objectives 2
+
+	level.cappy waittill animdone
+
+	level.cappy physics_on
+	level.cappy fixedleash 0
+
+	// Get the 3 friendlies shooting at the tank
+	wait 2.0
+	level.cappy thread CappyFireAtTank $end_tank
+
+	End
+
+//------------------------------------------------------------------------------
+TakeCover local.time local.dest:
+//------------------------------------------------------------------------------
+
+	wait local.time
+	self waitthread RunTo local.dest
+	self thread FireAtTank $end_tank
+
+	end
+
+//------------------------------------------------------------------------------
+EndTankGo:
+//------------------------------------------------------------------------------
+
+	// show tank
+	self waitthread gags/T3L2_KingTiger.scr::ShowTank
+
+	// make sure we know when we're dead...
+	self thread EndTankDestroyed
+
+	// setup our data..
+	self.gun pitchCaps "-160 105 0"
+	self removeondeath 0
+	self immune bullet
+	self immune fast_bullet
+	self immune grenade
+	self immune bash
+
+	self thread EndTankAttack0
+
+	self drive $end_tank_path
+	self waittill drive
+	self stop
+
+	End
+
+//------------------------------------------------------------------------------
+EndTankAttack0:
+//
+//	Fire first shot that hits tree...
+//------------------------------------------------------------------------------
+	//was 2.75
+	wait 4.5
+
+	if ( self!=NULL && isAlive self )
+	{
+		self.gun setAimTarget $tank_tree
+		self.gun waittill ontarget
+		$tree_collsion_gag solid
+		if ( self!=NULL && isAlive self )
+		{
+			self.gun anim fire
+			$tree_sound playsound tree_explosion
+			wait 1
+		//	self.gun setAimTarget end_tank_target2a
+			self thread EndTankAttack1
+		}
+	}
+
+	$tree_collsion_gag notsolid
+	End
+
+
+//------------------------------------------------------------------------------
+EndTankAttack1:
+//
+//	Fire second shot that hits vehicle...
+//------------------------------------------------------------------------------
+
+	wait 4	// brady change this
+
+	if ( self!=NULL && isAlive self )
+	{
+		self.gun setAimTarget $tiger
+		self.gun waittill ontarget
+		wait 0.5
+
+	if ( self!=NULL && isAlive self )
+		{
+			self.gun anim fire
+			wait 1
+			self.gun setAimTarget end_tank_target2a
+			self thread EndTankAttack2
+		}
+	}
+
+	End
+
+//------------------------------------------------------------------------------
+EndTankAttack2:
+//
+//	Fire third shot that takes out the captain...
+//------------------------------------------------------------------------------
+	$tiger anim temp_smoke
+	$tiger anim sizzle
+//	$tiger vehicleanim sizzle
+
+	wait 14	// brady change this
+
+	if ( self!=NULL && isAlive self )
+	{
+		self.gun setAimTarget $end_tank_target2
+		self.gun waittill ontarget
+
+		// fire our gun at the second target...
+		self.gun anim fire
+
+		// kill our friendlies here...
+
+		level.cappy takedamage
+		level.brit1 takedamage
+		level.brit2 takedamage
+
+		level.cappy damage self 3000 self (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+		//level.brit1 damage self 3000 self (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+		//level.brit2 damage self 3000 self (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+	}
+
+	End
+
+//------------------------------------------------------------------------------
+CappyFireAtTank local.tank:
+//------------------------------------------------------------------------------
+
+	if ( level.shoot_at_end_tank==0 )
+		end
+
+	self exec global/crouch.scr
+
+		// don't go running around here...
+	self.fire_at_tank_thread = local
+
+	while ( isAlive self )
+	{
+		// note: this thread gets deleted when the tank dies...
+		// if we have a shot at him, do it...
+
+		for (local.xx = 0; local.xx < 32; local.xx++ )
+		{
+			if ( !(isAlive self) )
+				break
+
+			self fire
+			wait 0.1
+
+			self turnto local.tank
+			self aimat local.tank
+		}
+
+		// ??? self waitthread anim/reload.scr::Reload 1 1 0
+		// reloading...
+		wait 1.8
+
+		self turnto local.tank
+		self aimat local.tank
+	}
+
+	End
+//------------------------------------------------------------------------------
+FireAtTank local.tank:
+//------------------------------------------------------------------------------
+
+	if ( level.shoot_at_end_tank==0 )
+		end
+
+	self exec global/crouch.scr
+
+		// don't go running around here...
+	self.fire_at_tank_thread = local
+
+	while ( isAlive self )
+	{
+		// note: this thread gets deleted when the tank dies...
+		// if we have a shot at him, do it...
+
+		for (local.xx = 0; local.xx < 8; local.xx++ )
+		{
+			if ( !(isAlive self) )
+				break
+
+			self fire
+			wait 0.25
+
+			self turnto local.tank
+			self aimat local.tank
+		}
+
+		// ??? self waitthread anim/reload.scr::Reload 1 1 0
+		// reloading...
+		wait 1.8
+
+		self turnto local.tank
+		self aimat local.tank
+	}
+
+	End
+
+//------------------------------------------------------------------------------
+FireAtTankDone:
+//
+//	stand up and enable ai...
+//  
+//------------------------------------------------------------------------------
+
+	self.fire_at_tank_thread delete
+
+	self physics_on
+
+	wait 0.1
+
+	self exec global/stand.scr
+	wait 0.5
+//	self exec global/enable_ai.scr
+
+	End
+
+//------------------------------------------------------------------------------
+EndTankDestroyed:
+//------------------------------------------------------------------------------
+
+	self waittill death
+
+	waitthread global/objectives.scr::add_objectives 2 3 
+	waitthread global/objectives.scr::add_objectives 3 2
+	waitthread global/objectives.scr::current_objectives 3
+
+	level.shoot_at_end_tank	= 0
+
+	// this should have guys come out of the tank...
+	self.type = empty_panzer_desert
+
+	self thread global/vehicles_thinkers.scr::tank_killed 
+
+	$end_tank anim temp_smoke
+	$end_tank anim sizzle
+
+	level.cappy waitthread FireAtTankDone
+	level.brit1 waitthread FireAtTankDone
+	level.brit2 waitthread FireAtTankDone
+	level.brit1 thread Regroup 1 $brit1_regroup
+	level.brit2 thread Regroup 2 $brit2_regroup
+
+	level.end_tank_destroyed = 1
+
+	level.cappy thread CappyFinishLevel
+
+	End
+
+//------------------------------------------------------------------------------
+Regroup local.time local.dest:
+//------------------------------------------------------------------------------
+
+	wait local.time
+	self waitthread RunTo local.dest
+	self lookat $player
+	self turnto $player[1]
+	wait 0.4 
+	self turnto NULL
+	self lookat NULL
+
+	End
+
+//------------------------------------------------------------------------------
+CappyFinishLevel:
+//
+// Cappy finishes off the level here...
+//------------------------------------------------------------------------------
+
+	wait 2
+
+	self exec global/disable_ai.scr
+
+	// jsl-->wait until we're not attacking the germans that came out of the tank anymore...
+	while (self.thinkstate == "attack")
+	{
+		wait 1
+	}
+
+	local.done = 0
+	while(local.done == 0)
+	{
+		self turnto $player[1]
+		local.dist = vector_length($player[1].origin - self.origin)
+		if (local.dist < 250)
+			local.done = 1
+		wait 0.25
+	}
+
+	waitthread global/objectives.scr::add_objectives 3 3
+
+	// stop player in his tracks...
+	thread LockDownPlayer
+
+	self anim 11b101_BritCaptOrder
+
+	wait 2
+
+	level.brit1 thread Brit2FinishLevel
+	level.brit2 thread GetWeapons
+
+	self waittill animdone
+
+	wait 1
+	self waitthread RunTo $britishlevelend
+
+	wait 4
+	exec global/missioncomplete.scr t1l2 1	
+
+	end
+
+//---------------------------------------------------------------------------------
+LockDownPlayer:
+//---------------------------------------------------------------------------------
+	$player takeall
+	$player physics_off
+	drawhud 0
+	thread ForcedEnd
+	end
+
+//---------------------------------------------------------------------------------
+UnlockPlayer:
+//---------------------------------------------------------------------------------
+	drawhud 1
+	$player physics_on
+	$player takeall
+
+	// give him his weapons here..
+	$player item weapons/Webley_Revolver.tik 
+	$player item weapons/enfield.tik 
+	$player item weapons/sten.tik 
+	$player item weapons/mills_grenade.tik   
+	$player item weapons/M18_smoke_grenade.tik  
+
+	$player ammo pistol 32
+	$player ammo smg 128
+	$player ammo rifle 50
+	$player ammo smokegrenade 3
+	$player ammo grenade 3
+
+	$player useweaponclass smg
+
+	end
+
+//---------------------------------------------------------------------------------
+DeleteWeapons:
+//---------------------------------------------------------------------------------
+
+	wait 1.4
+
+	for (local.i=1;local.i<$pickup_delete.size+1;local.i++)
+		$pickup_delete[local.i] remove
+
+	end
+
+//---------------------------------------------------------------------------------
+GetWeapons:
+//---------------------------------------------------------------------------------
+	self exec global/disable_ai.scr
+	self physics_on
+
+	wait 1.5
+	
+	self turnto $privategohere
+	self waitthread RunTo $privategohere 195
+
+	thread DeleteWeapons
+
+	// use the nazi pickup weapon animation....
+	self anim 11A995_pickupweapons
+	self waittill animdone
+
+	self turnto NULL
+
+//	self exec global/crouch.scr
+//	wait 0.5
+	
+	self exec global/stand.scr
+
+	wait 0.2
+
+	self turnto $player[1]
+	self lookat $player
+	self.movedoneradius = 90
+	self runto $player
+	self waittill movedone
+
+
+	self anim 11A990_handplayerweapons
+	self waittill animdone
+
+	thread UnlockPlayer
+
+	self turnto NULL
+	self lookat NULL
+
+	self.movedoneradius = 6.0
+	self waitthread RunTo $britishlevelend
+
+
+	exec global/missioncomplete.scr t1l2 1	
+
+	end
+
+//---------------------------------------------------------------------------------
+Brit2FinishLevel:
+//---------------------------------------------------------------------------------
+	self exec global/disable_ai.scr
+
+	//how long before Billy runs for the level end
+	wait 3
+
+	self.movedoneradius = 6.0
+	self waitthread RunTo $britishlevelend
+
+	wait 4
+	exec global/missioncomplete.scr t1l2 1	
+
+	end
+
+//---------------------------------------------------------------------------------
+RunTo local.ent local.movedoneradius:
+//
+//	Updated runto that makes sure he gets there...
+//---------------------------------------------------------------------------------
+	if ( local.ent==NIL || local.ent==NULL )
+	{
+		dprintln "RunTo: entity is NULL: " local.ent
+		End
+	}
+
+	if ( local.movedoneradius==NIL )
+		local.movedoneradius = 6
+
+	if ( self.runto_thread!=NIL && self.runto_thread!=NULL )
+	{
+		self.runto_thread delete
+	}
+
+	self.runto_thread	= local
+	self.movedoneradius = local.movedoneradius
+
+
+	self runto local.ent
+	self waittill movedone
+
+	while ( parm.movedone!=1 )
+	{
+		self runto local.ent
+		self waittill movedone
+	}
+
+	self.runto_thread	= NULL
+
+	self.movedoneradius	= 250
+	self.distance = 250
+
+	end
+
+//---------------------------------------------------------------------------------
+ForcedEnd:
+//---------------------------------------------------------------------------------
+
+	wait 17
+	exec global/missioncomplete.scr t1l2 1	
+
+	end

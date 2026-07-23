@@ -103,7 +103,7 @@ trigger1:
 		self remove
 
 		wait 2.5
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 		wait 0.5
 		level.colonel.enableEnemy = 1
 		level.colonel attackplayer
@@ -118,7 +118,7 @@ trigger1:
 		level.colonel mindist 10
 		level.colonel leash 10
 
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 	}
 
 end
@@ -147,9 +147,9 @@ trigger1alt:
 		level.colonel mindist 10
 		level.colonel leash 10
 
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 		wait 2
-		$balconyguy turnto $player
+		$balconyguy turnto $player[1]
 	}
 
 end
@@ -193,7 +193,7 @@ trigger2:
 		self remove
 
 		wait 0.5
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 		wait 0.5
 		level.colonel.enableEnemy = 1
 		level.colonel attackplayer
@@ -216,7 +216,7 @@ trigger2:
 		level.colonel mindist 10
 		level.colonel leash 10
 		level.colonel hide
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 
 		thread trigger2allies
 
@@ -311,12 +311,18 @@ KillPlayerOnTouch:
 		// for some reason, the angle doesn't work because the vehicle is turning without changing it's orientation..
 		// just doing a straight distance check seems to work well enough..
 //		local.bPlayerInTheWay = self waitthread global/vehicle_warning.scr::CanSeeTarget $player 200 0.707 NIL
-		local.bPlayerInTheWay = self waitthread global/vehicle_warning.scr::CanSeeTarget $player 100 NIL NIL
-
-		if ( local.bPlayerInTheWay==1 )
+		// HZM coop - resolve the player NEAREST the bike so either of the 2 players can be run over,
+		// not just the host; player_closestTo returns NULL mid-respawn -> skip this tick safely.
+		local.runover = exec coop_mod/replace.scr::player_closestTo self
+		if ( local.runover != NULL )
 		{
-			// kill him now!
-			$player damage NULL 3000 NULL (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+			local.bPlayerInTheWay = self waitthread global/vehicle_warning.scr::CanSeeTarget local.runover 100 NIL NIL
+
+			if ( local.bPlayerInTheWay==1 )
+			{
+				// kill him now!
+				local.runover damage NULL 3000 NULL (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+			}
 		}
 
 		wait 0.1
@@ -409,7 +415,7 @@ dotrigger3 local.delay:
 		level.pretrigger3 = 1
 
 		wait 0.5
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 		wait 0.5
 		level.colonel.enableEnemy = 1
 		level.colonel attackplayer
@@ -449,7 +455,7 @@ trigger4:
 		level.colonel mindist 10
 		level.colonel leash 10
 
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 		wait 0.5
 		level.colonel.enableEnemy = 1
 		level.colonel attackplayer
@@ -470,7 +476,7 @@ trigger4:
 		level.colonel mindist 5
 		level.colonel leash 5
 
-		level.colonel aimat $player
+		level.colonel aimat $player[1]
 
 		level.colonelreachedbalcony = 1
 		level.colonelatbalcony = 1
@@ -623,7 +629,14 @@ colonelhider:
 
 	while ( isAlive self )
 	{
-		local.zdiff = self.origin[2] - $player.origin[2]
+		// HZM coop - $player[1] is momentarily NULL during a respawn blink; skip the tick so
+		// $player[1].origin never casts none->vector.
+		if ( $player[1] == NULL )
+		{
+			waitframe
+			continue
+		}
+		local.zdiff = self.origin[2] - $player[1].origin[2]
 
 		if ( (local.zdiff < 75) && (local.zdiff > -75) )
 		{
@@ -689,18 +702,26 @@ captcapcolonel:
 		// wait to deliver dialog
 		local.diddialog = 0
 		local.expire = level.time + 4.0
-		local.pdist = vector_length($player.origin - $officerbalconytether.origin)
-		local.zdiff = $officerbalconytether.origin[2] - $player.origin[2]
+		// HZM coop - anchor on $player[1] (host); guard the respawn-blink NULL so .origin never casts
+		// none->vector. Default pdist = out-of-range so a NULL host just skips the proximity dialog wait.
+		local.pdist = 999999
+		local.zdiff = 0
+		if ( $player[1] != NULL )
+		{
+			local.pdist = vector_length($player[1].origin - $officerbalconytether.origin)
+			local.zdiff = $officerbalconytether.origin[2] - $player[1].origin[2]
+		}
 		while ( (local.pdist > 150) && (local.pdist < 575) && (level.time < local.expire) && (local.zdiff < 50) && (local.zdiff > -50) )
 		{
 			wait 0.2
-			local.pdist = vector_length($player.origin - $officerbalconytether.origin)
-			local.zdiff = $officerbalconytether.origin[2] - $player.origin[2]
+			if ( $player[1] == NULL ){ continue }
+			local.pdist = vector_length($player[1].origin - $officerbalconytether.origin)
+			local.zdiff = $officerbalconytether.origin[2] - $player[1].origin[2]
 		}
 
 		if ( (local.pdist < 150) && (local.zdiff < 50) && (local.zdiff > -50) )
 		{
-			level.captain turnto $player
+			level.captain turnto $player[1]
 			wait 0.25
 			level.captain anim 13C203_CaptainDialog_04
 			level.captain waittill animdone
@@ -714,11 +735,22 @@ captcapcolonel:
 
 		// wait to shoot colonel
 		local.expire = level.time + 15.0
-		local.zdiff = level.captain.origin[2] - $player.origin[2]
-		while ( (vector_length(level.captain.origin - $player.origin) > 400) || (local.zdiff > 50) || (local.zdiff < -50) )
+		// HZM coop - anchor on $player[1] (host); the .origin deref lived in the while-condition, which
+		// would cast none->vector on a respawn-blink NULL, so pull the distance into a guarded local.
+		// Default capdist = far so a NULL host keeps waiting (bounded by the captain-near exit) instead of crashing.
+		local.capdist = 999999
+		local.zdiff = 0
+		if ( $player[1] != NULL )
+		{
+			local.capdist = vector_length(level.captain.origin - $player[1].origin)
+			local.zdiff = level.captain.origin[2] - $player[1].origin[2]
+		}
+		while ( (local.capdist > 400) || (local.zdiff > 50) || (local.zdiff < -50) )
 		{
 			wait 0.1
-			local.zdiff = level.captain.origin[2] - $player.origin[2]
+			if ( $player[1] == NULL ){ continue }
+			local.capdist = vector_length(level.captain.origin - $player[1].origin)
+			local.zdiff = level.captain.origin[2] - $player[1].origin[2]
 		}
 
 		if ( (level.time < local.expire) && (local.diddialog == 0) )
@@ -742,9 +774,9 @@ captcapcolonel:
 		}
 
 		wait 0.5
-		level.captain turnto $player
+		level.captain turnto $player[1]
 		wait 0.5
-		level.captain lookat $player
+		level.captain lookat $player[1]
 		level.captain turnto NULL
 		level.captain say dfr_T1L2_BP6967
 		wait 3.0
