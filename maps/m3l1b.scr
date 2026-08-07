@@ -82,6 +82,7 @@ main:{
 
 	//*** start the bunker dust falling
 	thread bunker_dust_trigger
+	thread coop_rear_props	//[user 2026-08-07] baked build-mode props (see label at end of file)
 
 	//*** play the proper ambient track
 	forcemusic normal normal
@@ -769,6 +770,12 @@ println "CLEAR BUNKER COUNTER: " level.clear_bunker
 if (level.clear_bunker >= 6)
 {
 	waitthread global/objectives.scr::add_objectives 1 3
+
+	//[user 2026-08-07] COOP checkpoint: the bunker is cleared, so move respawns up out of the
+	//start area. Hooked on this gate (level.clear_bunker >= 6) rather than a progress_player area
+	//trigger because this is the map's own "objective 1 complete" test - it cannot fire early, and
+	//it fires on both the farbunker-cleared and not-yet-cleared branches below.
+	thread coop_mod/spawnlocations.scr::m3l1b_update1
 
 	//*** check to see if the farbunker gunner objective has been cleared as well, if so, add the exit level objective
 	if (level.clear_farbunker_gunner >= 2)
@@ -2047,6 +2054,23 @@ coop_flak88_objective:
 	$88mm_explosive1 thread global/obj_dm.scr::bomb_thinker
 	$88mm_explosive2 thread global/obj_dm.scr::bomb_thinker
 
+	//[user 2026-08-07] The fuse and the defuse team MUST be set AFTER bomb_thinker runs, not before.
+	//bomb_thinker opens by hardcoding its own level.bomb_tick_time = 45 (and bomb_damage /
+	//bomb_explosion_radius), silently overwriting anything we set above it - which is why a planted
+	//charge sat for 45 quiet seconds and read as a dud. waitframe lets both thinkers get past that
+	//assignment; the explode loop reads the value at PLANT time, so the shorter fuse still applies.
+	waitframe
+	level.bomb_tick_time = 15
+	//[user 2026-08-07] Instant plant. bomb_set_time is in TENTHS of a second and bomb_thinker
+	//hardcodes 50 (a 5s hold-to-plant). The rest of the trilogy plants on a single use press, so
+	//drop it to one 0.1s tick - the plant loop needs at least one iteration to reach its counter
+	//test, so 0 would never complete.
+	level.bomb_set_time = 1
+	//retail leaves level.defusing_team unset here, so an allied player brushing the plant trigger
+	//after arming gets "You're on the wrong team to defuse this bomb!". Everyone is allies in coop,
+	//so name axis and the defuse path simply never engages.
+	level.defusing_team = "axis"
+
 	//*** watch each bomb; when bomb_thinker sets .exploded, count it + silence that gun
 	thread coop_flak88_watch $88mm_explosive1 $88mm_weapon1
 	thread coop_flak88_watch $88mm_explosive2 $88mm_weapon2
@@ -2055,6 +2079,10 @@ coop_flak88_objective:
 	thread coop_flak88_fire $88mm_weapon1
 	thread coop_flak88_fire $88mm_weapon2
 	thread coop_flak88_defenders
+	//[user 2026-08-07] Rear garrison spawns HERE, when the 88 objective opens - not on completion.
+	//Hooking it to coop_flak88_complete meant the rear was empty for the whole fight and only
+	//populated once the guns were already down, which is backwards for "defend the rear area".
+	thread coop_rear_defenders
 
 end
 
@@ -2066,12 +2094,30 @@ coop_flak88_watch local.bomb local.gun:
 
 	if (local.bomb == NULL){ end }
 
+	//[user 2026-08-07] obj_dm.scr's explode loop shows NO stopwatch - it just ticks silently for the
+	//fuse, which is what made a planted charge read as a dud. Watch for the plant here (bomb_thinker
+	//sets .live = 1 the instant it arms) and put the fuse on the native stopwatch for every player,
+	//the same way coop_mod/officer.scr::coop_radio_bomb_countdown does its charge.
+	while (local.bomb.live != 1 && local.bomb.exploded != 1)
+	{
+		waitframe
+	}
+	if (local.bomb.exploded != 1)
+	{
+		exec coop_mod/replace.scr::stopwatch level.bomb_tick_time
+	}
+
 	while (local.bomb.exploded != 1)
 	{
 		waitframe
 	}
 
 	if (local.gun != NULL){ local.gun.coop_fireStop = 1 }
+	//[user 2026-08-07] Guaranteed detonation report. obj_dm.scr only plays a blast if the charge
+	//marker carries an explosion_sound entity key (`if (self.explosion_sound != NIL)`), and these
+	//retail pulse_explosive markers evidently do not - the kill was silent. explode_flak88 is
+	//aliased maps "m e t" so it loads here, unlike the flak FIRE aliases (bug-1548).
+	if (local.gun != NULL){ local.gun playsound explode_flak88 }
 
 	level.coop_flak88_destroyed = level.coop_flak88_destroyed + 1
 	if (level.coop_flak88_destroyed >= 2)
@@ -2083,25 +2129,41 @@ end
 
 
 //===========================================================================
-// Restored firing-on-the-beach: the turret ACTUALLY fires (muzzle + sound + recoil via startFiring, like
-// m3l3's scene4 gun) every few seconds until destroyed - not an explosion effect.
+// Restored firing-on-the-beach: the turret ACTUALLY fires (muzzle + sound + recoil) every few
+// seconds until destroyed - not an explosion effect. Needs BOTH startFiring and an aim target;
+// see the note in the body for why startFiring on its own never discharges.
 //===========================================================================
 coop_flak88_fire local.gun:
 
 	if (local.gun == NULL){ end }
 
+	//[user 2026-08-07] REWRITTEN. $88mm_weapon1/2 are class **Animate**, not TurretGun - the live log
+	//is unambiguous: "Failed execution of command 'startFiring' for class 'Animate'", and the same for
+	//stopFiring and setAimTarget. So the whole turret API is unavailable here, and the original
+	//startFiring pair had never done anything; my first fix (spawn an aim target, mirroring M3L3) was
+	//wrong for the same reason and just added a third failing command.
+	//What DOES work is the model's own animation. flak88turret.tik declares fire_scripted =
+	//88turret_fire.skc, and that anim carries the frame command `first sound flak_snd_fire`, so
+	//playing it gives the recoil AND the report from one call - no turret, no aim target, no
+	//projectile. Pair it with the alias maps-spec fix (bug-1548) or it animates silently.
 	while (local.gun.coop_fireStop != 1)
 	{
-		local.gun startFiring
-		wait 1
-		if (local.gun != NULL){ local.gun stopfiring }
-		if ($player != NULL)
+		local.gun anim fire_scripted
+
+		//shake anyone standing near the gun as it goes off. NOT `$player.origin` - $player is an
+		//ARRAY in coop and dereferencing it directly throws once a second player connects.
+		local.near = exec coop_mod/replace.scr::player_closestTo local.gun
+		if (local.near != NULL)
 		{
-			if (vector_length(local.gun.origin - $player.origin) < 1200)
+			if (vector_length(local.gun.origin - local.near.origin) < 1200)
 			{
 				thread jitter_artillery 0
 			}
 		}
+
+		wait 2
+		if (local.gun == NULL){ end }
+		if (local.gun.coop_fireStop != 1){ local.gun anim idle }
 		wait 4
 	}
 
@@ -2149,6 +2211,7 @@ coop_flak88_complete:
 
 	iprintlnbold "Both FLAK 88 emplacements destroyed - fall back to the exit!"
 
+
 	waitthread global/objectives.scr::add_objectives 3 3
 	waitthread global/objectives.scr::add_objectives 4 2 "Exit the bunker." $end_level_trigger.origin
 	waitthread global/objectives.scr::current_objectives 4
@@ -2156,3 +2219,386 @@ coop_flak88_complete:
 	$end_level_trigger triggerable
 
 end
+
+//===========================================================================
+// [user 2026-08-07] Rear-area garrison. Spawned once the FLAK 88s are down and the squad is sent
+// back toward the exit, so the whole run home is not a walk through an empty map.
+// Deliberately NOT given a runto: coop_flak88_spawn_defender above sends its men AT the players,
+// which is assault behaviour. These hold where they are placed and engage on sight, which is what
+// "defend the rear area" means. Points captured live with viewpos; the yaws viewpos printed were
+// accumulated past one turn (-422, -796 ...) and are normalised into 0..360 here.
+// Both models used below are already spawned elsewhere on this map (see the bunker_upper fodder
+// block), so nothing new has to be precached.
+//===========================================================================
+coop_rear_defenders:
+
+	if (level.coop_rearDefenders == 1){ end }
+	level.coop_rearDefenders = 1
+
+	waitthread coop_rear_spawn ( 391 365 320 ) 298 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 433 -269 256 ) 289 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -332 -112 328 ) 284 1
+	wait 0.3
+	waitthread coop_rear_spawn ( -871 -464 328 ) 293 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -861 297 384 ) 273 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1145 158 320 ) 295 1
+	wait 0.3
+	waitthread coop_rear_spawn ( 2112 118 384 ) 269 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 2086 -676 256 ) 94 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 2579 -715 384 ) 193 1
+	wait 0.3
+	waitthread coop_rear_spawn ( -85 -638 250 ) 238 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1047 95 320 ) 323 0
+	wait 0.3
+
+	//[user 2026-08-07] Second capture pass - "I want there to be an abundance out here". Same
+	//treatment as the first 11: viewpos reports the EYE, so every z drops by DEFAULT_VIEWHEIGHT (82)
+	//to put the actor on the floor, and the yaws viewpos printed had wrapped past a full turn
+	//(-186, 667, 696 ...) so they are normalised into 0..360.
+
+	waitthread coop_rear_spawn ( 542 -617 250 ) 174 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -134 -640 250 ) 183 1
+	wait 0.3
+	waitthread coop_rear_spawn ( 250 76 320 ) 41 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1181 268 320 ) 41 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1594 -344 577 ) 271 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1643 -824 372 ) 269 1
+	wait 0.3
+	waitthread coop_rear_spawn ( 2753 -21 384 ) 261 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 2776 -629 384 ) 217 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 389 -402 255 ) 353 1
+	wait 0.3
+	waitthread coop_rear_spawn ( 622 -170 255 ) 1 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -78 612 320 ) 187 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -185 98 389 ) 272 1
+	wait 0.3
+	waitthread coop_rear_spawn ( -867 -438 328 ) 270 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -1007 280 384 ) 307 0
+	wait 0.3
+	waitthread coop_rear_spawn ( -770 575 384 ) 336 1
+	wait 0.3
+	waitthread coop_rear_spawn ( -370 568 320 ) 281 0
+	wait 0.3
+
+end
+
+//===========================================================================
+// One rear defender. Mirrors coop_flak88_spawn_defender exactly (spawn -> disable_ai -> place ->
+// enable_ai) - placing an actor before enable_ai is what stops it waking up at the world origin.
+// The 0.3s stagger in the caller is the same-frame spawn/model/solid race guard.
+//===========================================================================
+coop_rear_spawn local.pos local.yaw local.nco:
+
+	if (local.nco == 1)
+	{
+		local.sol = spawn "models/human/german_wehrmact_nco" gun "mp40"
+	}
+	else
+	{
+		local.sol = spawn "models/human/german_wehrmact_soldier" gun "mauser kar 98k"
+	}
+
+	if (local.sol == NULL){ end }
+
+	local.sol exec global/disable_ai.scr
+	local.sol.origin = local.pos
+	local.sol.angles = ( 0 local.yaw 0 )
+	local.sol exec global/enable_ai.scr
+
+end
+
+
+
+//===========================================================================
+// [user 2026-08-07] Rear-area props, baked from a build-mode session.
+// IMPORTANT: build mode is a CAPTURE tool, not a persistence layer. It writes paste-ready blocks to
+// coop_mod/save/build_<map>.dat and re-reads that file only to append to it - nothing loads the .dat
+// at runtime, so placements vanish the moment the map reloads until they are baked into a script
+// like this. 34 pieces: crates, barbwire runs, tents, an Opel truck and a sandbag segment, forming
+// the defensive position the rear garrison fights from.
+//===========================================================================
+coop_rear_props:
+
+	// coop_build #1 models/static/barbwire_long_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_long_two_post.tik"
+	local.m.origin = ( -798.888 -1330.944 352.803 )
+	local.m.angles = ( 0 177 0 )
+	local.m solid
+	local.m setsize ( -31.892 -228.693 -20.522 ) ( 32.283 245.765 117.674 )
+	// coop_build #2 models/static/barbwire_long_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_long_two_post.tik"
+	local.m.origin = ( -1078.524 -770.399 350.050 )
+	local.m.angles = ( 0 177 0 )
+	local.m solid
+	local.m setsize ( -31.892 -228.693 -20.522 ) ( 32.283 245.765 117.674 )
+	// coop_build #3 models/static/barbwire_long_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_long_two_post.tik"
+	local.m.origin = ( -1204.489 -348.895 360.522 )
+	local.m.angles = ( 0 207 0 )
+	local.m solid
+	local.m setsize ( -31.892 -228.693 -20.522 ) ( 32.283 245.765 117.674 )
+	// coop_build #4 models/static/barbwire_long_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_long_two_post.tik"
+	local.m.origin = ( -1345.374 84.870 372.472 )
+	local.m.angles = ( 0 192 0 )
+	local.m solid
+	local.m setsize ( -31.892 -228.693 -20.522 ) ( 32.283 245.765 117.674 )
+	// coop_build #5 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -851.263 -778.000 337.211 )
+	local.m.angles = ( 0 177 0 )
+	local.m scale 1.100
+	local.m solid
+	local.m setsize ( -33.510 -124.197 -22.575 ) ( 35.512 126.968 129.441 )
+	// coop_build #6 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -727.801 -1599.875 315.331 )
+	local.m.angles = ( 0 57 0 )
+	local.m scale 1.100
+	local.m solid
+	local.m setsize ( -33.510 -124.197 -22.575 ) ( 35.512 126.968 129.441 )
+	// coop_build #7 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -739.280 -876.746 333.924 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 1.100
+	local.m solid
+	local.m setsize ( -33.510 -124.197 -22.575 ) ( 35.512 126.968 129.441 )
+	// coop_build #8 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -692.819 -1095.429 309.055 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 1.100
+	local.m solid
+	local.m setsize ( -33.510 -124.197 -22.575 ) ( 35.512 126.968 129.441 )
+	// coop_build #9 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -520.924 -1033.100 316.002 )
+	local.m.angles = ( 0 132 0 )
+	local.m solid
+	local.m setsize ( -30.464 -112.907 -20.522 ) ( 32.283 115.425 117.674 )
+	// coop_build #10 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -570.397 -786.583 321.600 )
+	local.m.angles = ( 0 147 0 )
+	local.m solid
+	local.m setsize ( -30.464 -112.907 -20.522 ) ( 32.283 115.425 117.674 )
+	// coop_build #11 models/static/barbwire_two_post.tik
+	local.m = spawn script_model
+	local.m model "models/static/barbwire_two_post.tik"
+	local.m.origin = ( -740.362 -639.292 360.125 )
+	local.m.angles = ( 0 87 0 )
+	local.m solid
+	local.m setsize ( -30.464 -112.907 -20.522 ) ( 32.283 115.425 117.674 )
+	// coop_build #12 models/static/tent.tik
+	local.m = spawn script_model
+	local.m model "models/static/tent.tik"
+	local.m.origin = ( -1154.281 -1286.895 193.688 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -171.763 -129.425 -0.287 ) ( 163.801 130.100 117.242 )
+	// coop_build #13 models/static/tent.tik
+	local.m = spawn script_model
+	local.m model "models/static/tent.tik"
+	local.m.origin = ( -1197.423 -1303.371 261.055 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -171.763 -129.425 -0.287 ) ( 163.801 130.100 117.242 )
+	// coop_build #14 models/static/tent.tik
+	local.m = spawn script_model
+	local.m model "models/static/tent.tik"
+	local.m.origin = ( -1151.902 -980.030 169.116 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -171.763 -129.425 -0.287 ) ( 163.801 130.100 117.242 )
+	// coop_build #15 models/static/tent.tik
+	local.m = spawn script_model
+	local.m model "models/static/tent.tik"
+	local.m.origin = ( -1175.596 -1113.308 236.483 )
+	local.m.angles = ( 0 87 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -171.763 -129.425 -0.287 ) ( 163.801 130.100 117.242 )
+	// coop_build #16 models/static/vehicle_opeltruck_green.tik
+	local.m = spawn script_model
+	local.m model "models/static/vehicle_opeltruck_green.tik"
+	local.m.origin = ( -1102.752 -1324.927 360.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -271.632 -67.831 -0.998 ) ( 128.923 63.344 133.403 )
+	// coop_build #17 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1069.900 -1041.995 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #18 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1069.595 -1078.047 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #19 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1158.326 -1117.769 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #20 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1214.925 -1115.047 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #21 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1156.670 -1080.127 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #22 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1071.265 -1115.710 335.850 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #23 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1079.558 -1152.890 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #24 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1080.248 -1188.867 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #25 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1082.137 -1226.501 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #26 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1137.955 -1200.977 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #27 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1136.770 -1163.210 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #28 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1115.406 -1143.207 341.029 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #29 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1112.844 -1122.218 335.713 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #30 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1191.591 -1196.942 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #31 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1190.245 -1160.510 344.422 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #32 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1169.285 -1140.485 341.999 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m solid
+	local.m setsize ( -20.969 -29.470 0.000 ) ( 20.523 30.122 37.746 )
+	// coop_build #33 models/static/indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1161.371 -1144.995 377.516 )
+	local.m.angles = ( 0 267 0 )
+	local.m scale 0.800
+	local.m notsolid
+	// coop_build #34 models/static/sandbag_longsegment.tik
+	local.m = spawn script_model
+	local.m model "models/static/sandbag_longsegment.tik"
+	local.m.origin = ( -1036.149 -1289.238 398.125 )
+	local.m.angles = ( 0 177 0 )
+	local.m scale 0.700
+	local.m solid
+	local.m setsize ( -13.818 -216.194 -0.000 ) ( 10.451 220.492 37.548 )
+
+end
+
