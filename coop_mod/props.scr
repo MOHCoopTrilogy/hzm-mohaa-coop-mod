@@ -1,0 +1,414 @@
+//=========================================================================
+// HZM coop - ARENA PROP PERSISTENCE  [user 2026-08-04] bug-1381
+//
+// Build mode's own build_<map>.dat is an EXPORT, not a save: paste-ready 'local.m = spawn
+// script_model' blocks meant to be baked into a map script by hand. Nothing ever reads it back, so
+// every prop vanished on a map restart and authoring across sessions was impossible.
+//
+// This adds the missing half: props_<map>.dat, one record per line
+//
+//     tik|x y z|pitch yaw roll|scale|solid
+//
+// read at map start and respawned exactly as placed. Same shape as walls_<map>.dat so both halves
+// of an arena reload the same way.
+//
+// SOLIDITY RULE (user): everything is solid EXCEPT foliage and rocks, which stay walk-through so
+// they dress the arena without blocking movement or fire. The rule lives in the DATA (the trailing
+// 0/1 per line), not in code, so any prop can be overridden by editing one character.
+//
+// SCALE + SOLID: 'scale' resizes only the VISUAL mesh - the collision hull stays the model's base
+// bounds (bug-829). A scaled solid prop therefore clips at its unscaled size unless setsize is
+// applied too, which is why the scale is stored and re-applied before the hull is set.
+//=========================================================================
+
+//=========================================================================
+prop_init:{
+	if( level.coop_prop_init == 1 ){ end }
+	level.coop_prop_init = 1
+	level.coop_prop_n = 0
+	//[user 2026-08-04] bug-1384 - ARENA CONTENT MUST NEVER REACH THE CAMPAIGN. These saves are
+	//per-map, and e3l4 is BOTH a campaign mission and the arena test bed - so without this gate a
+	//normal campaign run of e3l4 would spawn every authored barrier and prop and delete the doors
+	//removed for the arena, wrecking the mission. coop_buildmap is the arena switch (it is what
+	//halts the objective chain), so nothing arena-authored loads unless it is set.
+	if( level.coop_arenaMap != 1 && level.coop_buildmap != 1 ){
+		println( "^~^~^ PROPS: campaign run - arena content NOT loaded" )
+		end
+	}
+	waitthread prop_load
+}end
+
+//=========================================================================
+// Respawn every prop recorded for this map.
+//=========================================================================
+prop_load:{
+	local.name = getcvar "mapname"
+	local.txt = fs_read_content ( "coop_mod/save/props_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){
+		local.txt = fs_read_content ( "coop_mod/props/" + local.name + ".dat" )
+	}
+	if( local.txt == NIL || local.txt == "" ){ end }
+
+	local.field = ""
+	local.f0 = ""
+	local.f1 = ""
+	local.f2 = ""
+	local.f3 = ""
+	local.col = 0
+	local.i = 0
+	local.len = local.txt.size
+	local.loaded = 0
+
+	while( local.i < local.len ){
+		local.c = local.txt[local.i]
+		if( local.c == "|" ){
+			if( local.col == 0 ){ local.f0 = local.field }
+			if( local.col == 1 ){ local.f1 = local.field }
+			if( local.col == 2 ){ local.f2 = local.field }
+			if( local.col == 3 ){ local.f3 = local.field }
+			local.col++
+			local.field = ""
+		} else if( local.c == "\n" ){
+			if( local.col == 4 && local.f0 != "" ){
+				waitthread prop_spawn local.f0 local.f1 local.f2 local.f3 local.field
+				local.loaded++
+			}
+			local.field = ""
+			local.col = 0
+			local.f0 = ""
+		} else {
+			local.field += local.c
+		}
+		local.i++
+	}
+	if( local.col == 4 && local.f0 != "" ){
+		waitthread prop_spawn local.f0 local.f1 local.f2 local.f3 local.field
+		local.loaded++
+	}
+	level.coop_prop_n = local.loaded
+	println( "^~^~^ PROPS LOADED " + local.loaded + " for " + local.name )
+}end
+
+//=========================================================================
+// One prop. Every field arrives as a STRING from the file - coerce before use (bug-1352/1372).
+//=========================================================================
+prop_spawn local.tik local.posStr local.angStr local.scale local.solid:{
+	if( local.tik == "" ){ end }
+
+	local.pos = waitthread prop_vec local.posStr
+	local.ang = waitthread prop_vec local.angStr
+
+	//[bug-1415] LADDERS ARE NOT MODELS ANY MORE. The FuncLadder attempt rendered as a bare cube
+	//(every coop_build shape shares one cube mesh), so ladders now use the ported trigger+beam
+	//system in coop_mod/ladder.scr: textured rails and rungs drawn from func_beams, a latch
+	//trigger, and the statemap's own climbwall movement. The props row keeps the ladder_*.tik
+	//path purely as a MARKER so existing saves keep working: height rides in the scale column
+	//(height = 128 * scale), style comes from the marker name.
+	if( waitthread prop_isLadder local.tik ){
+		local.h = 128 * float( local.scale )
+		if( local.h < 70 ){ local.h = 70 }
+		local.style = waitthread prop_ladderStyle local.tik
+		thread coop_mod/ladder.scr::main local.pos local.ang[1] local.h local.style
+		end
+	}
+
+	local.m = spawn script_model model local.tik
+	if( local.m == NULL ){ end }
+	local.m.origin = local.pos
+	local.m.angles = local.ang
+
+	//[bug-1403] lights restored from the save file count against the same dlight budget as ones
+	//placed by hand this session - otherwise reloading a finished arena and adding one more would
+	//sail past the cap.
+	if( waitthread coop_mod/main.scr::containsText local.tik "coop_build/light_" 0 ){
+		if( level.coop_lightN == NIL ){ level.coop_lightN = 0 }
+		level.coop_lightN = level.coop_lightN + 1
+		local.m.coop_buildIsLight = 1
+		local.m notsolid
+		waitthread prop_lightApply local.m local.tik
+	}
+
+	//[user 2026-08-05] HOLDOUT CALL RADIO: every placed radio_military is the one-shot last-man
+	//squad-respawn radio (holdout.scr::holdout_radio_watch). Re-armed on every save reload; the
+	//once-per-point state lives on the ENTITY, so a mission restart resets it with the map.
+	if( waitthread coop_mod/main.scr::containsText local.tik "radio_military" 0 ){
+		thread coop_mod/holdout.scr::holdout_radio_watch local.m
+	}
+
+	local.sc = float( local.scale )
+	if( local.sc <= 0 ){ local.sc = 1 }
+	if( local.sc != 1 ){ local.m scale local.sc }
+
+	if( int( local.solid ) != 1 ){
+		local.m notsolid
+		end
+	}
+
+	//[user 2026-08-05] bug-1390 - SEMICIRCLE SANDBAGS NEED SEGMENTED COLLISION.
+	//SOLID_BBOX cannot be concave or rotate, so a plain 'solid' on a semicircle gives a filled
+	//rectangular hull and you cannot get INSIDE the bag ring - which is the whole point of it.
+	//coop_mod/cover.scr:57-90 already solved this for the deployable sandbag: leave the visual
+	//notsolid and ring the front arc with small script_object colliders, so the interior stays
+	//open. Same recipe here, scaled - the arc below is cover.scr's, tuned for the SMALL
+	//semicircle; coop_propArcScale widens it for the large one. Tune it if collision drifts.
+	if( !(waitthread prop_isSemicircle local.tik) ){
+		local.m solid
+		end
+	}
+	local.m notsolid
+	waitthread prop_arcCollide local.m local.ang local.tik
+}end
+
+//=========================================================================
+// "x y z" (a string) -> vector. No string->vector cast exists, so scan the three numbers out.
+// Shared by the position and angle columns.
+//=========================================================================
+prop_vec local.s:{
+	local.n1 = ""
+	local.n2 = ""
+	local.n3 = ""
+	local.part = 0
+	local.i = 0
+	while( local.i < local.s.size ){
+		local.c = local.s[local.i]
+		if( local.c == " " ){
+			local.part++
+		} else {
+			if( local.part == 0 ){ local.n1 += local.c }
+			if( local.part == 1 ){ local.n2 += local.c }
+			if( local.part == 2 ){ local.n3 += local.c }
+		}
+		local.i++
+	}
+	if( local.n1 == "" ){ local.n1 = "0" }
+	if( local.n2 == "" ){ local.n2 = "0" }
+	if( local.n3 == "" ){ local.n3 = "0" }
+	//[user 2026-08-05] bug-1388 - a vector literal must be built from PLAIN LOCALS. Nested calls
+	//like ( float(a) float(b) float(c) ) do NOT parse as a vector here - the expression collapses
+	//to the first value, so this returned a FLOAT. Downstream that produced
+	//"Cannot cast 'float' to vector" in playersWarpto, and every barrier/prop/checkpoint got a
+	//scalar instead of a position. Same trap already avoided in wall_spawn_one's setsize.
+	local.vx = float( local.n1 )
+	local.vy = float( local.n2 )
+	local.vz = float( local.n3 )
+	end ( local.vx local.vy local.vz )
+}end
+
+//=========================================================================
+// Is this model a concave sandbag ring? Those are the only props that need segmented collision.
+//=========================================================================
+prop_isSemicircle local.tik:{
+	local.i = 0
+	while( local.i < local.tik.size ){
+		if( local.tik[local.i] == "s" ){
+			if( local.i + 10 < local.tik.size ){
+				local.chunk = ""
+				local.j = 0
+				while( local.j < 11 ){
+					local.chunk += local.tik[local.i + local.j]
+					local.j++
+				}
+				if( local.chunk == "semicircle" + "_" ){ end 1 }
+				if( local.chunk == "semicircle." ){ end 1 }
+			}
+		}
+		local.i++
+	}
+	end 0
+}end
+
+//=========================================================================
+// Native constantLight per variant.                    [user 2026-08-05] bug-1423
+// Colour channels cap at 1.0 (constantLight packs bytes), so the _bright tiers differentiate by
+// RADIUS. Stacking two emitters on one spot still doubles the output.
+//=========================================================================
+prop_lightApply local.m local.tik:{
+	if( local.m == NULL || local.m == NIL ){ end }
+	local.r = 1.00
+	local.g = 0.86
+	local.b = 0.62
+	local.rad = 280
+	if( waitthread coop_mod/main.scr::containsText local.tik "light_white" 0 ){
+		local.r = 1.00
+		local.g = 1.00
+		local.b = 0.96
+		local.rad = 320
+	}
+	if( waitthread coop_mod/main.scr::containsText local.tik "light_cold" 0 ){
+		local.r = 0.62
+		local.g = 0.74
+		local.b = 1.00
+		local.rad = 360
+	}
+	if( waitthread coop_mod/main.scr::containsText local.tik "light_fire" 0 ){
+		local.r = 1.00
+		local.g = 0.60
+		local.b = 0.26
+		local.rad = 220
+	}
+	if( waitthread coop_mod/main.scr::containsText local.tik "_bright" 0 ){
+		local.rad = local.rad + ( local.rad / 2 )
+	}
+	local.m lightRed local.r
+	local.m lightGreen local.g
+	local.m lightBlue local.b
+	local.m lightRadius local.rad
+	local.m lightOn
+}end
+
+//=========================================================================
+// Marker tik -> beam shader for the rails/rungs.
+//=========================================================================
+prop_ladderStyle local.tik:{
+	//[bug-1424] style TOKENS, not texture paths - beam shaders are sprites and cannot take a
+	//texture; ladder.scr::beam maps these to colour tints on the default beamshader.
+	if( waitthread coop_mod/main.scr::containsText local.tik "ladder_rusty" 0 ){ end "rusty" }
+	if( waitthread coop_mod/main.scr::containsText local.tik "ladder_wood" 0 ){ end "wood" }
+	if( waitthread coop_mod/main.scr::containsText local.tik "ladder_clean" 0 ){ end "clean" }
+	end "metal"
+}end
+
+//=========================================================================
+// CLIMBABLE LADDER VOLUME.                             [user 2026-08-05] bug-1412
+// The visual (models/coop_build/ladder_*.tik) is scenery. This spawns the thing you actually
+// climb: a REAL func_ladder.
+//
+// It must genuinely be a func_ladder, not merely something carrying CONTENTS_LADDER, because
+// player_conditionals.cpp:1598 does ((FuncLadder *)trace.ent->entity)->CanUseLadder(this) after a
+// MASK_LADDER trace - an unchecked downcast that would call a member function on the wrong type.
+//
+// coop_ladderbox is the engine hook added for this (fgame/misc.cpp). A map ladder is a BRUSH
+// entity and LadderSetup asks for SOLID_BSP, which needs an inline model a script-spawned entity
+// does not have; the hook re-asserts SOLID_BBOX over the box we set here and stores the facing.
+//
+// TWO NUMBERS FROM CanUseLadder THAT DECIDE WHETHER IT WORKS AT ALL:
+//   * the player must be within 52u HORIZONTALLY of this entity's ORIGIN, so the volume sits at
+//     the climbing face - not at the centre of some larger box
+//   * the top dismount steps to origin + facingDir * 26, so facingDir points INTO the structure,
+//     which is the direction you were facing when you placed the ladder against the wall
+//=========================================================================
+prop_ladderVolume local.m local.yaw:{
+	if( local.m == NULL || local.m == NIL ){ end }
+
+	local.lad = spawn func_ladder
+	if( local.lad == NULL ){
+		println( "^~^~^ LADDER spawn returned NULL - entity pool pressure" )
+		end
+	}
+	local.lad.origin = local.m.origin
+
+	//height from the VISUAL, so the climb always matches whatever scale it was placed at.
+	//getmins/getmaxs are read off the placed model (buildmode does the same for solid hulls,
+	//bug-829). Fall back to a sane ladder if the bounds are not ready this frame.
+	local.top = 128
+	local.mx = local.m.getmaxs
+	if( local.mx != NIL && local.mx != NULL ){
+		if( local.mx[2] > 32 ){ local.top = local.mx[2] }
+	}
+	local.lmins = ( -18 -18 0 )
+	local.lmaxs = ( 18 18 local.top )
+	local.lad setsize local.lmins local.lmaxs
+	local.lad coop_ladderbox local.yaw
+
+	level.coop_ladderN = level.coop_ladderN + 1
+	if( level.coop_ladderN == NIL ){ level.coop_ladderN = 1 }
+	println( "^~^~^ LADDER volume at " + local.lad.origin + " height " + local.top + " facing " + local.yaw )
+	end local.lad
+}end
+
+//=========================================================================
+// Is this model one of the build-mode ladders?
+//=========================================================================
+prop_isLadder local.tik:{
+	end ( waitthread coop_mod/main.scr::containsText local.tik "coop_build/ladder_" 0 )
+}end
+
+//=========================================================================
+// Ring the front arc with small colliders - cover.scr's recipe, scaled.
+// The visual is already notsolid; these boxes ARE the collision.
+//=========================================================================
+prop_arcCollide local.ent local.ang local.tik:{
+	//[user 2026-08-05] bug-1407 - ARC SIZED FROM THE MODEL, not from a guessed multiplier.
+	//
+	//The offsets below are cover.scr's, and they are already exact for the SMALL semicircle: that
+	//model's own TIKI declares its obstacle bounds as
+	//    QUAKED static_obstacle_sandbag-small-semicircle ... (-32 -80 0) (56 88 56)
+	//and the arc's furthest point is x=56 - maxs.x on the nose - with y running -76..84 just inside
+	//-80..88. Nothing to fix there.
+	//
+	//The LARGE semicircle is a DIFFERENT size, and was being approximated by scaling the small
+	//arc by one uniform coop_propArcScale (1.5). Its TIKI declares
+	//    QUAKED static_obstacle_sandbag-large-semicircle ... (-56 -96 0) (64 104 56)
+	//so the true ratios are 120/88 = 1.364 in X and 200/168 = 1.190 in Y - NOT equal, and neither
+	//of them 1.5. A single 1.5 pushed the ring too far out on both axes, worst in Y, which is why
+	//you could walk into the bags before the collision met you.
+	//
+	//So map the small arc onto the large model's real bounds per axis:
+	//    x_large = (x_small + 32) * (120/88)  - 56
+	//    y_large = (y_small + 80) * (200/168) - 96
+	//No sweep of the trilogy was needed in the end - and none would have helped: the model is not
+	//placed in ANY of the 168 shipped BSPs. The TIKI is the only authority on its footprint.
+	local.afwd  = angles_toforward local.ang
+	local.aleft = angles_toleft local.ang
+
+	local.big = 0
+	if( waitthread coop_mod/main.scr::containsText local.tik "large_semicircle" 0 ){ local.big = 1 }
+
+	local.ox[1] = 4
+	local.oy[1] = 0 - 76
+	local.ox[2] = 24
+	local.oy[2] = 0 - 70
+	local.ox[3] = 41
+	local.oy[3] = 0 - 53
+	local.ox[4] = 52
+	local.oy[4] = 0 - 27
+	local.ox[5] = 56
+	local.oy[5] = 4
+	local.ox[6] = 52
+	local.oy[6] = 35
+	local.ox[7] = 41
+	local.oy[7] = 61
+	local.ox[8] = 24
+	local.oy[8] = 78
+	local.ox[9] = 4
+	local.oy[9] = 84
+
+	//half-width of each collider. 9 boxes span a longer arc on the large model, so they must be
+	//wider or gaps open between them and you slip through (bug-1392).
+	local.hwBase = 20
+	if( local.big == 1 ){ local.hwBase = 26 }
+
+	//optional fine-tune, now a MULTIPLIER ON TOP of correct bounds - so it defaults to 1.0, not 1.5
+	local.fine = float( getcvar "coop_propArcScale" )
+	if( local.fine <= 0 ){ local.fine = 1.0 }
+
+	local.b = 1
+	while( local.b <= 9 ){
+		local.sx = local.ox[local.b]
+		local.sy = local.oy[local.b]
+		if( local.big == 1 ){
+			local.sx = ( local.sx + 32 ) * 1.363636 - 56
+			local.sy = ( local.sy + 80 ) * 1.190476 - 96
+		}
+		local.fx = local.sx * local.fine
+		local.fy = local.sy * local.fine
+		local.wp = local.ent.origin + (local.afwd * local.fx) + (local.aleft * local.fy)
+		local.box = spawn script_object
+		if( local.box != NULL ){
+			local.box.origin = local.wp
+			//54u exactly as cover.scr: solid at chest 36u but CLEAR at head 58u, so the engine
+			//take-cover check still reads it as LOW cover you can peek over.
+			//[bug-1392] the BOX must be wide enough that 9 of them still touch along the arc, or
+			//you clip BETWEEN them into the ring. 20u suits the small model, 26u the large.
+			//Width varies; HEIGHT stays 54 - tuned to the engine's cover test (solid at chest 36u,
+			//CLEAR at head 58u, so you can peek over) and it must not move.
+			local.hw  = local.hwBase * local.fine
+			local.nhw = 0 - local.hw
+			local.bmins = ( local.nhw local.nhw 0 )
+			local.bmaxs = ( local.hw local.hw 54 )
+			local.box setsize local.bmins local.bmaxs
+			local.box safesolid
+		}
+		local.b++
+	}
+}end

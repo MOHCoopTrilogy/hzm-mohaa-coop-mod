@@ -1,0 +1,467 @@
+//=========================================================================
+// HZM coop - FOG / DARKNESS MODE  [user 08-02]
+//
+// A per-map fog + darkness authoring tool, driven from the numpad exactly like BUILD MODE
+// (coop_mod/buildmode.scr). Adjust live in-game, press SAVE, and every later load of that map
+// re-applies your settings automatically.
+//
+// WHY THIS IS SCRIPT-ONLY (and why that is the right call):
+//   World::UpdateFog (fgame/worldspawn.cpp) packs every fog field into one string and calls
+//   gi.setConfigstring(CS_FOGINFO, ...). Every $world fog setter routes through it. So a
+//   server-side script change REPLICATES TO EVERY CONNECTED CLIENT for free - no cgame change,
+//   no stufftext, nothing to redistribute. Dark short-range fog IS the darkness mode.
+//
+// DEAD ENDS deliberately not used (verified, do not "improve" this by reaching for them):
+//   - r_globalFog* is gl2-ONLY, and its start/end come from this same configstring anyway.
+//   - r_farplane / r_farplane_bias / r_farplane_color / r_entlight_scale are CVAR_CHEAT, and
+//     sv_ccmds.c force-clears cheats on every map load of a multi-slot server.
+//   - $world ambient / ambientlight / suncolor / sunlight are DECLARED but bound to NULL in the
+//     response map (worldspawn.cpp) - they parse and do nothing at runtime.
+//   - r_gamma / r_ppExposure are client CVAR_ARCHIVE: dropped by CG_IsSetVariableAllowed and
+//     would permanently stomp each player's own saved settings.
+//
+// *** GAMEPLAY WARNING - farplane IS NOT COSMETIC ***
+//   AI sight range is clamped to  world->farplane_distance * 0.828  in the engine
+//   (fgame/actorenemy.cpp, fgame/actor.cpp). HALVING FOG DISTANCE HALVES ENEMY ENGAGEMENT
+//   RANGE. officer.scr also auto-scales the officer plane off $world.farplane.
+//   farplane_bias and farplane_color have NO such coupling - prefer them for mood, and treat
+//   DIST as the one axis with balance consequences. The HUD shows the derived AI sight range
+//   live so this is never a surprise.
+//
+// SETUP (once):
+//   exec coop_mod/cfg/fogmode.cfg      - binds the numpad, seta coop_fog_boot 1, coop_fog 1
+//   coop_fog_boot is archived, so every later map arms the editor automatically.
+// TURN THE EDITOR OFF but keep saved fog applied:  seta coop_fog_boot 0
+// Auto-apply is INDEPENDENT of the editor: saved fog is applied on every load regardless.
+//=========================================================================
+
+//=========================================================================
+// Boot entry. Threaded from main.scr on every map. Always applies a saved profile; only starts
+// the interactive editor when coop_fog is 1 (so shipping players get the look, not the keypad).
+//=========================================================================
+coop_fog_boot:{
+//=========================================================================
+	waitthread coop_mod/main.scr::waitForMainScript
+	waitthread coop_fog_captureNative
+	waitthread coop_fog_loadProfile
+	if( getcvar( "coop_fog" ) == "1" ){
+		thread coop_fog_monitor
+	}
+}end
+
+//=========================================================================
+// Remember the map's OWN fog before we touch anything, so RESET can restore it exactly.
+// Uses the EV_GETTER property form ($world.farplane), which is how global/weather.scr reads it.
+//=========================================================================
+coop_fog_captureNative:{
+//=========================================================================
+	if( level.coop_fogNativeCaptured == 1 ){ end }
+	level.coop_fogNativeCaptured = 1
+	level.coop_fogNativeDist  = $world.farplane
+	level.coop_fogNativeColor = $world.farplane_color
+	if( level.coop_fogNativeDist == NIL ){ level.coop_fogNativeDist = 0 }
+	if( level.coop_fogNativeColor == NIL ){ level.coop_fogNativeColor = ( 0.5 0.5 0.5 ) }
+
+	// working set, seeded from the map's own values
+	level.coop_fogDist   = level.coop_fogNativeDist
+	level.coop_fogBias   = 0
+	level.coop_fogR      = level.coop_fogNativeColor[0]
+	level.coop_fogG      = level.coop_fogNativeColor[1]
+	level.coop_fogB      = level.coop_fogNativeColor[2]
+	level.coop_fogCull   = 1
+	level.coop_fogSky    = 0
+	level.coop_fogDirty  = 1
+}end
+
+//=========================================================================
+// Push the working set to $world. Everything below funnels through here so there is exactly one
+// place that talks to the engine. Command (EV_NORMAL) syntax - the same form co_lobby5.scr and
+// global/weather.scr already use successfully.
+//=========================================================================
+coop_fog_apply:{
+//=========================================================================
+	if( level.coop_fogDist > 0 ){
+		$world farplane level.coop_fogDist
+	}
+	$world farplane_color ( level.coop_fogR level.coop_fogG level.coop_fogB )
+	$world farplane_bias level.coop_fogBias
+	$world farplane_cull level.coop_fogCull
+	//[user 2026-08-04] bug-1353 - apply the sky value UNCONDITIONALLY. Skipping it at 0 meant
+	//a profile saved with sky fog off could never turn the map's own sky fog back off, and the
+	//editor's skydown-to-zero did nothing visible - the horizon stayed as the map left it.
+	$world skybox_farplane level.coop_fogSky
+	//[user 2026-08-04] bug-1345 - RAIN MAPS: global/weather.scr snapshots level.farplane +
+	//level.farplane_color at ITS init and re-asserts that snapshot after every lightning
+	//flash and at its restore points - stomping this profile with stale pre-profile fog
+	//(user: 'it was raining at the beginning, did that impact the fog I set?' - yes).
+	//Update the weather system's snapshot to OUR values whenever we apply, so its own
+	//flash/restore cycles re-assert the profile instead of fighting it.
+	if( level.farplane != NIL && level.coop_fogDist > 0 ){
+		level.farplane = level.coop_fogDist
+	}
+	if( level.farplane_color != NIL ){
+		level.farplane_color = ( level.coop_fogR level.coop_fogG level.coop_fogB )
+	}
+	level.coop_fogDirty = 1
+}end
+
+//=========================================================================
+// Restore the map's native look and forget the working edits (does NOT delete the saved file -
+// use SAVE afterwards if you want the reset persisted).
+//=========================================================================
+coop_fog_reset:{
+//=========================================================================
+	level.coop_fogDist = level.coop_fogNativeDist
+	level.coop_fogBias = 0
+	level.coop_fogR    = level.coop_fogNativeColor[0]
+	level.coop_fogG    = level.coop_fogNativeColor[1]
+	level.coop_fogB    = level.coop_fogNativeColor[2]
+	level.coop_fogCull = 1
+	level.coop_fogSky  = 0
+	waitthread coop_fog_apply
+}end
+
+//=========================================================================
+// One-key NIGHT preset - the proven dark short-range look from maps/co_lobby5.scr, which is the
+// only in-repo recipe known to read as night on day-baked lightmaps.
+//=========================================================================
+coop_fog_presetNight:{
+//=========================================================================
+	level.coop_fogDist = 1500
+	level.coop_fogBias = 450	//[user 2026-08-04] bug-1353 - was 0.4 (= 0.4 INCHES). ~30% of dist
+	level.coop_fogR    = 0.05
+	level.coop_fogG    = 0.06
+	level.coop_fogB    = 0.10
+	waitthread coop_fog_apply
+}end
+
+//=========================================================================
+// One-key HEAVY MIST preset - grey, close, high bias. Cosmetically strong but note the DIST
+// value still clamps AI sight (see the warning at the top of this file).
+//=========================================================================
+coop_fog_presetMist:{
+//=========================================================================
+	level.coop_fogDist = 2200
+	level.coop_fogBias = 900	//[user 2026-08-04] bug-1353 - was 0.55 (= 0.55 INCHES). ~40% of dist
+	level.coop_fogR    = 0.62
+	level.coop_fogG    = 0.64
+	level.coop_fogB    = 0.66
+	waitthread coop_fog_apply
+}end
+
+//=========================================================================
+// Session loop. Single-cvar control bus, identical in shape to buildmode's: every bind writes
+// coop_fog_cmd, this loop reads it, clears it FIRST, then dispatches. Clearing before dispatch
+// means a long-running action cannot swallow the next keypress.
+//=========================================================================
+coop_fog_monitor:{
+//=========================================================================
+	local.player = NULL
+	while( local.player == NULL ){
+		local.player = exec coop_mod/replace.scr::player_anyValid
+		if( local.player == NULL ){ wait 0.5 }
+	}
+
+	setcvar "coop_fog_cmd" ""
+	thread coop_fog_hud local.player
+	local.player iprint "FOG MODE armed - numpad. KP_INS saves this map." 1
+
+	while( getcvar( "coop_fog" ) == "1" ){
+		local.cmd = getcvar( "coop_fog_cmd" )
+		if( local.cmd != "" ){
+			setcvar "coop_fog_cmd" ""
+			waitthread coop_fog_doCmd local.cmd
+		}
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Flat string dispatcher, same style as buildmode's coop_build_doCmd.
+// Steps are deliberately coarse-then-fine: DIST moves in 250u, bias/colour in 0.05.
+//=========================================================================
+coop_fog_doCmd local.cmd:{
+//=========================================================================
+	if( local.cmd == "distup" ){
+		level.coop_fogDist = level.coop_fogDist + 250
+		if( level.coop_fogDist > 20000 ){ level.coop_fogDist = 20000 }
+	} else if( local.cmd == "distdown" ){
+		level.coop_fogDist = level.coop_fogDist - 250
+		//floor at 500: below this the AI sight clamp (dist * 0.828) makes enemies effectively blind
+		if( level.coop_fogDist < 500 ){ level.coop_fogDist = 500 }
+	} else if( local.cmd == "biasup" ){
+		//[user 2026-08-04] bug-1353 - BIAS IS A DISTANCE IN WORLD UNITS, not a 0..1 amount:
+		//the renderer feeds it as GL_FOG_START with farplane as GL_FOG_END (tr_backend.c:1480),
+		//so it is 'how far out before fog starts'. The old 0.05 step capped at 1 made the whole
+		//control a no-op (1 unit = 1 inch). 100/step, and capped one step below the fog distance
+		//because a start beyond the end inverts the ramp.
+		level.coop_fogBias = level.coop_fogBias + 100
+		if( level.coop_fogBias > level.coop_fogDist - 100 ){ level.coop_fogBias = level.coop_fogDist - 100 }
+		if( level.coop_fogBias < 0 ){ level.coop_fogBias = 0 }
+	} else if( local.cmd == "biasdown" ){
+		level.coop_fogBias = level.coop_fogBias - 100
+		if( level.coop_fogBias < 0 ){ level.coop_fogBias = 0 }
+	} else if( local.cmd == "rup" ){
+		level.coop_fogR = level.coop_fogR + 0.05
+		if( level.coop_fogR > 1 ){ level.coop_fogR = 1 }
+	} else if( local.cmd == "rdown" ){
+		level.coop_fogR = level.coop_fogR - 0.05
+		if( level.coop_fogR < 0 ){ level.coop_fogR = 0 }
+	} else if( local.cmd == "gup" ){
+		level.coop_fogG = level.coop_fogG + 0.05
+		if( level.coop_fogG > 1 ){ level.coop_fogG = 1 }
+	} else if( local.cmd == "gdown" ){
+		level.coop_fogG = level.coop_fogG - 0.05
+		if( level.coop_fogG < 0 ){ level.coop_fogG = 0 }
+	} else if( local.cmd == "bup" ){
+		level.coop_fogB = level.coop_fogB + 0.05
+		if( level.coop_fogB > 1 ){ level.coop_fogB = 1 }
+	} else if( local.cmd == "bdown" ){
+		level.coop_fogB = level.coop_fogB - 0.05
+		if( level.coop_fogB < 0 ){ level.coop_fogB = 0 }
+	} else if( local.cmd == "skyup" ){
+		level.coop_fogSky = level.coop_fogSky + 500
+		if( level.coop_fogSky > 60000 ){ level.coop_fogSky = 60000 }
+	} else if( local.cmd == "skydown" ){
+		level.coop_fogSky = level.coop_fogSky - 500
+		if( level.coop_fogSky < 0 ){ level.coop_fogSky = 0 }
+	} else if( local.cmd == "cull" ){
+		level.coop_fogCull = level.coop_fogCull + 1
+		if( level.coop_fogCull > 2 ){ level.coop_fogCull = 0 }
+	} else if( local.cmd == "night" ){
+		waitthread coop_fog_presetNight
+		end
+	} else if( local.cmd == "mist" ){
+		waitthread coop_fog_presetMist
+		end
+	} else if( local.cmd == "reset" ){
+		waitthread coop_fog_reset
+		end
+	} else if( local.cmd == "save" ){
+		waitthread coop_fog_saveProfile
+		end
+	} else {
+		end
+	}
+	waitthread coop_fog_apply
+}end
+
+//=========================================================================
+// SAVE - one line, one file per map, in the homepath:
+//   %APPDATA%/openmohaa/maintt/coop_mod/save/fog_<map>.dat
+// Format:  fogv1,<dist>,<bias>,<r>,<g>,<b>,<cull>,<skyfar>
+// The version tag is checked on load, mirroring blueprint.scr's bpv1 header check, so a future
+// format change cannot be silently misparsed as the current one.
+//=========================================================================
+coop_fog_saveProfile:{
+//=========================================================================
+	local.name = waitthread coop_fog_mapName
+	local.out = "fogv1," + level.coop_fogDist + "," + level.coop_fogBias + "," + level.coop_fogR + "," + level.coop_fogG + "," + level.coop_fogB + "," + level.coop_fogCull + "," + level.coop_fogSky
+	fs_write_content ( "coop_mod/save/fog_" + local.name + ".dat" ) ( local.out )
+	local.p = exec coop_mod/replace.scr::player_anyValid
+	if( local.p != NULL ){
+		local.p iprint ( "FOG SAVED: coop_mod/save/fog_" + local.name + ".dat" ) 1
+	}
+	println( "^~^~^ COOP_FOG_SAVE " + local.name + " " + local.out )
+}end
+
+//=========================================================================
+// LOAD - homepath first (your live edits), then the shipped pk3 copy, exactly like
+// blueprint.scr's bp_readfile. Silently does nothing when there is no profile, so this is safe
+// to run unconditionally on every map.
+//=========================================================================
+coop_fog_loadProfile:{
+//=========================================================================
+	local.name = waitthread coop_fog_mapName
+	local.txt = fs_read_content ( "coop_mod/save/fog_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){
+		local.txt = fs_read_content ( "coop_mod/fog/" + local.name + ".dat" )
+	}
+	if( local.txt == NIL || local.txt == "" ){ end }
+
+	local.parts = waitthread coop_fog_split local.txt
+	if( local.parts.size < 8 ){ end }
+	if( local.parts[1] != "fogv1" ){
+		println( "^~^~^ COOP_FOG_LOAD bad header for " + local.name )
+		end
+	}
+
+	//[user 2026-08-04] bug-1352 - COERCE TO NUMBERS. The splitter yields STRINGS, and both
+	//coop_fog_apply and the keeper compare coop_fogDist against 0 - 'binary > applied to
+	//incompatible types string and int' aborted the thread AT THAT LINE, so $world farplane
+	//was never set and the keeper spammed the console every 2s. The editor path never hit it
+	//(captureNative seeds real numbers from $world), which is why only LOADED profiles were
+	//broken - i.e. every profile, for every player, on every map. float() per blueprint.scr.
+	level.coop_fogDist = float( local.parts[2] )
+	level.coop_fogBias = float( local.parts[3] )
+	level.coop_fogR    = float( local.parts[4] )
+	level.coop_fogG    = float( local.parts[5] )
+	level.coop_fogB    = float( local.parts[6] )
+	level.coop_fogCull = int( local.parts[7] )
+	level.coop_fogSky  = float( local.parts[8] )
+	waitthread coop_fog_apply
+	//[user 2026-08-04] bug-1343 - the map's OWN fog init runs AFTER this profile load and
+	//stomps it (e2l2.scr:121 'setFog 2000' overwrote the user's 3000 night fog). Re-assert a
+	//few times over the first seconds so the profile wins the init race. Only runs on maps
+	//that HAVE a profile, so every other map's scripted fog is untouched.
+	thread coop_fog_lateAsserts
+	println( "^~^~^ COOP_FOG_LOAD " + local.name + " applied" )
+}end
+
+//=========================================================================
+coop_fog_lateAsserts:{
+//=========================================================================
+	wait 2
+	waitthread coop_fog_apply
+	wait 3
+	waitthread coop_fog_apply
+	wait 5
+	waitthread coop_fog_apply
+	println( "^~^~^ COOP_FOG profile re-asserted over map fog init" )
+
+	//[user 2026-08-04] bug-1349 - a 10s window is not enough on maps whose CINEMATIC re-fogs
+	//per camera scene (e2l2's intro does it SEVEN times) or that swap fog on later triggers.
+	//A saved profile is an explicit 'this map looks like this' instruction, so hold it for the
+	//whole map: cheap 2s poll, and it only re-applies when something else actually moved the
+	//fog, so scripted transitions still show for a frame rather than being hard-blocked.
+	while( 1 ){
+		wait 2
+		if( level.coop_fogDist > 0 && $world.farplane != level.coop_fogDist ){
+			waitthread coop_fog_apply
+		}
+	}
+}end
+
+//=========================================================================
+// Comma splitter. There is no engine string-split, so walk the characters. Yields every 1500
+// chars like blueprint.scr's bp_parse, though a fog line is ~50 chars so it never actually waits.
+//=========================================================================
+// Idiom copied verbatim from coop_mod/blueprint.scr::bp_parse - strings are indexed with
+// local.txt[i] and are ZERO-BASED, and length is local.txt.size (there is no substr/size call).
+// An explicit counter is used instead of local.out.size+1 because an EMPTY array reports
+// .size == -1 in this engine, which would silently write index 0 and shift everything.
+coop_fog_split local.txt:{
+//=========================================================================
+	local.cnt = 0
+	local.cur = ""
+	local.i = 0
+	local.n = local.txt.size
+	while( local.i < local.n ){
+		local.c = local.txt[local.i]
+		if( local.c == "," ){
+			local.cnt++
+			local.out[local.cnt] = local.cur
+			local.cur = ""
+		} else if( local.c != " " ){
+			local.cur += local.c
+		}
+		local.i++
+	}
+	local.cnt++
+	local.out[local.cnt] = local.cur
+}end local.out
+
+//=========================================================================
+// "maps/e3l2.scr" -> "e3l2"
+//=========================================================================
+coop_fog_mapName:{
+//=========================================================================
+	local.s = level.script
+	local.n = local.s.size
+	local.start = 0
+	local.i = 0
+	while( local.i < local.n ){
+		if( local.s[local.i] == "/" ){ local.start = local.i + 1 }
+		local.i++
+	}
+	local.out = ""
+	local.i = local.start
+	while( local.i < local.n ){
+		local.c = local.s[local.i]
+		if( local.c == "." ){
+			local.i = local.n
+		} else {
+			local.out += local.c
+			local.i++
+		}
+	}
+}end local.out
+
+//=========================================================================
+// HUD. Slots 88-95 (free per _research/hud_slot_map.md; build mode owns 54-61 and this must
+// never share with it). Repaints on a dirty flag at 0.15s, same cadence as build mode's.
+// The AI SIGHT line is not decoration: it is the derived farplane * 0.828 clamp, shown so the
+// balance cost of a short fog distance is visible while you are dialling it in.
+//=========================================================================
+coop_fog_hud local.player:{
+//=========================================================================
+	//[user 08-02] runs for EITHER entry point: the standalone console path (coop_fog 1) or the
+	//build-mode FOG submode, which is the normal way in now that fog shares build mode's keymap.
+	while( ( getcvar( "coop_fog" ) == "1" || level.coop_build_mode == "fog" ) && local.player != NULL ){
+		if( level.coop_fogDirty == 1 ){
+			level.coop_fogDirty = 0
+
+			ihuddraw_align local.player 88 left top
+			ihuddraw_rect local.player 88 12 120 300 20
+			ihuddraw_color local.player 88 1 0.85 0.4
+			ihuddraw_alpha local.player 88 1
+			ihuddraw_font local.player 88 "facfont-20"
+			ihuddraw_string local.player 88 "FOG MODE"
+
+			ihuddraw_align local.player 89 left top
+			ihuddraw_rect local.player 89 12 142 320 20
+			ihuddraw_color local.player 89 1 1 1
+			ihuddraw_alpha local.player 89 1
+			ihuddraw_font local.player 89 "facfont-20"
+			ihuddraw_string local.player 89 ( "DIST  " + level.coop_fogDist + "   (up/down arrows)" )
+
+			ihuddraw_align local.player 90 left top
+			ihuddraw_rect local.player 90 12 162 320 20
+			ihuddraw_color local.player 90 1 0.5 0.5
+			ihuddraw_alpha local.player 90 1
+			ihuddraw_font local.player 90 "facfont-20"
+			ihuddraw_string local.player 90 ( "AI SIGHT " + ( level.coop_fogDist * 0.828 ) + "  <- fog clamps enemy vision" )
+
+			ihuddraw_align local.player 91 left top
+			ihuddraw_rect local.player 91 12 182 320 20
+			ihuddraw_color local.player 91 1 1 1
+			ihuddraw_alpha local.player 91 1
+			ihuddraw_font local.player 91 "facfont-20"
+			//[user 2026-08-04] bug-1353 - label it as the distance it is, and show the clear
+			//foreground it buys, so the number reads as something meaningful while tuning.
+			ihuddraw_string local.player 91 ( "FOG STARTS AT  " + level.coop_fogBias + "u   (left/right)" )
+
+			ihuddraw_align local.player 92 left top
+			ihuddraw_rect local.player 92 12 202 320 20
+			ihuddraw_color local.player 92 level.coop_fogR level.coop_fogG level.coop_fogB
+			ihuddraw_alpha local.player 92 1
+			ihuddraw_font local.player 92 "facfont-20"
+			ihuddraw_string local.player 92 ( "COLOR " + level.coop_fogR + " " + level.coop_fogG + " " + level.coop_fogB )
+
+			ihuddraw_align local.player 93 left top
+			ihuddraw_rect local.player 93 12 222 320 20
+			ihuddraw_color local.player 93 1 1 1
+			ihuddraw_alpha local.player 93 1
+			ihuddraw_font local.player 93 "facfont-20"
+			ihuddraw_string local.player 93 ( "SKYFAR " + level.coop_fogSky + "   CULL " + level.coop_fogCull )
+
+			ihuddraw_align local.player 94 left top
+			ihuddraw_rect local.player 94 12 242 340 20
+			ihuddraw_color local.player 94 0.6 0.9 0.6
+			ihuddraw_alpha local.player 94 1
+			ihuddraw_font local.player 94 "facfont-20"
+			ihuddraw_string local.player 94 "KP_INS save   KP_DEL reset   KP_ENTER night   KP_5 mist"
+		}
+		wait 0.15
+	}
+
+	// leaving the editor: wipe our slots so they cannot linger over gameplay
+	if( local.player != NULL ){
+		local.i = 88
+		while( local.i <= 94 ){
+			ihuddraw_string local.player local.i ""
+			ihuddraw_alpha local.player local.i 0
+			local.i++
+		}
+	}
+}end

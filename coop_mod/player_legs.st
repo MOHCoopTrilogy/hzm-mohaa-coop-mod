@@ -114,6 +114,7 @@ state RUN_FORWARD
 
 	states
 	{
+		LIMP_FORWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		SPRINT_FORWARD		: COOP_SPRINTING
 
 		FALL				: FALLING
@@ -167,6 +168,7 @@ state RUN_BACKWARD
 
 	states
 	{
+		LIMP_BACKWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -218,6 +220,7 @@ state RUN_LEFT
 
 	states
 	{
+		LIMP_LEFT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -269,6 +272,7 @@ state RUN_RIGHT
 
 	states
 	{
+		LIMP_RIGHT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -326,6 +330,7 @@ state WALK_FORWARD
 
 	states
 	{
+		LIMP_FORWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -377,6 +382,7 @@ state WALK_BACKWARD
 
 	states
 	{
+		LIMP_BACKWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -428,6 +434,7 @@ state WALK_LEFT
 
 	states
 	{
+		LIMP_LEFT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -479,6 +486,7 @@ state WALK_RIGHT
 
 	states
 	{
+		LIMP_RIGHT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
@@ -2035,5 +2043,222 @@ state COVER_LOW_FIRE
 		COVER_LOW : ANIMDONE_LEGS
 
 		FALL_DUCKED : FALLING
+	}
+}
+
+
+////////////////////////////////////////////////////////////////
+// HZM coop [user 2026-08-02] bug-1291 - LOW-HEALTH LIMP.
+//
+// Entered from the WALK_*/RUN_* states while the engine conditional COOP_LIMPING is true
+// (Player::TickLimp - health/max_health below coop_limpStart, on the ground, not downed, not on a
+// vehicle/turret). Movement speed is clamped server-side in ClientMove, so the clip's own travel
+// rate and the player's actual travel rate agree and the feet do not slide.
+//
+// LEGS ROW ORDER IS THE WHOLE DESIGN. walk_injured*.skc are UNARMED clips, and a STAND torso takes
+// its animation FROM the legs (player_Torso.st:14-22) - so driving an armed player with one strips
+// his weapon posture and swings an empty arm while he is visibly still holding the rifle. Retail
+// ships exactly one ARMED injured cycle (rifle_run_injured.skc), so:
+//   rifle class  -> rifle_walk_injured_forward, a real limp WITH the weapon up
+//   other armed  -> their normal walk clip, unchanged posture; the limp reads through the
+//                   first-person camera and the speed clamp instead
+//   unarmed      -> the full walk_injured_* directional cycle
+// Every state exits on !COOP_LIMPING as its FIRST row, and none of them self-transition on
+// ANIMDONE - these are looping clips and re-entering a looping clip is a stick hazard
+// (see the SPRINT_FORWARD comment).
+////////////////////////////////////////////////////////////////
+
+state LIMP_FORWARD
+{
+	entrycommands
+	{
+		movementstealth "0.75"
+		moveposflags "standing" "walking"
+	}
+
+	legs
+	{
+		// [user 2026-08-02] "I'd like for it to work regardless of what weapon you have."
+		// EVERY armed class now gets the armed injured cycle, not just rifles. rifle_run_injured is
+		// the only ARMED injured clip retail ships, so an SMG/pistol/MG player limps in a long-gun
+		// carry rather than a perfectly matched pose - deliberately preferred over the alternative,
+		// because the unarmed clip would swing an empty arm while the weapon is still visibly in
+		// hand (a STAND torso takes its animation FROM the legs, player_Torso.st:19-21).
+		rifle_walk_injured_forward	: HAS_WEAPON
+		walk_injured_forward		: default
+	}
+
+	states
+	{
+		// leave the instant the limp clears - checked before anything else
+		WALK_FORWARD	: !COOP_LIMPING
+
+		FALL			: FALLING
+
+		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
+		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
+
+		STAND			: BLOCKED "2"
+		STAND			: !HAS_VELOCITY
+
+		LIMP_BACKWARD	: BACKWARD
+		LIMP_LEFT		: STRAFE_LEFT !FORWARD !BACKWARD
+		LIMP_RIGHT		: STRAFE_RIGHT !FORWARD !BACKWARD
+
+		// restart if our weapon has changed (edge-triggered, not ANIMDONE)
+		LIMP_FORWARD	: +HAS_WEAPON
+		LIMP_FORWARD	: -HAS_WEAPON
+
+		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
+	}
+}
+
+state LIMP_BACKWARD
+{
+	entrycommands
+	{
+		movementstealth "0.75"
+		moveposflags "standing" "walking"
+	}
+
+	legs
+	{
+		mp40_stand_walk_back				: IS_WEAPON_ACTIVE "mainhand" "MP40"
+		mp44_stand_walk_back				: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+		bazooka_stand_walk_back				: IS_WEAPON_ACTIVE "mainhand" "Bazooka"
+		bazooka_stand_walk_back				: IS_WEAPON_ACTIVE "mainhand" "Panzerschreck"
+		shotgun_stand_walk_back				: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		steilhandgranate_stand_walk_back	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
+		pistol_stand_walk_back				: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol" 
+		rifle_stand_walk_back				: IS_WEAPONCLASS_ACTIVE "mainhand" "rifle" 
+		grenade_stand_walk_back				: IS_WEAPONCLASS_ACTIVE "mainhand" "grenade" 
+		smg_stand_walk_back					: IS_WEAPONCLASS_ACTIVE "mainhand" "smg" 
+		mg_stand_walk_back					: IS_WEAPONCLASS_ACTIVE "mainhand" "mg" 
+//		pistol_stand_walk_back				: IS_WEAPONCLASS_ACTIVE "mainhand" "item" // hold all items like a pistol for now
+		walk_injured_back				: default
+	}
+
+	states
+	{
+		// leave the instant the limp clears - checked before anything else
+		WALK_BACKWARD	: !COOP_LIMPING
+
+		FALL			: FALLING
+
+		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
+		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
+
+		STAND			: BLOCKED "2"
+		STAND			: !HAS_VELOCITY
+
+		LIMP_FORWARD	: FORWARD
+		LIMP_LEFT		: STRAFE_LEFT !FORWARD !BACKWARD
+		LIMP_RIGHT		: STRAFE_RIGHT !FORWARD !BACKWARD
+
+		// restart if our weapon has changed (edge-triggered, not ANIMDONE)
+		LIMP_BACKWARD	: +HAS_WEAPON
+		LIMP_BACKWARD	: -HAS_WEAPON
+
+		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
+	}
+}
+
+state LIMP_LEFT
+{
+	entrycommands
+	{
+		movementstealth "0.75"
+		moveposflags "standing" "walking"
+	}
+
+	legs
+	{
+		mp40_stand_walk_left				: IS_WEAPON_ACTIVE "mainhand" "MP40"
+		mp44_stand_walk_left				: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+		bazooka_stand_walk_left				: IS_WEAPON_ACTIVE "mainhand" "Bazooka"
+		bazooka_stand_walk_left				: IS_WEAPON_ACTIVE "mainhand" "Panzerschreck"
+		shotgun_stand_walk_left				: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		steilhandgranate_stand_walk_left	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
+		pistol_stand_walk_left				: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol" 
+		rifle_stand_walk_left				: IS_WEAPONCLASS_ACTIVE "mainhand" "rifle" 
+		grenade_stand_walk_left				: IS_WEAPONCLASS_ACTIVE "mainhand" "grenade" 
+		smg_stand_walk_left					: IS_WEAPONCLASS_ACTIVE "mainhand" "smg" 
+		mg_stand_walk_left					: IS_WEAPONCLASS_ACTIVE "mainhand" "mg" 
+//		pistol_stand_walk_left				: IS_WEAPONCLASS_ACTIVE "mainhand" "item" // hold all items like a pistol for now
+		walk_injured_left				: default
+	}
+
+	states
+	{
+		// leave the instant the limp clears - checked before anything else
+		WALK_LEFT	: !COOP_LIMPING
+
+		FALL			: FALLING
+
+		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
+		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
+
+		STAND			: BLOCKED "2"
+		STAND			: !HAS_VELOCITY
+
+		LIMP_FORWARD	: FORWARD
+		LIMP_BACKWARD	: BACKWARD
+		LIMP_RIGHT		: STRAFE_RIGHT !FORWARD !BACKWARD
+
+		// restart if our weapon has changed (edge-triggered, not ANIMDONE)
+		LIMP_LEFT	: +HAS_WEAPON
+		LIMP_LEFT	: -HAS_WEAPON
+
+		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
+	}
+}
+
+state LIMP_RIGHT
+{
+	entrycommands
+	{
+		movementstealth "0.75"
+		moveposflags "standing" "walking"
+	}
+
+	legs
+	{
+		mp40_stand_walk_right				: IS_WEAPON_ACTIVE "mainhand" "MP40"
+		mp44_stand_walk_right				: IS_WEAPON_ACTIVE "mainhand" "StG 44"
+		bazooka_stand_walk_right			: IS_WEAPON_ACTIVE "mainhand" "Bazooka"
+		bazooka_stand_walk_right			: IS_WEAPON_ACTIVE "mainhand" "Panzerschreck"
+		shotgun_stand_walk_right			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
+		steilhandgranate_stand_walk_right	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
+		pistol_stand_walk_right				: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol" 
+		rifle_stand_walk_right				: IS_WEAPONCLASS_ACTIVE "mainhand" "rifle" 
+		grenade_stand_walk_right			: IS_WEAPONCLASS_ACTIVE "mainhand" "grenade" 
+		smg_stand_walk_right				: IS_WEAPONCLASS_ACTIVE "mainhand" "smg" 
+		mg_stand_walk_right					: IS_WEAPONCLASS_ACTIVE "mainhand" "mg" 
+//		pistol_stand_walk_right				: IS_WEAPONCLASS_ACTIVE "mainhand" "item" // hold all items like a pistol for now
+		walk_injured_right			: default
+	}
+
+	states
+	{
+		// leave the instant the limp clears - checked before anything else
+		WALK_RIGHT	: !COOP_LIMPING
+
+		FALL			: FALLING
+
+		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
+		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
+
+		STAND			: BLOCKED "2"
+		STAND			: !HAS_VELOCITY
+
+		LIMP_FORWARD	: FORWARD
+		LIMP_BACKWARD	: BACKWARD
+		LIMP_LEFT		: STRAFE_LEFT !FORWARD !BACKWARD
+
+		// restart if our weapon has changed (edge-triggered, not ANIMDONE)
+		LIMP_RIGHT	: +HAS_WEAPON
+		LIMP_RIGHT	: -HAS_WEAPON
+
+		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
 	}
 }

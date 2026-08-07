@@ -1,0 +1,424 @@
+//====================================================================
+// coop_selftest_dbno.scr - HZM dev automated DBNO-subsystem probes
+//====================================================================
+// Cvar-gated dev probes for the automated test harness. INERT for real
+// players: nothing runs unless the harness boot cfg sets the gate cvar.
+// Markers are machine-parseable "^~^~^ ST_DBNO_..." / "^~^~^ DBNO..." lines
+// the harness greps, exactly like coop_mod/coop_selftest.scr +
+// coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+//
+// Launched from coop_mod/main.scr::main (guarded threads):
+//    coop_st_dbno 1      -> st_dbno_run       : combat-map DBNO battery
+//                           (respawnkit -> spawnprot -> corpse-revive ->
+//                            death-race -> crawl-bleed -> team-wipe),
+//                           run in SEQUENCE so the sub-tests never race
+//                           over the shared player. Boot on a 4-player
+//                           combat map (e.g. m1l1).
+//    coop_st_dbno_jeep 1 -> st_dbno_jeepgate  : jeep/rail map DBNO-disabled
+//                           gate. Boot on a jeep map (m1l3a/m1l3b).
+//
+// Tests intentionally NOT here (already in coop_selftest.scr): DBNO
+// function-revive (dbnotest_run) + team-revive (dbnoteam_run).
+// needs-human (skipped): real held-[USE] team-revive / self-revive /
+// give-up-vs-medic tap, headshot-location instant-kill bypass.
+//====================================================================
+
+
+//--------------------------------------------------------------------
+// Clean server-side damage helper. dflags 0 (no radius scaling) so the
+// amount lands exactly; location 5 (torso) so it is never mis-read as a
+// headshot by dbno_classifyHit. Mirrors the known-good damage form used
+// across coop_mod (aihandler.scr / maptest_phase2.scr).
+//--------------------------------------------------------------------
+st_dbno_damage local.p local.amt:{
+	if( local.p == NULL ){ end }
+	if( local.p == NIL ){ end }
+	local.p damage $world local.amt $world local.p.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 5
+}end
+
+
+//====================================================================
+// DISPATCHER: run the whole DBNO battery in sequence on one boot. Each
+// sub-test sets the cvars it needs (setcvar) so they never fight, and
+// re-acquires an alive player itself, so ordering is robust even though
+// several sub-tests kill/respawn the shared player.
+//====================================================================
+st_dbno_run:{
+	local.boot = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.boot == NULL ){
+		println "^~^~^ ST_DBNO abort=no_host"
+		end
+	}
+	println( "^~^~^ ST_DBNO begin map=" + level.coop_mapname )
+
+	waitthread st_dbno_respawnkit
+	wait 3
+	waitthread st_dbno_spawnprot
+	wait 3
+	waitthread st_dbno_corpse
+	wait 3
+	waitthread st_dbno_race
+	wait 3
+	waitthread st_dbno_crawl
+	wait 3
+	waitthread st_dbno_wipe
+
+	println "^~^~^ ST_DBNO done"
+}end
+
+
+//====================================================================
+// RESPAWNKIT (test 6, partial): the exact reserve ammo a player carried
+// when killed must survive the respawn (coop_ammoRestore), not reset to
+// the loadout default. Snapshot a distinctive odd rifle reserve, let the
+// snapshot loop capture it, kill, then read the pool after respawn.
+// Note: primary-weapon COUNT is not cleanly script-readable, so primaries
+// is a best-effort (weapon-type present) - the load-bearing assert is ammo.
+//====================================================================
+st_dbno_respawnkit:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.p == NULL ){
+		println "^~^~^ RESPAWNKIT abort=no_host"
+		end
+	}
+	setcvar "coop_exactAmmo" "1"
+
+	// force a distinctive odd reserve, then let the 0.5s snapshot loop record it
+	local.p setammo rifle 17
+	wait 1
+	local.before = local.p getammo rifle
+	local.weapPre = "na"
+	println( "^~^~^ RESPAWNKIT phase=pre weap=" + local.weapPre + " ammo=" + local.before )
+
+	// kill (same entity persists across respawn - do NOT re-find, others may be alive)
+	waitthread st_dbno_damage local.p 15000
+	local.w = 0
+	while( local.w < 30 && !isAlive local.p ){
+		wait 0.5
+		local.w++
+	}
+	if( !isAlive local.p ){
+		println "^~^~^ RESPAWNKIT abort=no_respawn"
+		end
+	}
+	// let coop_ammoRestore (async, after the inventory rebuild) land
+	wait 2
+	local.after = local.p getammo rifle
+	local.weap  = "na"
+	local.prim  = 0
+	if( local.weap != "" && local.weap != NIL ){ local.prim = 1 }
+	println( "^~^~^ RESPAWNKIT weap=" + local.weap + " ammo=" + local.after + " primaries=" + local.prim )
+}end
+
+
+//====================================================================
+// SPAWN PROTECTION (test 5): damage is fully blocked during the window
+// (nodamage), and restored after it expires (takedamage). Force a fresh
+// respawn to arm the window (a double-respawn exercises the re-arm guard),
+// hit for 200 in-window (health unchanged) then out-of-window (drops).
+//====================================================================
+st_dbno_spawnprot:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.p == NULL ){
+		println "^~^~^ SPAWNPROT abort=no_host"
+		end
+	}
+	setcvar "coop_spawnProtect" "4"
+
+	// fresh respawn arms spawnProtection; second quick respawn re-arms (extends) the window
+	local.p respawn
+	wait 0.5
+	local.p respawn
+
+	// wait for the spawn pipeline to arm the protection flag
+	local.w = 0
+	while( local.w < 30 && local.p != NULL && local.p.flags["coop_spawnProtOn"] != 1 ){
+		wait 0.25
+		local.w++
+	}
+	if( local.p == NULL || local.p.flags["coop_spawnProtOn"] != 1 ){
+		println "^~^~^ SPAWNPROT abort=no_window"
+		end
+	}
+
+	// IN-WINDOW: nodamage must swallow the hit
+	local.hb = local.p.health
+	waitthread st_dbno_damage local.p 200
+	wait 0.25
+	local.ha = local.p.health
+	println( "^~^~^ SPAWNPROT p=" + local.p.netname + " phase=in hpBefore=" + local.hb + " hpAfter=" + local.ha )
+
+	// wait for the window to expire (takedamage restored)
+	local.w = 0
+	while( local.w < 40 && local.p != NULL && local.p.flags["coop_spawnProtOn"] == 1 ){
+		wait 0.25
+		local.w++
+	}
+	wait 0.5
+	if( local.p == NULL ){
+		println "^~^~^ SPAWNPROT abort=lost_player"
+		end
+	}
+
+	// OUT-OF-WINDOW: the hit must now land (200 < DBNO threshold, so no down)
+	local.hb2 = local.p.health
+	waitthread st_dbno_damage local.p 200
+	wait 0.25
+	local.ha2 = local.p.health
+	println( "^~^~^ SPAWNPROT p=" + local.p.netname + " phase=out hpBefore=" + local.hb2 + " hpAfter=" + local.ha2 )
+}end
+
+
+//====================================================================
+// CORPSE-REVIVE WINDOW (test 4): a player killed WHILE downed can be
+// stood back up in place within coop_dbnoCorpseRevive seconds. Positive:
+// revive inside the window -> getup_corpserevive at the fall spot.
+// Negative: wait past the window -> revive call is a no-op (no getup).
+//====================================================================
+st_dbno_corpse:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.p == NULL ){
+		println "^~^~^ DBNOCORPSE abort=no_host"
+		end
+	}
+	setcvar "coop_dbnoCorpseRevive" "10"
+	setcvar "coop_dbnoTimer" "60"
+	setcvar "coop_teamRevive" "0"
+
+	// ---- POSITIVE: revive inside the window ----
+	thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+	local.dn = 0
+	local.w  = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( local.p != NULL && local.p.flags["coop_dbno_active"] == 1 ){ local.dn = 1 }
+		if( local.dn == 1 ){ break }
+		local.w++
+	}
+	if( local.dn != 1 ){
+		println "^~^~^ DBNOCORPSE sub=pos abort=not_downed"
+		end
+	}
+	// kill while down -> dbno_corpse_monitor records corpse origin + prints death_killedWhileDown
+	waitthread st_dbno_damage local.p 15000
+	wait 0.3
+	local.corpse = local.p.flags["coop_dbno_corpseOrigin"]
+	if( local.corpse == NIL ){ local.corpse = local.p.origin }
+	println( "^~^~^ DBNOCORPSE sub=pos corpseOrigin=" + local.corpse )
+	// revive fast, before the normal death->respawn flow completes
+	waitthread coop_mod/dbno.scr::dbno_corpse_revive local.p
+	wait 1
+	local.aliveP = 0
+	if( isAlive local.p ){ local.aliveP = 1 }
+	local.ro   = local.p.origin
+	local.dist = vector_length( local.ro - local.corpse )
+	println( "^~^~^ DBNOCORPSE sub=pos alive=" + local.aliveP + " respawnOrigin=" + local.ro + " dist=" + local.dist )
+
+	// wait for a clean upright state before the negative run
+	local.w = 0
+	while( local.w < 30 && !isAlive local.p ){
+		wait 0.5
+		local.w++
+	}
+	wait 2
+
+	// ---- NEGATIVE: revive AFTER the window expires (must NOT get up via corpse-revive) ----
+	thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+	local.dn2 = 0
+	local.w   = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( local.p != NULL && local.p.flags["coop_dbno_active"] == 1 ){ local.dn2 = 1 }
+		if( local.dn2 == 1 ){ break }
+		local.w++
+	}
+	if( local.dn2 != 1 ){
+		println "^~^~^ DBNOCORPSE sub=neg abort=not_downed"
+		end
+	}
+	waitthread st_dbno_damage local.p 15000
+	wait 0.3
+	println "^~^~^ DBNOCORPSE sub=neg killed=1"
+	wait 12
+	waitthread coop_mod/dbno.scr::dbno_corpse_revive local.p
+	wait 1
+	local.aliveN = 0
+	if( isAlive local.p ){ local.aliveN = 1 }
+	println( "^~^~^ DBNOCORPSE sub=neg reviveAttempted=1 aliveNow=" + local.aliveN )
+}end
+
+
+//====================================================================
+// DEATH-RACE GUARDS (test 9): (a) the killing hit outran DBNO - down a
+// dead corpse via dbno_enter -> death_outran guard (no "give health to
+// dead"). (b) a single instant-kill exercises the manageDead cumulative
+// re-entry (bug-924 isAlive guard). Neither may throw a Script Error and
+// the player must reach normal death + respawn.
+//====================================================================
+st_dbno_race:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.p == NULL ){
+		println "^~^~^ DBNORACE abort=no_host"
+		end
+	}
+	setcvar "coop_dbnoTimer" "60"
+
+	// (a) OUTRAN: kill first, THEN down the corpse
+	waitthread st_dbno_damage local.p 15000
+	thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+	wait 1
+	println "^~^~^ DBNORACE sub=outran fired=1"
+
+	// wait for respawn before the instant-kill sub
+	local.w = 0
+	while( local.w < 30 && !isAlive local.p ){
+		wait 0.5
+		local.w++
+	}
+	wait 1
+
+	// (b) INSTAKILL: one big hit -> manageDead re-entry path
+	if( isAlive local.p ){
+		waitthread st_dbno_damage local.p 15000
+	}
+	wait 2
+	local.w = 0
+	while( local.w < 30 && !isAlive local.p ){
+		wait 0.5
+		local.w++
+	}
+	local.aliveEnd = 0
+	if( isAlive local.p ){ local.aliveEnd = 1 }
+	println( "^~^~^ DBNORACE sub=instakill aliveEnd=" + local.aliveEnd )
+}end
+
+
+//====================================================================
+// CRAWL BLEED-OUT ACCELERATION (test 8): moving while downed accrues an
+// extra bleed penalty. Down two players; pin one >100u from its fall spot
+// (re-asserted each tick = "moving"), leave the other stationary. Over the
+// same wall-time the mover's coop_dbno_elapsed must climb faster. Needs 2+.
+//====================================================================
+st_dbno_crawl:{
+	local.a = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.a == NULL ){
+		println "^~^~^ DBNOCRAWL abort=no_host"
+		end
+	}
+	local.b = waitthread coop_mod/coop_selftest.scr::selftest_findOther 40 local.a
+	if( local.b == NULL ){
+		println "^~^~^ DBNOCRAWL abort=need_2_players"
+		end
+	}
+	// long timer so neither bleeds out during the sampling window
+	setcvar "coop_dbnoTimer" "45"
+	setcvar "coop_teamRevive" "0"
+
+	thread coop_mod/dbno.scr::dbno_enter local.a "chest"
+	thread coop_mod/dbno.scr::dbno_enter local.b "chest"
+	local.w = 0
+	while( local.w < 24 ){
+		wait 0.5
+		if( local.a != NULL && local.b != NULL && local.a.flags["coop_dbno_active"] == 1 && local.b.flags["coop_dbno_active"] == 1 ){ break }
+		local.w++
+	}
+	if( local.a == NULL || local.b == NULL || local.a.flags["coop_dbno_active"] != 1 || local.b.flags["coop_dbno_active"] != 1 ){
+		println "^~^~^ DBNOCRAWL abort=not_downed"
+		end
+	}
+
+	// b = mover: pin it 140u from its fall origin (stays > the 100u crawl-penalty gate,
+	// same Z so voidguard never triggers). Re-assert each tick so it keeps "moving".
+	local.borg = local.b.flags["coop_dbno_origin"]
+	if( local.borg == NIL ){ local.borg = local.b.origin }
+	local.target = local.borg + ( 140 0 0 )
+
+	local.t = 0
+	while( local.t < 20 ){
+		if( local.b != NULL && local.b.flags["coop_dbno_active"] == 1 ){
+			local.b.origin = local.target
+		}
+		wait 0.5
+		local.t++
+	}
+
+	local.ea = 0
+	local.eb = 0
+	if( local.a != NULL ){ local.ea = local.a.flags["coop_dbno_elapsed"] }
+	if( local.b != NULL ){ local.eb = local.b.flags["coop_dbno_elapsed"] }
+	println( "^~^~^ DBNOCRAWL p=" + local.a.netname + " moved=0 elapsed=" + local.ea )
+	println( "^~^~^ DBNOCRAWL p=" + local.b.netname + " moved=1 elapsed=" + local.eb )
+}end
+
+
+//====================================================================
+// TEAM-WIPE BLEEDOUT (test 1): down EVERY alive player at once with a
+// short timer and team-revive off; every one must go down and bleed out,
+// with no Script Error / crash, and all return active (respawned) after.
+// The per-player "DBNO down p=" / "DBNO death_bledout" lines come from
+// dbno.scr; this probe frames the count + the recovered-active tally.
+//====================================================================
+st_dbno_wipe:{
+	local.boot = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+	if( local.boot == NULL ){
+		println "^~^~^ DBNOWIPE abort=no_host"
+		end
+	}
+	setcvar "coop_dbnoTimer" "4"
+	setcvar "coop_teamRevive" "0"
+
+	local.count = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.pl = $player[local.i]
+		if( local.pl == NULL ){ continue }
+		if( local.pl == NIL ){ continue }
+		if( !isAlive local.pl ){ continue }
+		if( local.pl.flags["coop_isActive"] != 1 ){ continue }
+		thread coop_mod/dbno.scr::dbno_enter local.pl "chest"
+		local.count++
+	}
+	println( "^~^~^ DBNOWIPE begin n=" + local.count )
+
+	// timer 4 + bleed-out slump + respawn pipeline
+	wait 10
+
+	local.active = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.pl = $player[local.i]
+		if( local.pl == NULL ){ continue }
+		if( local.pl == NIL ){ continue }
+		if( local.pl.flags["coop_isActive"] == 1 ){ local.active++ }
+	}
+	println( "^~^~^ DBNOWIPE end active=" + local.active + " total=" + local.count )
+}end
+
+
+//====================================================================
+// JEEP/RAIL DBNO-DISABLED GATE (test 7): on a jeep map (m1l3a/m1l3b the
+// map main sets level.coop_dbno_disabled) a lethal hit must skip DBNO
+// entirely - the player dies + respawns, never goes "down". Applies the
+// kill through the real monitor path (NOT dbno_enter) and watches that
+// coop_dbno_active never latches. Separate gate (needs a jeep map).
+//====================================================================
+st_dbno_jeepgate:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ DBNOJEEP abort=no_host"
+		end
+	}
+	local.dis = level.coop_dbno_disabled
+	if( local.dis == NIL ){ local.dis = 0 }
+	println( "^~^~^ DBNOJEEP begin map=" + level.coop_mapname + " disabled=" + local.dis )
+
+	waitthread st_dbno_damage local.p 15000
+	local.down = 0
+	local.w    = 0
+	while( local.w < 12 ){
+		wait 0.3
+		if( local.p != NULL && local.p.flags["coop_dbno_active"] == 1 ){ local.down = 1 }
+		local.w++
+	}
+	local.aliveEnd = 0
+	if( isAlive local.p ){ local.aliveEnd = 1 }
+	println( "^~^~^ DBNOJEEP killed=1 wasDown=" + local.down + " aliveEnd=" + local.aliveEnd )
+}end

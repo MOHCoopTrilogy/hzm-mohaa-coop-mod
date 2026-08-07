@@ -109,7 +109,12 @@ coop_setDriverForTank local.player:{
 		while (isAlive local.player && local.player.flags["coop_isActive"] == 1 && local.player.dmteam == "allies"){
 			//chrissstrahl - if player wants to exit the tank
 			if(local.player.useheld == 1){
-				if( level.time > level.coop_tankLastDriverTime ){
+				//[user 08-02] SEAT LOCK. Maps that require every player to stay tank-mounted for the
+				//whole mission (t3l2 Berlin) set level.coop_lockVehicleSeats = 1; the USE-to-exit
+				//break is then refused outright. Default 0 keeps m5l2b / e1l1 byte-identical.
+				if( level.coop_lockVehicleSeats == 1 ){
+					exec coop_mod/main.scr::printInfo local.player "You are committed to this vehicle for the mission." 1
+				}else if( level.time > level.coop_tankLastDriverTime ){
 					break
 				}else{
 					exec coop_mod/main.scr::printInfo local.player "You need to wait before you can leave the tank again!" 1
@@ -649,11 +654,24 @@ truck_load local.passengers local.guy_type local.special local.passenger_name lo
 	//[user 07-22 GUARD bug-1030] addon vehicles that supply no crew model reach here with
 	//local.guy_type == NIL; 'spawn NIL' then makes local.driver 'none' and every following
 	//local.driver.* / passenger command throws 'Cannot cast none to listener' (the vehicle-nil
-	//errors on m1l3b/t2l4/t3l1/t3l2). No crew model = nothing to load; skip cleanly. The vehicle
-	//entity itself (self) is untouched, so its rail-drive / player-seating still works.
+	//errors on m1l3b/t2l4/t3l1/t3l2).
+	//
+	//[user 08-02] THAT GUARD WENT TOO FAR - it 'end'ed, which silently EMPTIED every truck whose
+	//caller relies on the vanilla DEFAULT crew model instead of naming one. Retail does not skip
+	//here, it DEFAULTS: global/vehicles_thinkers.scr's LoadPassengers carries
+	//    if (local.guy_type == NIL) local.guy_type = "models/human/german_afrika_private"
+	//and our own LoadPassenger still has that same line - the early 'end' above just meant we
+	//never reached it. Reported on m1l3c: "when the final opel truck arrives after you turn on
+	//the lighthouse, no enemies appeared in the truck". maps/m1l3c.scr:845 calls
+	//    $radmobile thread ...::enemy_truck_think 400 6 $weez_juice
+	//i.e. THREE arguments, so guy_type is NIL and all six passengers plus the driver vanished.
+	//
+	//Defaulting is also still crash-safe, which is what bug-1030 actually needed: enemy_truck_think
+	//only calls truck_load when passengers > 0, so reaching here means the caller genuinely wants a
+	//crew. A caller that wants no crew passes no passenger count and never gets here.
 	if( local.guy_type == NIL || local.guy_type == "" ){
-		println( "^~^~^ VEHCREW-SKIP no guy_type for '" + self.targetname + "' @ " + self.origin )
-		end
+		local.guy_type = "models/human/german_afrika_private"
+		println( "^~^~^ VEHCREW-DEFAULT no guy_type for '" + self.targetname + "' - using " + local.guy_type )
 	}
 	self waitthread LoadPassengers local.passengers local.guy_type local.special local.passenger_name
 
@@ -729,6 +747,8 @@ truck_unload local.playerseek:
 
 		//chrissstrahl - compatibility to aa models/maps
 		if(level.coop_aaMap == NIL || level.coop_aaMap != 1){
+			//[user 2026-08-03] bug-1315 - same ghost hazard as the passenger path above.
+			thread coop_unloadFailsafe local.driver 6
 			local.driver anim_noclip 00A003_driverexit
 			local.driver waittill animdone
 		}
@@ -771,6 +791,13 @@ truck_passenger_unload local.slot local.playerseek:{
 	local.ent.angles = self gettagangles local.tag
 	local.ent notsolid
 	local.ent physics_on
+	//[user 2026-08-03] bug-1315 - the unload goes NOTSOLID here and only goes solid again
+	//AFTER 'waittill animdone'. If that anim never completes the man is left a permanent
+	//GHOST: alive, armed and shooting, but bullets pass straight through him (probe on e2l1
+	//confirmed starttruckguy alive at hp 100 and damageable by a direct hurt event, while the
+	//player could not hit or touch him). Arm a failsafe that restores the post-unload state
+	//unconditionally; it no-ops when the normal path completes.
+	thread coop_unloadFailsafe local.ent 6
 	local.ent anim_noclip ("opel_passenger" + local.slot)
 	local.ent waittill animdone
 	local.ent solid
@@ -872,6 +899,7 @@ truck_killed local.type:{
 	local.name = self
 	local.angles = self.angles
 	local.origin = self.origin
+	println("^~^~^ TANKKILL pre-collisionent")
 	local.brushmodel = self.collisionent.brushmodel	//chrissstrahl - not used in aa - inconsitent
 	//	self remove
 	self hide
@@ -1210,6 +1238,11 @@ TankExplodeOnDeath local.type:
 	}
 	self removeondeath 0
 
+	//[user 2026-08-04] bug-1336 - the FinalBattle tanks die during their own SETUP (VEHZOMBIE:
+	//hp=0 deadflag=2 BEFORE the player's first hit) with no death waiter armed yet, so this
+	//waittill never fires and tank_killed never runs: no wreck, no fx, turret keeps tracking.
+	//The poller forces the retail death sequence whenever health sits at/below zero.
+	thread coop_tankDeathFailsafe
 	self waittill death
 //println "z:         " self " is dead. self.start_health: " self.start_health //chrissstrahl - disabled because it is printed in coop
 	thread tank_killed
@@ -1252,6 +1285,13 @@ tank_stop_if_close:{
 }end
 
 tank_killed:
+	//[user 2026-08-04] bug-1333 breadcrumbs - the e2l1 FinalBattle P40 dies with no sound, no
+	//fx, no wreck swap, and no logged script error. Sound was explode_tank's maps spec (fixed);
+	//these prints name the exact abort line for the visuals on the next kill.
+	println("^~^~^ TANKKILL enter")
+	if (self.coop_tankKilledOnce == 1) { end }
+	self.coop_tankKilledOnce = 1
+	self stoploopsound	//bug-1334 - silence the scripted drive/idle loop
 	self playsound explode_tank
 	self stop
 	self.driving = 0
@@ -1388,6 +1428,7 @@ tank_killed:
 	if (self.gun)
 		local.turretangles = self.gun.angles
 
+	println("^~^~^ TANKKILL spawning fx + wreck swap")
 	self thread spawn_fx models/emitters/explosion_tank.tik
 //	wait 0.25  jsl--> these waits cause the t34 tank to disappear briefly...
 	waitframe
@@ -1893,3 +1934,46 @@ e2l1_manager:
 	self thread maps/e2l1/effectVisibility.scr::truck
 
 end
+
+//=========================================================================
+coop_unloadFailsafe local.ent local.seconds:
+//=========================================================================
+	//[user 2026-08-03] bug-1315 - vehicle unload leaves the man NOTSOLID while an exit anim
+	//plays and only restores him afterwards. A missing or non-completing anim therefore strands
+	//a live, shooting actor that no bullet can touch. Wait out the anim, then restore the
+	//post-unload state if the normal path has not already done so. Deliberately NOT endon-ed:
+	//an endon on the same listener would be drained (and this thread deleted) before it could
+	//run - the bug-1308 lesson from monitortruckhealth.
+	wait local.seconds
+	if (local.ent == NULL || local.ent == NIL)
+		end
+	if (local.ent.done_unloading == 1)
+		end
+	if (!(isalive local.ent))
+		end
+
+	local.ent solid
+	local.ent exec global/enable_ai.scr
+	local.ent exec global/setdeathanim.scr NIL
+	local.ent.ainoprone = 0
+	local.ent.ainocrouch = 0
+	local.ent.done_unloading = 1
+	println("^~^~^ UNLOAD FAILSAFE fired for entnum " + local.ent.entnum + " - restored solid + AI")
+end
+
+//=========================================================================
+coop_tankDeathFailsafe:{
+//=========================================================================
+	//[user 2026-08-04] bug-1336 - see enemy_tank_think. Health sits negative between hits (the
+	//engine rescue only flips it during a damage event), so a 1s poll catches the state.
+	while (1) {
+		wait 1
+		if (!self) { end }
+		if (self.coop_tankKilledOnce == 1) { end }
+		if (self.health <= 0) {
+			println("^~^~^ TANKFAILSAFE ent dead-by-numbers - forcing tank_killed")
+			thread tank_killed
+			end
+		}
+	}
+}end

@@ -22,13 +22,28 @@ StartRide: {
 	level.gliderCrashOver	 = 0
 	level.gliderTakingFire	 = 0
 
+	//[user 2026-08-03] bug-1312 - suspend player.scr::preventSpawnStuck for the whole ride.
+	//Riders are physics_off in a camera and cannot move, so the stuck detector fired, prompted
+	//"press use to switch spawnlocation", and ATE the USE press this scene's own beats need
+	//(the user lost the restored pilot line to it). Cleared in coop_handlePlayerGliderEject /
+	//coop_chuteDrop once the player actually has control.
+	level.coop_noSpawnStuck = 1
+
 	thread handlePilot
 	thread handlePassengers
 	thread handleCamera
 	thread handleC47
 	thread handleDialogue
 	thread handleGlider
-	thread maps/e2l1/pocketflash.scr::DoGliderFlak $flak_left 3
+	//[coop] was: thread maps/e2l1/pocketflash.scr::DoGliderFlak $flak_left 3
+	//retail DoGliderFlak ignores both args (its parameterised body is commented out) and
+	//fires all 7 bursts on a hardcoded "wait 38.5" measured from StartRide. In coop the
+	//descent no longer lands on that clock - and hacks.scr::allowSkipGliderDialogue lets
+	//any player collapse the dialogue and start the descent ~30s early - so the whole
+	//volley went off before the glider ever reached the flak cluster. Position-driven now.
+	thread coop_gliderFlakVolley
+	thread coop_chuteSpawnInit		//[user 2026-08-03] bug-1309 - drop-point table, must exist before handleCrash
+	thread coop_preplaceGliderPlayer	//[user 2026-08-04] bug-1328c - park player 1 at the wreck for the WHOLE ride, like vanilla
 	//thread RestrictView
 
 	if (level.skipFadeIn == 0) {
@@ -111,6 +126,11 @@ handlePassenger1React: {
 
 	// animate the dudes to react
 	$gliderDude1 anim A_21_passenger1_panic
+
+	//[user 2026-08-03] bug-1305 - passenger 1 is WOUNDED, not killed (he keeps moving in
+	//handlePassenger1FreakedOut), so he gets gore tier 1 only. See coop_bloodyGliderDude.
+	$gliderDude1 thread coop_bloodyGliderDude 1
+
 	$gliderDude1 waittill animdone
 	$gliderDude1 thread handlePassenger1FreakedOut
 }end
@@ -145,6 +165,11 @@ handlePassenger2React: {
 	// animate the dudes to react
 	$gliderDude2 thread doPanicSound snd_den_pain_generic
 	$gliderDude2 anim A_21_passenger2_death
+
+	//[user 2026-08-03] bug-1305 - passenger 2 is KILLED by this burst (A_21_passenger2_death),
+	//so he ramps to gore tier 2 (heavy) rather than stopping at light.
+	$gliderDude2 thread coop_bloodyGliderDude 2
+
 	$gliderDude2 waittill animdone
 }end
 
@@ -338,10 +363,18 @@ TruckGuyGoToCrashSite: {
 //============================================================================
 handleCrash: {
 //============================================================================
-	$dead_dude1 anim dead_pose1		
+	$dead_dude1 anim dead_pose1
 	$dead_dude2 anim dead_pose2
 	$dead_dude1 notsolid
 	$dead_dude2 notsolid
+
+	//[user 2026-08-03] bug-1317 - the crash-site dead. They are script_models using the SAME two
+	//models as the glider passengers (Sc_AL_US_CORP / Sc_AL_US_ltPALIA), which the bug-1305
+	//coop overrides already gave gore tiers, so they take the same treatment: tier 2 heavy -
+	//soaked, bullet holes - plus the coop_blooddrip emitter so each corpse pools where it lies.
+	//Retail left them spotless, which read as men asleep rather than men killed in a crash.
+	$dead_dude1 thread coop_bloodyGliderDude 2
+	$dead_dude2 thread coop_bloodyGliderDude 2
 
 	waitthread game.waittill gliderRideOver //[202] Smithy - save cpu cycles
 	/*
@@ -370,6 +403,7 @@ handleCrash: {
 	thread game.event gliderCrashOver //[202] Smithy - save cpu cycles
 	level.gliderCrashOver = 1
 	thread HandleSearchParty
+	thread coop_searchPartyShotWatch	//[user 2026-08-04] bug-1344 - first shot at them ends the show
 
 	if (self){
 		// find out what 75% of health is
@@ -411,15 +445,45 @@ handleCrash: {
 	thread coop_mod/replace.scr::physics_on 
 	
 	//[202] Smithy - handle their eject stuff individually
+	//[user 2026-08-03] bug-1309 CHUTE SPAWNS - only the FIRST active player takes the glider
+	//eject beat; everyone else arrives by parachute at the user-scouted drop points above the
+	//crash site, frozen until they cut the chute (same freeze->USE beat as the glider). Later
+	//spawns (late join or respawn) come down the same way via coop_chuteSpawnManager.
+	local.gliderTaken = 0
 	for (local.i = 1; local.i <= $player.size; local.i++){
 		local.player = $player[local.i]
 		if (waitthread game.playerActive local.player && !local.player.ejectHandled){
-			local.player thread coop_handlePlayerGliderEject
+			if (local.gliderTaken == 0){
+				local.gliderTaken = 1
+				//[user 2026-08-03] bug-1328b - place him at the vanilla wreck spot IN THE CRASH
+				//FRAME, before any camera release ordering can show his ground-level body for a
+				//beat ('I spawn close to the ground, then respawn higher'). The eject handler
+				//sets the same origin again - idempotent.
+				local.player.origin = ( 4494 6086 592 )
+				local.player.viewangles = ( 0 270 0 )
+				local.player thread coop_handlePlayerGliderEject
+			}else{
+				local.player thread coop_chuteDrop
+			}
 		}
 	}
+	if (level.gametype != 0){
+		thread coop_chuteSpawnManager
+	}
+
+	//[user 2026-08-03] bug-1307 - the flak run is over and the players are on the ground:
+	//release the scripted suppression floor so the normal decay takes it to zero.
+	thread coop_mod/main.scr::coop_setSuppressionAll 0
 
 	//time to roll up the truck
-    thread WaitToStartTruck   
+	//[user 2026-08-03] bug-1308 (C3) PRE-ARM. WaitToStartTruck sleeps 20-50s (skill-dependent)
+	//before startTruck runs enemy_truck_think, and only that runs truck_INIT. Until then
+	//$starttruck still has the Vehicle default removeondeath qtrue - so a player who lands,
+	//mounts $aagun2 (~950u away) and kills it sees it VANISH silently: no explosion, no sound,
+	//no truck_killed. (It IS damageable in that window - the ctor sets DAMAGE_YES - so only the
+	//death handling is missing, and that is all the pre-arm touches.)
+	thread coop_preArmStartTruck
+	thread WaitToStartTruck
 
     /* //[202] Smithy - done in coop_handlePlayerGliderEject now
 	$searchparty thread EnableAI
@@ -432,36 +496,68 @@ handleCrash: {
 //============================================================================
 HandleSearchParty: {
 //============================================================================
-
+	//[user 2026-08-04] bug-1350 - REWRITTEN. Three compounding defects made this scene
+	//unwatchable ('they never walked up... then noticed me from a distance'):
+	//  1. e2l1.scr disable_ai's the search party, so retail's runto could never move them -
+	//     they only ever moved once the ABORT enabled their AI, i.e. as hostiles.
+	//  2. coop replace.scr::say_wait reports length NIL for these aliases, so every
+	//     'waittill saydone' returned instantly and all four lines + GetPlayer collapsed into
+	//     one frame.
+	//  3. the 30s landing cap (bug-1348) expired while the player was still hanging.
+	//Now: wait for the player to land (no cap - the scene is pointless unwatched), enable AI so
+	//they can actually path to the wreck, but BLIND them (sight/hearing 1) so they walk in
+	//without noticing, play the four lines on fixed timings, then restore their senses and
+	//hand off to GetPlayer. Shooting one still ends it early via coop_searchPartyShotWatch.
 	level.abortSearchParty = 0
+
+	//[user 2026-08-04] bug-1354 - START AT THE CRASH, not on landing. The landing gate was
+	//added (bug-1348) because the scene used to finish before the player had control - but
+	//that was really the NIL-length dialogue collapsing all four lines into one frame
+	//(bug-1350). With fixed timings the scene runs ~21s, so starting it at the crash lets the
+	//player watch the Italians walk in and talk from the wreck, exactly as the user wants,
+	//and they are still blind until it ends whether the player drops mid-scene or not.
+	wait 1
+	if (level.abortSearchParty == 1) { end }
+
+	$searchparty waitthread EnableAI
+	for (local.i = 1; local.i <= 2; local.i++) {
+		if ($searchparty[local.i]) {
+			$searchparty[local.i] sight 1
+			$searchparty[local.i] hearing 1
+		}
+	}
 	$searchparty[1] runto $searchpartyrunto1
 	$searchparty[2] runto $searchpartyrunto2
 
-	wait 2
-	if (level.abortSearchParty == 0) {
-		$searchparty[1] waitthread game.say den_E2L1_ITALIAN1
-		$searchparty[1] waittill saydone
-	}
+	wait 6	//let them cover the ~1100u from their posts to the wreck before talking
 
 	if (level.abortSearchParty == 0) {
-		$searchparty[1] waitthread game.say den_E2L1_ITALIAN2
-		$searchparty[1] waittill saydone
+		$searchparty[1] playsound den_E2L1_ITALIAN1
+		wait 3.5
 	}
-
 	if (level.abortSearchParty == 0) {
-		$searchparty[2] waitthread game.say den_E2L1_ITALIAN3
-		$searchparty[2] waittill saydone
+		$searchparty[1] playsound den_E2L1_ITALIAN2
+		wait 4
 	}
-
 	if (level.abortSearchParty == 0) {
-		$searchparty[1] waitthread game.say den_E2L1_ITALIAN4
-		$searchparty[1] waittill saydone
+		$searchparty[2] playsound den_E2L1_ITALIAN3
+		wait 3.5
+	}
+	if (level.abortSearchParty == 0) {
+		$searchparty[1] playsound den_E2L1_ITALIAN4
+		wait 4
 	}
 
-	wait 2
+	//senses back before the hunt, or they would chase blind
+	for (local.i = 1; local.i <= 2; local.i++) {
+		if ($searchparty[local.i]) {
+			$searchparty[local.i] sight 2000
+			$searchparty[local.i] hearing 2000
+		}
+	}
 	if (level.abortSearchParty == 0) {
 		$searchparty thread GetPlayer
-  	}
+	}
 }end
 
 //============================================================================
@@ -514,6 +610,11 @@ handleDialogue: {
 
 	if (level.skipDialogue == 0) {
 		// "Thanks for the cheery observation..."
+		//[user 2026-08-03] bug-1330 - retail animates the pilot TALKING here with no audio;
+		//GP1301 is that recorded line, shipped and never referenced.
+		if ($gliderCamera){
+			$gliderCamera[1] playsound DFRUS_E2L1_GP1301
+		}
 		$gliderPilot upperanim AA_pilot_talk1
 		$gliderPilot waittill upperanimdone		
 	}
@@ -544,6 +645,10 @@ handleDialogue: {
 
 	if (level.skipDialogue == 0) {
 		// "Roger that, detachment ready..."
+		//[user 2026-08-03] bug-1330 - same: GP1302 is this line's recording
+		if ($gliderCamera){
+			$gliderCamera[1] playsound DFRUS_E2L1_GP1302
+		}
 		$gliderPilot upperanim AA_pilot_talk2
 		$gliderPilot waittill upperanimdone		
 		wait 2.5
@@ -587,8 +692,31 @@ handleDialogue: {
 	}
 
 	if (level.skipDialogue == 0) {
-		// "Sergent Baker, you might want to hold onto..."
-		$gliderPilot upperanim AA_pilot_talk4
+		//[user 2026-08-02] bug-1297 - AA_pilot_talk4 DOES NOT EXIST. Retail ships only
+		//AA_pilot_talk1/2/3 (models/human/animation/scripted/e2L1/) and level_e2l1.tik registers
+		//exactly those three - there is no fourth. So this line threw
+		//  Script Error : unknown animation 'AA_pilot_talk4' in 'models/human/sc_al_us_pilot.tik'
+		//and ABORTED THIS THREAD, which is why everything below never ran: the descent events, the
+		//dialogueFinished flag, cueplayer, the $gliderCamera cleanup, and - the visible one - the
+		//setFog call at the end of this function that switches the map to its GROUND fog
+		//(1500 units). Without it the map stays on the TOW fog (3000), i.e. twice as thin, which
+		//reads in play as "no fog on the ground" and lets distant geometry pop in unmasked.
+		//
+		//[user 2026-08-03] bug-1302 - the first repair reused AA_pilot_talk3 here, but every
+		//AA_pilot_talk* anim carries its OWN VO as an embedded TIKI frame command
+		//(level_e2l1.tik:121-127, "1 sound DFRUS_E2L1_GP1303"), so replaying the anim replayed the
+		//line: the pilot said "We are clear, Two-Four" twice in a row.
+		//
+		//CUT LINE RESTORED. The beat's real line is DFRUS_E2L1_GP1306, "There were reports of
+		//heavy AA fire in this area, but hopefully our boys took care of that for us." - which is
+		//why it sits immediately before the glider starts taking AA fire. All three pieces ship:
+		//  anim   A_21_Glider_1A            level_e2l1.tik:257 (plays "0 sound DFRUS_E2L1_GP1306")
+		//  audio  DFRUS_E2L1_GP1306xd04.mp3 maintt/sound/dialogue/Mission_2/Allies/ - a LOOSE file,
+		//         not in any pk3, which is why a pk3-only search first reported it missing
+		//  reach  sc_al_us_pilot.tik -> new_generic_human.tik -> level_e2l1.tik, the same include
+		//         chain that resolves AA_pilot_talk1/2/3
+		//Only the alias was commented out in ubersound/uberdialog.scr; the coop copy re-enables it.
+		$gliderPilot upperanim A_21_Glider_1A
 		$gliderPilot waittill upperanimdone
 	}
 
@@ -812,6 +940,16 @@ coop_handlePlayerGliderEject:{
 //============================================================================
 	local.player = self
 	local.player.ejectHandled = game.true
+	local.player thread coop_crashDizzy	//[user 2026-08-03] bug-1322
+	//[user 2026-08-03] bug-1328 - GLIDER PLAYER ONLY: stand at the vanilla post-crash spot.
+	//Retail never moves the player at all: the body waits out the whole ride at the map's
+	//single info_player_start (4494 6086 592) yaw 270 - seat height, ~192u above the static
+	//wreck at (4462 5960 400) - and physics_on after USE settles them into the wreck. Coop
+	//spawns sat at ground level, which read as 'way too close to the ground'. Same
+	//origin/viewangles/physics_off recipe as coop_chuteDrop. Chute players keep their own
+	//user-scouted drop points.
+	local.player.origin = ( 4494 6086 592 )
+	local.player.viewangles = ( 0 270 0 )
 	local.player physics_off	
 	local.player commanddelay 0.05 iprint("Hold USE to eject from the glider") game.true
 	local.player.gliderEjectThread = local
@@ -819,13 +957,21 @@ coop_handlePlayerGliderEject:{
 		wait .1
 	}
 	if (local.player){
+		//[user 2026-08-04] bug-1347 - the eject settles the player ~192u from the vanilla seat
+		//height onto the wreck; in coop that fall damage was enough to put them straight into
+		//DBNO. Same nodamage window coop_chuteDrop already uses for its drop.
+		local.player nodamage
 		local.player physics_on		
+		local.player thread coop_ejectDamageRestore
+		level.coop_gliderPlayerLanded = 1
 		local.player.ejectHandled = game.false
-		if (!level.coop_searchPartyAborted){
-			level.coop_searchPartyAborted = game.true
-			$searchparty thread EnableAI
-			level.abortSearchParty = 1
-		}
+		level.coop_noSpawnStuck = 0		//[user 2026-08-03] bug-1312 - player has control again
+		//[user 2026-08-04] bug-1344 - ejecting NO LONGER aborts the search-party scene. Retail
+		//killed the Italians' walk-in + 4-line exchange the moment the player pressed USE, so
+		//in practice nobody ever saw it ('isn't there a script where the italians walk around
+		//and have some kind of dialogue and dont notice you immediately?' - there is, and now
+		//it plays). Hostility comes from the scene's own GetPlayer after line 4, or instantly
+		//if any player SHOOTS a search-party member (coop_searchPartyShotWatch).
 	}
 }end
 
@@ -1089,6 +1235,13 @@ handlePilot:{
 	// animate the his death
 	$gliderPilot anim AA_pilot1_death2
 	$gliderPilot playsound dfr_E2L1_PILOT_DEATH
+
+	//[user 2026-08-03] bug-1314 - he is being shot to pieces through the windscreen, so he goes
+	//straight to gore tier 2 (heavy): soaked tunic and pants, bullet holes, and an entry wound on
+	//the face. Retail left him spotless because his model shipped one shader per surface - the
+	//coop override in models/human/SC_Al_US_pilot.tik adds the tiers.
+	$gliderPilot thread coop_bloodyGliderPilot
+
 	$gliderPilot waittill animdone
 	$gliderPilot ai_off
 
@@ -1158,4 +1311,428 @@ UnrestrictView: {
 	level.restrict setPlayerUsable 0
 	level.restrict delete
 	level.restrict = NULL
+}end
+
+//============================================================================
+coop_gliderFlakVolley: {
+//============================================================================
+	//[coop] position-driven replacement for pocketflash.scr::DoGliderFlak. Each burst
+	//fires when the glider closes to within local.lead units of that flak origin along
+	//the descent axis (+Y), so the volley is correct at any descent speed and survives
+	//the dialogue being skipped. exp_flak_near_moving.tik launches its particles down
+	//-Y toward the oncoming glider, so a lead of a few hundred to ~1200 units puts the
+	//flash ahead of the cockpit and sweeps the smoke past it a fraction of a second later.
+
+	while (level.gliderDescentBegun == 0 && level.gliderRideOver == 0) {
+		waitframe
+	}
+
+	if (level.gliderRideOver) { end }
+	if (!$glider) { end }
+	if (!$gliderpath) { end }
+
+	//handleGlider snaps the glider onto the start of the descent spline before it flies.
+	//With the glider parked at the tow position this gate is already satisfied and falls
+	//through in zero frames; it only does work if the snap has not happened yet. Kept as
+	//insurance against a future reorder, not because it is load-bearing today.
+	local.armY = $gliderpath.origin[1] + 100
+	while (level.gliderRideOver == 0 && $glider && $glider.origin[1] > local.armY) {
+		waitframe
+	}
+
+	if (level.gliderRideOver) { end }
+	if (!$glider) { end }
+
+	//origins in the order the glider meets them (sorted by Y). Leads spread the volley
+	//over roughly 1.5s - 4.0s of the descent, the last two bursting close in as the
+	//glider flies through the cluster.
+	//[user 2026-08-03] bug-1307 - the suppression/blur floor is set by the FIRST BURST inside
+	//coop_flakWhenGliderNears, not here: this label runs at descent start, ~1.5-4s before any
+	//flak is visibly firing, and the user called the early blur out ("hits a bit too early").
+	//Released in handleCrash at the eject beat.
+	level.coop_gliderSuppOn = 0
+
+	$flak_origin_1 thread coop_flakWhenGliderNears 1200
+	$flak_origin_3 thread coop_flakWhenGliderNears 1050
+	$flak_origin_6 thread coop_flakWhenGliderNears 1100
+	$flak_origin_5 thread coop_flakWhenGliderNears 900
+	$flak_origin_7 thread coop_flakWhenGliderNears 750
+	$flak_origin_2 thread coop_flakWhenGliderNears 600
+	$flak_origin_4 thread coop_flakWhenGliderNears 300
+}end
+
+//============================================================================
+coop_flakWhenGliderNears local.lead: {
+//============================================================================
+	//[coop] fire one retail DoSingleFlak burst at this script_origin the moment the
+	//glider closes to within local.lead units of it along the descent axis (+Y).
+	if (!self) { end }
+
+	while (level.gliderRideOver == 0) {
+		if (!$glider) { end }
+
+		if (($glider.origin[1] + local.lead) >= self.origin[1]) {
+			break
+		}
+
+		waitframe
+	}
+
+	if (level.gliderRideOver) { end }
+
+	//[user 2026-08-03] bug-1307 tune - the FIRST burst sets the held floor ("hits a bit too
+	//early" when it armed at descent start). Later bursts skip straight to the bump.
+	if (level.coop_gliderSuppOn != 1) {
+		level.coop_gliderSuppOn = 1
+		thread coop_mod/main.scr::coop_setSuppressionAll 0.55
+	}
+
+	self thread maps/e2l1/pocketflash.scr::DoSingleFlak
+
+	//[user 2026-08-03] bug-1307 - each burst also spikes the one-shot suppression bump on top
+	//of the held floor, so individual flak bursts read as flinches rather than a flat tint.
+	for (local.i = 1; local.i <= $player.size; local.i++) {
+		thread coop_mod/main.scr::coop_bumpSuppression $player[local.i] 0.5
+	}
+}end
+
+//============================================================================
+coop_bloodyGliderDude local.tier: {
+//============================================================================
+	//[user 2026-08-03] bug-1305 - bloody a glider passenger's uniform as he is shot up.
+	//
+	//The engine's gore tier 1 (Sentient::CoopGoreUpdateSkinTier) drives this automatically for
+	//real AI, by accumulating damage and writing MDL_SURFACE_SKINOFFSET_BIT0/BIT1 into
+	//edict->s.surfaces[]. These two passengers are cinematic script_models: they never take
+	//damage, so nothing ever set their tier. Driving the same skin bits by hand is exactly what
+	//the retail glider does for its cracked windscreen (CG4Aglider.tik surface +skin1/+skin2).
+	//
+	//Requires the blood skins to EXIST on the model - retail Sc_Al_US_Corp.tik / Sc_Al_US_LtPalia.tik
+	//declare one shader per surface, so the coop overrides in models/human/ add the _blood1/2/3
+	//tiers copied verbatim from models/human/Sc_Al_US_Inf.tik, which already shipped them for the
+	//same two surfaces. Shaders live in scripts/coop_gore.shader.
+	//
+	//skin offset: 0 clean, 1 = +skin1 (light), 2 = +skin2 (heavy). Written the same way the
+	//engine writes it - never both bits, since offset 3 is the gib skin.
+	if (!self) { end }
+
+	self surface Sc_Al_US_Inf_Tunic "+skin1"
+	self surface Sc_Al_US_Inf_Pants "+skin1"
+	self surface hand "+skin1"
+
+	if (local.tier < 2) { end }
+
+	//killed outright - let the light tier read for a beat, then go heavy
+	wait 0.6
+	if (!self) { end }
+
+	self surface Sc_Al_US_Inf_Tunic "-skin1" "+skin2"
+	self surface Sc_Al_US_Inf_Pants "-skin1" "+skin2"
+	self surface hand "-skin1" "+skin2"
+
+	//[user 2026-08-03] bug-1317 - tier 2 means killed, so bleed. Same oil-drum-leak reskin the
+	//engine attaches to real corpses (Sentient::CoopGoreTryDripAttach, "Bip01 Spine1"); these are
+	//scripted props the engine never reaches.
+	self attachmodel "models/fx/coop_blooddrip.tik" "Bip01 Spine1"
+}end
+
+//============================================================================
+coop_preArmStartTruck: {
+//============================================================================
+	//[user 2026-08-03] bug-1308 (C3) - minimal by design. The truck is ALREADY damageable in
+	//the pre-arrival window (Vehicle ctor sets DAMAGE_YES, health 1000); what is missing is
+	//death handling, so a kill vanished it silently. Deliberately NOT touched here:
+	//  health          - startTruck's enemy_truck_think sets level.truck1_health at arrival;
+	//                    raising it early would make the window kill HARDER, not easier
+	//  collisionent    - $truckcollide is ONE script_object shared with $starttruck2's own
+	//                    drive-in; binding or disconnect_path-ing it early breaks the other
+	//                    truck's arrival (adversarial-review finding D-5)
+	if (!$starttruck) { end }
+
+	$starttruck removeondeath 0
+	$starttruck thread coop_startTruckDeathBeforeArrival
+}end
+
+//============================================================================
+coop_startTruckDeathBeforeArrival: {
+//============================================================================
+	//If the truck is destroyed before startTruck ever runs, run the retail death sequence once
+	//and latch level.starttruckonce so startTruck (which guards on it) becomes a no-op instead
+	//of attaching enemy_truck_think to a corpse. If startTruck ran first it set the latch
+	//itself and enemy_truck_think owns the death - this thread just exits.
+	self waittill death
+
+	if (level.starttruckonce == 1) { end }
+	level.starttruckonce = 1
+
+	self stop
+	//NO disconnect_paths: self.collisionent is unset pre-arrival, and the collide brush is
+	//shared with $starttruck2 (see coop_preArmStartTruck).
+	self thread global/vehicles_thinkers.scr::truck_killed
+}end
+
+//============================================================================
+coop_chuteSpawnInit: {
+//============================================================================
+	//[user 2026-08-03] bug-1309 CHUTE SPAWNS - drop points scouted by the user with viewpos
+	//(console 2026-08-03 19:58-19:59). Format was (x y z) : yaw; yaws normalised to 0-360.
+	//All four hang well above the crash-site ground, so a frozen player reads as descending.
+	level.coop_chutePoint[1] = ( 3113 5130 618 )
+	level.coop_chuteYaw[1] = 32
+	level.coop_chutePoint[2] = ( 2600 4597 851 )
+	level.coop_chuteYaw[2] = 134
+	level.coop_chutePoint[3] = ( 2806 4463 713 )
+	level.coop_chuteYaw[3] = 352
+	level.coop_chutePoint[4] = ( 3154 5949 695 )
+	level.coop_chuteYaw[4] = 340
+	level.coop_chuteCount = 4
+	level.coop_chuteNext = 1
+}end
+
+//============================================================================
+coop_chuteDrop: {
+//============================================================================
+	//[user 2026-08-03] bug-1309 - one player's parachute arrival. Same freeze -> USE beat as
+	//coop_handlePlayerGliderEject, at altitude: teleport to the next drop point, hang a canopy
+	//overhead (models/static/parachute_actors.tik - the same canopy this map's own para battle
+	//hangs its AI from), and hold physics off until the player cuts away. nodamage covers the
+	//fall so the authored drop heights can never be a death sentence; 15s failsafe auto-cut so
+	//nobody is stranded in the sky if the prompt is missed.
+	local.player = self
+	if (!local.player) { end }
+	local.player.ejectHandled = game.true
+	local.player.coop_chuting = 1
+	local.player thread coop_crashDizzy	//[user 2026-08-03] bug-1322
+
+	local.idx = level.coop_chuteNext
+	level.coop_chuteNext++
+	if (level.coop_chuteNext > level.coop_chuteCount) { level.coop_chuteNext = 1 }
+
+	local.player.origin = level.coop_chutePoint[local.idx]
+	local.player.viewangles = ( 0 level.coop_chuteYaw[local.idx] 0 )
+	local.player physics_off
+
+	local.chute = spawn script_model model "models/static/parachute_actors.tik" targetname "coop_chute_canopy"
+	local.chute notsolid
+	local.chute.origin = local.player.origin + ( 0 0 8 )
+
+	local.player commanddelay 0.05 iprint("Hold USE to cut your chute") game.true
+
+	local.t = 0
+	while (waitthread game.playerActive local.player && !local.player.useheld && local.t < 150) {
+		wait .1
+		local.t++
+	}
+
+	if (local.chute) { local.chute delete }
+
+	if (local.player) {
+		local.player nodamage
+		local.player physics_on
+		wait 3
+		if (local.player) { local.player takedamage }
+	}
+
+	if (local.player) {
+		local.player.coop_chuting = 0
+		local.player.ejectHandled = game.false
+		level.coop_noSpawnStuck = 0		//[user 2026-08-03] bug-1312 - player has control again
+	}
+}end
+
+//============================================================================
+coop_chuteSpawnManager: {
+//============================================================================
+	//[user 2026-08-03] bug-1309 - after the crash, EVERY arrival (late join or respawn) comes
+	//down by chute at the scouted points, so nobody ever pops in standing at a map default.
+	//Mirrors coop_startGliderSpawnManager's playerspawn loop, which stops mattering once the
+	//ride is over.
+	while (1) {
+		level waittill playerspawn
+		group.player = parm.other
+
+		if (group.player && group.player.coop_chuting != 1) {
+			group.player thread coop_chuteDrop
+		}
+	}
+}end
+
+//============================================================================
+coop_bloodyGliderPilot: {
+//============================================================================
+	//[user 2026-08-03] bug-1314 - the pilot takes the burst that kills him through the
+	//windscreen, so he ramps light -> heavy rather than popping straight to soaked. Same
+	//[user 2026-08-04] bug-1332 - "head*" not "head": head1.skd contains TWO surfaces both
+	//named "head" (LOD pair) and Surface_NameToNum returns only the FIRST - the rendered one
+	//stayed clean ("his face is perfectly clean"). The trailing * is retail SurfaceCommand
+	//prefix-match mode (entity.cpp:4237) and flips BOTH. Engine gore tiers loop all surfaces
+	//by index, which is why AI faces were never affected.
+	//hand-driven skin-offset mechanism as coop_bloodyGliderDude and the retail cracked
+	//windscreen: 0 clean, +skin1 light, +skin2 heavy. Tokens MUST be quoted - a bare +skin1
+	//is a whole-file parse killer (bug-1308).
+	if (!self) { end }
+
+	self surface Sc_Al_US_Pilot_Tunic "+skin1"
+	self surface Sc_Al_US_Pilot_Pants "+skin1"
+	self surface "head*" "+skin1"
+
+	wait 0.5
+	if (!self) { end }
+
+	//heavy: soaked, bullet holes, and the entry wound on the face
+	self surface Sc_Al_US_Pilot_Tunic "-skin1" "+skin2"
+	self surface Sc_Al_US_Pilot_Pants "-skin1" "+skin2"
+	self surface "head*" "-skin1" "+skin2"
+	self surface hand "-skin1" "+skin2"
+
+	//[user 2026-08-03] bug-1314 - BLEED. models/fx/coop_blooddrip.tik is the mod's own
+	//oil-drum-leak reskin (persistent originemitter: falling streaks + droplets, each carrying
+	//collision + bouncedecal so every drip leaves a coop_bloodsplat mark where it lands). The
+	//engine normally attaches it itself - Sentient::CoopGoreTryDripAttach, to the "Bip01 Spine1"
+	//tag - but only for damageable AI; this pilot is a scripted nodamage prop, so nothing ever
+	//triggered it. Attach the same tik to the same tag by hand.
+	self attachmodel "models/fx/coop_blooddrip.tik" "Bip01 Spine1"
+
+	//[user 2026-08-03] bug-1316 - and paint the WINDSCREEN. The glass surface carries a fourth
+	//skin in the coop CG4Aglider.tik override (base / cracks001 / cracks002 / coop_glass_blood),
+	//so setting BOTH offset bits selects the bloodied pane. This is the same surface the retail
+	//shot anim drives to +skin2, which is why it is already shattered underneath.
+	if ($glider) {
+		$glider surface glider_body_glass "+skin1" "+skin2"
+		thread coop_glassBloodKeeper	//[user 2026-08-04] bug-1341 - the shot anim REPLAYS its crack progression on every flak burst and its 2.1s step forces cracks-only, wiping this
+	}
+}end
+
+//============================================================================
+coop_crashDizzy: {
+//============================================================================
+	//[user 2026-08-03] bug-1322 - ~10 seconds of hard concussion while you hang. Threaded from
+	//BOTH hang paths (the glider eject and every parachute arrival), so late joiners and
+	//respawns that come down by chute get it too, without a second timer to keep in sync.
+	//0.9 is deliberately near the top of the range: a damaging hit spikes the client to
+	//0.25 + lost * 2.5 (cg_view.c), so ~0.9 is what a solid wound already feels like, and the
+	//suppression shader weights its tunnel/blur curve to the TOP of the range (sHi = s * s),
+	//which is what reads as dizzy rather than as a flat grey wash.
+	//The 0.3s lead-in matters: the crash frame also threads coop_setSuppressionAll 0 to release
+	//the flak-run floor. Both are threads off the same frame, so without the wait that release
+	//lands a moment AFTER this floor is set and silently clears it.
+	local.player = self
+	if (!local.player) { end }
+	wait 0.3
+	if (!local.player) { end }
+	thread coop_mod/main.scr::coop_setSuppression local.player 0.9
+
+	local.t = 0
+	while (local.t < 10) {
+		wait 0.5
+		local.t = local.t + 0.5
+		if (!local.player) { end }
+	}
+
+	//ramp out rather than snapping off, so it reads as the world steadying
+	local.a = 0.9
+	while (local.a > 0) {
+		local.a = local.a - 0.15
+		if (local.a < 0) { local.a = 0 }
+		if (!local.player) { end }
+		thread coop_mod/main.scr::coop_setSuppression local.player local.a
+		wait 0.35
+	}
+}end
+
+//============================================================================
+coop_preplaceGliderPlayer: {
+//============================================================================
+	//[user 2026-08-04] bug-1328c - the crash-frame origin set still lost a visible race ('spawns
+	//you close to the ground first, then up at the default point'). Vanilla never has this
+	//problem because the body stands at info_player_start (4494 6086 592) physics-off for the
+	//ENTIRE ride. Do the same: pin the first active player there from ride start until the
+	//crash; the eject handler owns them afterwards. Re-pin each half second in case a respawn
+	//or late activation moves the body mid-ride.
+	local.pinned = NULL
+	while (level.gliderCrashOver != 1) {
+		if (local.pinned == NULL || local.pinned == NIL) {
+			for (local.i = 1; local.i <= $player.size; local.i++) {
+				if (local.pinned == NULL && waitthread game.playerActive $player[local.i]) {
+					local.pinned = $player[local.i]
+					//[user 2026-08-04] bug-1328d - viewangles + physics ONCE at first pin only.
+					//Re-stuffing viewangles each tick snapped the camera straight ahead every half
+					//second ('wont let me move my camera around'). Only the ORIGIN is re-pinned.
+					local.pinned.viewangles = ( 0 270 0 )
+					local.pinned physics_off
+				}
+			}
+		}
+		if (local.pinned != NULL && local.pinned != NIL) {
+			local.pinned.origin = ( 4494 6086 592 )
+		}
+		wait 0.5
+	}
+}end
+
+//============================================================================
+coop_glassBloodKeeper: {
+//============================================================================
+	//[user 2026-08-04] bug-1341 - once the pilot's blood is on the windscreen it must survive
+	//every later shot-anim replay (each flak burst re-runs the crack progression, whose 2.1s
+	//step is '-skin1 +skin2'). Cheapest robust answer: re-assert the blood skin twice a second
+	//for the remainder of the ride - any wipe lasts at most half a second.
+	while (level.gliderCrashOver != 1) {
+		if ($glider) {
+			$glider surface glider_body_glass "+skin1" "+skin2"
+		}
+		wait 0.5
+	}
+	if ($glider) {
+		$glider surface glider_body_glass "+skin1" "+skin2"
+	}
+}end
+
+//============================================================================
+coop_searchPartyShotWatch: {
+//============================================================================
+	//[user 2026-08-04] bug-1344 - the search party is disable_ai during their scene, which
+	//would make them free kills that never react. First damage to EITHER member enables the
+	//whole party and aborts the remaining dialogue - the retail abort, just moved from
+	//'player pressed USE' to 'player opened fire'.
+	for (local.i = 1; local.i <= 2; local.i++) {
+		if ($searchparty[local.i]) {
+			$searchparty[local.i] thread coop_searchPartyMemberHit
+		}
+	}
+}end
+
+//============================================================================
+coop_searchPartyMemberHit: {
+//============================================================================
+	self waittill damage
+	if (!level.coop_searchPartyAborted){
+		level.coop_searchPartyAborted = game.true
+		level.abortSearchParty = 1
+		$searchparty thread EnableAI
+		//[user 2026-08-04] bug-1350 - restore the senses the scene blinded, or a shot-at
+		//search party would hunt with sight 1 and never find anyone.
+		for (local.i = 1; local.i <= 2; local.i++) {
+			if ($searchparty[local.i]) {
+				$searchparty[local.i] sight 2000
+				$searchparty[local.i] hearing 2000
+			}
+		}
+	}
+}end
+
+//============================================================================
+coop_ejectDamageRestore: {
+//============================================================================
+	//[user 2026-08-04] bug-1347 - re-arm damage once the player is on the ground (or after a
+	//5s cap), so the eject fall cannot DBNO them but they are not invulnerable afterwards.
+	local.player = self
+	local.t = 0
+	while (local.t < 5) {
+		wait 0.25
+		local.t = local.t + 0.25
+		if (!local.player) { end }
+		if (local.player.groundentity != NULL && local.t > 1) { break }
+	}
+	if (local.player) { local.player takedamage }
 }end

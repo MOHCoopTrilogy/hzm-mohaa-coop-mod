@@ -3,7 +3,9 @@ main:
 //=========================================================================
 {
 	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (must be first frame)
-	level.coop_weatherTheme = "none"			//HZM coop - dynamic weather: North Africa / Med coast (no precip)
+	level.coop_weatherTheme = "rain"			//HZM coop - dynamic weather: Monte Battaglia. Vanilla stormed here - the retail outro explicitly switches it OFF (Outro.scr level.thunder = 0 / level.rainvolume = 0), and Bunker2.scr/Outro.scr still carry thunder-muting gags that are currently orphaned no-ops
+	level.coop_weatherHold = 2			//[user 2026-08-04] bug-1375 - Monte Battaglia storms for the WHOLE mission (retail);
+										//hold a steady heavy storm instead of the random build/clear walk. 0-3.
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 	level.coop_hasCallback["coop_playerJustLeft"] = 1
@@ -42,6 +44,19 @@ main:
 	thread maps/e3l4/Outro.scr::InitOutro
 	thread maps/e3l4/CastleAmbient.scr::InitCastleAmbient
 	waitthread InitLevel
+
+	//[user 2026-08-04] bug-1379 - ARENA BUILD MODE STOPS HERE.
+	//First attempt set every hackskip* flag instead, which was wrong: those flags make each
+	//Objective* thread return IMMEDIATELY, so the linear waitthread chain below raced straight
+	//through all four bunkers, the castle and the tower and landed in the OUTRO - the user got
+	//dropped into the end-of-mission cutscene. Skipping a section is not the same as not
+	//running the mission. Ending main here leaves the level fully built (every Init* thread
+	//above has already run, so the world, ambient and entities exist) with the player standing
+	//at the normal spawn on foot, and nothing scripted driving them anywhere.
+	if( level.coop_buildmap == 1 ){
+		println( "^~^~^ E3L4 ARENA BUILD MODE - objective chain halted, free-roam authoring" )
+		end
+	}
 
 	// Bunker1
 	waitthread maps/e3l4/Bunker1.scr::DoIntro
@@ -198,7 +213,14 @@ Fadein:
 InitWeather:
 //=========================================================================
 {
-	exec global/weather.scr
+	// HZM coop [user 08-02]: removed 'exec global/weather.scr'. InitWeather is called from
+	// line 154, AFTER the spawn gate, and global/weather.scr:73 is a bare
+	// 'level waittill spawn' which the engine REMOVES once spawned
+	// (Level::ServerSpawned -> RemoveWaitTill(STRING_SPAWN), level.cpp:1498). The waittill
+	// therefore threw "invalid waittill" and killed the thread before 'thread thunder',
+	// which is why Monte Battaglia had no storm. coop_mod/weather.scr::main execs it at
+	// PREspawn instead, where the waittill is still valid - the "rain" theme in main: is
+	// now all this map needs. See the matching note in maps/e3l2.scr.
 
 	//	level.rain_speed = "32"
 	//	level.rain_speed_vary = "16"
@@ -321,5 +343,24 @@ end
 coop_playerJustLeft:
 end
 
-coop_playerJustRespawned:
+coop_playerJustRespawned local.player:
+	//[user 2026-08-05] bug-1435 - a gunner death during the intro convoy left the .30cal empty
+	//AND locked for the rest of the ride. Vacant-gun re-seat with Bunker1's own mount recipe;
+	//refreshing the gunner var also fixes the stale-var dismount warp for free.
+	if( level.playeronjeep != 1 ){ end }
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( $startjeep == NULL ){ end }
+	if( level.coop_e3l4JeepGunner != NULL && level.coop_e3l4JeepGunner != NIL && isAlive level.coop_e3l4JeepGunner ){ end }
+	$startjeep.turret = $startjeep queryturretslotentity 0
+	$startjeep unlock
+	$startjeep.turret unlock
+	local.player notsolid
+	local.player.origin = $startjeep.turret.origin
+	$startjeep attachturretslot 0 local.player
+	local.player perferredweapon ".30cal Machine Gun"
+	local.player forcelegsstate COOP_TURRET_MAN_F
+	level.coop_e3l4JeepGunner = local.player
+	$startjeep.turret lock
+	$startjeep lock
+	local.player iprint "Back on the convoy .30cal!" 1
 end

@@ -4,7 +4,7 @@
 //============================================================================
 init: {
 //============================================================================
-	level waittill spawn
+	waitthread coop_mod/replace.scr::waitTillSpawn	//[user 2026-08-02] bug-1294 - coop shim: a bare `level waittill spawn` does NOT wait once spawn has fired, so this ran too early and its $entity refs were NULL
 
 	level.did_ab_gag			= 0
 	level.ab_failsafe			= 0
@@ -115,6 +115,13 @@ AB41_motion: {
 	//$AB41_motion_trigger waittill trigger
 	$AB41 takedamage
 	$aagun4 thread turrethealthcheck
+	//[user 2026-08-03] bug-1318 - SOFT-LOCK FAILSAFE. FOUR threads block on this notify (here,
+	//AttackAB41, enemySet325.scr:21 and objectives.scr:158 - the mission objective itself). A
+	//live probe caught the AB41 at hp -50 with the notify never fired: dead by the numbers,
+	//smoking, turrets still tracking, map unfinishable. DrivableVehicle::Killed calls
+	//Unregister(STRING_DEATH) even under removeondeath 0, so the notify is not the problem -
+	//Killed was never reached. Watch for that state and force it.
+	thread coop_ab41DeathFailsafe
 	$AB41 waittill death
 	level.did_ab_gag = 1
 	thread coop_mod/challenges.scr::chal_team_bump "cc_enemy_mine" 1	// [cc] Enemy Mine feat: Italian AB-41 destroyed
@@ -700,5 +707,38 @@ turrethealthcheck: {
 			self revive 1
 		}
 		waitframe
+	}
+}end
+
+//============================================================================
+coop_ab41DeathFailsafe: {
+//============================================================================
+	//[user 2026-08-03] bug-1318 - poll for "dead by the numbers but never died". EV_Hurt kills any
+	//entity whose health is at or below the damage dealt, so re-arming takedamage and applying a
+	//large hit drives Entity::DamageEvent into Killed, firing the death notify all four waiters
+	//are blocked on. Guarded so it can only ever act on an ALREADY-dead vehicle - it can never
+	//shorten a legitimate fight.
+	while (1) {
+		wait 1
+		if (!$AB41) { end }
+		if ($AB41.health == NIL) { continue }
+		if ($AB41.health > 0) { continue }
+
+		println("^~^~^ AB41 FAILSAFE: health " + $AB41.health + " but death never fired - forcing")
+		//[user 2026-08-03] bug-1323 - 'hurt' alone can never work here: it routes through
+		//Entity::DamageEvent, which refuses all damage while health <= 0. Reset health above
+		//zero FIRST so the hurt re-crosses zero and fires Killed. (The engine-side
+		//CoopZombieRescue now does the same for any player hit; this keeps the poller
+		//self-sufficient.)
+		//[user 2026-08-03] vanilla-sourced per user: retail left its own forced-kill idiom
+		//commented at the end of enemy_tank_think - 'self damage $world 35000 ...' - and
+		//truck_killed uses the same shape on the t2l2 cab driver. Copied verbatim. The health
+		//reset stays: Entity::DamageEvent refuses all damage at health <= 0 (bug-1323), so
+		//without it even retail's own idiom is swallowed.
+		$AB41 takedamage
+		$AB41.health = 1
+		$AB41 damage $world 35000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+		wait 2
+		end
 	}
 }end

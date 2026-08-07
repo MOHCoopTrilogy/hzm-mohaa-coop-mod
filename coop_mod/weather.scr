@@ -43,8 +43,36 @@ coop_weather_init:{
 		waitthread coop_weather_rainLook
 	}
 
-	// start calm; the driver below (or the native cycle / a fixed pin) takes it from here
-	level.weatherpattern = 0
+	// [HZM coop 2026-08-02] bug-1280 - start at whatever intensity the MAP authored, not flat calm.
+	// This used to hardcode 0, which silently overrode maps that script their own weather: t3l1 sets
+	// 'level.rain_density = 5' (maps/t3l1.scr:22) for Berlin, yet the controller forced pattern 0 and the
+	// random driver also opened at 0 with 180-420s dry spells - so a mission scripted to rain throughout
+	// could sit under clear sky for minutes. Per the user's rule for t3l1, match what SP does.
+	level.weatherpattern = waitthread coop_weather_seedPattern
+
+	//[user 2026-08-04] bug-1375 - PER-MAP CONSTANT WEATHER. Some levels stormed CONTINUOUSLY in
+	//retail; e3l4 Monte Battaglia is the clear case - its own outro explicitly switches the storm
+	//off (Outro.scr level.thunder = 0 / level.rainvolume = 0), which only makes sense if it had been
+	//on for the whole level. The fluid random driver is deliberately biased toward clearing (38%
+	//build / 47% ease, plus 60-180s dry spells), so such a map spent most of a session dry - user:
+	//'I think this specific map is supposed to always rain'. A map can now declare
+	//level.coop_weatherHold = 0..3 to hold one intensity for the whole mission. Set BEFORE
+	//'exec global/weather.scr' below, because the native renderer reads level.weatherpattern.
+	if( level.coop_weatherHold != NIL && level.coop_weatherHold != "" ){
+		level.weatherpattern = int( level.coop_weatherHold )
+	}
+
+	// [2026-08-02] SAFE PROBE - separate printlns, single values, NO concatenation.
+	// Question: rain still not visible even though this thread now survives. Which link is dead -
+	// the map's authored density (raw=), the band it seeds (pattern=), or the native renderer
+	// downstream (density-after=)? raw=NIL means the map value is gone by the time we read it;
+	// pattern=0 means the seed maths rejected it; both non-zero means the fault is past this point.
+	println "^~^~^ WXSEED raw rain_density="
+	if( level.rain_density != NIL ){ println level.rain_density }
+	println "^~^~^ WXSEED pattern="
+	println level.weatherpattern
+	println "^~^~^ WXSEED raindensity(native src)="
+	if( level.raindensity != NIL ){ println level.raindensity }
 
 	// hand off to the native SP renderer: it draws the precip, SMOOTHS every intensity change (so transitions
 	// are fluid), and for rain fires thunder + lightning whose frequency auto-scales with intensity. It
@@ -54,13 +82,25 @@ coop_weather_init:{
 	// FLUID RANDOM storms (default): random-walk the intensity up/down so light rain builds into
 	// thunderstorms / light snow into blizzards and eases back, unpredictably. coop_weatherPin "cycle" (native
 	// fixed cycle) or 0-3 (fixed intensity) disables this.
-	if( getcvar( "coop_weatherPin" ) == "" ){
-		thread coop_weather_randomDriver
+	if( level.coop_weatherHold != NIL && level.coop_weatherHold != "" ){
+		println( "^~^~^ WEATHER HOLD at intensity " + level.weatherpattern + " - map-authored constant, random driver OFF" )
+	} else {
+		if( getcvar( "coop_weatherPin" ) == "" ){
+			thread coop_weather_randomDriver
+		}
 	}
 
 	if( local.theme == "rain" ){
 		thread coop_weather_sound "coop_rain_ext"	// rain ambience (snow is silent for now)
 	}
+
+	// second half of the WXSEED probe: what the NATIVE script left behind once it had run. If
+	// pattern/raw looked right above but these are 0, global/weather.scr is overriding us.
+	waitframe
+	println "^~^~^ WXSEED post-exec pattern="
+	println level.weatherpattern
+	println "^~^~^ WXSEED post-exec rain_density="
+	if( level.rain_density != NIL ){ println level.rain_density }
 	if( local.theme == "sand" ){
 		thread coop_weather_sound "coop_amb_wind"	//[user 07-16] sandstorm = driving wind bed tracking intensity
 	}
@@ -70,6 +110,13 @@ coop_weather_init:{
 //=========================================================================
 // Theme resolution: coop_weatherForce override wins, else the map's level.coop_weatherTheme, else none.
 coop_weather_theme:{
+	//[user 2026-08-04] bug-1383 - ARENA MODE HAS NO WEATHER. Rain leaks through the roofs of the
+	//buildings a holdout arena gets built in, because cg_nature's per-drop SURF_SKY gate only
+	//sees sky above them - those interiors were never meant to be stood in. Rather than chase
+	//occlusion per building, an arena session simply has no precipitation. coop_buildmap is the
+	//arena switch (it is what halts the campaign), so it doubles as the weather gate.
+	if( level.coop_arenaMap == 1 || level.coop_buildmap == 1 ){ end "none" }
+
 	local.f = getcvar "coop_weatherForce"
 	if( local.f == "rain" ){ end "rain" }
 	if( local.f == "snow" ){ end "snow" }
@@ -106,7 +153,11 @@ coop_weather_snowLook:{
 	level.rain_slant      = 250
 	level.rain_min_dist   = 1800
 	level.thundertime     = 0		// snow: no thunder/lightning (native gates the thunder thread on this)
-	setcvar "r_ppRainDrops" "0"		// never wet-lens during snow
+	//[bug-1206] the old `setcvar "r_ppRainDrops" "0"` guard is GONE. It was a server-side setcvar, so it
+	//only ever reached a listen HOST - every remote coop client kept its beads - and because
+	//r_ppRainDrops is CVAR_ARCHIVE it also stomped the player's own Advanced Graphics setting for the
+	//rest of the session. The cgame now decides per weather TYPE (cg_view.c CG_CoopPrecipType, keyed on
+	//the networked rain shader name), so snow leaves the lens dry on EVERY client with no cvar poking.
 }end
 
 //=========================================================================
@@ -125,7 +176,10 @@ coop_weather_sandLook:{
 	level.rain_slant      = 600		// near-horizontal driving dust
 	level.rain_min_dist   = 1024
 	level.thundertime     = 0		// no thunder/lightning in a sandstorm
-	setcvar "r_ppRainDrops" "0"		// no wet-lens
+	//[bug-1206] no wet-lens during a dust storm. This is now enforced CLIENT-side off the networked
+	//rain shader name ("textures/coop_sand" -> PRECIP_DUST in cg_view.c CG_CoopPrecipType) instead of
+	//the old server-side `setcvar "r_ppRainDrops" "0"`, which never reached remote clients - THAT is
+	//why dust storms showed rain-on-lens for everyone but the listen host.
 }end
 
 //=========================================================================
@@ -141,7 +195,10 @@ coop_weather_rainLook:{
 	level.rain_length     = 90
 	level.rain_slant      = 250
 	level.thundertime     = 20		// rain: thunder + lightning on (native scales frequency with intensity)
-	setcvar "r_ppRainDrops" "1"		// wet-lens FX on for rain
+	//[bug-1206] the old `setcvar "r_ppRainDrops" "1"` re-arm is GONE too: it existed only to undo the
+	//snow/sand stomps above, and as a side effect it overrode a player who had deliberately turned
+	//rain-on-lens OFF in Advanced Graphics. r_ppRainDrops is now purely the user's master toggle; the
+	//cgame supplies the per-weather gate.
 }end
 
 //=========================================================================
@@ -152,9 +209,32 @@ coop_weather_rainLook:{
 // build before it clears; and when it fully clears (level 0) it holds a random DRY SPELL (coop_weatherDryMin/
 // Max, default 1-3 min) before the next storm can build - so there are real dry periods, not just brief lulls.
 // (For rain, native thunder frequency auto-scales with the intensity this sets.)
+//[HZM coop 2026-08-02] bug-1280 - translate a map's authored rain_density into the native
+//weatherpattern band, so the random walk STARTS where the map wanted rather than at calm.
+//Bands mirror global/weather.scr's own pattern table (1 -> 0.8, 2 -> 3, 3 -> 10 density);
+//a map that authored nothing still starts calm, which is the old behaviour.
+//=========================================================================
+coop_weather_seedPattern:{
+//=========================================================================
+	if( level.rain_density == NIL ){ end 0 }
+
+	//[2026-08-02] bug-1281 - float() FIRST. level.rain_density arrives as a STRING here (a map can
+	//seed it from a cvar, and getcvar always returns a string), so comparing it to an int threw
+	//"binary '>=' applied to incompatible types 'string' and 'int'" - which killed this thread and
+	//with it the 'exec global/weather.scr' handoff below, so the fix for the missing rain removed
+	//the rain entirely. Coerce before comparing, never compare a level var to a literal on trust.
+	local.d = float( level.rain_density )
+
+	if( local.d >= 7 ){ end 3 }
+	if( local.d >= 2 ){ end 2 }
+	if( local.d > 0 ){ end 1 }
+	end 0
+}end 0
+
 coop_weather_randomDriver:{
-	local.cur = 0
-	level.weatherpattern = 0
+	//seed the walk from the map's authored intensity (bug-1280) instead of forcing calm
+	local.cur = waitthread coop_weather_seedPattern
+	level.weatherpattern = local.cur
 	while( 1 ){
 		local.r = randomfloat( 1 )
 		if( local.r < 0.38 ){				// HZM coop - build 38% / ease 47% / hold 15% = slight DOWNWARD bias so
@@ -244,10 +324,10 @@ coop_weather_flash_setup local.slot:{
 	while( local.i <= $player.size ){
 		if( $player[local.i] != NULL ){
 			// top-weighted SKY gradient over the upper ~2/3 of the screen, so it reads as the sky flashing.
-			$player[local.i] ihuddraw_shader      local.slot "textures/coop_skyflash.tga"
-			$player[local.i] ihuddraw_virtualsize local.slot 1
-			$player[local.i] ihuddraw_rect        local.slot 0 0 640 360
-			$player[local.i] ihuddraw_color       local.slot 0.92 0.95 1.0	// pale blue-white
+			ihuddraw_shader $player[local.i] local.slot "textures/coop_skyflash.tga"
+			ihuddraw_virtualsize $player[local.i] local.slot 1
+			ihuddraw_rect $player[local.i] local.slot 0 0 640 360
+			ihuddraw_color $player[local.i] local.slot 0.92 0.95 1.0	// pale blue-white
 		}
 		local.i++
 	}
@@ -257,7 +337,7 @@ coop_weather_flash_set local.slot local.a:{
 	local.i = 1
 	while( local.i <= $player.size ){
 		if( $player[local.i] != NULL ){
-			$player[local.i] ihuddraw_alpha local.slot local.a
+			ihuddraw_alpha $player[local.i] local.slot local.a
 		}
 		local.i++
 	}

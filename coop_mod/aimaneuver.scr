@@ -1,0 +1,158 @@
+//====================================================================
+// aimaneuver.scr - HZM coop COMBAT MANEUVER layer (2026-07-23)
+//====================================================================
+// The engine holds turret/cover enemies in place at typical combat range
+// (they only charge past ~1024u or flee under ~128u, and cover-seek needs
+// authored cover nodes that coop's open play lacks). This low-frequency
+// script loop gives ENGAGED flank/cover enemies somewhere to go WITHOUT
+// map cover nodes: it issues a real runto to a lateral/flank position on
+// their target, so they circle + relocate instead of standing. Aggressive
+// enemies charge natively (long leash) and prone shooters stay posed, so
+// this only nudges the flank + cover roles. Gated on coop_aiDynamic 1;
+// throttled per-actor (~1 reposition / 4s) to stay cheap + not spam paths.
+//====================================================================
+// re-enable the enemy-seeking think after a short reposition move, so the trooper re-engages from its
+// new angle. Kept short (~1.6s) so troopers are only briefly "not shooting" while they relocate.
+aimaneuver_reengage local.e:{
+	// Ship#4: adaptive re-engage. A flat 1.6s left a stalled / early-arrived trooper standing blind (can't
+	// move, can't return fire) for the whole window - a free kill. Poll instead: after ~0.4s, if it has
+	// stopped (arrived or path-failed) re-engage at once; otherwise let a genuine long arc run up to 2.2s.
+	local.waited = 0
+	while( local.waited < 2.2 ){
+		wait 0.2
+		local.waited = local.waited + 0.2
+		if( local.e == NULL || local.e == NIL ){ end }
+		if( !isAlive local.e ){ end }
+		if( local.waited >= 0.4 ){
+			local.v = local.e.velocity
+			local.sp = ( local.v[0] * local.v[0] ) + ( local.v[1] * local.v[1] )
+			if( local.sp < 100 ){ break }
+		}
+	}
+	if( local.e == NULL || local.e == NIL ){ end }
+	if( !isAlive local.e ){ end }
+	local.e.enableEnemy = 1
+	local.e forceactivate
+}end
+
+main:{
+	while( getcvar( "coop_aiDynamic" ) == "1" ){
+		wait 2
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		local.dbg_eng = 0
+		local.dbg_cand = 0
+		local.dbg_issued = 0
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.e = local.arr[local.i]
+			if( local.e == NIL || local.e == NULL ){ continue }
+			if( !isAlive local.e ){ continue }
+			// only actively-engaged flank/cover troopers reposition (has a target = engaged; covers
+			// attack + curious + target-acquired states, not just the literal "attack" thinkstate)
+			if( local.e.enemy == NULL || local.e.enemy == NIL ){ continue }
+			local.dbg_eng++
+			local.role = local.e.flags["coop_role"]
+			// Playtest#2 (gated coop_aiAggrMove): also advance the AGGR role. ~37% of the force rolls aggr,
+			// which native-charges only past ~1024u - inside typical combat range they were pure static
+			// shooters this layer never touched. Given a small-lateral / large-forward push below, throttled
+			// slower (6s) so it reads as a measured advance, not a zerg.
+			local.allowAggr = 0
+			if( getcvar( "coop_aiAggrMove" ) == "1" ){ local.allowAggr = 1 }
+			if( local.role != "flank" && local.role != "cover" ){
+				if( local.role != "aggr" || local.allowAggr == 0 ){ continue }
+			}
+			local.dbg_cand++
+			// per-actor throttle: at most one reposition every 4s. Ship#3 - the stamp is now set only when a
+			// move is actually ISSUED (just before the runto below), so a candidate rejected by the target/
+			// distance gates retries on the next 2s loop instead of burning a full 4s cooldown for nothing.
+			if( local.e.coop_manNext != NIL && level.time < local.e.coop_manNext ){ continue }
+
+			local.tp = local.e.enemy
+			if( local.tp == NULL || local.tp == NIL ){ continue }
+			if( !isAlive local.tp ){ continue }
+
+			// horizontal direction enemy -> target
+			// parse-safe per-component math (inline vector literals + parenthesized arithmetic in
+			// expressions choke the morlang parser). Basis vectors as locals, scalars precomputed.
+			local.bx = ( 1 0 0 )
+			local.by = ( 0 1 0 )
+			local.to = local.tp.origin - local.e.origin
+			local.dx = local.to[0]
+			local.dy = local.to[1]
+			local.flen = ( local.dx * local.dx ) + ( local.dy * local.dy )
+			if( local.flen < 1024 ){ continue }
+			local.flen = sqrt( local.flen )
+			local.ux = local.dx / local.flen
+			local.uy = local.dy / local.flen
+			// left perpendicular of (ux,uy) is (-uy, ux)
+			local.px = 0 - local.uy
+			local.py = local.ux
+			// per-role offset: flank circles forward toward the target's side; cover sidesteps + drops back;
+			// aggr pushes forward with only a small lateral (a measured advance, not a wall-hug).
+			local.latmag = 340
+			local.fwd = 160
+			if( local.role == "cover" ){ local.fwd = 0 - 120 }
+			if( local.role == "aggr" ){ local.latmag = 120; local.fwd = 280 }
+			// Ship#2: pick the OPEN side by TRACING both candidate destinations, not a blind coin flip.
+			// ~half of coin flips picked a side blocked by a wall within 340u, where runto can't path and the
+			// actor stalls motionless AND not firing for the whole reengage window. Trace both, take the
+			// clearer, and clamp the dest short of any wall hit so we never runto into solid geometry.
+			local.up = ( 0 0 40 )
+			local.tstart = local.e.origin + local.up
+			// side +1 candidate
+			local.dxA = ( local.px * local.latmag ) + ( local.ux * local.fwd )
+			local.dyA = ( local.py * local.latmag ) + ( local.uy * local.fwd )
+			local.destA = local.e.origin + ( local.dxA * local.bx ) + ( local.dyA * local.by )
+			local.tendA = local.destA + local.up
+			local.rA = traced ( local.tstart ) ( local.tendA )
+			local.fracA = local.rA["fraction"]
+			// side -1 candidate
+			local.latB = 0 - local.latmag
+			local.dxB = ( local.px * local.latB ) + ( local.ux * local.fwd )
+			local.dyB = ( local.py * local.latB ) + ( local.uy * local.fwd )
+			local.destB = local.e.origin + ( local.dxB * local.bx ) + ( local.dyB * local.by )
+			local.tendB = local.destB + local.up
+			local.rB = traced ( local.tstart ) ( local.tendB )
+			local.fracB = local.rB["fraction"]
+			// choose the clearer side
+			local.frac = local.fracA
+			local.selX = local.dxA
+			local.selY = local.dyA
+			if( local.fracB > local.fracA ){
+				local.frac = local.fracB
+				local.selX = local.dxB
+				local.selY = local.dyB
+			}
+			// clamp short of the wall the winning ray hit (pull back ~48u so the dest is in front of solid)
+			if( local.frac < 1.0 ){
+				local.reach = sqrt( ( local.selX * local.selX ) + ( local.selY * local.selY ) )
+				local.scale = local.frac
+				if( local.reach > 0 ){ local.scale = local.frac - ( 48 / local.reach ) }
+				if( local.scale < 0 ){ local.scale = 0 }
+				local.selX = local.selX * local.scale
+				local.selY = local.selY * local.scale
+			}
+			local.dest = local.e.origin + ( local.selX * local.bx ) + ( local.selY * local.by )
+
+			// an actor in native combat IGNORES a script runto (attack-think owns movement). Suspend
+			// the enemy-seeking think (enableEnemy 0) so it obeys the runto, move ~1.6s, then re-engage
+			// - the proven pattern the officer flanker/prone-shooter use. Reads as: break contact,
+			// reposition, re-engage from the new angle.
+			// Ship#3: stamp the throttle HERE (a move is actually being issued), not up at the gate.
+			// aggr repositions on a slower cadence (6s) so its forward push reads as periodic, not a rush.
+			local.thr = 4
+			if( local.role == "aggr" ){ local.thr = 6 }
+			local.e.coop_manNext = level.time + local.thr
+			local.e.movedoneradius = 96
+			local.e.enableEnemy = 0
+			local.e runto local.dest
+			local.e forceactivate
+			thread aimaneuver_reengage local.e
+			local.dbg_issued++
+		}
+		if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+			println( "^~^~^ MANEUVER attackState=" + local.dbg_eng + " candidates=" + local.dbg_cand + " runtoIssued=" + local.dbg_issued )
+		}
+	}
+}end

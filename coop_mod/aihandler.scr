@@ -74,6 +74,11 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//HZM coop - register for Frontline battle chatter (flchatter picks living AIs near players)
 	thread coop_mod/flchatter.scr::flchatter_register
 
+	//HZM coop - register for the SITUATIONAL voice layer (coop_mod/aivoice.scr): under fire ->
+	//"take cover"/"need backup", man down, reload, in-combat taunt. Nationality is resolved from
+	//the MODEL there (de/it/us/uk) so a British model never speaks US lines and vice versa.
+	thread coop_mod/aivoice.scr::aivoice_register
+
 	//HZM coop - retail wired sethelmet (helmet pops off on head hits) on 131 human models but
 	//missed a handful; give the stragglers the same config their wired siblings use.
 	if (self.model == "models/human/1st-ranger_engineer.tik" || self.model == "models/human/1st-ranger_sergeant.tik" || self.model == "models/human/1st-ranger_private_prisoner.tik" || self.model == "models/human/allied_oss_man_m1.tik"){
@@ -96,6 +101,15 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 	thread addActorToArray
 
+	//[user 07-23] DYNAMIC AI: give BASE map enemies the same personality roll (aggressive/cover/flank/
+	//prone) that reinforcement replicas + officer waves already get - so normal enemies flank, take
+	//cover and push instead of standing as turrets. Enemies only (self.team german); replicas/waves
+	//already carry coop_personality_set so the re-call is a cheap no-op. Gated on coop_aiDynamic (off
+	//by default until tuned + verified with the coop_aiBehav tracker).
+	if( getcvar( "coop_aiDynamic" ) == "1" && self.team == "german" ){
+		thread coop_mod/officer.scr::coop_apply_personality self
+	}
+
 	thread coop_tryDuplicateActor 		//[208] HZM coop - per-spawn enemy count-scaling by player count
 
 	self waittill death 				//'death' event is unregistered if an AI is killed or if they are removed
@@ -106,6 +120,15 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	thread removeActorFromArray
 
 	if (!self){ end }
+
+	//[user 08-02] CANTEEN BELT ON DEATH. The sip's canteen is attached by a frame-4 anim event and
+	//detached by script; if the actor dies mid-sip the corpse kept it welded to tag_weapon_left,
+	//and corpses persist (coop_corpseLife defaults to 0 = off), so it stayed on the battlefield.
+	//removeattachedmodel is idempotent and cheap, so this runs unconditionally on every death.
+	if( self.flags["coop_canteenOut"] == 1 ){
+		self.flags["coop_canteenOut"] = 0
+	}
+	self removeattachedmodel "tag_weapon_left"
 
 	//[209] HZM coop - DEATH VOICE fires HERE (past the waitframe + self-null guard), NOT the instant the
 	//'death' event resumes. Engine truth (openmohaa actor.cpp Actor::Remove, which BOTH `delete` and
@@ -170,6 +193,13 @@ coop_tryDuplicateActor:{
 	local.scal = local.pc
 	if( level.coop_maxPlayerScalar != NIL && local.scal > level.coop_maxPlayerScalar ){ local.scal = level.coop_maxPlayerScalar }
 	local.maxExtra = local.scal - 1
+	// [2026-07-24] MORE SQUADS (coop_squadDensity, default 0): extra copies per original beyond the
+	// player-count baseline, so each spawn seeds a bigger COHESIVE squad - the replicas spawn scattered
+	// near the original, so aisquad.scr groups them into a fighting unit. Bounded by the live hardcap
+	// (coop_aiScaleHardCap) for entity-budget safety; the density add itself is capped at +4.
+	local.dens = int( getcvar "coop_squadDensity" )
+	if( local.dens > 4 ){ local.dens = 4 }
+	if( local.dens > 0 ){ local.maxExtra = local.maxExtra + local.dens }
 	if( local.maxExtra < 1 ){ end }
 
 	local.chance = int( getcvar "coop_aiScaleChance" )
@@ -251,10 +281,136 @@ coop_reinf_brain:{
 		wait 1.5
 		local.arr = level.coop_actorArray["german"]
 		if( local.arr == NIL ){ continue }
+		//[user 2026-07-28] BULLET-SPONGE SWEEP - hoisted per-tick gate, so the cvar is read ONCE per 1.5s
+		//tick and NOT once per actor (this loop walks up to ~80 germans). See the block inside the loop.
+		//coop_unsponge: 0 = off, 1 = on + "^~^~^ UNSPONGE" log (DEFAULT, unset counts as 1), 2 = on, silent.
+		local.unsponge = 1
+		local.usc = getcvar "coop_unsponge"
+		if( local.usc == "0" ){ local.unsponge = 0 }
+		if( local.usc == "2" ){ local.unsponge = 2 }
 		local.i = 1
 		while( local.i <= local.arr.size ){
 			local.a = local.arr[local.i]
 			if( local.a != NULL && isAlive local.a ){
+				//=================================================================================
+				//[user 2026-07-28] BULLET-SPONGE SWEEP ("an AI that takes thousands of rounds").
+				//
+				//STRUCTURAL CAUSE: initialisePainVars buffers EVERY german's ENGINE health to 5000
+				//(see 'self health 5000' below) and moves the real hp into coop_actorActualHealth.
+				//The ONLY thing that can ever undo that buffer is the coop pain handler, and the
+				//engine reaches it from exactly ONE place - actor.cpp Actor::HandlePain ->
+				//ExecuteScript(global/pain.scr) - behind TWO gates:
+				//    if (!m_bEnablePain) { return; }        <- 'self.enablePain = 0'
+				//    if (!m_bNoLongPain) { ...ExecuteScript... }   <- 'self.nolongpain = 1'
+				//So the instant any script flips either one on a buffered body, global/pain.scr
+				//stops running, coop_actorActualHealth stops being decremented, the scripted kill
+				//at the bottom of handlePain is never issued, and the ONLY way left to drop that
+				//actor is chewing the raw 5000 engine hp. That is the bullet sponge. Scripts that
+				//ALSO do 'self.health += 10000' on top of the buffer (the retail balcony gags) push
+				//it to 15000.
+				//
+				//WHY A SWEEP AND NOT PER-SITE PATCHES: some offenders are not in this mod at all.
+				//maps/e3l2.scr execs global/balconyGuy.scr, which this mod does NOT ship, so the
+				//RETAIL Breakthrough copy runs (health += 10000 + nolongpain = 1). We cannot patch
+				//what we do not ship, and every future map/gag that touches nolongpain would be a
+				//fresh leak. This reconciles by SYMPTOM instead, so it self-heals unknown paths.
+				//Fires at most ONCE per actor (it sets coop_actorStopPainHandler, which excludes the
+				//actor from its own condition on every later tick). COST on the healthy path, which is
+				//what matters with ~80 enemies: 2 flag reads + 1 health read + 1 var read + 1 compare.
+				//Everything past the high-water-mark test only runs for a body that is LOSING health
+				//without the handler restoring it - i.e. an actor that is already broken.
+				//=================================================================================
+				//[user 08-02] GATE WIDENED. This used to REQUIRE coop_actorHandledPain, which made the
+				//sweep blind to any actor that never completed pain-init - and a live t3l1 session proved
+				//the blind spot is real: the player fought an axis actor that soaked an absurd amount of
+				//fire with coop_unsponge ON, and the sweep logged ZERO repairs all session. An actor
+				//sitting on a big engine-health pile is a sponge whether or not our own flag was ever set,
+				//so detect by SYMPTOM only and keep just the stop-flag exclusion.
+				if( local.unsponge != 0 && !local.a.flags["coop_actorStopPainHandler"] ){
+					//HIGH-WATER MARK. Only ever intervene on a body the players are ACTUALLY shooting, i.e. one
+					//whose ENGINE health has dropped below its own peak. Two reasons. (1) SAFETY: map gags routinely
+					//park an actor on a big authored health and then poll it for a CHANGE - maps/t1l3.scr does
+					//'local.health = self.health' then 'while (local.health == self.health){ waitframe }' - so
+					//writing health to an UNTOUCHED actor would trip those gates and play a scripted death nobody
+					//earned. (2) EXACTNESS: waiting for the first hit costs the player one bullet and makes the
+					//delta below land on precisely the vanilla number. It is also the cheap path: a WORKING pain
+					//handler restores health to exactly 5000 after every single hit, so a healthy actor never drops
+					//below its own peak and costs one compare per tick.
+					local.eng = local.a.health
+					if( local.a.coop_unspongePeak == NIL || local.eng > local.a.coop_unspongePeak ){
+						local.a.coop_unspongePeak = local.eng
+					}
+					if( local.eng < local.a.coop_unspongePeak ){
+						local.rhp = local.a.flags["coop_actorActualHealth"]
+						if( local.rhp == NIL || local.rhp == NULL || local.rhp <= 0 ){ local.rhp = 100 }
+						//SLOP for detector 2: german-on-german damage is dropped by the engine BEFORE the
+						//nolongpain gate (Actor::HandlePain returns early on IsTeamMate), so friendly fire
+						//legitimately walks the buffer down a little with no handler restore. That case is
+						//ALREADY self-healed by the "health changed elsewhere" guard in actorPainHandler the
+						//moment a player lands a hit, so detector 2 must not beat it to the punch. 500 is
+						//more than the biggest single friendly explosion and still only ~14 rifle rounds
+						//against a 5000 sponge, i.e. invisible to the player.
+						//[user 08-02] The buffer is a CVAR now (coop_aiBuffer, see initialisePainVars), so
+						//every detector below must key off the ACTUAL value. Hardcoding 5000 here while the
+						//buffer shipped at 1000 would have made detector 2 ("eng > 1000") dead on arrival -
+						//i.e. it would have silently switched the whole sweep off.
+						local.bufv = local.a.flags["coop_aiBufferVal"]
+						if( local.bufv == NIL || local.bufv <= 0 ){
+							local.bufv = int( getcvar "coop_aiBuffer" )
+							if( local.bufv <= 0 ){ local.bufv = 1000 }
+						}
+						//lower bound for detector 2: an absolute small script write is NOT a sponge. Scale it
+						//with the buffer instead of the old fixed 1000 so the two never invert.
+						local.bufLow = local.bufv / 5
+						if( local.bufLow < 200 ){ local.bufLow = 200 }
+						local.engFloor = local.bufv - local.rhp - 500
+						//why: 1 = a script stacked health ON TOP of the 5000 buffer (nothing legitimate ever
+						//         raises a buffered actor above 5000 - the handler only writes exactly 5000).
+						//     2 = OVER-TANKED: absorbed more raw engine damage than its ENTIRE real hp pool
+						//         (plus slop) and STILL sitting on a big pile of engine health. Impossible
+						//         while the handler is running. This is the symptom-level catch-all: it covers
+						//         enablePain 0 (which has NO script getter, so it cannot be read directly) and
+						//         any future detacher nobody has thought of yet. The "> 1000" lower bound
+						//         matters: a gag that writes an ABSOLUTE small health (maps/e3l3/scene3.scr
+						//         does 'self.health = 500') already un-buffered itself and is NOT a sponge.
+						//     3 = nolongpain is set, i.e. the engine dispatch is provably severed (the exact
+						//         signal). Checked last because it is a property read, not a local compare.
+						local.why = 0
+						if( local.eng > local.bufv ){
+							local.why = 1
+						} else if( local.eng > local.bufLow && local.eng < local.engFloor ){
+							local.why = 2
+						} else if( local.a.nolongpain == 1 ){
+							local.why = 3
+						}
+						if( local.why > 0 ){
+							//RECONCILE. Two cases, split on whether the 5000 buffer is still in there at all.
+							//(a) eng > 1000: the buffer is still present, so subtract ONLY its contribution.
+							//    (eng - 5000) is whatever the MAP script did on top - 0 for a plain strand,
+							//    +10000 for the balcony gags, negative for damage already absorbed. Preserving
+							//    that offset is what makes the authored vanilla gates line up exactly as they
+							//    do in SP again ('while (self.health > 10000)'); assigning the real hp outright
+							//    would fire those gates instantly and break the scripted falls.
+							//(b) eng <= 1000: an ABSOLUTE script write already destroyed the buffer (maps/e3l3/
+							//    scene3.scr 'self.health = 500', maps/e3l4/Tower.scr '= 10'). Nothing is left to
+							//    subtract and that actor is not a sponge - honour the authored number and just
+							//    detach the coop accounting so it stops lying about this body.
+							//Floor at 1 either way: the sweep NEVER kills anyone by itself, the next bullet does.
+							if( local.eng > local.bufLow ){
+								local.nhp = local.rhp + local.eng - local.bufv
+							} else {
+								local.nhp = local.eng
+							}
+							if( local.nhp < 1 ){ local.nhp = 1 }
+							local.a.health = local.nhp
+							local.a.flags["coop_actorActualHealth"] = local.nhp
+							local.a.flags["coop_actorStopPainHandler"] = 1
+							if( local.unsponge == 1 ){
+								println "^~^~^ UNSPONGE " local.a " model=" local.a.model " tn=" local.a.targetname " why=" local.why " eng=" local.eng " real=" local.rhp " newhp=" local.nhp " buf=" local.bufv
+							}
+						}
+					}
+				}
 				if( local.a.flags["coop_personality_set"] == 1 && local.a.flags["coop_hurt_covered"] != 1 && local.a.flags["coop_limping"] != 1 ){
 					//[user 2026-07-17] a committed wounded-limper (wounded.scr) is already withdrawing to a
 					//medkit - don't ALSO cover-seek + canteen-heal him here (they'd fight the same actor).
@@ -272,7 +428,22 @@ coop_reinf_brain:{
 				// German now and then so they aren't dead-silent before they spot a player. Per-actor
 				// cooldown + chance + distance falloff = ambient chatter, not spam. SAFE: playsound does
 				// not change the think state, so combat reaction is unaffected.
-				if( local.a.flags["coop_personality_set"] == 1 && local.a.enemy == NULL ){
+				// HZM fix (bug-1172): unlike flchatter.scr's taunt/bark system (which hard-blocks the
+				// first 15s of a map), this loop had NO map-time gate at all - every personality-tagged
+				// trooper near a scripted intro (e.g. m1l1's checkpoint, further multiplied by
+				// coop_tryDuplicateActor's enemy-count-scaling clones) independently rolled the same
+				// "curious" VO pool on its own cooldown, stacking into constant chatter right at mission
+				// start ("bitte" etc., CurD_O_* curious-reaction lines). Match flchatter's own proven gate.
+				// [user 2026-07-28] "I want the dialogue to be more logical, not so random ... maybe
+				// that will help this random German dialogue I keep hearing that I think is them
+				// saying 'Bitte'." THIS LOOP IS THAT SOUND: coop_officer_idle1..4 are
+				// sound/dialogue/Generic/G/curious/CurD_O_003a/004a/005a/008a.wav - German CURIOUS
+				// reactions ("bitte?" = "come again?") fired as a pure timer roll by EVERY
+				// personality-tagged trooper on a 2800-unit radius with no situation behind it.
+				// It is now OFF whenever the situational layer is running (coop_aiVoice != 0, the
+				// default) - coop_mod/aivoice.scr speaks for these troopers only when something
+				// actually happens. Set coop_aiVoice 0 to get the old random mutter back.
+				if( getcvar( "coop_aiVoice" ) == "0" && level.time >= 15 && local.a.flags["coop_personality_set"] == 1 && local.a.enemy == NULL ){
 					if( local.a.coop_idle_next == NIL || level.time >= local.a.coop_idle_next ){
 						local.a.coop_idle_next = level.time + 7 + (randomint 9)
 						if( (randomint 100) < 45 ){
@@ -300,8 +471,58 @@ coop_trooper_canteen local.a:{
 	local.a.flags["coop_drank"] = 1
 	wait 1
 	if( local.a == NULL || !isAlive local.a ){ end }
+	// HZM fix (bug-1199) - THE canteen-stuck-to-the-rifle bug, root-caused from the TIKI:
+	// models/human/new_generic_human.tik defines pass_canteen_drink with TWO server frame events -
+	//     4   attachmodel models/miscobj/canteen.tik tag_weapon_left
+	//     47  removeattachedmodel tag_weapon_left
+	// The detach is a FRAME-47 event, so it only fires if the anim actually plays through to
+	// frame 47. This is an UPPERANIM on a live combat AI: the moment the actor decides to aim or
+	// fire, its own upper-body anim replaces the drink and frame 47 never arrives - so the canteen
+	// stays welded to tag_weapon_left (the left-weapon tag, which is why it reads as "stuck to
+	// their rifle"). User confirmed seeing exactly this, on a build with no damage-related change
+	// in it at all - so DAMAGE WAS NEVER THE CAUSE. An earlier attempt here wrapped the sip in
+	// nodamage on that wrong theory; that only bought a hard invulnerability window whose sole
+	// release was the next line, so any script error in between would have left the trooper
+	// permanently bulletproof. Removed - it fixed nothing and risked a lot.
+	// The real fix is to issue the SAME detach the anim would have, unconditionally, from script.
+	// Also mirrored into an independent watchdog so a dead thread still cleans up.
+	//[user 08-02] Mark the canteen as OUT before issuing the anim, so the watchdog below is bound
+	//to actual ownership instead of a wall clock. See the note on coop_trooper_canteen_restore.
+	local.a.flags["coop_canteenOut"] = 1
+	thread coop_trooper_canteen_restore local.a
 	local.a upperanim pass_canteen_drink
-	wait 2.5
+	//[user 08-02] DROP IT IF THEY RE-ENGAGE. Was a flat `wait 2.5`. Per the user: "if they can't
+	//heal in time, they drop it". Poll in short slices instead, and abort the sip the moment the
+	//trooper acquires an enemy - a soldier being shot at does not calmly finish his canteen. This
+	//also shortens the window in which the canteen can be left attached at all.
+	local.t = 0
+	local.interrupted = 0
+	while( local.t < 2.5 ){
+		if( local.a == NULL || !isAlive local.a ){ break }
+		if( local.a.enemy != NULL && local.a.enemy != NIL ){ local.interrupted = 1; break }
+		wait 0.25
+		local.t = local.t + 0.25
+	}
+	if( local.interrupted == 1 ){
+		//dropped, not drunk: detach and take NO heal. The watchdog keeps sweeping either way.
+		if( local.a != NULL ){
+			local.a upperanim pass_canteen_end
+			local.a removeattachedmodel "tag_weapon_left"
+		}
+		end
+	}
+	//[bug-1232] A fixed wait RACES the animation. `upperanim` does not start instantly on a busy
+	//combat AI, and the attach is a FRAME-4 event - so a plain removeattachedmodel here can fire
+	//BEFORE the canteen is ever attached, and then the anim attaches it afterwards with nothing
+	//left to clean it up. That is why the first fix did not hold.
+	//Use the AUTHORED completion path instead: new_generic_human.tik defines pass_canteen_end with
+	//`enter removeattachedmodel tag_weapon_left` - an ENTER event, not a frame event, so it cannot
+	//be missed however the drink was interrupted. Play it, then still issue the explicit detach as
+	//a belt, then let the watchdog sweep again later for the case where the anim is pre-empted too.
+	if( local.a != NULL ){
+		local.a upperanim pass_canteen_end
+		local.a removeattachedmodel "tag_weapon_left"
+	}
 	if( local.a == NULL || !isAlive local.a ){ end }
 	// partial heal, once. Heal the field that actually represents this trooper's life.
 	if( local.a.flags["coop_actorActualHealth"] != NIL ){
@@ -310,6 +531,40 @@ coop_trooper_canteen local.a:{
 		local.a.health = local.a.health + 60
 	}
 	local.a gore_reset 60	// HZM coop - gore tier 1: canteen heal credits the gore counter
+}end
+
+//=========================================================================
+//[209] HZM coop (bug-1199) - unconditional canteen DETACH for the sip above. The drink anim only
+//detaches the canteen on its frame-47 event, which a combat AI routinely never reaches because its
+//own upperanim replaces the drink first. This runs in its own thread so that no failure inside
+//coop_trooper_canteen - script error, early end, the actor being interrupted - can leave the canteen
+//welded to tag_weapon_left. Deliberately outlives the 2.5s sip. removeattachedmodel is idempotent,
+//so running alongside the normal detach (or after the anim's own frame 47) is harmless.
+//=========================================================================
+coop_trooper_canteen_restore local.a:{
+//=========================================================================
+	//[bug-1232] POLL rather than fire once: the drink anim can start late or be pre-empted and
+	//re-issued, so a single sweep at a fixed time can still miss the attach.
+	//[user 08-02] The six-pass / ~12s version was still a WALL CLOCK chasing an ANIMATION EVENT,
+	//and it lost that race often enough to be reported again. The attach is a frame-4 event on an
+	//upperanim; on a busy combat AI `upperanim` can be deferred well past 12s, and once the last
+	//sweep had run the canteen was welded for the rest of that actor's life - and then onto its
+	//CORPSE, because coop_corpseLife defaults to 0 (corpses persist). That is the actual bug the
+	//user kept seeing.
+	//The durable shape is to make the clear conditional on the set having been OBSERVED, not on
+	//elapsed time: sweep for as long as the actor still owns a canteen (coop_canteenOut), with a
+	//hard 60s cap so a leaked flag can never spin forever. One event per second on one rare actor.
+	local.n = 0
+	while( local.a != NULL && local.n < 60 ){
+		if( local.a.flags["coop_canteenOut"] != 1 ){ break }
+		local.a removeattachedmodel "tag_weapon_left"
+		local.n++
+		wait 1
+	}
+	if( local.a != NULL ){
+		local.a removeattachedmodel "tag_weapon_left"
+		local.a.flags["coop_canteenOut"] = 0
+	}
 }end
 
 //[200] Smithy - new func
@@ -476,6 +731,27 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 		end
 	}
 
+	//[user 08-02] SOVIET ALLIES COUNT AS ALLIED TOO. The exemption above keys on MOHAA's internal
+	//team enum, which only has "american" and "german" - there is no soviet team. Spearhead's
+	//Soviet actors are allies in fiction but fall through here as german, so coop buffered their
+	//health like an enemy's. That is why t3l1's two riflemen by the Opel truck survive the
+	//scripted blast: JeepExplosion does radiusdamage 700, the buffer is coop_aiBuffer (1000), so
+	//they walk away at 300 - while in single player they sit on their authored ~100hp and die
+	//outright, which is the behaviour the mission is scripted to have.
+	//Model test rather than team, mirroring the nationality detection in coop_mod/aivoice.scr and
+	//the story-actor blocklist in aivoice_register. Covers soviet_infantry/officer/corporal and
+	//the russian_* variants.
+	if( self.model != NIL ){
+		if( waitthread coop_mod/main.scr::containsText self.model "soviet" 0 ){
+			self.flags["coop_actorStopPainHandler"] = game.true
+			end
+		}
+		if( waitthread coop_mod/main.scr::containsText self.model "russian" 0 ){
+			self.flags["coop_actorStopPainHandler"] = game.true
+			end
+		}
+	}
+
 	if (self.flags["coop_actorStopPainHandler"]){
 		end
 	}
@@ -509,8 +785,37 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//(coop_mod/wounded.scr). self.health is about to be buffered to 5000 below, so it can't be used later.
 	self.flags["coop_woundedMaxHp"] = self.flags["coop_actorActualHealth"]
 
+	//[2026-07-23] DEV/TEST ONLY (coop_aiTestHp, default 0/off): multiply the tracked REAL hp so enemies
+	//survive the combat bot's lethal fire long enough to exhibit survival behaviors (tactical retreat,
+	//prone, wounded-limp) for automated measurement. Never set in shipped cfgs; real play uses base hp.
+	local.testhp = int( getcvar "coop_aiTestHp" )
+	if( local.testhp > 1 ){
+		self.flags["coop_actorActualHealth"] = self.flags["coop_actorActualHealth"] * local.testhp
+		self.flags["coop_woundedMaxHp"] = self.flags["coop_actorActualHealth"]
+	}
+
 	//we don't want anyone to kill him outright
-	self health 5000
+	//[user 2026-07-28] THIS LINE IS THE BULLET-SPONGE SOURCE. From here on the actor's ENGINE health is a
+	//5000 buffer and its REAL hp lives in coop_actorActualHealth; the ONLY thing that can undo that is the
+	//coop pain handler, which the engine reaches from exactly ONE place (actor.cpp Actor::HandlePain ->
+	//ExecuteScript(global/pain.scr)) behind 'if (!m_bEnablePain) return;' and 'if (!m_bNoLongPain)'. Any
+	//script that later sets nolongpain/enablePain 0, or stacks health on top of this, strands the body at
+	//~5000 hp. coop_reinf_brain above carries the reconciliation sweep (cvar coop_unsponge) that repairs it.
+	//[user 08-02] BUFFER SIZE IS NOW A CVAR, AND MUCH SMALLER BY DEFAULT.
+	//Observed live on t3l1: the player hit an axis actor that took an absurd amount of fire and
+	//eventually died ("finally killed him"), while coop_unsponge was ON and the repair sweep fired
+	//ZERO times all session. So this actor was stranded on the raw buffer and the sweep could not
+	//see it - the sweep's own gating is the blind spot, and it is NOT yet root-caused.
+	//Until it is, stop the failure mode from being catastrophic: a flat 5000 against a typical real
+	//HP of ~100 makes a stranded body FIFTY times tougher than intended. 1000 keeps ample headroom
+	//for the pain handler to arbitrate a single large hit (a rifle round is ~30-100, a bazooka a few
+	//hundred) while capping the worst case at ~10x instead of ~50x.
+	//Set coop_aiBuffer back to 5000 to restore the old behaviour exactly.
+	local.buf = int( getcvar "coop_aiBuffer" )
+	if( local.buf <= 0 ){ local.buf = 1000 }
+	if( local.buf < 300 ){ local.buf = 300 }
+	self.flags["coop_aiBufferVal"] = local.buf
+	self health local.buf
 }end
 
 //handles all AI pain events (handler is global/pain.scr) (internal use only)
@@ -622,6 +927,9 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	if(self.flags["coop_actorActualHealth"] > 0){
 		//[user 2026-07-17] survived the hit - maybe break off and limp to the furthest medkit (low HP + roll)
 		thread coop_mod/wounded.scr::coop_checkWoundedRetreat self
+		//[2026-07-23] survived - maybe make a TACTICAL retreat: mid-HP band, break contact + re-engage
+		//(the "they never retreat" ask; gated coop_retreatEnable, layers above the <=30% terminal limp)
+		thread coop_mod/wounded.scr::coop_checkTacticalRetreat self
 		end
 	}
 
@@ -720,7 +1028,14 @@ attackPlayer local.player:{
 //=========================================================================
 if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread aihandler/attackPlayer->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	local.enemy = self
-	local.enemy say den_head_sighted_a //TODO: MAKE THIS COMPATIBLE WITH BT DIALOGUE
+	//[user 2026-08-06] bug-1477 - resolves the TODO below: den_head_sighted_a/c/h were never defined
+	//anywhere, in the mod or any retail pak (confirmed by direct search) - a genuinely invented name,
+	//not a scoping regression. The 'say' dispatch tries multiple lettered-suffix takes for
+	//randomization, which is why _a/_c/_h all showed as separately dead despite one call site.
+	//den_alarm_12a is real, retail, already scoped "m e t" (BT-compatible out of the box), has 11
+	//wav takes under sound/dialogue/Generic/G/sighted/ for natural variety, and is semantically the
+	//right category - an enemy voicing that it has spotted its target.
+	local.enemy say den_alarm_12a
 	local.enemy.enablePain = 1
 	local.enemy.flags["coop_isAttacking"] = game.true
 	local.enemy attackplayer

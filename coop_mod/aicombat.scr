@@ -1,0 +1,119 @@
+//====================================================================
+// aicombat.scr - HZM coop AUTOMATED COMBAT DRIVER (2026-07-23)
+//====================================================================
+// Puts the test players into a real firefight with the German AI so the
+// behavior tracker (aibehav.scr) can measure combat behavior UNATTENDED
+// (no live human needed). Gated on coop_aiCombat:
+//   0 = off (default)
+//   1 = KEEPALIVE + ANCHOR only: hold players alive and near an enemy cluster
+//       so the ENGINE bot driver (coop_botInput) can do the actual shooting -
+//       real bullets, real line-of-sight => the AI genuinely acquires + engages
+//       the player (which the damage-sim below could never do). THIS is the
+//       mode to pair with coop_botInput 1.
+//   2 = mode 1 PLUS the legacy damage-sim: bursts of light damage attributed to
+//       the nearest player. A fallback for measuring the under-fire response
+//       WITHOUT the engine bot; note it does not make the AI target the player
+//       (damage attribution != target acquisition), so engaging stays ~0.
+// Launched from main.scr::main.
+//
+// This is a DEV/TEST tool: players are invincible while it runs (and in mode 2
+// enemies take light scripted damage), so it is only for automated AI
+// measurement, never normal play. coop_aiCombat is never set in shipped cfgs.
+//====================================================================
+
+// nearest ALIVE player to a point; NULL if none. (server-side, safe on stale refs)
+aicombat_nearestPlayer local.pt:{
+	local.best = NULL
+	local.bestD = 999999
+	if( $player == NULL ){ end NULL }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( !isAlive local.p ){ continue }
+		local.d = vector_length( local.p.origin - local.pt )
+		if( local.d < local.bestD ){
+			local.bestD = local.d
+			local.best = local.p
+		}
+	}
+	end local.best
+}end
+
+// nearest ALIVE german to a point; NULL if none.
+aicombat_nearestEnemy local.pt:{
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end NULL }
+	local.best = NULL
+	local.bestD = 999999
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.e = local.arr[local.i]
+		if( local.e == NIL || local.e == NULL ){ continue }
+		if( !isAlive local.e ){ continue }
+		local.d = vector_length( local.e.origin - local.pt )
+		if( local.d < local.bestD ){
+			local.bestD = local.d
+			local.best = local.e
+		}
+	}
+	end local.best
+}end
+
+main:{
+	local.tick = 0
+	while( getcvar( "coop_aiCombat" ) != "0" && getcvar( "coop_aiCombat" ) != "" ){
+		wait 1
+		local.tick++
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		// (1)+(2) keep every player alive AND concentrated on ONE enemy cluster so MANY enemies engage
+		// (a shared anchor = nearest enemy to the first alive player). Players spread laterally around it.
+		if( $player != NULL ){
+			local.anchor = NULL
+			for( local.pi = 1; local.pi <= $player.size; local.pi++ ){
+				if( isAlive $player[local.pi] ){
+					local.anchor = waitthread aicombat_nearestEnemy $player[local.pi].origin
+					if( local.anchor != NULL ){ break }
+				}
+			}
+			for( local.pi = 1; local.pi <= $player.size; local.pi++ ){
+				local.p = $player[local.pi]
+				if( !isAlive local.p ){ continue }
+				local.p.health    = 100000
+				local.p.maxhealth = 100000
+				if( local.anchor != NULL ){
+					local.dp = vector_length( local.anchor.origin - local.p.origin )
+					local.coopRng = int( getcvar "coop_aiCombatRange" )
+					if( local.coopRng <= 0 ){ local.coopRng = 350 }
+					if( local.dp > ( local.coopRng + 300 ) || local.dp < ( local.coopRng - 120 ) ){
+						// hold CLOSE (~350u) so enemies keep line-of-sight and stay engaged, but with a
+						// little lateral fan so the flank-mover's ~340u sidestep still reads as a flank.
+						local.bx2 = ( 1 0 0 )
+						local.by2 = ( 0 1 0 )
+						local.bz2 = ( 0 0 1 )
+						local.off = ( local.coopRng * local.bx2 ) + ( ( ( local.pi - 2 ) * 110 ) * local.by2 ) + ( 40 * local.bz2 )
+						local.p.origin = local.anchor.origin + local.off
+					}
+				}
+			}
+		}
+
+		// (3) LEGACY damage-sim (mode 2 only): with the engine bot (coop_botInput) doing real fire,
+		// mode 1 skips this entirely and lets the authentic bullets aggro + engage the AI.
+		local.fire = 0
+		if( getcvar( "coop_aiCombat" ) == "2" && ( local.tick % 4 ) < 2 ){ local.fire = 1 }
+		if( local.fire == 1 ){
+			for( local.ei = 1; local.ei <= local.arr.size; local.ei++ ){
+				local.e = local.arr[local.ei]
+				if( local.e == NIL || local.e == NULL ){ continue }
+				if( !isAlive local.e ){ continue }
+				local.pp = waitthread aicombat_nearestPlayer local.e.origin
+				if( local.pp == NULL ){ continue }
+				local.d = vector_length( local.e.origin - local.pp.origin )
+				if( local.d < 1400 ){
+					// light real damage attributed to the player: aggro + under-fire response, slow attrition
+					local.e damage local.pp 6 local.pp local.pp.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 5
+				}
+			}
+		}
+	}
+}end

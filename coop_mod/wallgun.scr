@@ -1,0 +1,555 @@
+//=========================================================================
+// HZM coop - INVISIBLE BARRIER TOOL  [user 2026-08-04] bug-1378
+//
+// Authoring tool for holdout arenas. Aim, press a key, and an invisible barrier drops where you are
+// looking. A crate ghost shows you exactly where it will land BEFORE you place it, and every placed
+// barrier keeps a visible ghost while you are authoring - both disappear the moment you leave build
+// mode, so gameplay never sees them.
+//
+// WHAT A BARRIER IS
+//   A script_model with NO visible mesh, a bounding box from setsize, and CONTENTS_PLAYERCLIP applied
+//   by the engine event 'coop_playerclip' (fgame/entity.cpp, added for this tool).
+//   That contents value is the whole point (bg_public.h:633-646):
+//       MASK_PLAYERSOLID   CONTAINS CONTENTS_PLAYERCLIP  -> human players are blocked
+//       MASK_MONSTERSOLID  omits it                      -> AI walk straight through
+//       MASK_SHOT          omits it                      -> bullets pass through
+//       MASK_PROJECTILE    omits it                      -> thrown grenades pass through
+//   There is no script-only way to get this; 'solid' means CONTENTS_SOLID and blocks everyone.
+//
+// CONTROLS (exec coop_mod/cfg/wallgun.cfg)
+//   F9    place a barrier where you are aiming
+//   F10   delete the barrier you are aiming at
+//   UP/DN arrow   taller / shorter
+//   L/R   arrow   wider / narrower
+//   F11   save this map's barriers
+//   F12   clear every barrier on this map
+//
+// STORAGE
+//   coop_mod/save/walls_<mapname>.dat, one barrier per line: "x y z|yaw|width|height".
+//   Loaded automatically at map start, so an arena rebuilds itself. Unlike holdout_load this parser
+//   is real, not a stub.
+//=========================================================================
+
+//=========================================================================
+// Armed from main.scr. Loads this map's barriers, then watches the command bus.
+//=========================================================================
+wall_init:{
+	if( level.coop_wall_init == 1 ){ end }
+	level.coop_wall_init = 1
+	level.coop_wall_n = 0
+	level.coop_wall_ghostOn = 0
+
+	setcvar "coop_wall_cmd" ""
+	if( getcvar( "coop_wallW" ) == "" ){ setcvar "coop_wallW" "64" }
+	if( getcvar( "coop_wallH" ) == "" ){ setcvar "coop_wallH" "320" }
+
+	//[user 2026-08-04] bug-1384 - ARENA CONTENT MUST NEVER REACH THE CAMPAIGN. These saves are
+	//per-map, and e3l4 is BOTH a campaign mission and the arena test bed - so without this gate a
+	//normal campaign run of e3l4 would spawn every authored barrier and prop and delete the doors
+	//removed for the arena, wrecking the mission. coop_buildmap is the arena switch (it is what
+	//halts the objective chain), so nothing arena-authored loads unless it is set.
+	if( level.coop_arenaMap != 1 && level.coop_buildmap != 1 ){
+		println( "^~^~^ WALLGUN: campaign run - arena content NOT loaded" )
+		end
+	}
+	waitthread wall_load
+	waitthread wall_kill_load
+	thread wall_cmd_monitor
+	//always start it - it self-gates on coop_wall every frame, so the tool can be armed and
+	//disarmed mid-session with no map reload.
+	thread wall_preview_loop
+}end
+
+//=========================================================================
+// The command bus. Same shape as holdout's: a cvar the binds poke, polled here.
+//=========================================================================
+wall_cmd_monitor:{
+	while( 1 ){
+		wait 0.1
+		local.c = getcvar "coop_wall_cmd"
+		if( local.c == "" ){ continue }
+		setcvar "coop_wall_cmd" ""
+
+		local.p = waitthread wall_player
+		if( local.p == NULL ){ continue }
+
+		//[user 2026-08-04] bug-1380 - DISARMED MEANS DISARMED. Without this the binds stay live
+		//after coop_wall 0 and F9 keeps dropping barriers while you are using another tool.
+		if( getcvar( "coop_wall" ) != "1" ){
+			local.p iprint "Barrier tool is OFF - exec coop_mod/cfg/wallgun.cfg to re-arm." 1
+			continue
+		}
+
+		if( local.c == "place" ){ waitthread wall_place local.p }
+		else if( local.c == "remove" ){ waitthread wall_remove local.p }
+		else if( local.c == "save" ){ waitthread wall_save local.p }
+		else if( local.c == "clear" ){ waitthread wall_clear local.p }
+		//axis "h"/"w", dir 1 = grow / 0 = shrink. NO negative literals as arguments: "local.p 0 -64"
+		//is ambiguous - the parser can fold "0 -64" into a single subtraction and pass ONE argument.
+		else if( local.c == "taller" ){ waitthread wall_size local.p "h" 1 }
+		else if( local.c == "shorter" ){ waitthread wall_size local.p "h" 0 }
+		else if( local.c == "wider" ){ waitthread wall_size local.p "w" 1 }
+		else if( local.c == "narrower" ){ waitthread wall_size local.p "w" 0 }
+		else if( local.c == "ghost" ){ waitthread wall_ghost_toggle local.p }
+		else if( local.c == "killent" ){ waitthread wall_killent local.p }
+		else if( local.c == "killsave" ){ waitthread wall_kill_save local.p }
+	}
+}end
+
+//=========================================================================
+// First live player. Barriers are a single-author tool, so the host drives it.
+//=========================================================================
+wall_player:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){ end $player[local.i] }
+		local.i++
+	}
+	end NULL
+}end
+
+//=========================================================================
+// Where is this player aiming? Verbatim the cover.scr / buildmode ghost recipe:
+// eye at origin+54, angles_toforward, traced out to 512u; if nothing is hit, park at fixed range.
+//=========================================================================
+wall_aimpos local.player:{
+	if( local.player == NULL ){ end ( 0 0 0 ) }
+	local.eyepos = local.player.origin + ( 0 0 54 )
+	local.fwd = angles_toforward local.player.viewangles
+	local.traceend = local.eyepos + ( local.fwd * 512 )
+	local.result = traced ( local.eyepos ) ( local.traceend )
+	local.frac = local.result["fraction"]
+	local.hit = local.result["endpos"]
+	if( local.frac >= 1.0 ){
+		local.hit = local.eyepos + ( local.fwd * 450 )
+	}
+	end local.hit
+}end
+
+//=========================================================================
+// Spawn ONE barrier. Shared by placement and by load, so a loaded arena is byte-identical to an
+// authored one. local.showGhost 1 = also spawn the visible crate marker (authoring only).
+//=========================================================================
+wall_spawn_one local.pos local.yaw local.w local.h local.showGhost:{
+	local.n = level.coop_wall_n + 1
+
+	// values coming back from the .dat are STRINGS - coerce before any arithmetic (bug-1352/1372)
+	local.w = int( local.w )
+	local.h = int( local.h )
+	if( local.w < 16 ){ local.w = 16 }
+	if( local.h < 16 ){ local.h = 16 }
+
+	local.half = local.w / 2
+	//build the vector components into plain locals FIRST. A vector literal in this dialect is
+	//( x y z ) over simple terms - nesting an expression like ( 0 - local.half ) inside one is
+	//not reliably parseable, and a bare negative in parens is an outright parse killer.
+	local.negHalf = 0 - local.half
+	local.mins = ( local.negHalf local.negHalf 0 )
+	local.maxs = ( local.half local.half local.h )
+
+	// the barrier itself: no visible mesh, a real bbox, PLAYERCLIP contents
+	local.b = spawn script_model model "models/coop_build/box_concrete.tik"
+	local.b.origin = local.pos
+	local.b.angles = ( 0 local.yaw 0 )
+	local.b hide
+	local.b setsize local.mins local.maxs
+	local.b coop_playerclip 1
+
+	level.coop_wall_ent[local.n] = local.b
+	level.coop_wall_pos[local.n] = local.pos
+	level.coop_wall_ang[local.n] = local.yaw
+	level.coop_wall_w[local.n] = local.w
+	level.coop_wall_h[local.n] = local.h
+	level.coop_wall_n = local.n
+
+	if( local.showGhost == 1 ){
+		local.g = spawn script_model model "models/coop_build/box_concrete.tik"
+		local.g.origin = local.pos
+		local.g.angles = ( 0 local.yaw 0 )
+		local.g notsolid
+		local.g alpha 0.35	//command form - buildmode.scr:467. '.alpha =' does nothing.
+		//[user 2026-08-05] bug-1397 - ghosts used to spawn VISIBLE while coop_wall_ghostOn was 0, so
+		//the state and the screen disagreed: the first HOME press set the flag to 1 and called 'show'
+		//on already-shown crates (no visible change), and only the SECOND press hid them. Honour the
+		//flag at spawn time and the toggle is truthful from the first press. Default is hidden - the
+		//live preview crate already shows where the NEXT barrier lands, so these only add clutter.
+		if( level.coop_wall_ghostOn != 1 ){ local.g hide }
+		level.coop_wall_ghost[local.n] = local.g
+	}
+	end local.n
+}end
+
+//=========================================================================
+wall_place local.player:{
+	local.pos = waitthread wall_aimpos local.player
+	local.yaw = int( local.player.viewangles[1] )
+	local.w = int( getcvar "coop_wallW" )
+	local.h = int( getcvar "coop_wallH" )
+
+	local.n = waitthread wall_spawn_one local.pos local.yaw local.w local.h 1
+	local.player playsound coop_ui_click
+	local.player iprint ( "BARRIER " + local.n + " placed  (" + local.w + " wide x " + local.h + " tall).  F11 saves." ) 1
+	println( "^~^~^ WALL PLACE " + local.n + " at " + local.pos + " yaw " + local.yaw + " w " + local.w + " h " + local.h )
+}end
+
+//=========================================================================
+// Delete the barrier nearest to where the player is aiming (within 128u of the aim point).
+//=========================================================================
+wall_remove local.player:{
+	local.pos = waitthread wall_aimpos local.player
+	local.best = 0
+	local.bestd = 128
+	local.i = 1
+	while( local.i <= level.coop_wall_n ){
+		if( level.coop_wall_ent[local.i] != NULL ){
+			local.d = vector_length( level.coop_wall_ent[local.i].origin - local.pos )
+			if( local.d < local.bestd ){
+				local.bestd = local.d
+				local.best = local.i
+			}
+		}
+		local.i++
+	}
+	if( local.best == 0 ){
+		local.player iprint "No barrier under your crosshair." 1
+		end
+	}
+	if( level.coop_wall_ent[local.best] != NULL ){ level.coop_wall_ent[local.best] remove }
+	if( level.coop_wall_ghost[local.best] != NIL && level.coop_wall_ghost[local.best] != NULL ){
+		level.coop_wall_ghost[local.best] remove
+	}
+	level.coop_wall_ent[local.best] = NULL
+	level.coop_wall_ghost[local.best] = NULL
+	local.player iprint ( "BARRIER " + local.best + " deleted." ) 1
+}end
+
+//=========================================================================
+wall_size local.player local.axis local.up:{
+	local.w = int( getcvar "coop_wallW" )
+	local.h = int( getcvar "coop_wallH" )
+	if( local.axis == "h" ){
+		if( local.up == 1 ){ local.h = local.h + 64 } else { local.h = local.h - 64 }
+	} else {
+		if( local.up == 1 ){ local.w = local.w + 32 } else { local.w = local.w - 32 }
+	}
+	if( local.w < 16 ){ local.w = 16 }
+	if( local.h < 16 ){ local.h = 16 }
+	if( local.w > 1024 ){ local.w = 1024 }
+	if( local.h > 1024 ){ local.h = 1024 }
+	setcvar "coop_wallW" local.w
+	setcvar "coop_wallH" local.h
+	local.player iprint ( "Barrier size: " + local.w + " wide x " + local.h + " tall" ) 1
+}end
+
+//=========================================================================
+wall_clear local.player:{
+	local.i = 1
+	while( local.i <= level.coop_wall_n ){
+		if( level.coop_wall_ent[local.i] != NULL ){ level.coop_wall_ent[local.i] remove }
+		if( level.coop_wall_ghost[local.i] != NIL && level.coop_wall_ghost[local.i] != NULL ){
+			level.coop_wall_ghost[local.i] remove
+		}
+		level.coop_wall_ent[local.i] = NULL
+		level.coop_wall_ghost[local.i] = NULL
+		local.i++
+	}
+	level.coop_wall_n = 0
+	if( local.player != NULL ){ local.player iprint "All barriers cleared (not yet saved - F11 to commit)." 1 }
+}end
+
+//=========================================================================
+// "x y z|yaw|w|h" per line. Deleted slots are skipped, so save also compacts.
+//=========================================================================
+wall_save local.player:{
+	local.name = getcvar "mapname"
+	local.txt = ""
+	local.kept = 0
+	local.i = 1
+	while( local.i <= level.coop_wall_n ){
+		if( level.coop_wall_ent[local.i] != NULL ){
+			local.p = level.coop_wall_pos[local.i]
+			local.txt = local.txt + local.p[0] + " " + local.p[1] + " " + local.p[2] + "|" + level.coop_wall_ang[local.i] + "|" + level.coop_wall_w[local.i] + "|" + level.coop_wall_h[local.i] + "\n"
+			local.kept++
+		}
+		local.i++
+	}
+	fs_write_content ( "coop_mod/save/walls_" + local.name + ".dat" ) local.txt
+	println( "^~^~^ WALL SAVED " + local.kept + " barrier(s) -> coop_mod/save/walls_" + local.name + ".dat" )
+	if( local.player != NULL ){ local.player iprint ( "SAVED " + local.kept + " barrier(s) for this map." ) 1 }
+}end
+
+//=========================================================================
+// Real parser (holdout_load is still a phase-2 stub; this one is not). Character scan, same shape as
+// challenges.scr::chal_deserialize - no split() in this dialect.
+//=========================================================================
+wall_load:{
+	local.name = getcvar "mapname"
+	local.txt = fs_read_content ( "coop_mod/save/walls_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){ end }
+
+	local.showGhost = 0
+	if( getcvar( "coop_wall" ) == "1" ){ local.showGhost = 1 }
+
+	local.field = ""
+	local.f0 = ""
+	local.f1 = ""
+	local.f2 = ""
+	local.col = 0
+	local.i = 0
+	local.len = local.txt.size
+	local.loaded = 0
+
+	while( local.i < local.len ){
+		local.c = local.txt[local.i]
+		if( local.c == "|" ){
+			if( local.col == 0 ){ local.f0 = local.field }
+			if( local.col == 1 ){ local.f1 = local.field }
+			if( local.col == 2 ){ local.f2 = local.field }
+			local.col++
+			local.field = ""
+		} else if( local.c == "\n" ){
+			if( local.col == 3 && local.f0 != "" ){
+				waitthread wall_spawn_line local.f0 local.f1 local.f2 local.field local.showGhost
+				local.loaded++
+			}
+			local.field = ""
+			local.col = 0
+		} else {
+			local.field += local.c
+		}
+		local.i++
+	}
+	// trailing line with no newline
+	if( local.col == 3 && local.f0 != "" ){
+		waitthread wall_spawn_line local.f0 local.f1 local.f2 local.field local.showGhost
+		local.loaded++
+	}
+	println( "^~^~^ WALL LOADED " + local.loaded + " barrier(s) for " + local.name )
+}end
+
+//=========================================================================
+// "x y z" (a STRING) -> vector. There is no string->vector cast, so scan the three numbers out.
+//=========================================================================
+wall_spawn_line local.posStr local.yaw local.w local.h local.showGhost:{
+	local.n1 = ""
+	local.n2 = ""
+	local.n3 = ""
+	local.part = 0
+	local.i = 0
+	while( local.i < local.posStr.size ){
+		local.c = local.posStr[local.i]
+		if( local.c == " " ){
+			local.part++
+		} else {
+			if( local.part == 0 ){ local.n1 += local.c }
+			if( local.part == 1 ){ local.n2 += local.c }
+			if( local.part == 2 ){ local.n3 += local.c }
+		}
+		local.i++
+	}
+	if( local.n1 == "" || local.n2 == "" || local.n3 == "" ){ end }
+	//[bug-1388] plain locals only - nested calls in a vector literal collapse to a float
+	local.vx = float( local.n1 )
+	local.vy = float( local.n2 )
+	local.vz = float( local.n3 )
+	local.pos = ( local.vx local.vy local.vz )
+	waitthread wall_spawn_one local.pos ( int( local.yaw ) ) local.w local.h local.showGhost
+}end
+
+//=========================================================================
+// Show/hide every placed barrier's ghost. Authoring only - gameplay never spawns them.
+//=========================================================================
+wall_ghost_toggle local.player:{
+	if( level.coop_wall_ghostOn == 1 ){ level.coop_wall_ghostOn = 0 } else { level.coop_wall_ghostOn = 1 }
+	local.i = 1
+	while( local.i <= level.coop_wall_n ){
+		if( level.coop_wall_ghost[local.i] != NIL && level.coop_wall_ghost[local.i] != NULL ){
+			if( level.coop_wall_ghostOn == 1 ){ level.coop_wall_ghost[local.i] show }
+			else { level.coop_wall_ghost[local.i] hide }
+		}
+		local.i++
+	}
+	if( local.player != NULL ){ local.player iprint ( "Barrier ghosts " + level.coop_wall_ghostOn ) 1 }
+}end
+//=========================================================================
+// LIVE PREVIEW - a single translucent crate parked on your aim point every frame, resized to the
+// current width/height, so you can SEE where the barrier will land before committing. This is the
+// piece that was missing: without it you are placing invisible geometry blind.
+// Only ever runs while coop_wall is 1 (an authoring session); gameplay never spawns it.
+//=========================================================================
+wall_preview_loop:{
+	level.coop_wall_pv = spawn script_model model "models/coop_build/box_concrete.tik"
+	level.coop_wall_pv notsolid
+	level.coop_wall_pv alpha 0.45
+	level.coop_wall_pvW = 0
+
+	while( 1 ){
+		waitframe
+		//hide rather than merely stop updating - a crate frozen in mid-air reads as a bug
+		if( getcvar( "coop_wall" ) != "1" ){
+			if( level.coop_wall_pv != NULL && level.coop_wall_pvHidden != 1 ){
+				level.coop_wall_pv hide
+				level.coop_wall_pvHidden = 1
+				//[user 2026-08-05] bug-1397 - disarming the tool must also drop the PLACED-barrier
+				//ghosts, not just the aim crate. The host asked for these gone so players never see
+				//them, and wallgun_off.cfg is the only thing standing between an authoring session and
+				//a live round. Edge-triggered off the same flag, so it costs nothing per frame.
+				level.coop_wall_ghostOn = 0
+				local.gi = 1
+				while( local.gi <= level.coop_wall_n ){
+					if( level.coop_wall_ghost[local.gi] != NIL && level.coop_wall_ghost[local.gi] != NULL ){
+						level.coop_wall_ghost[local.gi] hide
+					}
+					local.gi++
+				}
+			}
+			continue
+		}
+		if( level.coop_wall_pvHidden == 1 && level.coop_wall_pv != NULL ){
+			level.coop_wall_pv show
+			level.coop_wall_pvHidden = 0
+		}
+		local.p = waitthread wall_player
+		if( local.p == NULL ){ continue }
+		if( level.coop_wall_pv == NULL ){ continue }
+
+		local.pos = waitthread wall_aimpos local.p
+		level.coop_wall_pv.origin = local.pos
+		//[bug-1388] plain local, not a nested call - a nested expression inside a vector literal
+		//collapses to a single value instead of parsing as a vector.
+		local.pyaw = int( local.p.viewangles[1] )
+		level.coop_wall_pv.angles = ( 0 local.pyaw 0 )
+
+		//only re-scale when the size actually changed - setsize every frame is wasted work
+		local.w = int( getcvar "coop_wallW" )
+		local.h = int( getcvar "coop_wallH" )
+		if( local.w != level.coop_wall_pvW || local.h != level.coop_wall_pvH ){
+			level.coop_wall_pvW = local.w
+			level.coop_wall_pvH = local.h
+			local.half = local.w / 2
+			local.negHalf = 0 - local.half
+			local.pmins = ( local.negHalf local.negHalf 0 )
+			local.pmaxs = ( local.half local.half local.h )
+			level.coop_wall_pv setsize local.pmins local.pmaxs
+		}
+	}
+}end
+
+//=========================================================================
+// DELETE A MAP ENTITY YOU ARE AIMING AT  [user 2026-08-04] bug-1382
+// For the doors and gates that block an arena. These are BRUSH entities the level artist left
+// UNNAMED (targetname "-" throughout the e3l4 entity dump), so there is no $name to reference and
+// no way to hardcode one safely - you point at the one you mean.
+//
+// Persistence is by ENTITY NUMBER: the trace returns ["entityNum"], BSP entities spawn in a fixed
+// order on every load, and getentbyentnum resolves a number back to an entity - so the number is a
+// stable handle across sessions. getentarray is NOT usable here: the mod already records that it
+// "does NOT match brush triggers in this engine" (maptest_waypoints.scr:36), and func_door is one.
+//=========================================================================
+wall_killent local.player:{
+	local.eyepos = local.player.origin + ( 0 0 54 )
+	local.fwd = angles_toforward local.player.viewangles
+	local.traceend = local.eyepos + ( local.fwd * 512 )
+	local.result = traced ( local.eyepos ) ( local.traceend )
+
+	local.e = local.result["entity"]
+	local.num = local.result["entityNum"]
+	if( local.e == NULL || local.e == NIL ){
+		local.player iprint "Nothing removable there - that is world geometry, not an entity." 1
+		end
+	}
+	if( local.num == NIL ){ end }
+	local.n8 = int( local.num )
+
+	//[user 2026-08-05] bug-1395 - CRASH GUARD. The world is NOT entity 0 in a trace result:
+	//ENTITYNUM_WORLD = MAX_GENTITIES-2 (q_shared.h:1674), and with GENTITYNUM_BITS 11 that is
+	//2046, with ENTITYNUM_NONE 2047. The first guard here only rejected <= 0, so aiming at plain
+	//world geometry returned 2046 and this removed THE WORLD - "^~^~^ WALL KILLENT entnum 2046"
+	//is the last line before the crash dump. Derive the ceiling from maxentities rather than
+	//hardcoding 2046, so it stays correct if GENTITYNUM_BITS ever moves again.
+	local.maxent = int( getcvar "maxentities" )
+	if( local.maxent <= 0 ){ local.maxent = 2048 }
+	local.worldnum = local.maxent - 2
+	if( local.n8 <= 0 || local.n8 >= local.worldnum ){
+		//Say WHICH, so a door that simply cannot be removed is distinguishable from a bad aim.
+		local.player iprint "That is baked world geometry, not an entity - it cannot be removed. Try the door PANEL itself, or its frame edge." 1
+		println( "^~^~^ WALL KILLENT refused: entnum " + local.n8 + " = world (limit " + local.worldnum + ") at " + local.result["endpos"] )
+		end
+	}
+	if( local.e == local.player ){ end }
+
+	local.n = level.coop_kill_n
+	if( local.n == NIL ){ local.n = 0 }
+	local.n++
+	level.coop_kill_num[local.n] = int( local.num )
+	level.coop_kill_n = local.n
+
+	local.e remove
+	local.player playsound coop_ui_click
+	//report WHAT was removed - classname/targetname make it obvious whether the right thing went
+	local.cn = local.e.classname
+	if( local.cn == NIL ){ local.cn = "?" }
+	local.tn = local.e.targetname
+	if( local.tn == NIL || local.tn == "" ){ local.tn = "(unnamed)" }
+	local.player iprint ( "Removed " + local.cn + " " + local.tn + " [" + local.num + "].  END saves." ) 1
+	println( "^~^~^ WALL KILLENT entnum " + local.num + " class " + local.cn + " name " + local.tn )
+}end
+
+//=========================================================================
+wall_kill_save local.player:{
+	local.name = getcvar "mapname"
+	local.txt = ""
+	local.i = 1
+	while( local.i <= level.coop_kill_n ){
+		local.txt = local.txt + level.coop_kill_num[local.i] + "\n"
+		local.i++
+	}
+	fs_write_content ( "coop_mod/save/killed_" + local.name + ".dat" ) local.txt
+	println( "^~^~^ KILLED SAVED " + level.coop_kill_n + " entity(s)" )
+	if( local.player != NULL ){ local.player iprint ( "SAVED " + level.coop_kill_n + " removed entity(s)." ) 1 }
+}end
+
+//=========================================================================
+// Re-remove them at map start, so a cleared doorway stays cleared.
+//=========================================================================
+wall_kill_load:{
+	local.name = getcvar "mapname"
+	local.txt = fs_read_content ( "coop_mod/save/killed_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){ end }
+
+	local.field = ""
+	local.i = 0
+	local.gone = 0
+	local.n = 0
+	while( local.i < local.txt.size ){
+		local.c = local.txt[local.i]
+		if( local.c == "\n" ){
+			if( local.field != "" ){
+				local.num = int( local.field )
+				//[bug-1395] same world guard as the delete path - a bad number already sitting in the
+				//file would otherwise remove the world on EVERY load, i.e. crash on entering the map.
+				local.mx = int( getcvar "maxentities" )
+				if( local.mx <= 0 ){ local.mx = 2048 }
+				if( local.num <= 0 || local.num >= local.mx - 2 ){
+					println( "^~^~^ KILLED LOAD skipped bad entnum " + local.num )
+					local.field = ""
+					local.i++
+					continue
+				}
+				local.e = getentbyentnum local.num
+				if( local.e != NULL && local.e != NIL ){
+					local.e remove
+					local.gone++
+				}
+				local.n++
+				level.coop_kill_num[local.n] = local.num
+			}
+			local.field = ""
+		} else {
+			local.field += local.c
+		}
+		local.i++
+	}
+	level.coop_kill_n = local.n
+	println( "^~^~^ KILLED LOADED " + local.gone + " of " + local.n + " removed entity(s)" )
+}end

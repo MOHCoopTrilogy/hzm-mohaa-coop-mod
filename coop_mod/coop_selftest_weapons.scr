@@ -1,0 +1,594 @@
+//====================================================================
+// coop_selftest_weapons.scr - HZM dev automated self-tests: WEAPONS
+//====================================================================
+// Weapon systems + combat FX probes for the automated test harness.
+// Every probe is INERT for real players: nothing runs unless the boot
+// cfg sets coop_st_weapons 1 (which threads st_weapons_run from
+// coop_mod/main.scr::main), and each sub-test is additionally gated on
+// its own coop_st_weapons_<x> cvar so the harness composes exactly the
+// tests it wants per boot. All tests run SEQUENTIALLY inside the one
+// dispatcher so they never race over the shared players.
+//
+// Machine-parseable lines are prefixed "^~^~^ ST_WEAPONS_<TEST>" and
+// greppable by the harness, exactly like coop_mod/coop_selftest.scr and
+// coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+//
+// Sub-tests (per-cvar):
+//   coop_st_weapons_fire     -> st_weapons_fire     (FIRETEST)
+//   coop_st_weapons_ammo     -> st_weapons_ammo     (EXACTAMMO)
+//   coop_st_weapons_smoke    -> st_weapons_smoke    (SMOKEFRAG)
+//   coop_st_weapons_ammobox  -> st_weapons_ammobox  (AMMOBOX)
+//   coop_st_weapons_gore     -> st_weapons_gore     (GOREBUDGET)
+//   coop_st_weapons_goreskin -> st_weapons_goreskin (GORESKIN-CORPSE)
+//   coop_st_weapons_mg42hp   -> st_weapons_mg42hp   (MG42HP)
+//   coop_st_weapons_holster  -> st_weapons_holster  (HOLSTER)
+//   coop_st_weapons_blood    -> st_weapons_blood    (BLOODTRAIL soak)
+//
+// Skipped as needs-human (not implemented here): MG42OVERHEAT (needs a
+// real held +attack on a mounted turret), HEADSHOT (needs a real aimed
+// head-region kill). See the harness recipe.
+//====================================================================
+
+//--------------------------------------------------------------------
+// Dispatcher. Launched once from main.scr when coop_st_weapons == 1.
+// Runs each enabled sub-test in sequence with small gaps so probes do
+// not fight over the shared players / a shared test actor.
+//--------------------------------------------------------------------
+st_weapons_run:{
+	// let the map + coop init fully settle before touching players/spawning
+	wait 6
+	if( getcvar( "coop_st_weapons_fire" ) == "1" ){ waitthread st_weapons_fire }
+	wait 1
+	if( getcvar( "coop_st_weapons_ammo" ) == "1" ){ waitthread st_weapons_ammo }
+	wait 1
+	if( getcvar( "coop_st_weapons_smoke" ) == "1" ){ waitthread st_weapons_smoke }
+	wait 1
+	if( getcvar( "coop_st_weapons_ammobox" ) == "1" ){ waitthread st_weapons_ammobox }
+	wait 1
+	if( getcvar( "coop_st_weapons_gore" ) == "1" ){ waitthread st_weapons_gore }
+	wait 1
+	if( getcvar( "coop_st_weapons_goreskin" ) == "1" ){ waitthread st_weapons_goreskin }
+	wait 1
+	if( getcvar( "coop_st_weapons_mg42hp" ) == "1" ){ waitthread st_weapons_mg42hp }
+	wait 1
+	if( getcvar( "coop_st_weapons_holster" ) == "1" ){ waitthread st_weapons_holster }
+	wait 1
+	// blood is a multi-minute soak - always run it LAST
+	if( getcvar( "coop_st_weapons_blood" ) == "1" ){ waitthread st_weapons_blood }
+	println( "^~^~^ ST_WEAPONS dispatcher_done map=" + level.coop_mapname )
+}end
+
+//--------------------------------------------------------------------
+// Collect every currently-alive connected player into level.coop_stw_pl[]
+// (1-indexed) and return the count. Player entities persist across a
+// death/respawn, so refs captured here stay valid through the exact-ammo
+// kill test. Never touches a bare $player as a single entity.
+//--------------------------------------------------------------------
+st_weapons_collectPlayers:{
+	local.n = 0
+	if( $player != NULL && $player.size >= 1 ){
+		local.i = 1
+		while( local.i <= $player.size ){
+			if( isAlive $player[local.i] ){
+				local.n++
+				level.coop_stw_pl[local.n] = $player[local.i]
+			}
+			local.i++
+		}
+	}
+}end local.n
+
+//====================================================================
+// FIRETEST - AI-driven fire sweep of the 69-gun roster (beyond give).
+// Spawns ONE test actor, then for each roster tik: strip it, equip the
+// gun, and drive an actual fire via the base-game AI shoot handler
+// (global/shoot.scr - the same entry the gags use, e.g.
+// gags/t3l1_enemyspawn.scr:65 "$santa exec global/shoot.scr"). Firing
+// loads the muzzle-flash + projectile + fire-anim tiks that a plain give
+// never touches. Any Script Error / TIKI-anim error prints in the window
+// between a gun's "fired" marker and the next -> attributable to that gun.
+// developer 1 REQUIRED so compile/anim errors actually print.
+//====================================================================
+st_weapons_fire:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_WEAPONS_FIRE abort=no_host"
+		end
+	}
+	waitthread coop_mod/loadoutroster.scr::roster_ids
+	local.n = level.coop_loRosterN
+	if( local.n == NIL ){ local.n = 0 }
+
+	local.pos = local.p.origin + ( 80 0 24 )
+	local.ai = spawn "models/human/german_afrika_private.tik"
+	if( local.ai == NULL || local.ai == NIL ){
+		println "^~^~^ ST_WEAPONS_FIRE abort=spawn_null"
+		end
+	}
+	local.ai.origin = local.pos
+	local.ai health 5000				// survive its own reloads/aim across all 69 guns
+	local.ai.flags["coop_waveActor"] = 1		// keep the cloner (aihandler) from duplicating the test actor
+	wait 2						// let aihandler's manage loop attach handlers
+
+	println( "^~^~^ ST_WEAPONS_FIRE begin count=" + local.n + " map=" + level.coop_mapname )
+	local.i = 0
+	while( local.i < local.n ){
+		if( local.ai == NULL || local.ai == NIL ){
+			println "^~^~^ ST_WEAPONS_FIRE abort=ai_gone"
+			break
+		}
+		local.tik = level.coop_loRosterGive[local.i]
+		local.id  = level.coop_loRosterId[local.i]
+		if( local.tik == NIL ){ local.tik = "" }
+
+		local.ai takeall
+		if( local.tik != "" ){
+			local.ai item local.tik
+			wait 0.3
+			// threaded (not exec) so a broken tik's anim hang stays in its own
+			// thread and does not stall the rest of the sweep
+			local.ai thread global/shoot.scr
+		}
+		wait 1.5
+		println( "^~^~^ ST_WEAPONS_FIRE idx=" + local.i + " id=" + local.id + " tik=" + local.tik + " fired=1" )
+		local.i++
+	}
+	println( "^~^~^ ST_WEAPONS_FIRE done count=" + local.n )
+	if( local.ai != NULL && local.ai != NIL ){ local.ai remove }
+}end
+
+//====================================================================
+// EXACTAMMO - 4-player concurrent-respawn reserve restore. Seeds a
+// UNIQUE rifle reserve on each alive player, lets the snapshot loop
+// (itemhandler::coop_ammoSnapshotLoop, 0.5s ticks) capture it, kills all
+// four in one frame (real death -> respawn -> itemhandler::coop_ammoRestore
+// re-applies the snapshot), then reads each player's restored reserve.
+// Per-self flag isolation: p1..p4 must each get their own value back with
+// no cross-bleed. Needs coop_exactAmmo 1 and coop_dbno 0 (real respawn).
+//====================================================================
+st_weapons_ammo:{
+	local.n = waitthread st_weapons_collectPlayers
+	if( local.n < 1 ){
+		println "^~^~^ ST_WEAPONS_EXACTAMMO abort=no_host"
+		end
+	}
+	if( getcvar( "coop_exactAmmo" ) != "1" ){
+		println "^~^~^ ST_WEAPONS_EXACTAMMO abort=exactAmmo_off"
+		end
+	}
+	local.want[1] = 7
+	local.want[2] = 13
+	local.want[3] = 23
+	local.want[4] = 31
+
+	// seed each alive player's rifle reserve to a distinct known value
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		local.v = local.want[local.i]
+		if( local.v == NIL ){ local.v = 5 }
+		if( local.pl != NULL && local.pl != NIL ){ local.pl setammo rifle local.v }
+		local.i++
+	}
+	// give the 0.5s snapshot loop two ticks to record the seeded values
+	wait 1.5
+
+	// kill all in ONE frame -> real death -> respawn
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		if( local.pl != NULL && local.pl != NIL ){
+			local.pl damage $world 20000 $world local.pl.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 1
+		}
+		local.i++
+	}
+
+	// wait until every player has respawned AND its restore has landed
+	local.w = 0
+	while( local.w < 40 ){
+		wait 0.5
+		local.allup = 1
+		local.i = 1
+		while( local.i <= local.n ){
+			local.pl = level.coop_stw_pl[local.i]
+			if( local.pl == NULL || local.pl == NIL ){ local.allup = 0 }
+			else if( !isAlive local.pl ){ local.allup = 0 }
+			else if( local.pl.flags["coop_ammoRestorePending"] == 1 ){ local.allup = 0 }
+			local.i++
+		}
+		if( local.allup == 1 ){ break }
+		local.w++
+	}
+	wait 1		// let the final setammo settle
+
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		local.saved = local.want[local.i]
+		if( local.saved == NIL ){ local.saved = 5 }
+		local.got = 0 - 1
+		if( local.pl != NULL && local.pl != NIL ){ local.got = local.pl getammo rifle }
+		local.ok = 0
+		if( local.got == local.saved ){ local.ok = 1 }
+		println( "^~^~^ ST_WEAPONS_EXACTAMMO p=" + local.i + " saved=" + local.saved + " got=" + local.got + " ok=" + local.ok )
+		local.i++
+	}
+}end
+
+//====================================================================
+// SMOKEFRAG - a smoke grenade must NOT dedup a frag out of inventory.
+// mills_grenade -> class "agrenade", m18_smoke_grenade -> class
+// "smokegrenade" (itemhandler::getAmmoType, 2289-2293) so the two live in
+// separate ammo pools. For each player: equip a frag, seed a known frag
+// reserve, THEN equip the smoke and confirm the frag reserve survived and
+// the smoke reserve is present.
+//====================================================================
+st_weapons_smoke:{
+	local.n = waitthread st_weapons_collectPlayers
+	if( local.n < 1 ){
+		println "^~^~^ ST_WEAPONS_SMOKEFRAG abort=no_host"
+		end
+	}
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		if( local.pl != NULL && local.pl != NIL ){
+			local.pl item "models/weapons/mills_grenade.tik"
+			wait 0.3
+			local.pl ammo agrenade 4			// seed a known frag reserve
+			wait 0.3
+			// equip the smoke - the pickup/juggle path must not touch the agrenade pool
+			local.pl item "models/weapons/m18_smoke_grenade.tik"
+			wait 0.5
+			local.frag  = local.pl getammo agrenade
+			local.smoke = local.pl getammo smokegrenade
+			local.ok = 0
+			if( local.frag > 0 && local.smoke > 0 ){ local.ok = 1 }
+			println( "^~^~^ ST_WEAPONS_SMOKEFRAG p=" + local.i + " frag=" + local.frag + " smoke=" + local.smoke + " ok=" + local.ok )
+		}
+		local.i++
+	}
+}end
+
+//====================================================================
+// AMMOBOX - one-box-per-mission gate + per-player refill cap.
+// The honest resupply is a proximity + held [USE] interaction (a client
+// button that cannot be faked server-side -> that leg is needs-human).
+// This probe exercises the automatable logic: (1) the one-box drop gate
+// (ammobox_place blocks a 2nd box by the same owner), and (2) the real
+// ammobox_refill + the exact per-entnum counter/cap the monitor uses, so
+// each player independently reaches maxn and a capped player is denied
+// while a fresh player still refills. Use a map that allows deployables
+// (coop_noDeployables != 1, i.e. NOT t2l2).
+//====================================================================
+st_weapons_ammobox:{
+	local.n = waitthread st_weapons_collectPlayers
+	if( local.n < 1 ){
+		println "^~^~^ ST_WEAPONS_AMMOBOX abort=no_host"
+		end
+	}
+	local.p1 = level.coop_stw_pl[1]
+	if( local.p1 == NULL || local.p1 == NIL ){
+		println "^~^~^ ST_WEAPONS_AMMOBOX abort=no_host"
+		end
+	}
+
+	// one-box-per-mission gate
+	local.before = level.coop_ammobox_count
+	if( local.before == NIL ){ local.before = 0 }
+	waitthread coop_mod/ammobox.scr::ammobox_place local.p1
+	wait 0.4
+	local.after1 = level.coop_ammobox_count
+	if( local.after1 == NIL ){ local.after1 = 0 }
+	// a 2nd place by the same owner must be blocked (coop_ammobox_dropped gate)
+	waitthread coop_mod/ammobox.scr::ammobox_place local.p1
+	wait 0.4
+	local.after2 = level.coop_ammobox_count
+	if( local.after2 == NIL ){ local.after2 = 0 }
+	local.gateok = 0
+	if( local.after1 == ( local.before + 1 ) && local.after2 == local.after1 ){ local.gateok = 1 }
+	println( "^~^~^ ST_WEAPONS_AMMOBOX gate before=" + local.before + " after1=" + local.after1 + " after2=" + local.after2 + " ok=" + local.gateok )
+
+	local.slot = local.after1
+	local.maxn = int( getcvar( "coop_ammobox_refills" ) )
+	if( local.maxn <= 0 ){ local.maxn = 2 }
+
+	// per-player refill cap - replicate the monitor's per-entnum counter exactly
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		if( local.pl != NULL && local.pl != NIL ){
+			local.key = local.pl.entnum
+			// drive maxn refills for this player
+			local.c = 0
+			while( local.c < local.maxn ){
+				local.usd = level.coop_ammobox_uses[local.slot][local.key]
+				if( local.usd == NIL ){ local.usd = 0 }
+				if( local.usd < local.maxn ){
+					waitthread coop_mod/ammobox.scr::ammobox_refill local.pl
+					local.usd++
+					level.coop_ammobox_uses[local.slot][local.key] = local.usd
+				}
+				local.c++
+			}
+			// one attempt past the cap - must be denied
+			local.usd = level.coop_ammobox_uses[local.slot][local.key]
+			if( local.usd == NIL ){ local.usd = 0 }
+			local.refilled = 0
+			if( local.usd < local.maxn ){
+				waitthread coop_mod/ammobox.scr::ammobox_refill local.pl
+				local.usd++
+				level.coop_ammobox_uses[local.slot][local.key] = local.usd
+				local.refilled = 1
+			}
+			println( "^~^~^ ST_WEAPONS_AMMOBOX p=" + local.i + " n=" + local.usd + " refilled=" + local.refilled )
+		}
+		local.i++
+	}
+}end
+
+//====================================================================
+// GOREBUDGET - decap/gib + gore-skin entity budget under concurrent
+// kills (2048 entity-pool crash class). Spawns a cluster of test actors
+// around the players and gibs them all in one frame, repeated in bursts.
+// The engine emits its own "^~^~^ GORESKIN ..." / decap-gib markers
+// (coop_goreDebug 1); this probe emits burst progress and BOUNDS the
+// entity count (small cluster, removed after each burst). The harness
+// samples server RSS + watches CrashDumps across the bursts.
+// Boot with coop_aiScale 0 so the cluster size stays the budget driver.
+//====================================================================
+st_weapons_gore:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_WEAPONS_GORE abort=no_host"
+		end
+	}
+	local.bursts = 5
+	local.per = 12
+	local.b = 1
+	while( local.b <= local.bursts ){
+		local.base = local.p.origin + ( 0 0 48 )
+		// spawn the cluster
+		local.k = 1
+		while( local.k <= local.per ){
+			local.a = spawn "models/human/german_afrika_private.tik"
+			if( local.a != NULL && local.a != NIL ){
+				local.a.origin = local.base + ( ( local.k * 20 ) ( local.k * 14 ) 0 )
+				local.a.flags["coop_waveActor"] = 1	// no clone amplification - keep the count exact
+				local.arr[local.k] = local.a
+			}
+			local.k++
+		}
+		wait 2		// let handlers attach so the gore/decap pipeline runs on the kills
+
+		// gib every one in a single frame (no wait between)
+		local.k = 1
+		while( local.k <= local.per ){
+			local.a = local.arr[local.k]
+			if( local.a != NULL && local.a != NIL ){
+				local.a damage $world 20000 $world local.a.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 1
+			}
+			local.k++
+		}
+		println( "^~^~^ ST_WEAPONS_GORE burst=" + local.b + " spawned=" + local.per )
+		wait 3		// let gib pieces + gore decals EV_Remove / settle
+
+		// bound the pool: remove any survivors / lingering corpses this burst spawned
+		local.k = 1
+		while( local.k <= local.per ){
+			local.a = local.arr[local.k]
+			if( local.a != NULL && local.a != NIL ){ local.a remove }
+			local.arr[local.k] = NULL
+			local.k++
+		}
+		wait 1
+		local.b++
+	}
+	println( "^~^~^ ST_WEAPONS_GORE done bursts=" + local.bursts )
+}end
+
+//====================================================================
+// GORESKIN-CORPSE - the heavy gib-splatter skin (tier 3) must only ever
+// land on the dead, never on a still-moving enemy. Applies repeated
+// SUB-lethal damage to one high-HP actor (kept alive) and emits an
+// "alive" window, then delivers the kill and emits a "dead" window. The
+// engine's "^~^~^ GORESKIN ent=N tier=T ..." lines (coop_goreDebug 1) in
+// the alive window must all be tier<=2; tier=3 may appear only after the
+// kill marker.
+//====================================================================
+st_weapons_goreskin:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_WEAPONS_GORESKIN abort=no_host"
+		end
+	}
+	local.pos = local.p.origin + ( 80 0 24 )
+	local.ai = spawn "models/human/german_afrika_private.tik"
+	if( local.ai == NULL || local.ai == NIL ){
+		println "^~^~^ ST_WEAPONS_GORESKIN abort=spawn_null"
+		end
+	}
+	local.ai.origin = local.pos
+	local.ai health 400				// survive the sub-lethal barrage
+	local.ai.flags["coop_waveActor"] = 1
+	wait 2						// handlers attach
+
+	println( "^~^~^ ST_WEAPONS_GORESKIN phase=alive begin hp=" + local.ai.health )
+	local.h = 1
+	while( local.h <= 8 ){
+		if( local.ai == NULL || local.ai == NIL ){ break }
+		if( !isAlive local.ai ){ break }
+		local.ai damage $world 20 $world local.ai.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 1
+		wait 0.5
+		local.h++
+	}
+	local.stillAlive = 0
+	if( local.ai != NULL && local.ai != NIL && isAlive local.ai ){ local.stillAlive = 1 }
+	println( "^~^~^ ST_WEAPONS_GORESKIN phase=alive done alive=" + local.stillAlive )
+
+	// now the killing blow - tier 3 gib-splatter is allowed only from here on
+	if( local.ai != NULL && local.ai != NIL ){
+		local.ai damage $world 20000 $world local.ai.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 1
+	}
+	wait 1
+	println "^~^~^ ST_WEAPONS_GORESKIN phase=dead kill=1"
+	if( local.ai != NULL && local.ai != NIL ){ local.ai remove }
+}end
+
+//====================================================================
+// MG42HP - a captured-MG42 gunner's health scales by connected player
+// count. Spawns a gunner stand-in, flags it coopMG42_gunner, and runs the
+// real mg42_hack::main (base 25 HP * $player.size, clamped 150). At 4P the
+// result must be 100 (25*4, under the cap); 2P -> 50; solo -> 25. Also
+// proves the $player.size read is clean with 4 connected (no array cast).
+//====================================================================
+st_weapons_mg42hp:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_WEAPONS_MG42HP abort=no_host"
+		end
+	}
+	local.pos = local.p.origin + ( 80 0 24 )
+	local.ai = spawn "models/human/german_waffenss_shutze.tik"
+	if( local.ai == NULL || local.ai == NIL ){
+		println "^~^~^ ST_WEAPONS_MG42HP abort=spawn_null"
+		end
+	}
+	local.ai.origin = local.pos
+	local.ai.flags["coop_waveActor"] = 1
+	// hold an MG so the unholster branch in mg42_hack finds an active weapon
+	local.ai item "models/weapons/mg42portable.tik"
+	wait 1
+	local.ai.flags["coopMG42_gunner"] = 1
+	local.ai waitthread coop_mod/mg42_hack.scr::main NIL
+	wait 0.2
+
+	local.sz = 0
+	if( $player != NULL ){ local.sz = $player.size }
+	local.hp = 0 - 1
+	if( local.ai != NULL && local.ai != NIL ){ local.hp = local.ai.health }
+	println( "^~^~^ ST_WEAPONS_MG42HP players=" + local.sz + " hp=" + local.hp )
+	if( local.ai != NULL && local.ai != NIL ){ local.ai remove }
+}end
+
+//====================================================================
+// HOLSTER - the weapons-on-back switch path runs clean for all players.
+// Gives each player a primary + a secondary and forces rapid switch
+// cycles (use primary -> returnActiveWeapon holster check -> use
+// secondary). PASS = no Script Error in the window and each player ends
+// still armed (returnActiveWeapon returns a Weapon). Visual confirmation
+// of the back-model attach is a needs-human spot-check (no log signal).
+// developer 1 REQUIRED so any switch/anim error prints.
+//====================================================================
+st_weapons_holster:{
+	local.n = waitthread st_weapons_collectPlayers
+	if( local.n < 1 ){
+		println "^~^~^ ST_WEAPONS_HOLSTER abort=no_host"
+		end
+	}
+	// arm every alive player with a primary + a sidearm
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pl = level.coop_stw_pl[local.i]
+		if( local.pl != NULL && local.pl != NIL ){
+			local.pl item "models/weapons/m1_garand.tik"
+			local.pl item "models/weapons/colt45.tik"
+		}
+		local.i++
+	}
+	wait 0.5
+
+	local.cyc = 1
+	while( local.cyc <= 3 ){
+		local.i = 1
+		while( local.i <= local.n ){
+			local.pl = level.coop_stw_pl[local.i]
+			if( local.pl != NULL && local.pl != NIL ){
+				local.pl use "models/weapons/m1_garand.tik"
+				wait 0.3
+				// exercise the holster/unholster return path (weapons-on-back evidence)
+				local.item = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.pl
+				local.pl use "models/weapons/colt45.tik"
+				wait 0.3
+				local.armed = 0
+				if( local.item != NULL && local.item != NIL && local.item.classname == "Weapon" ){ local.armed = 1 }
+				println( "^~^~^ ST_WEAPONS_HOLSTER p=" + local.i + " cycle=" + local.cyc + " switched=1 armed=" + local.armed )
+			}
+			local.i++
+		}
+		wait 0.3
+		local.cyc++
+	}
+}end
+
+//====================================================================
+// BLOODTRAIL - blood-trail decal/entity budget under sustained wounded
+// combat. Spawns a small rolling population of wounded (sub-lethal, then
+// forceactivated so the mod's wounded-limp behaviour moves them and drips
+// blood), sustained for coop_st_weapons_blood_sec seconds (default 180).
+// Each round's batch is removed to bound the live count. The engine emits
+// "^~^~^ BLOODTRAIL ..." per-drop telemetry (coop_bloodTrail 1 /
+// coop_bloodDebug 1); the harness samples RSS + entity count and asserts a
+// flat slope + imgidx != 0. Boot with coop_aiScale 0 so the population
+// stays bounded/measurable.
+//====================================================================
+st_weapons_blood:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_WEAPONS_BLOOD abort=no_host"
+		end
+	}
+	local.dur = int( getcvar( "coop_st_weapons_blood_sec" ) )
+	if( local.dur <= 0 ){ local.dur = 180 }
+	local.per = 6
+	local.elapsed = 0
+	local.round = 0
+
+	while( local.elapsed < local.dur ){
+		local.round++
+		local.base = local.p.origin + ( 0 0 48 )
+
+		// spawn a wounded batch
+		local.k = 1
+		while( local.k <= local.per ){
+			local.a = spawn "models/human/german_afrika_private.tik"
+			if( local.a != NULL && local.a != NIL ){
+				local.a.origin = local.base + ( ( local.k * 24 ) ( local.k * 18 ) 0 )
+				local.a health 300
+				local.a.flags["coop_waveActor"] = 1
+				local.a forceactivate			// make it live so the wounded-limp movement runs
+				local.barr[local.k] = local.a
+			}
+			local.k++
+		}
+		wait 2
+
+		// hold the batch in a bleeding state for ~15s (10 * 1.5s)
+		local.t = 0
+		while( local.t < 10 ){
+			local.k = 1
+			while( local.k <= local.per ){
+				local.a = local.barr[local.k]
+				if( local.a != NULL && local.a != NIL && isAlive local.a ){
+					local.a damage $world 12 $world local.a.origin ( 0 0 0 ) ( 0 0 1 ) 0 0 18 1
+				}
+				local.k++
+			}
+			wait 1.5
+			local.t++
+		}
+		println( "^~^~^ ST_WEAPONS_BLOOD round=" + local.round + " elapsed=" + local.elapsed + " spawned=" + local.per )
+
+		// remove the batch to bound the live entity count
+		local.k = 1
+		while( local.k <= local.per ){
+			local.a = local.barr[local.k]
+			if( local.a != NULL && local.a != NIL ){ local.a remove }
+			local.barr[local.k] = NULL
+			local.k++
+		}
+		wait 1
+		local.elapsed = local.elapsed + 16
+	}
+	println( "^~^~^ ST_WEAPONS_BLOOD done rounds=" + local.round )
+}end

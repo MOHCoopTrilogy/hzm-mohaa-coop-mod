@@ -1,50 +1,129 @@
+//=========================================================================
+// briefinge2 - Breakthrough - Mission 2 briefing.
+//
+// HZM coop [user 08-02]: coop-patched from the retail script, modelled on the m-series
+// maps/briefing/briefing1.scr. The retail version was SP-only in three separate ways and
+// could not work in coop at all:
+//   1. "playmovie" is HOST-ONLY. ScriptThread::EventPlayMovie is literally
+//      gi.SendConsoleCommand(va("cinematic %s", ...)) - a SERVER console command, so on a
+//      listen server only the host ever saw it and on a dedicated server nobody did. That is
+//      why coop_mod/maplist.scr skipped these maps entirely ("this is just a video, so we
+//      skip it altogether it created more issues than it is worth").
+//      The fix: "cinematic" IS on the client server-command whitelist
+//      (cgame/cg_servercmds_filter.cpp), so a per-player stufftext reaches EVERY client.
+//   2. It used "$player stufftext spmap <map>" - spmap is single-player only.
+//   3. It used bare "level waittill prespawn"/"spawn" and single-entity $player refs, which
+//      throw once 2+ players are connected ($player is an ARRAY in coop).
+//
+// Slides vs film: the m-series briefings are still slide shows (showmenu briefingNa/b/c...).
+// Spearhead and Breakthrough never shipped slide art - their briefings are FMV only - so this
+// plays the retail .roq and uses the same coop READY GATE to advance, which also means the
+// squad controls when it ends rather than a hardcoded timer guessing the video length.
+//=========================================================================
+main:{
+//=========================================================================
+	level.coopPrevMap = ""					//chrissstrahl - set previouse map (for mom voteing)
+	level.coopNextMap = "e2l1"				//chrissstrahl - set next map (for mom voteing)
+	waitthread coop_mod/main.scr::main 	//chrissstrahl - start coop mod extensions
 
-main:
+	spawn script_origin targetname coop_playsound origin (0 0 0)	//chrissstrahl - spawn general sound entity
 
-level waittill prespawn
-
+	level waittill prespawn
 	drawhud 0
 
-level waittill spawn
+	level waittill spawn
 
-	thread briefingskip
-	thread freezeplayer
-
-	playmovie briefinge2.roq
-
-	thread endbriefing
-
-end
-
-
-endbriefing:
-
-	wait 2.0
-	$player stufftext "spmap e2l1"
-
-end
-
-
-briefingskip:
-
-	while ( $player.fireheld == 0 )
-	{
-		waitframe
+	if( level.gametype == 0){//chrissstrahl - sp only
+		exec global/briefing_save.scr
+		// prevent the player from trying to move around
+		$player physics_off
 	}
 
-	thread endbriefing
+	waitthread coop_mod/replace.scr::waitForPlayer	//chrissstrahl - wait for any player to join
+	thread freezeplayerview
 
-end
-
-
-freezeplayer:
-
-	$player physics_off
-
-	while (1)
-	{
-		$player.viewangles = (0 0 0)
-		waitframe
+	// skip the briefing: COOP reuses the lobby READY system (whole squad presses [Use]/F to skip
+	// to e2l1) via coop_mod/readygate.scr; SP keeps the vanilla fire/use-hold skip.
+	if( level.gametype ){
+		thread briefingReadyGate
+	} else {
+		thread briefingskip
 	}
 
-end
+	thread playBriefingMovie
+
+	// Safety cap only. The ready gate is the intended way out - players watch the film and then
+	// ready up. 210s is comfortably longer than any of the six retail briefing reels, so this
+	// only fires if every player goes AFK.
+	wait 210
+	thread endbriefing
+}end
+
+//=========================================================================
+// Show the retail FMV. SP keeps the engine path; coop pushes the same console command to every
+// connected client individually, because the server-side "cinematic" only affects the host.
+//=========================================================================
+playBriefingMovie:{
+//=========================================================================
+	if( level.gametype == 0 ){
+		playmovie briefinge2.roq
+		end
+	}
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.player = $player[local.i]
+		if( local.player == NULL ){ continue }
+		//[TRAPS T8] one statement per stufftext, unquoted - a quoted or ;-joined payload is
+		//truncated on the wire (bug-758).
+		local.player stufftext ( "cinematic briefinge2.roq" )
+	}
+}end
+
+//=========================================================================
+// COOP briefing skip = the lobby READY system. When the whole squad readies up ([Use]/F), skip
+// to e2l1. Runs alongside the film; whichever finishes first advances (endbriefing is guarded
+// so it only fires once).
+//=========================================================================
+briefingReadyGate:{
+//=========================================================================
+	thread coop_mod/readygate.scr::coop_readyGateStart
+	while( level.coop_readyGateDone != 1 && level.coop_briefingEnded != 1 ){
+		waitframe
+	}
+	if( level.coop_readyGateDone == 1 && level.coop_briefingEnded != 1 ){
+		thread endbriefing
+	}
+}end
+
+//=========================================================================
+endbriefing:{
+//=========================================================================
+	if( level.coop_briefingEnded == 1 ){ end }	//chrissstrahl-style guard: advance exactly once
+	level.coop_briefingEnded = 1
+	level.coop_readyGateActive = 0				//stop the ready gate if it is still running
+	if(level.gametype == 0){//chrissstrahl - handle sp
+		$player stufftext "spmap e2l1"
+	}else{//chrissstrahl - handle mp
+		exec global/missioncomplete.scr "e2l1"
+	}
+}end
+
+//=========================================================================
+briefingskip:{
+//=========================================================================
+	waitexec coop_mod/replace.scr::skip //chrissstrahl - wait for player vote to skip cinematic
+	thread endbriefing	//chrissstrahl - end brifing
+}end
+
+//=========================================================================
+freezeplayerview:{
+//=========================================================================
+	if (level.gametype){
+		while (1){//chrissstrahl - modified for coop
+			for (local.i = 1; local.i <= $player.size; local.i++){
+				local.player = $player[local.i]
+				local.player.viewangles = (0 0 0)
+			}
+			waitframe
+		}
+	}
+}end

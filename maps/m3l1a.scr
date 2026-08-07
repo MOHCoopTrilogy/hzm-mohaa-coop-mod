@@ -163,6 +163,7 @@ main:{
 	waitthread coop_mod/main.scr::main 			//chrissstrahl - start coop mod extensions
 	level.coop_weatherTheme = "none"			//HZM coop - dynamic weather: D-Day Omaha Beach (keep iconic clear look)
 	level.coop_ambienceBed = "surf"			//HZM coop - BOOM ONE beach surf bed
+	level.coop_dbnoThresholdOverride = 400		//HZM coop [user 07-31] - beach crossfire converges more simultaneous fire on an exposed player than most maps; take more cumulative damage before going down at all (default 250)
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 	level.coop_devTest = 0						//chrissstrahl - set to 0 once done testing
@@ -1909,18 +1910,28 @@ normal_damage local.amount:{
 //=========================================================================
 mg42_damage_player:{
 //=========================================================================
+	// HZM coop: this was 100% guaranteed damage every tick (up to 8 ticks while exposed,
+	// every .3-.9s -> as much as 76 dmg on medium in a few seconds with zero chance to avoid
+	// it), totally separate from the real MG42 turret's accuracy/spread fix - reads as an
+	// instakill. Add a miss chance and cut the per-tick amount so it pressures the player into
+	// cover without being an unavoidable death sentence.
+	if (randomfloat(1) < 0.4){
+		thread jitter_mg_cover
+		end
+	}
+
 		//println "MG42 DAMAGE PLAYER: skill: " (getcvar(skill))
 		if (getcvar(skill) == "0"){  // player is in easy skill
-			//println "MG42 DAMAGE PLAYER: doing 5"
-			$player thread normal_damage 5
+			//println "MG42 DAMAGE PLAYER: doing 3"
+			$player thread normal_damage 3
 		}
 		else if (getcvar(skill) == "2"){  // player is in hard skill
-			//println "MG42 DAMAGE PLAYER: doing 15"
-			$player thread normal_damage 15
+			//println "MG42 DAMAGE PLAYER: doing 9"
+			$player thread normal_damage 9
 		}
 		else{  // player is in medium skill
-			//println "MG42 DAMAGE PLAYER: doing 9.5"
-			$player thread normal_damage 9.5
+			//println "MG42 DAMAGE PLAYER: doing 6"
+			$player thread normal_damage 6
 		}
 
 	$player playsound snd_bh_flesh
@@ -2456,7 +2467,11 @@ coop_m3l1a_startMusic:{
 	wait 10
 	exec coop_mod/replace.scr::tmstartloop "sound/music/AfterTheDrop.mp3"
 	exec coop_mod/replace.scr::tmvolume 1.0
-	exec coop_mod/replace.scr::coop_setClientCvar "s_musicvolume" 3.5
+	//[user 08-06] bug-1502 - was coop_setClientCvar "s_musicvolume" 3.5 (one-shot hardcoded set,
+	//later restored in coop_m3l1a_beachAudio to a hardcoded 0.9 - clobbering any custom Music
+	//slider value the player had). coop_cvarDuckStart instead captures the player's OWN live
+	//s_musicvolume client-side and restores to exactly that later (coop_cvarDuckEnd "Music" below).
+	exec coop_mod/replace.scr::coop_cvarDuckStart "Music" 3.5 0.1 12
 }end
 
 //=========================================================================
@@ -2464,12 +2479,18 @@ coop_m3l1a_beachAudio:{
 //=========================================================================
 	// TRUE effects duck via the engine s_sfxduck cvar (music-EXEMPT): gunfire/voices/effects recede
 	// to faint chaos so the music owns the scene, while the soundtrack stays full. Also swell the
-	// music a touch and fade out the ambient bed for a clean takeover. Smooth fades (not jarring).
-	thread coop_mod/replace.scr::coop_cvarFade "s_ambientvolume" 0.6 0.0 4
+	// music a touch (coop_m3l1a_startMusic, threaded separately at map start) and fade out the
+	// ambient bed for a clean takeover. Smooth fades (not jarring).
+	//[user 08-06] bug-1502 - coop_cvarDuckStart captures the player's live s_ambientvolume and
+	//ramps to 0.0 over 4s client-side (was coop_cvarFade to a hardcoded 0.6/0.0 pair).
+	exec coop_mod/replace.scr::coop_cvarDuckStart "Ambient" 0.0 4 12
 	waitthread coop_mod/replace.scr::coop_cvarFade "s_sfxduck" 1.0 0.03 4		// effects -> 3% (very faint; music already loud)
 	wait 60										// a full minute of music-only
-	thread coop_mod/replace.scr::coop_cvarFade "s_ambientvolume" 0.0 0.6 12
-	thread coop_mod/replace.scr::coop_cvarFade "s_musicvolume" 3.5 0.9 12		// ease music back to baseline
+	//[user 08-06] bug-1502 - each restores to the PLAYER'S OWN captured baseline, not a hardcoded
+	//0.6/0.9. The 12s fade happens client-side (coop_duckAmbientOutDur/coop_duckMusicOutDur, both
+	//set to 12 at DuckStart above), so no wait/thread is needed here to time it out.
+	exec coop_mod/replace.scr::coop_cvarDuckEnd "Ambient"
+	exec coop_mod/replace.scr::coop_cvarDuckEnd "Music"
 	waitthread coop_mod/replace.scr::coop_cvarFade "s_sfxduck" 0.03 1.0 12		// slow fade the battlefield back in
 }end
 

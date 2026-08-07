@@ -69,13 +69,34 @@ DoWork: {
 	thread AdjustFogPlane
 
 	waitthread summonJohnson
-	wait 5
-	
+	//[user 08-06] bug-1504 - was a flat "wait 5" with no dependency on whether the Johnson escort
+	//sequence (JohnsonThinker.scr::updateObjectives, which completes "assist82nd") had actually
+	//finished. Since e2l3's objective strategy is "inOrder" (e2l3.scr:88), the moment handleObjectives
+	//completes "clearTown" and reveals "repelTanks", ObjMgr's current-objective scan jumps PAST the
+	//still-pending "assist82nd" slot and strips its yellow highlight at the exact instant the village
+	//ticks green - read by the player as "completing the village un-completed Assist 82nd Airborne."
+	//Poll the same flag JohnsonThinker.scr:286 sets right after CompleteObj "assist82nd", keeping the
+	//original 5s as a floor (so beating Johnson to it doesn't make the village complete instantly)
+	//and a 30s ceiling so a lost/never-met Johnson can't leave clearTown stuck waiting forever either.
+	local.metWait = 0
+	while( level.met82nd != 1 && local.metWait < 30 ){
+		wait 0.5
+		local.metWait += 0.5
+	}
+	if( local.metWait < 5 ){ wait ( 5 - local.metWait ) }
+
 	thread handleObjectives
+	//[user 08-06] bug-1506 - "A Boy to do a Man's Job": open the tank-battle window right as the
+	//finale actually starts, so a death earlier in the map (village, house intro) never disqualifies
+	//it. coop_mod/player.scr's true-death branch checks this flag and stamps
+	//level.e2l3_tankBattleCasualty if it fires while the window is open.
+	level.e2l3_tankBattleActive   = 1
+	level.e2l3_tankBattleCasualty = 0
 	thread doTankBattle    //for the whiz-bang finale
 
 	// complete objectives and finish mission
 	$tanksRepelled waittill trigger
+	level.e2l3_tankBattleActive = 0	//[user 08-06] bug-1506 - window closed, deaths after this don't count
 		
 	//[204]
 	if(level.gametype == 0){
@@ -147,7 +168,10 @@ summonJohnson: {
 	$ParatrooperLeader.metWithPlayer = 1
 
 	if (local.dist > 1000) {
-		$ParatrooperLeaderParatrooperLeader.jumpToFinalHouse = 1
+		//[user 2026-08-06] bug-1482 - the targetname was doubled ($ParatrooperLeaderParatrooperLeader),
+		//so this threw "Field 'jumpToFinalHouse' applied to NULL listener" and the leader never
+		//fast-travelled when the players were far away. Every other reference in this label is correct.
+		$ParatrooperLeader.jumpToFinalHouse = 1
 		wait 1.0
 	}
 
@@ -332,6 +356,14 @@ runTanks: {
 activateTank local.findName local.speed: {
 //============================================================================
 	local.trigger = waitthread global/FindTrigger.scr::FindTrigger local.findName
+	//[user 2026-08-06] bug-1483 - FindTrigger (global/FindTrigger.scr) falls through to
+	//'end local.returntrigger' with the variable unset when local.findName matches nothing, so
+	//local.trigger came back NIL and every line below threw: '.target' on NIL, then 'trigger' on
+	//NIL, then '.speed'/'.health' etc on the resulting NULL tank - a 6-error cascade per tank call.
+	if( local.trigger == NIL || local.trigger == NULL ){
+		println( "^~^~^ activateTank: FindTrigger found no trigger named '" + local.findName + "'" )
+		end
+	}
 	local.tank = local.trigger.target
 	trigger local.trigger
 	waitframe

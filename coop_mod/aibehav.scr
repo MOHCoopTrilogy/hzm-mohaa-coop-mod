@@ -1,0 +1,120 @@
+//====================================================================
+// aibehav.scr - HZM coop ENEMY-BEHAVIOR TRACKER (2026-07-23)
+//====================================================================
+// Measures what the German enemies are ACTUALLY doing so the dynamic-AI
+// work (coop_aiDynamic) can be verified UNATTENDED. Gated on coop_aiBehav
+// (0=off default, 1=log, 2=log + on-screen readout). Launched from main.scr.
+//
+// Two signals:
+//  ^~^~^ AIBEHAV  (every 4s, instant snapshot): alive/engaging/moving/staticCombat
+//     + role split (aggr/cover/flank/prone/none) + thinkstate split.
+//  ^~^~^ AIBEHAV2 (every 8s, the RELIABLE movement signal): cumulative distance each
+//     ENGAGED enemy travelled over the window - a turret scores ~0, an enemy that
+//     repositions scores large, regardless of when we sample. Fields:
+//       engagedMoved = engaged enemies that moved at all, repositioned = moved >150u,
+//       totalDist / avgDist = ground covered. Baseline (aiDynamic 0) -> repositioned~0;
+//       working dynamic AI -> repositioned climbs.
+//====================================================================
+main:{
+	local.tick = 0
+	while( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+		wait 1
+		local.tick++
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		// ---- every tick: accumulate per-enemy displacement WHILE ENGAGED ----
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NIL || local.a == NULL ){ continue }
+			if( !isAlive local.a ){ continue }
+			local.eng = 0
+			if( local.a.thinkstate == "attack" ){ local.eng = 1 }
+			if( local.a.enemy != NULL && local.a.enemy != NIL ){ local.eng = 1 }
+			if( local.eng == 1 ){
+				if( local.a.coop_trkLast != NIL ){
+					if( local.a.coop_trkDist == NIL ){ local.a.coop_trkDist = 0 }
+					local.a.coop_trkDist = local.a.coop_trkDist + vector_length( local.a.origin - local.a.coop_trkLast )
+				}
+				local.a.coop_trkLast = local.a.origin
+			} else {
+				local.a.coop_trkLast = NIL
+			}
+		}
+
+		// ---- every 4s: instant role/engagement snapshot ----
+		if( ( local.tick % 4 ) == 0 ){
+			local.alive = 0
+			local.engaging = 0
+			local.moving = 0
+			local.staticCombat = 0
+			local.r_aggr = 0
+			local.r_cover = 0
+			local.r_flank = 0
+			local.r_prone = 0
+			local.r_none = 0
+			local.flanked = 0			// engaged enemies at the player's SIDE/REAR (the felt "they flanked me")
+			for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+				local.a = local.arr[local.i]
+				if( local.a == NIL || local.a == NULL ){ continue }
+				if( !isAlive local.a ){ continue }
+				local.alive++
+				local.spd = vector_length( local.a.velocity )
+				local.eng = 0
+				if( local.a.enemy != NULL && local.a.enemy != NIL ){ local.eng = 1; local.engaging++ }
+				if( local.spd > 20 ){ local.moving++ }
+				if( local.eng == 1 && local.spd <= 20 ){ local.staticCombat++ }
+				local.role = local.a.flags["coop_role"]
+				if( local.role == "aggr" ){ local.r_aggr++ }
+				else if( local.role == "cover" ){ local.r_cover++ }
+				else if( local.role == "flank" ){ local.r_flank++ }
+				else if( local.role == "prone" ){ local.r_prone++ }
+				else { local.r_none++ }
+				// FLANK-SUCCESS: is this engaged enemy in its target player's side/rear hemisphere? That's the
+				// felt "they got around me". dot(player_forward, dir_to_enemy) < 0.3 => angle > ~72deg off the
+				// player's facing. Measures whether the flank/squad coordination actually produces flanking.
+				if( local.eng == 1 ){
+					local.tp = local.a.enemy
+					// only measure flanking vs a PLAYER target - an enemy's .enemy can be another actor / a
+					// stale ref (esp. with 4 players + friendly fire), and .viewangles on a non-player is
+					// 'none' -> none-cast spam. classname guard keeps the metric player-only.
+					if( local.tp != NULL && local.tp != NIL && isAlive local.tp && local.tp.classname == "Player" ){
+						local.fwd = angles_toforward local.tp.viewangles
+						local.dir = local.a.origin - local.tp.origin
+						local.dl = vector_length( local.dir )
+						if( local.dl > 1 ){
+							local.dirx = local.dir[0] / local.dl
+							local.diry = local.dir[1] / local.dl
+							local.dot = ( local.fwd[0] * local.dirx ) + ( local.fwd[1] * local.diry )
+							if( local.dot < 0.3 ){ local.flanked = local.flanked + 1 }
+						}
+					}
+				}
+			}
+			println( "^~^~^ AIBEHAV alive=" + local.alive + " engaging=" + local.engaging + " moving=" + local.moving + " staticCombat=" + local.staticCombat + " flanked=" + local.flanked + " | aggr=" + local.r_aggr + " cover=" + local.r_cover + " flank=" + local.r_flank + " prone=" + local.r_prone + " none=" + local.r_none )
+			if( getcvar( "coop_aiBehav" ) == "2" ){
+				iprintlnbold( "AI  alive:" + local.alive + "  moving:" + local.moving + "  static:" + local.staticCombat + "   [aggr:" + local.r_aggr + " cover:" + local.r_cover + " flank:" + local.r_flank + "]" )
+			}
+		}
+
+		// ---- every 8s: cumulative-displacement window (the reliable movement metric) + reset ----
+		if( ( local.tick % 8 ) == 0 ){
+			local.engMoved = 0
+			local.reposition = 0
+			local.totalDist = 0
+			for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+				local.a = local.arr[local.i]
+				if( local.a == NIL || local.a == NULL ){ continue }
+				if( local.a.coop_trkDist != NIL && local.a.coop_trkDist > 8 ){
+					local.engMoved++
+					local.totalDist = local.totalDist + local.a.coop_trkDist
+					if( local.a.coop_trkDist > 150 ){ local.reposition++ }
+				}
+				if( local.a != NULL ){ local.a.coop_trkDist = 0 }
+			}
+			local.avg = 0
+			if( local.engMoved > 0 ){ local.avg = int( local.totalDist / local.engMoved ) }
+			println( "^~^~^ AIBEHAV2 window=8s engagedMoved=" + local.engMoved + " repositioned=" + local.reposition + " totalDist=" + int( local.totalDist ) + " avgDist=" + local.avg )
+		}
+	}
+}end

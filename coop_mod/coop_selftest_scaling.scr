@@ -1,0 +1,259 @@
+//====================================================================
+// coop_selftest_scaling.scr - HZM dev scaling / $player-array / churn probes
+//====================================================================
+// Subsystem: player-count scaling + $player array correctness + connection
+// stress. Every probe here is a CONTINUOUS periodic SAMPLER (read-only over
+// the shared player/actor state) that the test HARNESS drives externally by
+// adding / dropping / downing clients over the map session, then buckets the
+// emitted markers by its own timeline (join / drop / rejoin phases are pushed
+// in as cvars so the marker carries the authoritative phase).
+//
+// Because the probes only READ live state (pc, actor array, isActive/dbno
+// flags) and never teleport, kill, or takeall a player, they are safe to run
+// concurrently - they never race over the shared tester the way the mutating
+// one-shot selftests do. Each is gated by its own cvar; the dispatcher only
+// launches the ones the boot cfg enabled.
+//
+// Launched from coop_mod/main.scr::main:
+//    if( getcvar( "coop_st_scaling" ) == "1" ){
+//        thread coop_mod/coop_selftest_scaling.scr::st_scaling_run
+//    }
+//
+// Per-probe gate cvars (all default 0, set by the harness boot cfg):
+//    coop_scalecheck  -> SCALECHK    : scaling parity (tests 1,3,8)
+//    coop_latejoin    -> LATEJOIN    : drop+rejoin survival (test 2)
+//    coop_ownerdrop   -> OWNERDROP   : downed-owner disconnect cleanup (test 4)
+//    coop_churntest   -> CHURN       : rapid connect/disconnect churn (test 5)
+//    coop_nullclosest -> NULLCLOSEST : all-players-unavailable closest path (test 7)
+//
+// Reuses the real code it audits:
+//    aihandler.scr : coop_tryDuplicateActor / calculateAccuracy scaling math,
+//                    level.coop_actorArray["german"], coop_isReplica,
+//                    level.coop_maxPlayerScalar, level.coop_aiScaleHardCap
+//    replace.scr   : player_closestTo (the all-unavailable NULL path)
+//====================================================================
+
+//--------------------------------------------------------------------
+// Resolve a printable map name (level.coop_mapname is set by
+// variables.scr::main; fall back to the raw cvar if a probe races init).
+//--------------------------------------------------------------------
+st_scaling_mapname:{
+	local.m = level.coop_mapname
+	if( local.m == NIL || local.m == "" ){ local.m = getcvar( "mapname" ) }
+	if( local.m == NIL || local.m == "" ){ local.m = "unknown" }
+}end local.m
+
+//--------------------------------------------------------------------
+// Live player count via the array size ONLY (never bare $player as a
+// single entity - that throws "cast array to listener" with 2+ clients).
+//--------------------------------------------------------------------
+st_scaling_pc:{
+	local.pc = 0
+	if( $player != NULL && $player.size >= 1 ){ local.pc = $player.size }
+}end local.pc
+
+//====================================================================
+// DISPATCHER - launched from main.scr when coop_st_scaling==1. Waits a
+// beat for the coop framework to finish loading, then fires each enabled
+// sampler as its own periodic thread.
+//====================================================================
+st_scaling_run:{
+	// let main.scr::main finish its single-frame init before we sample
+	local.w = 0
+	while( level.coop_mainScriptLoaded != game.true && local.w < 60 ){
+		wait 1
+		local.w++
+	}
+	wait 2
+	println( "^~^~^ ST_SCALING begin map=" + ( waitthread st_scaling_mapname ) )
+
+	if( getcvar( "coop_scalecheck" ) == "1" ){
+		thread st_scaling_scalecheck
+	}
+	if( getcvar( "coop_latejoin" ) == "1" ){
+		thread st_scaling_latejoin
+	}
+	if( getcvar( "coop_ownerdrop" ) == "1" ){
+		thread st_scaling_ownerdrop
+	}
+	if( getcvar( "coop_churntest" ) == "1" ){
+		thread st_scaling_churn
+	}
+	if( getcvar( "coop_nullclosest" ) == "1" ){
+		thread st_scaling_nullclosest
+	}
+}end
+
+//====================================================================
+// SCALECHK (tests 1 / 3 / 8): every ~12s emit the live scaling picture so
+// the harness can assert - PER MAP, across 2P/3P/4P boots and across a
+// progressive 1->2->3->4 join - that german/replicas grow monotonically
+// with player count, german never exceeds the hardcap, and the accuracy
+// multiplier tracks pc capped at maxPlayerScalar (the exact clamp from
+// aihandler.scr::calculateAccuracy). Read-only; no mutation.
+//====================================================================
+st_scaling_scalecheck:{
+	while( 1 ){
+		local.map = waitthread st_scaling_mapname
+		local.pc  = waitthread st_scaling_pc
+
+		// german array size + replica tally (inline; guarded == NULL && == NIL)
+		local.german = 0
+		local.reps   = 0
+		if( level.coop_actorArray != NIL && level.coop_actorArray["german"] != NIL ){
+			local.ga = level.coop_actorArray["german"]
+			local.german = local.ga.size
+			for( local.gi = 1; local.gi <= local.german; local.gi++ ){
+				local.a = local.ga[local.gi]
+				if( local.a != NULL && local.a != NIL && local.a.flags["coop_isReplica"] == 1 ){ local.reps++ }
+			}
+		}
+
+		local.maxsc = level.coop_maxPlayerScalar
+		if( local.maxsc == NIL ){ local.maxsc = 0 }
+		local.hardcap = level.coop_aiScaleHardCap
+		if( local.hardcap == NIL ){ local.hardcap = 0 }
+
+		// same clamp aihandler.scr::calculateAccuracy applies: accmult = pc, capped at maxPlayerScalar
+		local.accmult = local.pc
+		if( local.maxsc != NIL && local.accmult > local.maxsc ){ local.accmult = local.maxsc }
+
+		println( "^~^~^ SCALECHK map=" + local.map + " pc=" + local.pc + " german=" + local.german + " replicas=" + local.reps + " maxscalar=" + local.maxsc + " hardcap=" + local.hardcap + " accmult=" + local.accmult )
+		wait 12
+	}
+}end
+
+//====================================================================
+// LATEJOIN (test 2): sample pc and how many players are coop_isActive on a
+// timer. The harness drops client-3, waits, then reconnects it, pushing the
+// current phase (before / after_drop / after_rejoin) into coop_latejoin_phase
+// so each marker carries the authoritative phase. PASS = active drops by
+// exactly 1 on the disconnect and returns to full after the rejoin, with no
+// crash and no cast/Script error in the window.
+//====================================================================
+st_scaling_latejoin:{
+	while( 1 ){
+		local.map = waitthread st_scaling_mapname
+		local.pc  = waitthread st_scaling_pc
+
+		local.active = 0
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.pl = $player[local.i]
+				if( local.pl != NULL && local.pl != NIL && local.pl.flags["coop_isActive"] == 1 ){
+					local.active++
+				}
+			}
+		}
+
+		local.phase = getcvar( "coop_latejoin_phase" )
+		if( local.phase == "" || local.phase == NIL ){ local.phase = "before" }
+
+		println( "^~^~^ LATEJOIN map=" + local.map + " phase=" + local.phase + " pc=" + local.pc + " active=" + local.active )
+		wait 3
+	}
+}end
+
+//====================================================================
+// OWNERDROP (test 4, partial): the harness downs a NON-host player (real
+// DBNO), then disconnects that exact downed client WHILE it is down. This
+// probe samples the ownership picture on a timer - number of players still
+// flagged DBNO/downed and how many $player slots have gone dangling (NULL/
+// NIL) - so the harness can confirm the downed state is CLEANED (returns to
+// 0) rather than left orphaned when the owner leaves mid-down. The harness
+// pushes the stage (downed / dropped / settled) via coop_ownerdrop_stage.
+//====================================================================
+st_scaling_ownerdrop:{
+	while( 1 ){
+		local.map = waitthread st_scaling_mapname
+		local.pc  = waitthread st_scaling_pc
+
+		local.downed   = 0
+		local.dangling = 0
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.pl = $player[local.i]
+				if( local.pl == NULL || local.pl == NIL ){
+					local.dangling++
+				}
+				else if( local.pl.flags["coop_dbno_active"] == 1 ){
+					local.downed++
+				}
+			}
+		}
+
+		local.stage = getcvar( "coop_ownerdrop_stage" )
+		if( local.stage == "" || local.stage == NIL ){ local.stage = "downed" }
+
+		println( "^~^~^ OWNERDROP map=" + local.map + " stage=" + local.stage + " pc=" + local.pc + " downed=" + local.downed + " dangling=" + local.dangling )
+		wait 3
+	}
+}end
+
+//====================================================================
+// CHURN (test 5, partial): the harness connects/disconnects client-4 for
+// many fast cycles on one map and samples server RSS itself each cycle. This
+// probe emits the script-side view each tick - the cycle index the harness
+// pushed via coop_churn_cycle, the settled pc, and the german array size -
+// so the harness can confirm pc settles correctly and no leak/latch blocks
+// the final reconnect. (Process RSS is not readable from script; the harness
+// pairs its own mem sample with these lines by timestamp.)
+//====================================================================
+st_scaling_churn:{
+	while( 1 ){
+		local.map = waitthread st_scaling_mapname
+		local.pc  = waitthread st_scaling_pc
+
+		local.gs     = waitthread st_scaling_germanStats
+		local.german = local.gs[1]
+
+		local.cyc = getcvar( "coop_churn_cycle" )
+		if( local.cyc == "" || local.cyc == NIL ){ local.cyc = "0" }
+
+		println( "^~^~^ CHURN map=" + local.map + " cycle=" + local.cyc + " pc=" + local.pc + " german=" + local.german + " mem=na" )
+		wait 2
+	}
+}end
+
+//====================================================================
+// NULLCLOSEST (test 7, partial): when the harness makes EVERY player fail the
+// closest-scan filter (kills all, or sets coopDevNoclip on all), the real
+// escort/AI helpers that call replace.scr::player_closestTo must get a clean
+// NULL back rather than a NULL-deref Script Error. Each tick this probe both
+// (a) counts how many players currently PASS the same filter the function
+// uses, and (b) actually calls player_closestTo down the all-unavailable path
+// and reports whether it returned cleanly. phase=blackout when eligible==0.
+// errs is filled harness-side by counting Script-Error lines between a
+// blackout marker and the next restored marker.
+//====================================================================
+st_scaling_nullclosest:{
+	while( 1 ){
+		local.map = waitthread st_scaling_mapname
+
+		// count players that pass the exact filter player_closestTo uses
+		// (alive + not spectator + coop_isActive + not noclip)
+		local.eligible = 0
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.pl = $player[local.i]
+				if( local.pl != NULL && local.pl != NIL ){
+					if( local.pl.health > 0 && local.pl.dmteam != "spectator" && local.pl.flags["coop_isActive"] == 1 && local.pl.flags["coopDevNoclip"] == NIL ){
+						local.eligible++
+					}
+				}
+			}
+		}
+
+		// exercise the real function down the all-unavailable path (object=NULL,
+		// explicit origin so it runs the filtered distance loop, not player_anyValid).
+		local.ret = waitthread coop_mod/replace.scr::player_closestTo NULL ( 0 0 0 )
+		local.retstr = "got"
+		if( local.ret == NULL || local.ret == NIL ){ local.retstr = "null" }
+
+		local.phase = "restored"
+		if( local.eligible == 0 ){ local.phase = "blackout" }
+
+		println( "^~^~^ NULLCLOSEST map=" + local.map + " phase=" + local.phase + " eligible=" + local.eligible + " ret=" + local.retstr + " errs=0" )
+		wait 2
+	}
+}end

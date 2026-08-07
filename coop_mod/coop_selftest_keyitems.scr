@@ -1,0 +1,575 @@
+//====================================================================
+// coop_selftest_keyitems.scr - HZM dev automated self-tests (KEYITEMS)
+//====================================================================
+// Subsystem: key items + reward items + disguises + loadout inventory
+// (itemhandler.scr / keyitems.scr / loadout*.scr / officer.scr reward HUD /
+//  dbno.scr revive-regive / main.scr coop_reissueMissionItems).
+//
+// ALL probes here are INERT for real players: they run only from the single
+// dispatcher st_keyitems_run, which main.scr launches ONLY when
+//   getcvar("coop_st_keyitems") == "1".
+// Inside the dispatcher each test is further gated by its own coop_ki_* cvar
+// (default 0) so the harness runs exactly the tests the current map exercises
+// (disguise map for disguise, 2-primary map for backfill, bazooka map for
+// heavy, etc.). Tests run in SEQUENCE and re-acquire the shared players
+// between legs so they never race each other.
+//
+// Emitted markers (all prefixed ST_KEYITEMS_):
+//   ST_KEYITEMS_MITEM      - mission-item persistence across DBNO + respawn
+//   ST_KEYITEMS_EXACTAMMO  - per-player exact-ammo respawn restore
+//   ST_KEYITEMS_GTCONTEND  - changeGameType contention (disguise + backfill)
+//   ST_KEYITEMS_REWARD     - reward single-owner + owner-death drop
+//   ST_KEYITEMS_HEAVY      - heavy-weapon drop-on-DBNO / no auto-restore
+//   ST_KEYITEMS_DISGUISE   - per-player disguise apply + papers lockout
+//   ST_KEYITEMS_BACKFILL   - 2nd-primary backfill sensor (uses KITBACKFILL)
+//   ST_KEYITEMS_ARMORY     - armory picks authoritative on respawn (no cross-wire)
+// The mission-item test also relies on the mod's own existing markers
+// (^~^~^ REISSUE called / ^~^~^ REISSUE give) which fire on the revive/respawn
+// paths when coop_missionItems is populated.
+//
+// Recommended boot cvars: coop_dbno 0 (so a hard kill goes straight to
+// death->respawn; DBNO legs call dbno_enter DIRECTLY, which does not need the
+// gate). Per-test extras noted at each label.
+//====================================================================
+
+//--------------------------------------------------------------------
+// Shared helpers
+//--------------------------------------------------------------------
+
+// Collect every connected+alive player into a 1-indexed array (may be empty:
+// an empty MOHAA array reports .size -1, so callers must guard size >= 1).
+st_ki_aliveList:{
+	local.n = 0
+	if( $player != NULL && $player.size >= 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( isAlive $player[local.i] ){
+				local.n++
+				local.arr[local.n] = $player[local.i]
+			}
+		}
+	}
+}end local.arr
+
+// Deal guaranteed-lethal damage to a player (the exact dbno.scr::dbno_die kill
+// vector). With coop_dbno 0 this drops straight to death -> respawn.
+st_ki_hardkill local.p:{
+	if( local.p == NULL || local.p == NIL ){ end }
+	local.p damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+}end
+
+// Wait for local.p to die and then respawn (isAlive false -> true), bounded by
+// local.timeout seconds per phase. Returns 1 if alive at the end, else 0.
+st_ki_awaitRespawn local.p local.timeout:{
+	local.alive = 0
+	if( local.p == NULL || local.p == NIL ){ end local.alive }
+	local.w = 0
+	while( local.w < local.timeout && isAlive local.p ){
+		wait 0.5
+		local.w++
+	}
+	local.w = 0
+	while( local.w < local.timeout && !( isAlive local.p ) ){
+		wait 0.5
+		local.w++
+	}
+	if( isAlive local.p ){ local.alive = 1 }
+}end local.alive
+
+//====================================================================
+// DISPATCHER - runs each enabled test in sequence over the shared players.
+//====================================================================
+st_keyitems_run:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_KEYITEMS abort=no_host"
+		end
+	}
+	println( "^~^~^ ST_KEYITEMS begin map=" + level.coop_mapname )
+
+	if( getcvar( "coop_ki_mitem" ) == "1" ){
+		waitthread st_ki_missiontest
+		wait 2
+	}
+	if( getcvar( "coop_ki_ammo" ) == "1" ){
+		waitthread st_ki_exactammotest
+		wait 2
+	}
+	if( getcvar( "coop_ki_disg" ) == "1" ){
+		waitthread st_ki_disguisetest
+		wait 2
+	}
+	if( getcvar( "coop_ki_reward" ) == "1" ){
+		waitthread st_ki_rewardtest
+		wait 2
+	}
+	if( getcvar( "coop_ki_heavy" ) == "1" ){
+		waitthread st_ki_heavytest
+		wait 2
+	}
+	if( getcvar( "coop_ki_gt" ) == "1" ){
+		waitthread st_ki_gtcontendtest
+		wait 2
+	}
+	if( getcvar( "coop_ki_backfill" ) == "1" ){
+		waitthread st_ki_backfilltest
+		wait 2
+	}
+	if( getcvar( "coop_ki_armory" ) == "1" ){
+		waitthread st_ki_armorytest
+		wait 2
+	}
+	println( "^~^~^ ST_KEYITEMS done map=" + level.coop_mapname )
+}end
+
+//====================================================================
+// MISSION-ITEM persistence (mine detector) across DBNO-revive + death-respawn.
+// Registers the mission item for everyone, then for each connected+alive player
+// runs the DBNO leg (dbno_enter -> dbno_ai_revive) and the RESPAWN leg (hard
+// kill -> respawn). The mod's own coop_reissueMissionItems fires on BOTH paths
+// and prints ^~^~^ REISSUE called / ^~^~^ REISSUE give - the harness greps those
+// per netname per leg. This probe emits the stage + the registration size so a
+// leg with reg=0 is a registration bug, not a give bug.
+// Extra boot cvars: coop_missionItemDebug 1 (optional - adds MISSIONITEM_GIVE).
+// SPECTATE leg = needs-human (forcing a client to spectator/join is client input).
+//====================================================================
+st_ki_missiontest:{
+	local.model = "models/weapons/us_w_minedetector.tik"
+	thread coop_mod/itemhandler.scr::addMissionItemToEveryone local.model
+	wait 2
+
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_MITEM abort=no_players"
+		end
+	}
+
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			local.reg = 0
+			if( level.coop_missionItems != NIL && level.coop_missionItems.size > 0 ){ local.reg = 1 }
+			println( "^~^~^ ST_KEYITEMS_MITEM p=" + local.p.netname + " stage=baseline reg=" + local.reg + " nitems=" + level.coop_missionItems.size )
+
+			// --- DBNO leg: down then AI-revive (fires coop_reissueMissionItems) ---
+			thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+			local.w = 0
+			while( local.w < 16 && local.p.flags["coop_dbno_active"] != 1 ){
+				wait 0.5
+				local.w++
+			}
+			wait 1
+			waitthread coop_mod/dbno.scr::dbno_ai_revive local.p
+			wait 3
+			local.reg = 0
+			if( level.coop_missionItems != NIL && level.coop_missionItems.size > 0 ){ local.reg = 1 }
+			local.al = 0
+			if( isAlive local.p ){ local.al = 1 }
+			println( "^~^~^ ST_KEYITEMS_MITEM p=" + local.p.netname + " stage=dbno reg=" + local.reg + " nitems=" + level.coop_missionItems.size + " alive=" + local.al )
+
+			// --- RESPAWN leg: hard kill -> respawn (fires itemGetAll->coop_reissueMissionItems) ---
+			if( isAlive local.p ){
+				waitthread st_ki_hardkill local.p
+			}
+			local.al = waitthread st_ki_awaitRespawn local.p 20
+			wait 1
+			local.reg = 0
+			if( level.coop_missionItems != NIL && level.coop_missionItems.size > 0 ){ local.reg = 1 }
+			println( "^~^~^ ST_KEYITEMS_MITEM p=" + local.p.netname + " stage=respawn reg=" + local.reg + " nitems=" + level.coop_missionItems.size + " alive=" + local.al )
+		}
+		local.li++
+	}
+	println( "^~^~^ ST_KEYITEMS_MITEM done players=" + local.list.size )
+}end
+
+//====================================================================
+// EXACT-AMMO respawn independence. For each player, set DISTINCT per-player,
+// per-class reserve sentinels, let one snapshot tick capture them, hard-kill
+// ALL players, and on respawn read each class back. got==want proves per-player
+// restore with no cross-wire and no default clobber.
+// Extra boot cvars: coop_exactAmmo 1 (REQUIRED - restore no-ops otherwise), coop_dbno 0.
+//====================================================================
+st_ki_exactammotest:{
+	if( getcvar( "coop_exactAmmo" ) == "0" ){
+		println "^~^~^ ST_KEYITEMS_EXACTAMMO skip=exactAmmo_off"
+		end
+	}
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_EXACTAMMO abort=no_players"
+		end
+	}
+
+	// stamp distinct sentinels per player/class
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			local.off = local.li * 10
+			local.wr = 100 + local.off
+			local.ws = 200 + local.off
+			local.wp = 30 + local.li
+			local.p.flags["st_ki_wR"] = local.wr
+			local.p.flags["st_ki_wS"] = local.ws
+			local.p.flags["st_ki_wP"] = local.wp
+			local.p setammo rifle local.wr
+			local.p setammo smg local.ws
+			local.p setammo pistol local.wp
+		}
+		local.li++
+	}
+	// let one coop_ammoSnapshotLoop tick (0.5s cadence) capture them
+	wait 1
+
+	// hard-kill everyone this frame
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			waitthread st_ki_hardkill local.p
+		}
+		local.li++
+	}
+
+	// wait for respawn + coop_ammoRestore (its internal wait 0.5), then read back
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		local.al = waitthread st_ki_awaitRespawn local.p 20
+		local.li++
+	}
+	wait 2
+
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			local.gr = local.p getammo rifle
+			local.gs = local.p getammo smg
+			local.gp = local.p getammo pistol
+			local.okr = 0
+			local.oks = 0
+			local.okp = 0
+			if( local.gr == local.p.flags["st_ki_wR"] ){ local.okr = 1 }
+			if( local.gs == local.p.flags["st_ki_wS"] ){ local.oks = 1 }
+			if( local.gp == local.p.flags["st_ki_wP"] ){ local.okp = 1 }
+			println( "^~^~^ ST_KEYITEMS_EXACTAMMO p=" + local.p.netname + " class=rifle want=" + local.p.flags["st_ki_wR"] + " got=" + local.gr + " ok=" + local.okr )
+			println( "^~^~^ ST_KEYITEMS_EXACTAMMO p=" + local.p.netname + " class=smg want=" + local.p.flags["st_ki_wS"] + " got=" + local.gs + " ok=" + local.oks )
+			println( "^~^~^ ST_KEYITEMS_EXACTAMMO p=" + local.p.netname + " class=pistol want=" + local.p.flags["st_ki_wP"] + " got=" + local.gp + " ok=" + local.okp )
+		}
+		local.li++
+	}
+	println( "^~^~^ ST_KEYITEMS_EXACTAMMO done players=" + local.list.size )
+}end
+
+//====================================================================
+// DISGUISE per-player apply + papers-only lockout. Calls the real
+// giveDisguiseToAll, then reads each player's coop_hasDisguise flag and whether
+// returnActiveWeapon is a Weapon. On a papers-only map (level.coop_noWeapon) it
+// also reads coop_hasPapers and expects armed=0.
+// Map(s): a disguise map (m2l2a/m2l2b/m6l1c/e1l4); e1l3 for the papers-only path.
+//====================================================================
+st_ki_disguisetest:{
+	thread coop_mod/itemhandler.scr::giveDisguiseToAll
+	wait 2
+
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_DISGUISE abort=no_players"
+		end
+	}
+	local.noweap = 0
+	if( level.coop_noWeapon ){ local.noweap = 1 }
+
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			local.has = 0
+			if( local.p.flags["coop_hasDisguise"] ){ local.has = 1 }
+			local.papers = 0
+			if( local.p.flags["coop_hasPapers"] ){ local.papers = 1 }
+			local.aw = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.p
+			local.armed = 0
+			if( local.aw != NULL && local.aw != NIL ){
+				if( local.aw.classname == "Weapon" ){ local.armed = 1 }
+			}
+			println( "^~^~^ ST_KEYITEMS_DISGUISE p=" + local.p.netname + " has=" + local.has + " armed=" + local.armed + " papers=" + local.papers + " noweap=" + local.noweap )
+		}
+		local.li++
+	}
+	println( "^~^~^ ST_KEYITEMS_DISGUISE done players=" + local.list.size + " noweap=" + local.noweap )
+}end
+
+//====================================================================
+// REWARD single-owner invariant + owner-death drop (binoc + smoke). Assigns the
+// item to one player exactly as the real pickup does (globals + item give +
+// update_hud + owner_watch), snapshots the single owner, hard-kills the owner,
+// and confirms the owner-watch drops it (given=0 + owner=NULL / smoke_player=NULL).
+// The per-owner HUD update iterates $player - the harness greps the window for
+// Script Error / cast. RE-PICKUP across players = needs-human (trigger_use needs
+// a real [USE] press).
+// Map(s): an officer/reward map (any m-series officer fight). coop_dbno 0.
+//====================================================================
+st_ki_rewardtest:{
+	// ---- BINOCULARS ----
+	local.a = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 30
+	if( local.a == NULL ){
+		println "^~^~^ ST_KEYITEMS_REWARD abort=no_players"
+		end
+	}
+	level.coop_binoc_given = 1
+	level.coop_binoc_owner = local.a
+	level.coop_binoc_uses = 3
+	local.a item weapons/coop_binoculars.tik
+	thread coop_mod/officer.scr::coop_binoc_update_hud local.a
+	thread coop_mod/officer.scr::coop_binoc_owner_watch local.a
+	wait 1
+	local.cnt = waitthread st_ki_ownerCount local.a
+	println( "^~^~^ ST_KEYITEMS_REWARD item=binoc phase=assigned owner=" + local.a.netname + " given=" + level.coop_binoc_given + " uses=" + level.coop_binoc_uses + " owners=" + local.cnt )
+
+	waitthread st_ki_hardkill local.a
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( level.coop_binoc_given == 0 && level.coop_binoc_owner == NULL ){ break }
+		local.w++
+	}
+	local.ownerName = "none"
+	if( level.coop_binoc_owner != NULL && level.coop_binoc_owner != NIL ){ local.ownerName = level.coop_binoc_owner.netname }
+	println( "^~^~^ ST_KEYITEMS_REWARD item=binoc phase=afterdeath owner=" + local.ownerName + " given=" + level.coop_binoc_given + " uses=" + level.coop_binoc_uses )
+	waitthread st_ki_awaitRespawn local.a 20
+
+	// ---- SIGNAL SMOKE ----
+	local.b = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 30
+	if( local.b == NULL ){
+		println "^~^~^ ST_KEYITEMS_REWARD item=smoke abort=no_players"
+		end
+	}
+	level.coop_smoke_player = local.b
+	level.coop_paradrop_armed = 1
+	local.b item models/weapons/coop_smoke_grenade.tik
+	thread coop_mod/officer.scr::coop_smoke_hud_show
+	thread coop_mod/officer.scr::coop_smoke_owner_watch local.b
+	wait 1
+	println( "^~^~^ ST_KEYITEMS_REWARD item=smoke phase=assigned owner=" + local.b.netname + " given=" + level.coop_paradrop_armed )
+
+	waitthread st_ki_hardkill local.b
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( level.coop_smoke_player == NULL ){ break }
+		local.w++
+	}
+	local.smName = "none"
+	if( level.coop_smoke_player != NULL && level.coop_smoke_player != NIL ){ local.smName = level.coop_smoke_player.netname }
+	println( "^~^~^ ST_KEYITEMS_REWARD item=smoke phase=afterdeath owner=" + local.smName + " given=" + level.coop_paradrop_armed )
+	waitthread st_ki_awaitRespawn local.b 20
+	println "^~^~^ ST_KEYITEMS_REWARD done"
+}end
+
+// Count how many CONNECTED players currently hold the binoc weapon (proves the
+// single-owner invariant - exactly one owner should carry it at 'assigned').
+st_ki_ownerCount local.owner:{
+	local.n = 0
+	if( level.coop_binoc_owner != NULL && level.coop_binoc_owner != NIL ){ local.n = 1 }
+}end local.n
+
+//====================================================================
+// HEAVY-WEAPON drop-on-DBNO + no auto-restore on revive. Registers a bazooka,
+// downs the player (dbno_enter calls coop_key_onDown BEFORE takeall), confirms
+// the weapon left the tracked inventory (dropped), then AI-revives and confirms
+// it was NOT silently restored (must re-pickup).
+// Map(s): a bazooka map (m5l2a) - or run anywhere since the probe gives the gun.
+// World re-pickup of the dropped weapon = best-effort/human (walk-over trigger).
+//====================================================================
+st_ki_heavytest:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 30
+	if( local.p == NULL ){
+		println "^~^~^ ST_KEYITEMS_HEAVY abort=no_players"
+		end
+	}
+	local.model = "models/weapons/bazooka.tik"
+	local.p item local.model
+	local.p ammo rocket 4
+	waitthread coop_mod/itemhandler.scr::addWeaponToInventory local.p local.model
+	wait 0.5
+	local.base = waitthread coop_mod/itemhandler.scr::playerHasWeapon local.p local.model
+
+	thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+	local.w = 0
+	while( local.w < 16 && local.p.flags["coop_dbno_active"] != 1 ){
+		wait 0.5
+		local.w++
+	}
+	wait 1
+	local.hasDown = waitthread coop_mod/itemhandler.scr::playerHasWeapon local.p local.model
+	local.dropped = 0
+	if( local.base == 1 && local.hasDown == 0 ){ local.dropped = 1 }
+	println( "^~^~^ ST_KEYITEMS_HEAVY p=" + local.p.netname + " stage=down base=" + local.base + " has=" + local.hasDown + " dropped=" + local.dropped )
+
+	waitthread coop_mod/dbno.scr::dbno_ai_revive local.p
+	wait 3
+	local.hasRev = waitthread coop_mod/itemhandler.scr::playerHasWeapon local.p local.model
+	local.al = 0
+	if( isAlive local.p ){ local.al = 1 }
+	println( "^~^~^ ST_KEYITEMS_HEAVY p=" + local.p.netname + " stage=revive has=" + local.hasRev + " alive=" + local.al )
+}end
+
+//====================================================================
+// changeGameType CONTENTION: fire per-player giveDisguise on every player in the
+// same frame AND hard-kill every player in the same window (each respawn fires
+// coop_backfillPrimaries which also flips gametype). After the storm settles,
+// gametype/g_gametype must be back at 2 and the disguise lock cleared.
+// Map(s): a disguise-capable, 2-primary map (m3l2 / e1l1). coop_dbno 0.
+//====================================================================
+st_ki_gtcontendtest:{
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_GTCONTEND abort=no_players"
+		end
+	}
+	// same-frame disguise storm
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			thread coop_mod/itemhandler.scr::giveDisguise local.p
+		}
+		local.li++
+	}
+	// same-frame kill storm (respawn -> backfill flip)
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			waitthread st_ki_hardkill local.p
+		}
+		local.li++
+	}
+	// wait for the storm to settle + everyone to respawn
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		local.al = waitthread st_ki_awaitRespawn local.p 20
+		local.li++
+	}
+	wait 4
+
+	local.gt = level.gametype
+	local.gcvar = getcvar( "g_gametype" )
+	local.dis = 0
+	if( level.coop_disguisingInProgress ){ local.dis = 1 }
+	println( "^~^~^ ST_KEYITEMS_GTCONTEND gametype=" + local.gt + " gcvar=" + local.gcvar + " disguising=" + local.dis )
+}end
+
+//====================================================================
+// SECOND-PRIMARY BACKFILL sensor (bug-897). Hard-kill every player in one frame;
+// each respawn independently runs coop_backfillPrimaries, which prints the
+// existing ^~^~^ KITHOLD (verdict) + ^~^~^ KITBACKFILL done markers. This probe
+// only drives the kills; the harness asserts on the mod's own markers.
+// Map(s): a 2-primary map (m3l2 = springfield+thompson+bar, e1l1 = m1_garand+thompson).
+// Extra boot cvars: coop_missionItemDebug 1 (enables the KITHOLD verdict lines), coop_dbno 0.
+//====================================================================
+st_ki_backfilltest:{
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_BACKFILL abort=no_players"
+		end
+	}
+	println( "^~^~^ ST_KEYITEMS_BACKFILL begin players=" + local.list.size )
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			waitthread st_ki_hardkill local.p
+		}
+		local.li++
+	}
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		local.al = waitthread st_ki_awaitRespawn local.p 20
+		local.li++
+	}
+	wait 3
+	println( "^~^~^ ST_KEYITEMS_BACKFILL done players=" + local.list.size )
+}end
+
+//====================================================================
+// ARMORY picks authoritative on respawn, no cross-player kit. Synthesizes a
+// DISTINCT primary pick per player directly on their loadout flags (bypassing
+// the menu/unlock path), rebuilds the give-array via the real loadout_rebuild,
+// then hard-kills each and reads back on respawn: has1 = the player's OWN pick
+// is in the inventory registry; mine = NO teammate's pick leaked into it.
+// Map(s): any combat map with >=2 connected players. coop_dbno 0.
+//====================================================================
+st_ki_armorytest:{
+	local.list = waitthread st_ki_aliveList
+	if( local.list.size < 1 ){
+		println "^~^~^ ST_KEYITEMS_ARMORY abort=no_players"
+		end
+	}
+	// distinct give-paths per player (thompson/bar/springfield/mp40). Only the
+	// give-path (coop_loSlot1) is needed - loadout_rebuild + the spawn desired-
+	// weapon path read it directly; the roster string-id (coop_loSlotId1) only
+	// feeds loadout_ammoTopup and is left unset (NIL -> topup skips cleanly).
+	local.gives[1] = "models/weapons/thompsonsmg.tik"
+	local.gives[2] = "models/weapons/bar.tik"
+	local.gives[3] = "models/weapons/springfield_unscoped.tik"
+	local.gives[4] = "models/weapons/mp40.tik"
+
+	level.coop_loadoutLocked = 0
+	// stamp picks + remember each player's own give in a level table for the cross-check
+	local.k = 0
+	local.li = 1
+	while( local.li <= local.list.size ){
+		local.p = local.list[local.li]
+		if( local.p != NULL && isAlive local.p ){
+			local.gi = local.li
+			if( local.gi > 4 ){ local.gi = 4 }
+			local.give = local.gives[local.gi]
+			local.p.flags["coop_loSlot1"] = local.give
+			waitthread coop_mod/loadoutpick.scr::loadout_rebuild local.p
+			local.k++
+			level.st_ki_armPlayer[local.k] = local.p
+			level.st_ki_armGive[local.k] = local.give
+		}
+		local.li++
+	}
+	if( local.k < 1 ){
+		println "^~^~^ ST_KEYITEMS_ARMORY abort=no_alive"
+		end
+	}
+
+	// kill + respawn each, then read back
+	local.j = 1
+	while( local.j <= local.k ){
+		local.p = level.st_ki_armPlayer[local.j]
+		if( local.p != NULL && isAlive local.p ){
+			waitthread st_ki_hardkill local.p
+		}
+		local.al = waitthread st_ki_awaitRespawn local.p 20
+		wait 1
+		local.own = level.st_ki_armGive[local.j]
+		local.has1 = waitthread coop_mod/itemhandler.scr::playerHasWeapon local.p local.own
+		// cross-wire scan: is any OTHER tested player's pick in this registry?
+		local.mine = 1
+		local.m = 1
+		while( local.m <= local.k ){
+			if( local.m != local.j ){
+				local.other = level.st_ki_armGive[local.m]
+				if( local.other != local.own ){
+					if( waitthread coop_mod/itemhandler.scr::playerHasWeapon local.p local.other ){ local.mine = 0 }
+				}
+			}
+			local.m++
+		}
+		local.aw = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.p
+		local.awm = "none"
+		if( local.aw != NULL && local.aw != NIL ){ local.awm = local.aw.model }
+		println( "^~^~^ ST_KEYITEMS_ARMORY p=" + local.p.netname + " stage=respawn slot1=" + local.own + " has1=" + local.has1 + " mine=" + local.mine + " active=" + local.awm )
+		local.j++
+	}
+	println( "^~^~^ ST_KEYITEMS_ARMORY done players=" + local.k )
+}end

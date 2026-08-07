@@ -94,6 +94,135 @@ coop_checkWoundedRetreat local.actor:{
 }end
 
 //-------------------------------------------------------------------------
+// TACTICAL RETREAT (coop_retreatEnable, the user's "they never retreat" ask). When an ENGAGED enemy is
+// moderately hurt - a mid-HP band ABOVE the terminal-limp floor - it may briefly BREAK CONTACT: fall back
+// ~500u straight away from its target, then re-engage from the new spot. Reads as the squad giving ground
+// under fire, distinct from coop_checkWoundedRetreat's terminal limp-to-medkit at <=30%. CRASH-SAFE: uses
+// ONLY the upright runto + enableEnemy bounce (no anim_scripted, no origin-stepping - all prone-crash risk
+// lives there). The pain pipeline stays ATTACHED (no nolongpain / no un-buffer), so a retreater is still
+// killable and, if it keeps bleeding past 30%, escalates naturally into the terminal limp. Threaded from
+// aihandler.scr::handlePain on the survival path, right beside coop_checkWoundedRetreat.
+//-------------------------------------------------------------------------
+coop_checkTacticalRetreat local.actor:{
+	if( getcvar "coop_retreatEnable" != "1" ){ end }		// default OFF until enabled (dev/test + opt-in)
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	// pain-streak: this runs on EVERY surviving hit (threaded from handlePain), so count consecutive hits
+	// <1.5s apart = under sustained fire. Lets the actor break contact even at full HP - important because a
+	// lethal shooter (the combat bot, or an accurate player) kills through the mid-HP band before it lingers.
+	if( local.actor.coop_painLast != NIL && ( level.time - local.actor.coop_painLast ) < 1.5 ){
+		if( local.actor.coop_painStreak == NIL ){ local.actor.coop_painStreak = 0 }
+		local.actor.coop_painStreak = local.actor.coop_painStreak + 1
+	} else {
+		local.actor.coop_painStreak = 1
+	}
+	local.actor.coop_painLast = level.time
+	// eligibility (mirror the wounded/count-scaling exclusions)
+	if( local.actor.team != "german" ){ end }				// enemies only
+	if( local.actor.flags["coop_limping"] == 1 ){ end }			// already in the terminal limp
+	if( local.actor.flags["coop_actorStopPainHandler"] == 1 ){ end }	// officer / VIP / bespoke-HP
+	if( local.actor.flags["coop_waveActor"] == 1 ){ end }			// officer reinforcement waves
+	if( local.actor.flags["coop_role"] == "prone" ){ end }			// posed prone shooter stays put
+	if( local.actor.flags["coop_retreating"] == 1 ){ end }			// already mid-retreat
+	if( level.coop_officer != NULL && local.actor == level.coop_officer ){ end }
+	if( local.actor.turret != NULL ){ end }					// turret gunners stay put
+	// per-actor cooldown (also throttles the roll so we don't re-decide on every bullet)
+	if( local.actor.coop_retreatNext != NIL && level.time < local.actor.coop_retreatNext ){ end }
+	// need a threat to fall back FROM: the actor's formal target-lock (self.enemy), else the nearest living
+	// player. An actor under sustained fire but not yet target-locked still knows where the bullets came
+	// from - and this makes retreat robust to transient NULL .enemy (and testable via the script damage-sim).
+	local.tp = local.actor.enemy
+	if( local.tp == NULL || local.tp == NIL || !isAlive local.tp ){
+		local.tp = NIL
+		local.npd = 999999
+		local.pi = 1
+		while( $player != NULL && local.pi <= $player.size ){
+			local.pl = $player[local.pi]
+			if( local.pl != NULL && isAlive local.pl ){
+				local.pd = vector_length( local.pl.origin - local.actor.origin )
+				if( local.pd < local.npd ){ local.npd = local.pd; local.tp = local.pl }
+			}
+			local.pi++
+		}
+	}
+	if( local.tp == NULL || local.tp == NIL ){ end }
+	if( !isAlive local.tp ){ end }
+	// TRIGGER = mid-HP band OR pain-streak (either one). frac defaults 1.0 so the DBG print is always valid.
+	local.frac = 1.0
+	local.trigger = 0
+	// (a) mid-HP band: below coop_retreatHpFrac (0.60) but above the terminal-limp floor (0.30, wounded owns)
+	local.hp = local.actor.flags["coop_actorActualHealth"]
+	local.maxhp = local.actor.flags["coop_woundedMaxHp"]
+	if( local.hp != NIL && local.hp > 0 && local.maxhp != NIL && local.maxhp > 0 ){
+		local.hi = getcvar "coop_retreatHpFrac"
+		if( local.hi == "" ){ local.hi = "0.60" }
+		local.hi = float( local.hi )
+		if( local.hi <= 0 ){ local.hi = 0.60 }
+		local.frac = local.hp / local.maxhp
+		if( local.frac <= local.hi && local.frac > 0.30 ){ local.trigger = 1 }
+	}
+	// (b) pain-streak: under sustained fire (N consecutive hits <1.5s apart) even at full HP
+	local.streakNeed = int( getcvar "coop_retreatStreak" )
+	if( local.streakNeed <= 0 ){ local.streakNeed = 3 }
+	if( local.actor.coop_painStreak != NIL && local.actor.coop_painStreak >= local.streakNeed ){ local.trigger = 1 }
+	if( local.trigger == 0 ){ end }						// neither trigger armed - not yet
+	// chance roll (brief cooldown on decline so a healthy stream of hits does not re-roll every frame)
+	local.chance = int( getcvar "coop_retreatChance" )
+	if( local.chance <= 0 ){ local.chance = 50 }
+	if( ( randomint 100 ) >= local.chance ){ local.actor.coop_retreatNext = level.time + 2; end }
+	// concurrency cap - individual bounds, never a whole-squad rout
+	local.cap = int( getcvar "coop_retreatMax" )
+	if( local.cap <= 0 ){ local.cap = 2 }
+	if( level.coop_retreatCount == NIL ){ level.coop_retreatCount = 0 }
+	if( level.coop_retreatCount >= local.cap ){ local.actor.coop_retreatNext = level.time + 2; end }
+	// ---- COMMIT: break contact, fall back, re-engage ----
+	local.actor.flags["coop_retreating"] = 1
+	local.actor.coop_painStreak = 0						// consumed - must build again before the next break
+	level.coop_retreatCount = level.coop_retreatCount + 1
+	if( getcvar "coop_aiBehav" != "0" && getcvar "coop_aiBehav" != "" ){
+		println( "^~^~^ RETREATDBG frac=" + local.frac + " active=" + level.coop_retreatCount )
+	}
+	local.cd = int( getcvar "coop_retreatCooldown" )
+	if( local.cd <= 0 ){ local.cd = 9 }
+	local.actor.coop_retreatNext = level.time + local.cd
+	// destination: straight back from the target, coop_retreatDist away, floor-snapped
+	local.dist = int( getcvar "coop_retreatDist" )
+	if( local.dist <= 0 ){ local.dist = 500 }
+	local.away = local.actor.origin - local.tp.origin
+	local.ax = local.away[0]
+	local.ay = local.away[1]
+	local.alen = ( local.ax * local.ax ) + ( local.ay * local.ay )
+	if( local.alen >= 1 ){
+		local.alen = sqrt( local.alen )
+		local.ux = local.ax / local.alen
+		local.uy = local.ay / local.alen
+		local.bx = ( 1 0 0 )
+		local.by = ( 0 1 0 )
+		local.offx = local.ux * local.dist
+		local.offy = local.uy * local.dist
+		local.dest = local.actor.origin + ( local.offx * local.bx ) + ( local.offy * local.by )
+		local.grn = exec coop_mod/officer.scr::coop_find_ground local.dest
+		if( local.grn != NIL ){ local.dest = local.grn }
+		local.actor.movedoneradius = 96
+		local.actor.enableEnemy = 0
+		local.actor forceactivate
+		local.actor runto local.dest
+		local.re = getcvar "coop_retreatReengage"
+		if( local.re == "" ){ local.re = "3.0" }
+		local.re = float( local.re )
+		if( local.re <= 0 ){ local.re = 3.0 }
+		wait local.re
+	}
+	// re-engage from the new position
+	if( local.actor != NULL && isAlive local.actor ){
+		local.actor.enableEnemy = 1
+		local.actor forceactivate
+		local.actor attackplayer
+	}
+	if( local.actor != NULL ){ local.actor.flags["coop_retreating"] = 0 }
+	if( level.coop_retreatCount != NIL && level.coop_retreatCount > 0 ){ level.coop_retreatCount = level.coop_retreatCount - 1 }
+}end
+
+//-------------------------------------------------------------------------
 // The limp-away mover: disengage -> pick the furthest medkit AWAY from the players -> walkto (poll +
 // re-issue) -> evacuate (fade + remove) on arrival. Releases the concurrency slot on EVERY exit path.
 //-------------------------------------------------------------------------

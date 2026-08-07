@@ -1,0 +1,229 @@
+//====================================================================
+// coop_selftest_triggers.scr - HZM dev automated self-tests: TRIGGERS
+//====================================================================
+// Subsystem: level triggers / gags / scripted scenes / event bus
+// (coop_mod/eventsystem.scr + coop_mod/replace.scr shims).
+//
+// ONE dev cvar gates everything: coop_st_triggers 1  ->  st_triggers_run
+// (threaded from coop_mod/main.scr::main). INERT for real players: the
+// cvar defaults 0 and is only set by the harness boot cfgs. Each test
+// runs in SEQUENCE (small waits between) so they never race over the
+// shared player, and emits unique "^~^~^ ST_TRIGGERS_*" machine lines.
+//
+// Reuses the shared helpers in coop_mod/coop_selftest.scr:
+//   selftest_findPlayer <timeout>  -> first ALIVE player or NULL
+//
+// Implemented (automatable, self-contained probes):
+//   EVTBUS  - event-bus N-subscriber fan-out release (synthetic)
+//   SAYLEN  - scene VO length-table structural coverage smoke
+//   SHIM    - replace.scr selector/guard contract fuzz (valid/NULL/NIL/array)
+//====================================================================
+
+//--------------------------------------------------------------------
+// Dispatcher. Launched once from main.scr when coop_st_triggers == 1.
+//--------------------------------------------------------------------
+st_triggers_run:{
+	println( "^~^~^ ST_TRIGGERS begin map=" + level.coop_mapname )
+
+	// Test 1: event-bus fan-out - fully synthetic, no player needed.
+	waitthread st_triggers_evtbus
+	wait 1
+
+	// Test 2: VO length-table smoke - no player needed.
+	waitthread st_triggers_saylen
+	wait 1
+
+	// Test 3: replace.scr shim/selector contract fuzz.
+	waitthread st_triggers_shim
+
+	println "^~^~^ ST_TRIGGERS done"
+}end
+
+//====================================================================
+// EVTBUS: K threads each park on 'game.waittill <evt>' (waitTillEvent),
+// a SINGLE 'game.event <evt>' (doEvent) fires, and every waiter must be
+// released. Runs K = 1,2,4,8 with a distinct event name each round so the
+// name-list must fully drain back to 0 after each fan-out.
+//====================================================================
+st_triggers_evtbus:{
+	local.counts[1] = 1
+	local.counts[2] = 2
+	local.counts[3] = 4
+	local.counts[4] = 8
+
+	for( local.c = 1; local.c <= local.counts.size; local.c++ ){
+		local.k   = local.counts[local.c]
+		local.evt = "st_trig_evt" + local.k
+
+		level.st_triggers_evtReleased = 0
+
+		// park K waiters
+		for( local.i = 1; local.i <= local.k; local.i++ ){
+			thread st_triggers_evtWaiter local.evt
+		}
+		wait 1.5		// let all K reach '$EventSlave waittill trigger'
+
+		// single fan-out release
+		thread coop_mod/eventsystem.scr::doEvent local.evt
+		wait 1.5		// let releases + clearEvent drain
+
+		local.rel = level.st_triggers_evtReleased
+		local.nl  = 0
+		if( level.coop_eventNameList != NIL ){
+			local.nl = level.coop_eventNameList.size
+		}
+		println( "^~^~^ ST_TRIGGERS_EVTBUS event=" + local.evt + " waiters=" + local.k + " released=" + local.rel + " namelist=" + local.nl )
+		wait 0.5
+	}
+}end
+
+//--------------------------------------------------------------------
+// One counted waiter: parks on the event, tallies its own release.
+//--------------------------------------------------------------------
+st_triggers_evtWaiter local.evt:{
+	waitthread coop_mod/eventsystem.scr::waitTillEvent local.evt
+	level.st_triggers_evtReleased = level.st_triggers_evtReleased + 1
+}end
+
+//====================================================================
+// SAYLEN: structural smoke on the say_wait/playsound_wait length table
+// (level.coop_soundLength[level.coop_language][alias]). If the language
+// sub-table is absent, EVERY scene say_wait falls to the fallback early
+// return. We confirm the table exists and that a fixed set of known-good
+// briefing aliases (populated in coop_mod/sound.scr) all resolve.
+// NOTE: MOHAA cannot enumerate string-keyed array keys, so a full per-map
+// alias miss-scan needs a harness-supplied alias manifest (see recipe).
+//====================================================================
+st_triggers_saylen:{
+	local.langStr = "none"
+	if( level.coop_language != NIL ){
+		local.langStr = "" + level.coop_language
+	}
+
+	local.tableok = 0
+	if( level.coop_soundLength != NIL ){
+		if( level.coop_language != NIL ){
+			if( level.coop_soundLength[level.coop_language] != NIL ){
+				local.tableok = 1
+			}
+		}
+	}
+
+	local.checked   = 0
+	local.missing   = 0
+	local.firstmiss = "none"
+
+	if( local.tableok == 1 ){
+		local.aliases[1] = "mb_101"
+		local.aliases[2] = "mb_103"
+		local.aliases[3] = "mb_104"
+		local.aliases[4] = "mb_106"
+		local.aliases[5] = "mb_204"
+		local.aliases[6] = "mb_205"
+
+		for( local.i = 1; local.i <= local.aliases.size; local.i++ ){
+			local.a   = local.aliases[local.i]
+			local.checked++
+			local.len = level.coop_soundLength[level.coop_language][local.a]
+			if( !local.len ){
+				local.missing++
+				if( local.firstmiss == "none" ){
+					local.firstmiss = local.a
+				}
+			}
+		}
+	}
+
+	println( "^~^~^ ST_TRIGGERS_SAYLEN lang=" + local.langStr + " tableok=" + local.tableok + " checked=" + local.checked + " missing=" + local.missing + " firstmiss=" + local.firstmiss )
+}end
+
+//====================================================================
+// SHIM: fuzz the replace.scr selector/guard shims that gags/triggers lean
+// on. Graceful selectors (player_closestTo) get valid / NULL / NIL / array
+// so any 'cast array to listener' throw surfaces; the error()-contract
+// touch shims (istouching/getToucher/isinside) get the VALID case only
+// (their NULL/NIL/array branches error BY DESIGN - firing them just spams
+// controlled error() lines, see recipe). Also asserts a returned player is
+// never dead/spectator (excl field). Each shim family runs in its own child
+// thread so an unexpected throw kills only that family, not the dispatcher.
+//====================================================================
+st_triggers_shim:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 60
+
+	local.e1 = spawn script_origin
+	local.e2 = spawn script_origin
+	if( local.p != NULL && local.p != NIL ){
+		local.e1.origin = local.p.origin
+		local.e2.origin = local.p.origin
+	}
+
+	waitthread st_triggers_shimClosest local.e1 local.e2
+	wait 0.3
+	waitthread st_triggers_shimTouch local.e1
+	wait 0.3
+	waitthread st_triggers_shimAny
+
+	local.e1 remove
+	local.e2 remove
+}end
+
+//--------------------------------------------------------------------
+// player_closestTo across valid / NULL / NIL / 2-entity-array (array is
+// the cast-risk case, run last).
+//--------------------------------------------------------------------
+st_triggers_shimClosest local.ent local.ent2:{
+	local.r = waitthread coop_mod/replace.scr::player_closestTo local.ent
+	waitthread st_triggers_shimReport "closestTo" "a" local.r
+
+	local.r = waitthread coop_mod/replace.scr::player_closestTo NULL
+	waitthread st_triggers_shimReport "closestTo" "b" local.r
+
+	local.r = waitthread coop_mod/replace.scr::player_closestTo
+	waitthread st_triggers_shimReport "closestTo" "c" local.r
+
+	local.arr[1] = local.ent
+	local.arr[2] = local.ent2
+	local.r = waitthread coop_mod/replace.scr::player_closestTo local.arr
+	waitthread st_triggers_shimReport "closestTo" "d" local.r
+}end
+
+//--------------------------------------------------------------------
+// error()-contract touch shims: VALID case only (a).
+//--------------------------------------------------------------------
+st_triggers_shimTouch local.ent:{
+	local.r = waitthread coop_mod/replace.scr::istouching local.ent
+	println( "^~^~^ ST_TRIGGERS_SHIM fn=istouching case=a ret=" + local.r + " excl=0" )
+
+	local.r = waitthread coop_mod/replace.scr::getToucher local.ent
+	waitthread st_triggers_shimReport "getToucher" "a" local.r
+
+	local.r = waitthread coop_mod/replace.scr::isinside local.ent
+	println( "^~^~^ ST_TRIGGERS_SHIM fn=isinside case=a ret=" + local.r + " excl=0" )
+}end
+
+//--------------------------------------------------------------------
+// Parameterless selectors: player_anyValid + player_numActive.
+//--------------------------------------------------------------------
+st_triggers_shimAny:{
+	local.r = waitthread coop_mod/replace.scr::player_anyValid
+	waitthread st_triggers_shimReport "anyValid" "a" local.r
+
+	local.n = waitthread coop_mod/replace.scr::player_numActive
+	println( "^~^~^ ST_TRIGGERS_SHIM fn=numActive case=a ret=" + local.n + " excl=0" )
+}end
+
+//--------------------------------------------------------------------
+// Emit a shim marker for an entity-returning selector, flagging excl=1 if
+// the returned player is dead or spectator (guarded NULL and NIL deref).
+//--------------------------------------------------------------------
+st_triggers_shimReport local.fn local.case local.r:{
+	local.excl = 0
+	local.retk = "NULL"
+	if( local.r != NULL && local.r != NIL ){
+		local.retk = "ent"
+		if( local.r.health <= 0 || local.r.dmteam == "spectator" ){
+			local.excl = 1
+		}
+	}
+	println( "^~^~^ ST_TRIGGERS_SHIM fn=" + local.fn + " case=" + local.case + " ret=" + local.retk + " excl=" + local.excl )
+}end

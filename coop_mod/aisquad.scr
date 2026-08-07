@@ -1,0 +1,169 @@
+//====================================================================
+// aisquad.scr - HZM coop SQUAD BRAIN (2026-07-24)
+//====================================================================
+// Makes German enemies fight as coordinated SQUADS instead of isolated
+// individuals. Gated coop_aiSquad (0=off default). Launched from main.scr
+// inside the coop_aiDynamic block.
+//
+// SB1 - CLUSTERING SUBSTRATE: every ~1.7s greedily cluster the live germans
+// (seed a cluster, absorb every live german within COOP_SQUAD_RADIUS, stamp
+// self.coop_squadId), and find each cluster's shared threat (the first
+// member's live enemy). Read-only bookkeeping - issues no moves itself.
+//
+// SB2 - ALERT PROPAGATION: for any ENGAGED cluster (>=1 member has a target),
+// every member that has NOT acquired a target yet is sent loud via the proven
+// aihandler go-loud path (attackplayer + favoriteenemy + forceactivate) on the
+// nearest targetable player - so the WHOLE squad activates + converges the
+// instant ONE member makes contact, instead of standing until each is
+// individually line-of-sighted. Cluster-radius-scoped + per-tick capped so it
+// can never cascade into a whole-map aggro stampede.
+//
+// Excludes actors another system owns (prone shooters, limpers, retreaters,
+// bespoke-HP/officer) from the alert so it never fights those movers.
+// Note: members are tracked by an explicit count (local.memN) rather than an
+// array reset - morlang has no empty-array literal ([] is a parse-killer).
+//====================================================================
+
+main:{
+	while( getcvar( "coop_aiSquad" ) == "1" ){
+		wait 1.7
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		local.radius = 900
+		local.r2 = local.radius * local.radius
+		local.alertCap = 12				// max go-loud alerts per tick (anti-stampede)
+
+		local.dbgC = 0					// clusters
+		local.dbgE = 0					// engaged clusters
+		local.dbgA = 0					// members alerted
+		local.dbgS = 0					// search moves issued
+
+		// reset the per-actor "already clustered this tick" marker
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a != NIL && local.a != NULL ){ local.a.coop_sqSeen = 0 }
+		}
+
+		local.sid = 0
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.seed = local.arr[local.i]
+			if( local.seed == NIL || local.seed == NULL ){ continue }
+			if( !isAlive local.seed ){ continue }
+			if( local.seed.coop_sqSeen == 1 ){ continue }
+
+			// ---- SB1: seed a new cluster + absorb nearby live germans ----
+			local.sid++
+			local.dbgC++
+			local.seed.coop_sqSeen = 1
+			local.seed.coop_squadId = local.sid
+			local.memN = 1
+			local.mem[1] = local.seed
+			for( local.j = local.i + 1; local.j <= local.arr.size; local.j++ ){
+				local.o = local.arr[local.j]
+				if( local.o == NIL || local.o == NULL ){ continue }
+				if( !isAlive local.o ){ continue }
+				if( local.o.coop_sqSeen == 1 ){ continue }
+				local.dx = local.o.origin[0] - local.seed.origin[0]
+				local.dy = local.o.origin[1] - local.seed.origin[1]
+				local.d2 = ( local.dx * local.dx ) + ( local.dy * local.dy )
+				if( local.d2 <= local.r2 ){
+					local.o.coop_sqSeen = 1
+					local.o.coop_squadId = local.sid
+					local.memN = local.memN + 1
+					local.mem[local.memN] = local.o
+				}
+			}
+
+			// ---- shared threat + stamp last-known on every engaged member (feeds the search pass) ----
+			local.threat = NULL
+			for( local.k = 1; local.k <= local.memN; local.k++ ){
+				local.m = local.mem[local.k]
+				if( local.m.enemy != NULL && local.m.enemy != NIL ){
+					if( isAlive local.m.enemy ){
+						if( local.threat == NULL ){ local.threat = local.m.enemy }
+						local.m.coop_lastKnown = local.m.enemy.origin
+					}
+				}
+			}
+			if( local.threat == NULL ){ continue }		// whole cluster idle - nothing to do
+
+			local.dbgE++
+
+			// ---- SB2: alert the un-engaged members of an engaged cluster ----
+			for( local.k = 1; local.k <= local.memN; local.k++ ){
+				if( local.dbgA >= local.alertCap ){ continue }
+				local.m = local.mem[local.k]
+				if( local.m.enemy != NULL && local.m.enemy != NIL ){ continue }	// already engaged
+				// leave actors another system owns alone
+				if( local.m.flags["coop_role"] == "prone" ){ continue }
+				if( local.m.flags["coop_limping"] == 1 ){ continue }
+				if( local.m.flags["coop_retreating"] == 1 ){ continue }
+				if( local.m.flags["coop_actorStopPainHandler"] == 1 ){ continue }
+				// go loud on the NEAREST targetable player (fair in 4P vs. ganging the one spotter)
+				local.tp = waitthread coop_mod/replace.scr::player_closestTargetable local.m
+				if( local.tp == NULL || local.tp == NIL ){ local.tp = local.threat }
+				if( local.tp == NULL || local.tp == NIL ){ continue }
+				local.m.coop_lastKnown = local.tp.origin		// for the Sprint-2 converge/search
+				local.m.enablePain = 1
+				local.m.flags["coop_isAttacking"] = game.true
+				local.m attackplayer
+				local.m favoriteenemy local.tp
+				local.m forceactivate
+				local.dbgA = local.dbgA + 1
+			}
+		}
+
+		// ---- SS1/SB4: converge on LAST-KNOWN position when contact is lost (kills instant-forget) ----
+		// A german that HAD a target (coop_lastKnown stamped) but no longer has one advances to where the
+		// player was last seen and sweeps it, instead of freezing at its post. Proven suspend->runto->reengage;
+		// runs only when the actor is NOT engaged (outside the plant band), so it obeys runto directly.
+		if( getcvar( "coop_aiSearch" ) == "1" ){
+			for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+				local.e = local.arr[local.i]
+				if( local.e == NIL || local.e == NULL ){ continue }
+				if( !isAlive local.e ){ continue }
+				if( local.e.coop_lastKnown == NIL ){ continue }			// never had contact
+				if( local.e.enemy != NULL && local.e.enemy != NIL ){ continue }	// still engaged - not searching
+				if( local.e.flags["coop_role"] == "prone" ){ continue }
+				if( local.e.flags["coop_limping"] == 1 ){ continue }
+				if( local.e.flags["coop_retreating"] == 1 ){ continue }
+				if( local.e.flags["coop_actorStopPainHandler"] == 1 ){ continue }
+				if( local.e.turret != NULL ){ continue }
+				if( local.e.coop_searchNext != NIL && level.time < local.e.coop_searchNext ){ continue }
+				local.lk = local.e.coop_lastKnown
+				local.dx = local.lk[0] - local.e.origin[0]
+				local.dy = local.lk[1] - local.e.origin[1]
+				local.d2 = ( local.dx * local.dx ) + ( local.dy * local.dy )
+				if( local.d2 < 40000 ){					// within ~200u: swept the spot, give up the search
+					local.e.coop_lastKnown = NIL
+					continue
+				}
+				// step toward the last-known spot (capped ~500u) via the proven suspend -> runto -> reengage
+				local.dist = sqrt( local.d2 )
+				local.step = 500
+				if( local.dist < local.step ){ local.step = local.dist }
+				local.ux = local.dx / local.dist
+				local.uy = local.dy / local.dist
+				local.bx = ( 1 0 0 )
+				local.by = ( 0 1 0 )
+				local.offx = local.ux * local.step
+				local.offy = local.uy * local.step
+				local.dest = local.e.origin + ( local.offx * local.bx ) + ( local.offy * local.by )
+				local.grn = exec coop_mod/officer.scr::coop_find_ground local.dest
+				if( local.grn != NIL ){ local.dest = local.grn }
+				local.e.coop_searchNext = level.time + 3
+				local.e.movedoneradius = 96
+				local.e.enableEnemy = 0
+				local.e runto local.dest
+				local.e forceactivate
+				thread coop_mod/aimaneuver.scr::aimaneuver_reengage local.e
+				local.dbgS = local.dbgS + 1
+			}
+		}
+
+		if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+			println( "^~^~^ SQUAD clusters=" + local.dbgC + " engaged=" + local.dbgE + " alerts=" + local.dbgA + " search=" + local.dbgS )
+		}
+	}
+}end

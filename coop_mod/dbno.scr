@@ -23,6 +23,8 @@ dbno_start local.player:{
 	local.player stufftext "set coop_dbnoView 0"
 
 	local.player.flags["coop_dbno_active"]       = NIL
+	//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+	if (local.player != NULL){ local.player coop_setdbno 0 }
 	local.player.flags["coop_dbno_dead"]         = NIL
 	local.player.flags["coop_dbno_elapsed"]      = 0
 	local.player.flags["coop_dbno_timer_actual"] = 0
@@ -98,11 +100,21 @@ dbno_monitor local.player:{
 
 		local.threshold = int( getcvar "coop_dbnoThreshold" )
 		if( local.threshold <= 0 ){ local.threshold = 250 }
+		// HZM coop [user 07-31] - per-map override, same pattern as level.coop_dbno_disabled (jeep
+		// maps). m3l1a's opening beach crossfire converges more simultaneous fire on an exposed
+		// player than most maps; a map can raise level.coop_dbnoThresholdOverride so it takes more
+		// cumulative damage to go down at all, on top of the mitigation while already down.
+		// NIL guard is required: this level var is only set by maps that opt in (m3l1a), so on every
+		// other map it reads 'none' and a bare '> 0' compare throws "binary '>' applied to
+		// incompatible types 'none' and 'int'" EVERY FRAME of the monitor loop - trilogy-wide spam.
+		if( level.coop_dbnoThresholdOverride != NIL && level.coop_dbnoThresholdOverride > 0 ){ local.threshold = level.coop_dbnoThresholdOverride }
 
 		if( local.cumulative >= local.threshold && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 && local.player.flags["coop_dbno_dead"] != 1 ){
 			local.cumulative = 0
 			local.player.flags["coop_dbno_cumulative"] = 0
 			local.player.flags["coop_dbno_active"] = 1
+			//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+			if (local.player != NULL){ local.player coop_setdbno 1 }
 			local.player.flags["coop_dbno_prev_health"] = local.curr_health
 			local.player healthonly 100
 
@@ -111,6 +123,8 @@ dbno_monitor local.player:{
 			if( local.hitclass == "head" && getcvar "coop_dbnoHitLocation" == "1" ){
 				println "^~^~^ DBNO death_headshot"
 				local.player.flags["coop_dbno_active"] = NIL
+				//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+				if (local.player != NULL){ local.player coop_setdbno 0 }
 				local.player.flags["coop_dbno_dead"]   = 1
 				local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
 			}
@@ -126,6 +140,8 @@ dbno_monitor local.player:{
 				end
 			}
 			local.player.flags["coop_dbno_active"] = 1
+			//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+			if (local.player != NULL){ local.player coop_setdbno 1 }
 			local.player.flags["coop_dbno_prev_health"] = 1
 			local.player healthonly 100
 			thread dbno_enter local.player local.hitclass
@@ -143,10 +159,19 @@ dbno_enter local.player local.hitclass:{
 	if( !isAlive local.player ){
 		println "^~^~^ DBNO death_outran"
 		local.player.flags["coop_dbno_active"] = NIL
+		//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+		if (local.player != NULL){ local.player coop_setdbno 0 }
 		local.player.flags["coop_dbno_dead"]   = 1
 		end
 	}
-	local.player health 100
+	//[bug-1243] healthonly, NOT health. Entity::EventSetHealth sets `max_health = health`
+	//(entity.cpp:1938), so `health 100` here was silently collapsing max_health from coop_health (750)
+	//down to 100 for the whole DBNO. The player then read as 100% HEALTHY while bleeding out, and
+	//every health-fraction consumer saw 1.0 - which is why blood trails never appeared while crawling:
+	//Sentient::TryDropBloodTrail's "wounded only" gate (health > max_health * 0.5) rejected the downed
+	//player before any of the trail logic ran. healthonly sets current health and leaves max_health
+	//alone, which is what this line always meant; the sibling calls at 47/107/130 already use it.
+	local.player healthonly 100
 
 	local.base_timer = int( getcvar "coop_dbnoTimer" )
 	if( local.base_timer <= 0 ){ local.base_timer = 60 }
@@ -158,6 +183,8 @@ dbno_enter local.player local.hitclass:{
 	}
 
 	local.player.flags["coop_dbno_active"]       = 1
+	//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+	if (local.player != NULL){ local.player coop_setdbno 1 }
 	local.player.flags["coop_dbno_timer_actual"] = local.actual_timer
 	local.player.flags["coop_dbno_elapsed"]      = 0
 	local.player.coop_wentDownMap                = level.coop_mapname	// disqualify from "no-down" campaign feats this map (challenges.scr::cc_award_clean)
@@ -222,6 +249,40 @@ dbno_enter local.player local.hitclass:{
 	local.player thread dbno_letgo_monitor
 	thread dbno_marker_manager local.player
 	thread dbno_corpse_monitor local.player
+	thread dbno_damage_mitigation local.player
+}end
+
+
+// HZM coop [user 07-31] - AI has ZERO awareness of the DBNO state (confirmed: no reference to
+// coop_dbno_active anywhere in aihandler.scr). Every enemy that can still see a downed player -
+// turrets, scripted set-piece damage (m3l1a mg42_damage_player), regular riflemen - keeps firing
+// at full effect against a player pinned at a fixed 100 HP, which is why "killed while down"
+// follows "down" within 1-2 seconds almost every time on a crowded map. Rather than intercept
+// every native/scripted damage source individually (fragile, easy to miss one), this watches the
+// player's health every frame while down and gives back most of any drop before it can reach 0 -
+// works uniformly against ALL sources since it operates on the result, not the cause. Death from
+// truly sustained/overwhelming fire is still possible; casual chip damage from 1-2 stray rounds
+// is not.
+//=========================================================================
+dbno_damage_mitigation local.player:{
+//=========================================================================
+	local.mitigate = getcvar "coop_dbnoDamageMitigation"
+	if( local.mitigate == "" ){ local.mitigate = 0.65 }
+
+	local.prev = local.player.health
+	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+		if( isAlive local.player ){
+			local.cur = local.player.health
+			local.dmg = local.prev - local.cur
+			if( local.dmg > 0 ){
+				local.newh = local.cur + ( local.dmg * local.mitigate )
+				if( local.newh > 100 ){ local.newh = 100 }
+				if( local.newh > 0 ){ local.player healthonly local.newh }
+			}
+			local.prev = local.player.health
+		}
+		waitframe
+	}
 }end
 
 
@@ -251,6 +312,8 @@ dbno_corpse_monitor local.player:{
 				local.player.flags["coop_dbno_corpseTime"]   = level.time
 				local.player.flags["coop_dbno_dead"]   = 1
 				local.player.flags["coop_dbno_active"] = NIL
+				//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+				if (local.player != NULL){ local.player coop_setdbno 0 }
 				println "^~^~^ DBNO death_killedWhileDown"
 			}
 			end
@@ -475,6 +538,8 @@ dbno_die local.player:{
 	println "^~^~^ DBNO death_bledout"
 	local.player.flags["coop_dbno_dead"]   = 1
 	local.player.flags["coop_dbno_active"] = NIL
+	//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+	if (local.player != NULL){ local.player coop_setdbno 0 }
 	local.player forcelegsstate DBNO_BLEEDOUT	//[213] final slump before the kill lands
 	wait 0.45
 	local.player modheight "stand"
@@ -596,7 +661,7 @@ dbno_teamrevive_monitor local.downed:{
 dbno_ai_revive local.player:{
 	if( local.player == NULL ){ end }
 	// [302] HZM XP - the smoke owner's medic saved someone: +25 support credit
-	if( level.coop_smoke_player != NULL && level.coop_smoke_player != local.player ){
+	if( level.coop_smoke_player != NULL && level.coop_smoke_player != NIL && level.coop_smoke_player != local.player ){
 		thread coop_mod/xp.scr::xp_award level.coop_smoke_player 25 "support"
 	}
 	if( local.player.flags["coop_dbno_active"] != 1 ){
@@ -610,6 +675,15 @@ dbno_ai_revive local.player:{
 	local.player.flags["coop_dbno_dead"]    = 1
 	local.player.flags["coop_dbno_healing"] = NIL
 	local.player.flags["coop_dbno_active"]  = NIL
+	//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+	if (local.player != NULL){ local.player coop_setdbno 0 }
+	//[bug-1236] Hooked HERE - immediately after the state flags flip and BEFORE the ihuddraw
+	//block - deliberately. Every revive in the log throws two "Failed execution of command
+	//ihuddraw_alpha/ihuddraw_string" errors, because this path clears HUD slots that were never
+	//created for it. Anything sequenced AFTER that block is hostage to whether a failed command
+	//aborts the running thread. `thread` spawns an independent thread, so re-hatting first means
+	//the helmet is restored even if the rest of the revive body dies partway.
+	thread coop_mod/helmet.scr::helmet_apply local.player
 
 	// Clear all DBNO + self-revive HUD elements (harmless if a slot wasn't drawn).
 	// Clear the DBNO HUD slots created on the way down (fade/countdown/crawl/heartbeat).
@@ -637,6 +711,10 @@ dbno_ai_revive local.player:{
 	local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
 	wait 0.1
+	//[user 2026-08-02] bug-1293 - same fix as the medkit self-revive: raise the snapshot guard BEFORE
+	//takeall zeroes the ammo pools, not later inside coop_ammoRestore. Otherwise a 0.5s snapshot tick
+	//in the gap saves ZERO as the down-moment reserve and the restore re-applies it.
+	local.player.flags["coop_ammoRestorePending"] = 1
 	local.player takeall
 	//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: skip the ENTIRE weapon re-give (registered inv > picks >
 	//map default > failsafe kit) while weapons are locked out (coop_noWeapon). The revived player comes
@@ -688,6 +766,12 @@ dbno_ai_revive local.player:{
 		local.player item "weapons/colt45.tik"
 		local.player item "weapons/frag_grenade.tik"
 	}
+	//[user 07-28] bug-1204: the tiers above are EXCLUSIVE (first one that gives anything wins), so a
+	//player whose registered inventory held only primaries came back from a revive with no handgun -
+	//the "I lose my secondary after DBNO" report. The armory-picked sidearm is re-issued unconditionally
+	//on top; a pistol is a SECONDARY weapon class so it can never collide with the one-primary rule, and
+	//an already-held one makes the give a no-op. noWrap=1 - we are already inside the gametype-0 window.
+	local.player waitthread coop_mod/itemhandler.scr::coop_giveSidearmPick local.player 1
 	waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
 	}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
 	//[user 07-16] bug-620 / [user 07-19] bug-893: mission-critical map gear (e1l2 minedetector etc.)
@@ -792,6 +876,8 @@ dbno_letgo_monitor:{
 						ihuddraw_alpha  self local.hud_slot 0
 						self.flags["coop_dbno_letgo"] = 1
 						self.flags["coop_dbno_active"] = NIL
+						//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+						if (self != NULL){ self coop_setdbno 0 }
 						println "^~^~^ DBNO death_letgo"
 						self.flags["coop_dbno_dead"]   = 1
 						self forcelegsstate DBNO_BLEEDOUT	//[213] slump during the give-up fade
@@ -840,7 +926,7 @@ dbno_medic_callout local.player:{
 	while( local.i <= local.maxclients ){
 		if( $player[local.i] ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
-				$player[local.i] iprintlnbold local.msg
+				$player[local.i] iprint local.msg 1
 			}
 		}
 		local.i++
@@ -871,13 +957,13 @@ dbno_marker_manager local.player:{
 		if( $player[local.i] != NULL ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
 				if( $player[local.i] != local.player ){
-					$player[local.i] ihuddraw_virtualsize 31 1
-					$player[local.i] ihuddraw_align 31 left top
-					$player[local.i] ihuddraw_font 31 "verdana-12"
-					$player[local.i] ihuddraw_color 31 1 0.2 0.2
-					$player[local.i] ihuddraw_rect 31 10 30 0 0
-					$player[local.i] ihuddraw_alpha 31 1
-					$player[local.i] ihuddraw_string 31 local.hud_label
+					ihuddraw_virtualsize $player[local.i] 31 1
+					ihuddraw_align $player[local.i] 31 left top
+					ihuddraw_font $player[local.i] 31 "verdana-12"
+					ihuddraw_color $player[local.i] 31 1 0.2 0.2
+					ihuddraw_rect $player[local.i] 31 10 30 0 0
+					ihuddraw_alpha $player[local.i] 31 1
+					ihuddraw_string $player[local.i] 31 local.hud_label
 				}
 			}
 		}
@@ -902,8 +988,8 @@ dbno_marker_manager local.player:{
 	local.i = 1
 	while( local.i <= local.maxclients ){
 		if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){
-			$player[local.i] ihuddraw_alpha 31 0
-			$player[local.i] ihuddraw_string 31 ""
+			ihuddraw_alpha $player[local.i] 31 0
+			ihuddraw_string $player[local.i] 31 ""
 		}
 		local.i++
 	}

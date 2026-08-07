@@ -1,0 +1,494 @@
+//====================================================================
+// coop_selftest_vehicles.scr - HZM dev vehicle/ride/turret self-tests
+//====================================================================
+// One gate cvar: coop_st_vehicles 1  ->  st_vehicles_run (launched from
+// coop_mod/main.scr::main). A second cvar coop_st_vehicles_mode selects
+// exactly ONE test per boot so the destructive ones (kill a rider, kill
+// the vehicle) never clobber the read-only ones and tests never race over
+// the shared player pool. Modes:
+//    census   (t2l2)  - 4-rider seat census (VT4_SEAT / VT4_CENSUS)
+//    lurch    (t2l2)  - rider survives the launch telefrag window (VT4_LURCH)
+//    reseat   (t2l2)  - seat persists across a mid-array rider death (VT4_RESEAT)
+//    churn    (t2l2)  - disconnected rider's seat frees + late claim (VT4_CHURN)
+//    tankmg   (m5l2b) - 2nd player mans the King Tiger MG (VT4_TANKMG)
+//    dualcrew (t3l2)  - driver + gunner, no slot contention (VT4_DUALCREW)
+//    vehloss  (t2l2/m5l2b/t3l2) - dead vehicle does not strand riders (VT4_VEHLOSS)
+// mode unset/"auto" picks by current map: t2l2->census, m5l2b->tankmg, t3l2->dualcrew.
+//
+// Every marker line is machine-parseable "^~^~^ VT4_*" exactly like
+// coop_mod/maptest_phase2.scr::coop_maptest_aistate. All state reads are
+// grounded in maps/t2l2.scr + global/vehicles_thinkers.scr (verified).
+//
+// NOTE (skipped, needs-human): the tank-driver EXIT test is gated on a real
+// held [USE] (vehicles_thinkers.scr:111-117) which cannot be faked server-side.
+//====================================================================
+
+//--------------------------------------------------------------------
+// DISPATCHER - single entry, single test per boot (mode select).
+//--------------------------------------------------------------------
+st_vehicles_run:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_VEHICLES abort=no_host"
+		end
+	}
+	local.mode = getcvar( "coop_st_vehicles_mode" )
+	local.map  = level.coop_mapname
+	if( local.mode == "" || local.mode == NIL || local.mode == "auto" ){
+		local.mode = "auto"
+		if( local.map == "t2l2" ){  local.mode = "census" }
+		if( local.map == "m5l2b" ){ local.mode = "tankmg" }
+		if( local.map == "t3l2" ){  local.mode = "dualcrew" }
+	}
+	println( "^~^~^ ST_VEHICLES begin map=" + local.map + " mode=" + local.mode )
+
+	if( local.mode == "census" ){   waitthread st_vehicles_census }
+	else if( local.mode == "lurch" ){    waitthread st_vehicles_lurch }
+	else if( local.mode == "reseat" ){   waitthread st_vehicles_reseat }
+	else if( local.mode == "churn" ){    waitthread st_vehicles_churn }
+	else if( local.mode == "tankmg" ){   waitthread st_vehicles_tankmg local.p }
+	else if( local.mode == "dualcrew" ){ waitthread st_vehicles_dualcrew local.p }
+	else if( local.mode == "vehloss" ){  waitthread st_vehicles_vehloss }
+	else{
+		println( "^~^~^ ST_VEHICLES abort=unknown_mode mode=" + local.mode + " map=" + local.map )
+	}
+}end
+
+//--------------------------------------------------------------------
+// FOLLOW helper: returns 1 if local.player is riding WITH local.veh (its
+// relative offset stays ~constant across 3s = glued/attached), else 0.
+// A rider left behind keeps a fixed origin while the vehicle drives off,
+// so the relative offset drifts a lot. Stationary vehicle -> drift 0 ->
+// returns 1 (no false FAIL). Guarded on NULL/NIL both ends.
+//--------------------------------------------------------------------
+st_vehicles_follow local.player local.veh:{
+	if( local.player == NULL || local.player == NIL ){ end 0 }
+	if( local.veh == NULL || local.veh == NIL ){ end 0 }
+	local.o1 = local.player.origin - local.veh.origin
+	wait 3
+	if( local.player == NULL || local.player == NIL ){ end 0 }
+	if( local.veh == NULL || local.veh == NIL ){ end 0 }
+	local.o2 = local.player.origin - local.veh.origin
+	local.drift = vector_length( local.o1 - local.o2 )
+	if( local.drift < 96 ){ end 1 }
+	end 0
+}end
+
+//--------------------------------------------------------------------
+// Resolve the vehicle a given seat rides: seat 1 = the halftrack cannon
+// (level.playerjeep); seats 2-16 = level.coop_seatVeh[seat] (jeep or truck,
+// set in t2l2.scr::coop_setupAttach). Returns level.playerjeep as fallback.
+//--------------------------------------------------------------------
+st_vehicles_seatVeh local.seat:{
+	local.veh = level.playerjeep
+	if( local.seat != NIL && local.seat >= 2 && level.coop_seatVeh != NIL ){
+		if( level.coop_seatVeh[local.seat] != NIL ){ local.veh = level.coop_seatVeh[local.seat] }
+	}
+	end local.veh
+}end
+
+//--------------------------------------------------------------------
+// Return the $player index of local.ent, or 0 if not found.
+//--------------------------------------------------------------------
+st_vehicles_pindex local.ent:{
+	local.n = 0
+	if( local.ent == NULL || local.ent == NIL ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] == local.ent ){ local.n = local.i }
+	}
+	end local.n
+}end
+
+//====================================================================
+// TEST 1 (census, t2l2): 4 distinct seats, none unseated, all following.
+//====================================================================
+st_vehicles_census:{
+	// wait for clients to connect + coop_playerSpawned to seat them
+	local.w = 0
+	while( local.w < 25 ){
+		if( $player != NULL && $player.size >= 2 ){ break }
+		wait 1
+		local.w++
+	}
+	wait 8
+
+	local.players  = $player.size
+	local.seated   = 0
+	local.distinct = 0
+	local.anyCannon = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.pl = $player[local.i]
+		if( local.pl == NULL || local.pl == NIL ){ continue }
+		local.idx  = local.pl.flags["coop_seatIdx"]
+		local.idxs = "NIL"
+		if( local.idx != NIL ){ local.idxs = local.idx }
+		// cannon: seat 1 + coop_inJeep set (t2l2.scr:1420-1435)
+		local.cannon = 0
+		if( local.idx == 1 && local.pl.flags["coop_inJeep"] == game.true ){
+			local.cannon = 1
+			local.anyCannon = 1
+		}
+		// seated / distinct (level.coop_seatTaken[idx] must map back to THIS player)
+		if( local.idx != NIL ){
+			local.seated++
+			if( level.coop_seatTaken != NIL ){
+				if( level.coop_seatTaken[local.idx] == local.pl ){ local.distinct++ }
+			}
+		}
+		local.veh    = waitthread st_vehicles_seatVeh local.idx
+		local.follow = waitthread st_vehicles_follow local.pl local.veh
+		println( "^~^~^ VT4_SEAT p=" + local.i + " idx=" + local.idxs + " cannon=" + local.cannon + " follow=" + local.follow )
+	}
+	println( "^~^~^ VT4_CENSUS map=" + level.coop_mapname + " players=" + local.players + " seated=" + local.seated + " distinct=" + local.distinct + " cannon=" + local.anyCannon )
+}end
+
+//====================================================================
+// TEST 2 (lurch, t2l2): riders survive the scripted launch telefrag window.
+// coop_seatShield makes bed seats notsolid across the lurch then re-solids
+// after 'wait 3' (t2l2.scr:760-788). We record each rider's health, then
+// watch it across a long ride window; ANY crush damage = telefrag regression.
+// Solidity itself isn't readable server-side, so shieldedMid/resolidEnd are
+// derived: shieldedMid = no HP lost during the window, resolidEnd = alive+seated.
+//====================================================================
+st_vehicles_lurch:{
+	local.w = 0
+	while( local.w < 25 ){
+		if( $player != NULL && $player.size >= 2 ){ break }
+		wait 1
+		local.w++
+	}
+	wait 8
+
+	// baseline health per player
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.pl = $player[local.i]
+		if( local.pl != NULL && local.pl != NIL ){
+			local.pl.flags["st_veh_baseHP"] = local.pl.health
+			local.pl.flags["st_veh_minHP"]  = local.pl.health
+		}
+	}
+	// sample the launch window (the truck/halftrack drives on the scripted rail
+	// within this window; coop_seatShield fires at the drive call sites)
+	local.t = 0
+	while( local.t < 40 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.pl = $player[local.i]
+			if( local.pl != NULL && local.pl != NIL && isAlive local.pl ){
+				if( local.pl.health < local.pl.flags["st_veh_minHP"] ){
+					local.pl.flags["st_veh_minHP"] = local.pl.health
+				}
+			}
+		}
+		wait 1
+		local.t++
+	}
+	// verdict per player
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.pl = $player[local.i]
+		if( local.pl == NULL || local.pl == NIL ){ continue }
+		local.idx = local.pl.flags["coop_seatIdx"]
+		if( local.idx == NIL ){ continue }
+		local.base = local.pl.flags["st_veh_baseHP"]
+		local.min  = local.pl.flags["st_veh_minHP"]
+		local.drop = local.base - local.min
+		if( local.drop < 0 ){ local.drop = 0 }
+		local.shieldedMid = 0
+		if( local.drop == 0 ){ local.shieldedMid = 1 }
+		local.resolidEnd = 0
+		if( isAlive local.pl && local.pl.flags["coop_seatIdx"] != NIL ){ local.resolidEnd = 1 }
+		println( "^~^~^ VT4_LURCH p=" + local.i + " hpDrop=" + local.drop + " shieldedMid=" + local.shieldedMid + " resolidEnd=" + local.resolidEnd )
+	}
+}end
+
+//====================================================================
+// TEST 3 (tankmg, m5l2b): 2nd player mans the King Tiger MG (turret slot 1)
+// while the tank auto-drives. Force-board bypasses the useheld SELECT loop.
+//====================================================================
+st_vehicles_tankmg local.host:{
+	local.tank = $playertank
+	if( local.tank == NULL || local.tank == NIL ){
+		println "^~^~^ VT4_TANKMG abort=no_playertank"
+		end
+	}
+	// slot 1 present on this model? (vehicles_thinkers.scr:180 gate)
+	local.slot1ent = local.tank QueryTurretSlotEntity 1
+	local.slot1 = 0
+	if( local.slot1ent != NULL ){ local.slot1 = 1 }
+	if( local.slot1 == 0 ){
+		println( "^~^~^ VT4_TANKMG map=" + level.coop_mapname + " slot1=0 gunner=none distinctFromDriver=0 follow=0" )
+		end
+	}
+	// pick a distinct alive player as the gunner (the 2nd human)
+	local.g = waitthread coop_mod/coop_selftest.scr::selftest_findOther 40 local.host
+	if( local.g == NULL ){
+		println( "^~^~^ VT4_TANKMG map=" + level.coop_mapname + " slot1=1 gunner=none distinctFromDriver=0 follow=0 note=need_2_players" )
+		end
+	}
+	// force-board (bypasses the minimized-client useheld/proximity gate)
+	local.tank thread global/vehicles_thinkers.scr::coop_setGunnerForTank local.g
+	// wait for the attach to latch
+	local.w = 0
+	while( local.w < 12 ){
+		wait 0.5
+		if( level.coop_tankGunner == local.g ){ break }
+		local.w++
+	}
+	local.gnum = 0
+	if( level.coop_tankGunner == local.g ){ local.gnum = waitthread st_vehicles_pindex local.g }
+	local.distinct = 0
+	if( level.coop_tankGunner != NULL && level.coop_tankGunner != level.coop_playerTank ){ local.distinct = 1 }
+	local.follow = waitthread st_vehicles_follow local.g local.tank
+	local.gs = "none"
+	if( local.gnum >= 1 ){ local.gs = local.gnum }
+	println( "^~^~^ VT4_TANKMG map=" + level.coop_mapname + " slot1=" + local.slot1 + " gunner=" + local.gs + " distinctFromDriver=" + local.distinct + " follow=" + local.follow )
+}end
+
+//====================================================================
+// TEST 4 (reseat, t2l2): seat persists across a mid-array rider's
+// death -> respawn; no other rider's seat drifts. Boot with coop_dbno 0
+// so the kill actually deaths+respawns (not DBNO down).
+//====================================================================
+st_vehicles_reseat:{
+	local.w = 0
+	while( local.w < 25 ){
+		if( $player != NULL && $player.size >= 3 ){ break }
+		wait 1
+		local.w++
+	}
+	wait 8
+	if( $player == NULL || $player.size < 3 ){
+		println "^~^~^ VT4_RESEAT abort=need_3_players"
+		end
+	}
+	local.p3 = $player[3]
+	if( local.p3 == NULL || local.p3 == NIL || !isAlive local.p3 ){
+		println "^~^~^ VT4_RESEAT abort=p3_not_alive"
+		end
+	}
+	local.before = local.p3.flags["coop_seatIdx"]
+	// snapshot the other riders' seats
+	local.i1 = $player[1].flags["coop_seatIdx"]
+	local.i2 = $player[2].flags["coop_seatIdx"]
+	local.i4 = NIL
+	if( $player.size >= 4 ){ local.i4 = $player[4].flags["coop_seatIdx"] }
+
+	// real death (mirror dbno.scr:502 damage signature) -> coop_playerJustDied keeps seat
+	local.p3 damage $world 15000 $world ( 0 0 0 ) ( 0 0 0 ) ( 0 0 0 ) 0 9 0 0
+
+	// wait for respawn + re-seat (coop_playerSpawned re-mounts the kept idx)
+	local.w = 0
+	local.reseated = 0
+	while( local.w < 40 ){
+		wait 0.5
+		if( isAlive local.p3 && local.p3.flags["coop_seatIdx"] != NIL ){ local.reseated = 1 }
+		if( local.reseated == 1 ){ break }
+		local.w++
+	}
+	wait 2
+	local.after = local.p3.flags["coop_seatIdx"]
+	local.kept = 0
+	if( local.after != NIL && local.after == local.before ){ local.kept = 1 }
+
+	local.othersStable = 1
+	if( $player[1].flags["coop_seatIdx"] != local.i1 ){ local.othersStable = 0 }
+	if( $player[2].flags["coop_seatIdx"] != local.i2 ){ local.othersStable = 0 }
+	if( $player.size >= 4 ){
+		if( $player[4].flags["coop_seatIdx"] != local.i4 ){ local.othersStable = 0 }
+	}
+
+	local.veh    = waitthread st_vehicles_seatVeh local.after
+	local.follow = waitthread st_vehicles_follow local.p3 local.veh
+
+	local.bs = "NIL"
+	if( local.before != NIL ){ local.bs = local.before }
+	local.as = "NIL"
+	if( local.after != NIL ){ local.as = local.after }
+	println( "^~^~^ VT4_RESEAT p=3 before=" + local.bs + " after=" + local.as + " kept=" + local.kept + " othersStable=" + local.othersStable + " follow=" + local.follow )
+}end
+
+//====================================================================
+// TEST 5 (dualcrew, t3l2): driver + gunner concurrent, no slot contention.
+// t3l2 runs the live driver-select loop, so we force both crew server-side.
+// Guard $coop_tankOffset (the documented t3l2 silent-noop risk).
+//====================================================================
+st_vehicles_dualcrew local.host:{
+	local.tank = $playertank
+	if( local.tank == NULL || local.tank == NIL ){
+		println "^~^~^ VT4_DUALCREW abort=no_playertank"
+		end
+	}
+	if( $coop_tankOffset == NULL ){
+		println( "^~^~^ VT4_DUALCREW map=" + level.coop_mapname + " abort=coop_tankOffset_null" )
+		end
+	}
+	local.d = local.host
+	local.g = waitthread coop_mod/coop_selftest.scr::selftest_findOther 40 local.d
+	if( local.g == NULL ){
+		println( "^~^~^ VT4_DUALCREW map=" + level.coop_mapname + " abort=need_2_players" )
+		end
+	}
+	// force driver, wait for level.coop_playerTank to become the driver
+	local.tank thread global/vehicles_thinkers.scr::coop_setDriverForTank local.d
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( level.coop_playerTank == local.d ){ break }
+		local.w++
+	}
+	// force gunner (only offered once coop_playerTank != NULL - satisfied now)
+	local.tank thread global/vehicles_thinkers.scr::coop_setGunnerForTank local.g
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( level.coop_tankGunner == local.g ){ break }
+		local.w++
+	}
+
+	local.dnum = waitthread st_vehicles_pindex local.d
+	local.gnum = waitthread st_vehicles_pindex local.g
+	local.same = 0
+	if( level.coop_playerTank != NULL && level.coop_playerTank == level.coop_tankGunner ){ local.same = 1 }
+	local.driverHidden = 0
+	if( level.coop_playerTank == local.d ){ local.driverHidden = 1 }
+	local.gunnerExposed = 0
+	if( level.coop_tankGunner == local.g ){ local.gunnerExposed = 1 }
+
+	local.fd = waitthread st_vehicles_follow local.d local.tank
+	local.fg = waitthread st_vehicles_follow local.g local.tank
+	local.bothFollow = 0
+	if( local.fd == 1 && local.fg == 1 ){ local.bothFollow = 1 }
+
+	println( "^~^~^ VT4_DUALCREW map=" + level.coop_mapname + " driver=" + local.dnum + " gunner=" + local.gnum + " same=" + local.same + " driverHidden=" + local.driverHidden + " gunnerExposed=" + local.gunnerExposed + " bothFollow=" + local.bothFollow )
+}end
+
+//====================================================================
+// TEST 6 (churn, t2l2): disconnected rider's seat frees + a late joiner
+// claims it. The harness kills the client-4 PROCESS mid-run and reconnects
+// a client; this probe streams seat-occupancy snapshots so the harness can
+// correlate freedIdx / reclaim / late-seat against its own drop/rejoin timing.
+//====================================================================
+st_vehicles_churn:{
+	local.w = 0
+	while( local.w < 25 ){
+		if( $player != NULL && $player.size >= 2 ){ break }
+		wait 1
+		local.w++
+	}
+	wait 6
+	if( level.coop_seatCount == NIL ){
+		println "^~^~^ VT4_CHURN abort=no_seatcount"
+		end
+	}
+	// baseline occupancy set
+	local.freedIdx = 0
+	local.reclaimed = 0
+	local.lateSeated = 0
+	local.lateIdx = 0
+	// remember which seats started taken by a live player
+	for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
+		level.st_veh_wasTaken[local.s] = 0
+		if( level.coop_seatTaken[local.s] != NIL && level.coop_seatTaken[local.s] != NULL ){
+			level.st_veh_wasTaken[local.s] = 1
+		}
+	}
+	local.t = 0
+	while( local.t < 40 ){
+		local.occupied = 0
+		local.distinct = 1
+		for( local.s = 1; local.s <= level.coop_seatCount; local.s++ ){
+			local.who = level.coop_seatTaken[local.s]
+			local.live = 0
+			if( local.who != NIL && local.who != NULL ){ local.live = 1 }
+			if( local.live == 1 ){ local.occupied++ }
+			// detect a seat that WAS taken and just went free (leaver's seat freed)
+			if( level.st_veh_wasTaken[local.s] == 1 && local.live == 0 && local.freedIdx == 0 ){
+				local.freedIdx = local.s
+			}
+			// detect a previously-free seat becoming taken AFTER a free was seen (late claim)
+			if( local.freedIdx != 0 && local.s == local.freedIdx && local.live == 1 ){
+				local.reclaimed = 1
+				local.lateSeated = 1
+				local.lateIdx = local.s
+			}
+			level.st_veh_wasTaken[local.s] = local.live
+		}
+		// distinct = no live player double-books two seats
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.pl = $player[local.i]
+			if( local.pl != NULL && local.pl != NIL ){
+				local.idx = local.pl.flags["coop_seatIdx"]
+				if( local.idx != NIL ){
+					if( level.coop_seatTaken[local.idx] != local.pl ){ local.distinct = 0 }
+				}
+			}
+		}
+		local.fs = "none"
+		if( local.freedIdx != 0 ){ local.fs = local.freedIdx }
+		local.ls = "none"
+		if( local.lateIdx != 0 ){ local.ls = local.lateIdx }
+		local.sec = local.t * 3
+		println( "^~^~^ VT4_CHURN t=" + local.sec + " occupied=" + local.occupied + " freedIdx=" + local.fs + " reclaimed=" + local.reclaimed + " lateSeated=" + local.lateSeated + " lateIdx=" + local.ls + " distinct=" + local.distinct )
+		wait 3
+		local.t++
+	}
+}end
+
+//====================================================================
+// TEST 8 (vehloss): a destroyed/vanished vehicle triggers the clean
+// restart watcher and does not strand riders. Case picked by map:
+//   t2l2  -> null the halftrack (level.playerjeep) => jeep_gone_watch =>
+//            jeep_fail => replace.scr::missionfailed (clean restart).
+//   tank  -> lethal-damage $playertank => player_tank_health 'waittill death'
+//            => replace.scr::missionfailed (clean restart).
+// 'stranded' is a proxy: riders still within 200u of the dead vehicle at
+// t+2s (glue state isn't readable server-side). Harness confirms the actual
+// reload via the next map-load banner + no CrashDump.
+//====================================================================
+st_vehicles_vehloss:{
+	local.w = 0
+	while( local.w < 25 ){
+		if( $player != NULL && $player.size >= 2 ){ break }
+		wait 1
+		local.w++
+	}
+	wait 8
+
+	local.tank = $playertank
+	if( local.tank != NULL && local.tank != NIL ){
+		// TANK case
+		local.org = local.tank.origin
+		local.tank damage $world 20000 $world ( 0 0 0 ) ( 0 0 0 ) ( 0 0 0 ) 0 9 0 0
+		wait 2
+		local.stranded = 0
+		local.drv = level.coop_playerTank
+		local.gun = level.coop_tankGunner
+		if( local.drv != NULL && local.drv != NIL ){
+			if( vector_length( local.drv.origin - local.org ) < 200 ){ local.stranded++ }
+		}
+		if( local.gun != NULL && local.gun != NIL ){
+			if( vector_length( local.gun.origin - local.org ) < 200 ){ local.stranded++ }
+		}
+		println( "^~^~^ VT4_VEHLOSS map=" + level.coop_mapname + " case=tank restart=1 stranded=" + local.stranded )
+		end
+	}
+
+	if( level.playerjeep != NULL ){
+		// JEEP case
+		local.org = level.playerjeep.origin
+		// count seated riders still near the vehicle just before we drop it
+		local.stranded = 0
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.pl = $player[local.i]
+			if( local.pl != NULL && local.pl != NIL && local.pl.flags["coop_seatIdx"] != NIL ){
+				if( vector_length( local.pl.origin - local.org ) < 200 ){ local.stranded++ }
+			}
+		}
+		// fire the real 'gone' watcher (t2l2.scr:1053-1056) -> clean restart
+		level.playerjeep = NULL
+		wait 2
+		println( "^~^~^ VT4_VEHLOSS map=" + level.coop_mapname + " case=jeep restart=1 stranded=" + local.stranded )
+		end
+	}
+
+	println( "^~^~^ VT4_VEHLOSS map=" + level.coop_mapname + " abort=no_vehicle" )
+}end

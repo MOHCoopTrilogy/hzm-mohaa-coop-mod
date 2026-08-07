@@ -82,6 +82,16 @@ main:{
 
 	//[202] chrissstrahl - Inizialize required game and level variable for the coop mod
 	waitthread coop_mod/variables.scr::main
+
+	//[user 2026-08-05] bug-1427 - coop_buildmap is a ONE-SHOT switch, consumed here on EVERY map
+	//load. It is seta-archived in omconfig, so a build session on e3l4 left it latched at 1
+	//across restarts - and a latched 1 silently HALTS the e3l4 campaign (hacks.scr gate), loads
+	//arena props/wallguns on campaign maps and kills their weather. Consume-and-clear makes a
+	//stale latch impossible: set coop_buildmap 1, load the map, author; the next load is normal
+	//play unless you set it again. ALL readers must use level.coop_buildmap, never the cvar.
+	level.coop_buildmap = 0
+	if( int( getcvar "coop_buildmap" ) == 1 ){ level.coop_buildmap = 1 }
+	setcvar "coop_buildmap" "0"
 	
 	//[200] chrissstrahl - restore default speed after automatic speed mapcheck
 	if( int(getcvar("coop_dev")) == 1 || int(getcvar("developer")) > 0 ){ setcvar "timescale" 1 }
@@ -119,6 +129,17 @@ main:{
 	
 	//[200] Smithy - disable weapons on select menu
 	thread coop_mod/itemhandler.scr::disableAllWeaponsOnMenu
+	thread coop_launcherRespawnSweep	//[user 2026-08-04] bug-1337 - launcher pickups respawn, trilogy-wide
+	//[user 2026-08-04] HOLDOUT - checkpoint wave defence. Threaded unconditionally like the
+	//fog and challenge systems: holdout_init only arms the authoring bus and loads a saved
+	//profile. Nothing spawns until the host runs 'coop_holdout_cmd start', so a normal coop
+	//mission is completely unaffected.
+	thread coop_mod/holdout.scr::holdout_init
+	//[user 2026-08-04] bug-1378 - invisible barrier tool. Like holdout_init this only arms the
+	//command bus and reloads this map's saved barriers; nothing is spawned unless a walls_<map>.dat
+	//exists, so a normal coop map is untouched.
+	thread coop_mod/wallgun.scr::wall_init
+	thread coop_mod/props.scr::prop_init	//[bug-1381] respawn placed props from props_<map>.dat
 	
 	//chrissstrahl - set coop mod specific mom file
 	//[202] chrissstrahl - disabled my mom, there was no need for this
@@ -129,12 +150,20 @@ main:{
 
 	if( getcvar( "coop_build_boot" ) == "1" ){ thread coop_mod/buildmode.scr::coop_build_monitor } //HZM coop BUILD MODE dev tool (coop_mod/cfg/buildmode.cfg)
 
+	//[user 08-02] HZM coop FOG / DARKNESS MODE (coop_mod/cfg/fogmode.cfg). Threaded
+	//UNCONDITIONALLY, unlike build mode above: coop_fog_boot only gates the numpad EDITOR, while
+	//applying a saved per-map fog profile is a shipping feature that must run for everyone. The
+	//thread self-cancels immediately when the map has no saved profile.
+	thread coop_mod/fogmode.scr::coop_fog_boot
+	thread coop_mod/probe.scr::boot	//[user 2026-08-03] bug-1311 - rcon-driven entity probe (set coop_probe list|hurt)
+
 	thread coop_mod/medkit.scr::coop_scan_health_entities
 	thread coop_mod/officer.scr::coop_officer_init
 	thread coop_mod/director.scr::director_main	//[user 07-17] reactive difficulty (coop_ddaEnabled gates; default OFF)
 	thread coop_mod/weather.scr::coop_weather_init	//[v1] dynamic rain/snow storms (theme-gated; no-op unless coop_dynWeather 1 + themed/forced)
 	thread coop_mod/ambience.scr::coop_ambience_init	// HZM coop - ambience beds + combat mixing (no-op unless coop_ambience 1; bed picked from level.coop_weatherTheme)
 	thread coop_mod/flchatter.scr::flchatter_init	// HZM coop - Frontline battle chatter (coop_flchatter 0 disables)
+	thread coop_mod/aivoice.scr::aivoice_init	// HZM coop - SITUATIONAL AI voice: under fire / man down / reload / in-combat taunt (coop_aiVoice 0 disables)
 	thread coop_mod/flmusic.scr::coop_flmusic_filler	// HZM coop - Frontline filler OST on quiet maps when the music channel is silent (coop_musicFiller 0 disables)
 	// 50/50 objective binoc/smoke drop DISABLED for now (its pickup re-granted on every
 	// touch -> infinite grenades). Re-enable by uncommenting once the pickup is one-shot.
@@ -148,6 +177,10 @@ main:{
 	// Map-rotation auto-tester. Off unless coop_maptest==1 or 2, no-op in normal play.
 	// 1 = Phase 1 load smoke test (maptest.scr), 2 = Phase 2 active patrol (maptest_phase2.scr).
 	if( getcvar( "coop_maptest" ) == "1" ){
+		thread coop_mod/maptest.scr::coop_maptest_tick
+	}
+	//[user 2026-08-05] Phase 3 = coverage walk: same rotation tick, plus covwalk before the dwell
+	if( getcvar( "coop_maptest" ) == "3" ){
 		thread coop_mod/maptest.scr::coop_maptest_tick
 	}
 	if( getcvar( "coop_maptest" ) == "2" && getcvar( "coop_maptest_m5l3" ) != "1" ){
@@ -167,9 +200,108 @@ main:{
 	if( getcvar( "coop_tracescan" ) == "1" ){
 		thread coop_mod/tracescan.scr::scan
 	}
+	// HZM dev [2026-07-23]: automated self-test probes (coop_selftest.scr). Each is INERT unless
+	// its cvar is set by the test harness cfgs. Threaded, so their waits never touch this
+	// single-frame init. weapon-give integrity / DBNO+revive / win->transition path.
+	if( getcvar( "coop_weaptest" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::weaptest_run
+	}
+	if( getcvar( "coop_dbnotest" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::dbnotest_run
+	}
+	if( getcvar( "coop_dbnoteam" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::dbnoteam_run
+	}
+	if( getcvar( "coop_xptest" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::xptest_run
+	}
+	if( getcvar( "coop_scaletest" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::scaletest_run
+	}
+	// [user 07-23] per-subsystem automated 4-player self-test batteries (coop_selftest_<key>.scr).
+	// Each is INERT unless its coop_st_<key> cvar is set by the test harness. Threaded dispatchers.
+	if( getcvar( "coop_st_scaling" ) == "1" ){
+		thread coop_mod/coop_selftest_scaling.scr::st_scaling_run
+	}
+	if( getcvar( "coop_st_engine" ) == "1" ){
+		thread coop_mod/coop_selftest_engine.scr::st_engine_run
+	}
+	if( getcvar( "coop_st_vehicles" ) == "1" ){
+		thread coop_mod/coop_selftest_vehicles.scr::st_vehicles_run
+	}
+	if( getcvar( "coop_st_objectives" ) == "1" ){
+		thread coop_mod/coop_selftest_objectives.scr::st_objectives_run
+	}
+	if( getcvar( "coop_st_triggers" ) == "1" ){
+		thread coop_mod/coop_selftest_triggers.scr::st_triggers_run
+	}
+	if( getcvar( "coop_st_officer" ) == "1" ){
+		thread coop_mod/coop_selftest_officer.scr::st_officer_run
+	}
+	if( getcvar( "coop_st_keyitems" ) == "1" ){
+		thread coop_mod/coop_selftest_keyitems.scr::st_keyitems_run
+	}
+	if( getcvar( "coop_st_dbno" ) == "1" ){
+		thread coop_mod/coop_selftest_dbno.scr::st_dbno_run
+	}
+	if( getcvar( "coop_st_xp" ) == "1" ){
+		thread coop_mod/coop_selftest_xp.scr::st_xp_run
+	}
+	if( getcvar( "coop_st_weapons" ) == "1" ){
+		thread coop_mod/coop_selftest_weapons.scr::st_weapons_run
+	}
+	if( getcvar( "coop_wintest" ) == "1" ){
+		thread coop_mod/coop_selftest.scr::wintest_run
+	}
+	if( getcvar( "coop_st_officer" ) == "1" ){
+		thread coop_mod/coop_selftest_officer.scr::st_officer_run
+	}
+	// engine-level stress / resource-limit / crash-guard probes (coop_selftest_engine.scr).
+	// dispatcher threads whichever sub-probe cvar (coop_entstress/coop_csstress/coop_sndstress/
+	// coop_soakbeat/coop_tgatest) the boot cfg set. INERT unless coop_st_engine==1.
+	if( getcvar( "coop_st_engine" ) == "1" ){
+		thread coop_mod/coop_selftest_engine.scr::st_engine_run
+	}
+	// objectives subsystem probes (coop_selftest_objectives.scr): objective HUD fan-out,
+	// sender-latch self-heal, completed-objective idempotency, coop_objWrap word-wrap,
+	// side-objective push, destroyable failsafe, missioncomplete double-fire. INERT unless
+	// coop_st_objectives==1 (MCIDEM map-transition sub-gated on coop_st_obj_mc).
+	if( getcvar( "coop_st_objectives" ) == "1" ){
+		thread coop_mod/coop_selftest_objectives.scr::st_objectives_run
+	}
 	// Universal out-of-bounds safety net (all maps): a player who falls into the void
 	// is warped back to their last good ground position. coop_voidGuard 0 disables.
 	thread coop_mod/voidguard.scr::main
+	// [user 07-23] DYNAMIC AI engine timers: only when coop_aiDynamic is on, shorten the turret
+	// reposition lockout (5000->1500ms, so enemies juke WHILE being shot) and the German cover
+	// hide-time cap (15000->6000ms, so they re-peek sooner). Defaults in the engine are vanilla, so
+	// nothing changes unless this runs. User can pre-set either cvar to override these values.
+	if( getcvar( "coop_aiDynamic" ) == "1" ){
+		if( getcvar( "coop_aiRetargetMs" ) == "5000" || getcvar( "coop_aiRetargetMs" ) == "" ){ setcvar "coop_aiRetargetMs" "1500" }
+		if( getcvar( "coop_aiHideMaxMs" ) == "15000" || getcvar( "coop_aiHideMaxMs" ) == "" ){ setcvar "coop_aiHideMaxMs" "6000" }
+		// combat maneuver layer: engaged flank/cover enemies reposition instead of standing (no map cover nodes needed)
+		thread coop_mod/aimaneuver.scr::main
+	}
+	// SQUAD BRAIN (coop_aiSquad, default off): cluster the germans + propagate alerts so an engaged squad
+	// goes loud + converges together (SB1+SB2), instead of noticing you one-at-a-time. Independent toggle.
+	if( getcvar( "coop_aiSquad" ) == "1" ){ thread coop_mod/aisquad.scr::main }
+	// SQUAD MORALE (coop_moraleEnable, default off): a force whittled below half its peak falters/goes berserk.
+	if( getcvar( "coop_moraleEnable" ) == "1" ){ thread coop_mod/morale.scr::main }
+	// [user 07-23] enemy-behavior tracker (dev/tuning observability for the dynamic-AI work). INERT
+	// unless coop_aiBehav is set (1=log ^~^~^ AIBEHAV lines, 2=+on-screen readout). See aibehav.scr.
+	if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+		thread coop_mod/aibehav.scr::main
+	}
+	// [user 07-23] AUTOMATED COMBAT DRIVER (dev/test only): drives the test players into a real
+	// firefight so AI combat behavior can be measured unattended. INERT unless coop_aiCombat 1.
+	if( getcvar( "coop_aiCombat" ) == "1" ){
+		thread coop_mod/aicombat.scr::main
+	}
+
+	//HZM coop [bug-1141] - precache the voice pools (deathvox/flvo/gurgle/taunt/headshot)
+	//across the early frames; lazy first-play loads were synchronous disk hits mid-combat
+	//(user lag spikes). Async thread: adds no time to this single-frame init.
+	thread coop_mod/sndcache.scr::main
 
 	//[200] Smithy - used by waitForMainScript to check if main has loaded
 	level.coop_mainScriptLoaded = game.true
@@ -189,7 +321,15 @@ spWaitForPlayer:{
 	level waittill spawn
 	level.coop_playerReady = 1
 	//[200] chrissstrahl - set variables
-	$player.flags["coop_isHost"] = 1
+	//[user 08-02] TRAPS T5: this was a bare "$player.flags[...] = 1". $player is an ARRAY once a
+	//second player connects, so the write threw "cast to listener" and killed this thread at the
+	//first 2-player spawn. player.scr already sets coop_isHost correctly per player
+	//(entnum == 0), so this only needs to cover the single/host case without exploding.
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL && $player[local.i].entnum == 0 ){
+			$player[local.i].flags["coop_isHost"] = 1
+		}
+	}
 }end
 
 //[200] chrissstrahl - this autospawns the hosting player
@@ -853,7 +993,7 @@ coop_reissueMissionItems:{
 						local.dc2 = waitthread containsText local.dwn local.dan 0
 						if( local.dc1 || local.dc2 ){ local.dverdict = "PRESENT" }
 					}
-					self iprintlnbold ( "MISSIONITEM " + local.dwant + " -> " + local.dverdict + " (active=" + local.dawm + ")" )
+					self iprint ( "MISSIONITEM " + local.dwant + " -> " + local.dverdict + " (active=" + local.dawm + ")" ) 1
 					println ( "^~^~^ MISSIONITEM player=" + self.netname + " want=" + local.dwant + " verdict=" + local.dverdict + " active=" + local.dawm )
 				}
 				local.dmi++
@@ -1662,7 +1802,13 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	// and leaves the test client stuck on the MP team-select (never reaches CS_ACTIVE) -
 	// an infinite loop (root-caused on e1l4's papers gate). Suppress the reload while the
 	// Phase 1/2 tester is active so the tour can continue past any mission-fail.
-	if( getcvar( "coop_maptest" ) == "1" || getcvar( "coop_maptest" ) == "2" ){
+	//[user 2026-08-06] bug-1466 - PHASE 3 was missing from this guard, exactly like the tick's
+	//entry guard was (bug-1440). Consequence: m3l3 looped 12x and m5l3 4x - the coverage sweep's
+	//force-fire trips a mission-fail path, restartMap reloads the map, the sweep walks it again,
+	//fails again, forever. MAPTEST_ADVANCE never printed because the rotation was not advancing at
+	//all; the map was being restarted underneath it. Whenever a new maptest phase is added, EVERY
+	//phase-gated branch has to learn about it.
+	if( getcvar( "coop_maptest" ) == "1" || getcvar( "coop_maptest" ) == "2" || getcvar( "coop_maptest" ) == "3" ){
 		println( "^~^~^ MAPTEST_RESTART_SUPPRESSED " + getcvar( "mapname" ) )
 		end
 	}
@@ -1748,7 +1894,18 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 inCoopMode:{
 //=========================================================================
 if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread main/inCoopMode->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
-	if (level.gametype == NIL){ level.gametype = int(getcvar "g_gametype") } //just in case level.gametype isn't a var yet
+	//[user 2026-08-06] bug-1491 - a cached ZERO used to be sticky, and that made a coop map spend its
+	//whole life believing it was single-player. On a map RESTART (which is exactly how the sweep and
+	//missioncomplete advance maps) g_gametype has not always latched by the time the map script first
+	//asks, so this cached 0; every later inCoopMode call then returned false, and callers took their
+	//SP branch - including replace.scr::waitForPlayer:105, whose SP branch is a RAW 'level waittill
+	//spawn'. The Level spawn event had already fired, so that threw "invalid waittill spawn for
+	//'Level'" and KILLED the main thread: no coop setup, no walker, four clients sat unspawned.
+	//Observed live on m2l2a 2026-08-06 (10:58:16), together with maps/m2l2a.scr:78 taking its
+	//'level.gametype == 0' branch on a coop server. Re-reading while it is still 0 costs one getcvar
+	//and lets detection recover the moment the cvar latches; in genuine SP it re-reads 0 forever, so
+	//single-player behaviour is unchanged.
+	if (level.gametype == NIL || level.gametype == 0){ level.gametype = int(getcvar "g_gametype") } //just in case level.gametype isn't a var yet
 
 	local.isCoopMap = waitthread coop_mod/main.scr::isCoopEnabledMap (getcvar "mapname")
 
@@ -1818,10 +1975,111 @@ getCleanVectorString local.dirtyVector:{
 coop_watchDestroyable local.target local.box:
 	if (local.target == NULL || local.target == NIL)
 		end
+	// HZM [user 08-02]: ARMING GUARD - without this the failsafe detonates every charge
+	// it guards, ~0.3s into map load, on every map that uses it.
+	// "isalive" is engine-side literally (ent->health > 0) - scriptthread.cpp EventIsAlive.
+	// Every target we watch is a health-LESS map entity: TurretGun/FixedTurret/Vehicle/
+	// Item never assign health in their constructors, and none of the BSP entities
+	// (turretweapon_*, scriptmodel) carry a "health" key, nor do their TIKs. So health is
+	// 0 from Entity::Entity(), "isalive" is false on the FIRST evaluation, the while loop
+	// never runs a single iteration, and 0.3s later we BlowUp a charge nobody planted.
+	// That removed the box (DoExplosion -> EV_Remove) before players could ever reach it
+	// and ran the destruction setthread out of sequence - which is what soft-locked e2l1
+	// (all six AA charges gone during the glider ride) and e3l2 (modellos destroyed at
+	// spawn, then "$CannonN_Throb show" threw on the removed box and aborted the POW
+	// thread). 16 call sites: e2l1 x6, e3l2 x3, t2l1 x4, t1l2 x2, t1l3 x1.
+	// A target that cannot lose health cannot "die unexpectedly", so the failsafe has
+	// nothing to protect and must stay inert. Re-enabling it for real needs a different
+	// trigger (watch for the destroyed-model swap, or give targets health+takedamage).
+	if (local.target.health == NIL)
+		end
+	if (local.target.health <= 0)
+		end
 	while (isalive local.target)
 		waitframe
 	// grace period: give a legitimate plant detonation time to remove its own box
 	wait 0.3
 	if (local.box != NULL && local.box != NIL)
 		local.box BlowUp
+end
+
+//[user 2026-08-03] bug-1307 SCRIPTED SUPPRESSION - hold the under-fire screen effect at a floor
+//for the duration of a set piece. Consumed by cgame (cg_view.c, coop_suppHold), which clamps it
+//to 1.0, clears it on death/spectate/disconnect, and lets the normal coop_suppressFade decay
+//take over the instant the amount drops to 0.
+//
+//EDGE-TRIGGERED ON PURPOSE - a per-frame stuff floods the reliable command ring. Same rule
+//dbno.scr already follows.
+//
+//NEVER use setcvar for this: on a listen server the game and the client share one cvar table,
+//so a global setcvar would tint the host regardless of intent. Per-player stufftext is the only
+//correct emitter.
+//
+//usage: thread coop_mod/main.scr::coop_setSuppression local.player 0.65   // start
+//       thread coop_mod/main.scr::coop_setSuppression local.player 0      // release
+coop_setSuppression local.player local.amount:
+	if (local.player == NULL || local.player == NIL)
+		end
+	if (local.amount == NIL)
+		local.amount = 0
+	if (local.amount < 0)
+		local.amount = 0
+	if (local.amount > 1)
+		local.amount = 1
+	if (local.player.coop_suppSent == local.amount)
+		end
+	local.player.coop_suppSent = local.amount
+	local.player stufftext ("set coop_suppHold " + local.amount)
+end
+
+//one-shot spike (a single flak burst, a near explosion). Self-consuming on the client, so it
+//does not need a matching release and cannot get stuck.
+coop_bumpSuppression local.player local.amount:
+	if (local.player == NULL || local.player == NIL)
+		end
+	if (local.amount == NIL || local.amount <= 0)
+		end
+	local.player stufftext ("set coop_suppBump " + local.amount)
+end
+
+//convenience: apply a floor to every connected player at once
+coop_setSuppressionAll local.amount:
+	for (local.i = 1; local.i <= $player.size; local.i++)
+		thread coop_setSuppression $player[local.i] local.amount
+end
+
+//============================================================================
+coop_launcherRespawnSweep:
+//============================================================================
+	//[user 2026-08-04] bug-1337 - 'any bazooka/piat/panzerschreck launchers indefinitely
+	//respawn if a player takes one' (user got soft-locked after losing a picked-up launcher
+	//on a DBNO revive). Uses the engine's own DM item respawn (Item::setRespawn - the same
+	//machinery every deathmatch pickup uses), so the pickup re-appears 30s after being taken,
+	//forever. One sweep at +3s: world-PLACED pickups exist by then, while AI-carried and
+	//AI-dropped launchers are excluded two ways (they have an .owner at sweep time, and drops
+	//happen later than the sweep) - so enemy drops never become infinite launcher farms.
+	wait 3
+	if (level.gametype == 0) { end }
+	local.max = int(getcvar("maxentities"))
+	local.n = 0
+	for (local.i = 0; local.i < local.max; local.i++) {
+		local.ent = getentbyentnum local.i
+		if (local.ent == NULL || local.ent == NIL) { continue }
+		if (local.ent.model == NIL) { continue }
+		if (local.ent.owner != NULL && local.ent.owner != NIL) { continue }
+		local.hit = 0
+		if (local.ent.model == "models/weapons/bazooka.tik") { local.hit = 1 }
+		if (local.ent.model == "models/weapons/panzerschreck.tik") { local.hit = 1 }
+		if (local.ent.model == "models/weapons/Uk_W_Piat.tik") { local.hit = 1 }
+		if (local.ent.model == "models/weapons/uk_w_piat.tik") { local.hit = 1 }
+		if (local.hit == 1) {
+			local.ent set_respawn 1
+			local.ent set_respawn_time 30
+			local.n++
+			println("^~^~^ LAUNCHER-RESPAWN ent=" + local.ent.entnum + " model=" + local.ent.model)
+		}
+	}
+	if (local.n > 0) {
+		println("^~^~^ LAUNCHER-RESPAWN armed on " + local.n + " placed launcher pickup(s)")
+	}
 end

@@ -3,7 +3,17 @@
 main: {
 //============================================================================
 	waitthread coop_mod/main.scr::main			//[202] Smithy
-	level.coop_weatherTheme = "rain"			//HZM coop - dynamic weather: Normandy countryside
+	//[user 08-02] "rain" -> "none". Rain was rendering INSIDE the glider during the intro ride.
+	//Two facts behind that: (a) this theme line is an HZM ADDITION - retail e2l1 never execs
+	//global/weather.scr at all, so there was no rain on this map in vanilla; and (b) the coop
+	//global-rain roof cull cannot see the glider anyway. cg_nature.cpp traces up from the player
+	//with MASK_SOLID, but $glider is addon_vehicle_CG4Aglider -> TIK classname scriptmodel ->
+	//SOLID_NOT with contents 0, and nothing in gliderride.scr ever makes it solid. The trace
+	//passes straight through to SURF_SKY, the client concludes "outdoors", and draws rain.
+	//Matching vanilla is the honest fix. To put rain back, the ride itself needs a suppression
+	//hook (hold density at 0 until level.ejectedFromGlider == 1, set at e2l1.scr:127).
+	level.coop_weatherTheme = "none"			//HZM coop - dynamic weather: vanilla e2l1 has no precip (see note above)
+	thread coop_bakedProps	//[user 2026-08-03] bug-1310 - baked build-mode crash-site props (label at end of file)
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
 	level.coop_hasCallback["coop_playerJustLeft"] = 1
@@ -153,7 +163,10 @@ InitPlayer: {
 //============================================================================
 InitLights: {
 //============================================================================
-	level waittill prespawn
+	//[user 2026-08-02] bug-1294 - coop shim. A bare `level waittill prespawn` throws once prespawn
+	//has already fired, and the throw ABORTS THIS THREAD - so the waitexec below never ran and the
+	//map got no light styles and no $jeepfire effects at all.
+	waitthread coop_mod/replace.scr::waitTillPrespawn
 	waitexec maps/e2l1/light_e2l1.scr
 }end
 
@@ -450,6 +463,18 @@ dialog_over_here: {
 //============================================================================
 	//[202] chrissstrahl
 	thread coop_mod/replace.scr::playsound DFRUS_E2L1_JP2742
+	//[user 2026-08-03] bug-1330 CUT DIALOGUE - the whole e2l1 mid-mission VO set (JP27xx,
+	//PH29xx, MK26xx) ships aliased in uberdialog.scr but is wired to NOTHING, in retail too.
+	//Phillips' greeting - deliberately ends mid-sentence ('...We --'), the AB41's arrival is
+	//the interruption, which is exactly the next scripted beat.
+	wait 3
+	thread coop_mod/replace.scr::playsound DFRUS_E2L1_JP2704
+	//[user 2026-08-04] bug-1335 - JP2705 'Wait! What's that? Incoming! Take cover!' is the
+	//NEXT line of this same retail conversation - the interruption to the greeting - not a
+	//final-battle line (user: 'fires too early... supposed to be after the glad to see you
+	//made it line'). Chained here after the greeting's length.
+	wait 4.5
+	thread coop_mod/replace.scr::playsound DFRUS_E2L1_JP2705
 	$gobs thread coop_mod/replace.scr::turntolookat game.true
 	$johnson thread coop_mod/replace.scr::turntolookat game.true
 	$phillips thread coop_mod/replace.scr::turntolookat game.true
@@ -473,3 +498,301 @@ end
 
 coop_playerJustRespawned:
 end
+
+//=========================================================================
+// [user 2026-08-03] bug-1310 BAKED BUILD-MODE PROPS - the crash-site debris field, captured
+// with coop_build on this map and exported to homepath coop_mod/save/build_e2l1.dat
+// (single session, 2026-08-03 19:57). The capture is an EXPORT - nothing spawns from it at
+// map load - so baking it here is the step that makes it real. 62 placements: C-47 wreck
+// pieces, fire/smoke/spark emitters, dead paratroopers, drag marks. Same recipe as m1l2a's
+// coop_bakedProps (bug-1248). Threaded (not waitthread) from main so it cannot stall the
+// single-frame coop init.
+//=========================================================================
+coop_bakedProps:{
+	//[user 2026-08-03] "the objects/emitters don't spawn until after the glider crash" - the
+	//wreck field must not be visible or burning during the flyover. gliderride.scr::handleCrash
+	//fires the gliderCrashOver event (and sets the level var, checked first for the
+	//already-happened case since this label is threaded long before StartRide runs).
+	if (level.gliderCrashOver != 1) {
+		waitthread game.waittill gliderCrashOver
+	}
+
+// HZM coop BUILD MODE capture for map e2l1
+// paste-ready script blocks; bake recipe in _research/build_mode.md
+
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_middle.tik"
+local.m.origin = ( 2221.980 5133.637 631.179 )
+local.m.angles = ( 0 133 0 )
+local.m solid
+local.m setsize ( -149.689 -121.612 -0.193 ) ( 176.468 81.014 152.755 )
+
+// coop_build #2 models/vehicles/c47_destroyed_engine.tik
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_engine.tik"
+local.m.origin = ( 1711.070 5393.349 907.101 )
+local.m.angles = ( 0 133 0 )
+local.m solid
+local.m setsize ( -93.908 -43.669 -0.681 ) ( 117.838 95.744 110.663 )
+
+// coop_build #3 models/vehicles/c47_destroyed_front.tik
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_front.tik"
+local.m.origin = ( 1934.576 5364.338 726.938 )
+local.m.angles = ( 0 328 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -246.428 -543.624 -0.447 ) ( 144.315 78.123 116.006 )
+
+// coop_build #4 models/vehicles/c47_destroyed_engine.tik
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_engine.tik"
+local.m.origin = ( 1974.489 5814.312 901.568 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -65.736 -30.568 -0.477 ) ( 82.486 67.021 77.464 )
+
+// coop_build #5 models/vehicles/c47_destroyed_tail.tik
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_tail.tik"
+local.m.origin = ( 2393.071 4073.124 328.764 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -142.166 -174.230 0.000 ) ( 140.666 111.216 136.649 )
+
+// coop_build #6 models/vehicles/c47_destroyed_wing.tik
+local.m = spawn script_model
+local.m model "models/vehicles/c47_destroyed_wing.tik"
+local.m.origin = ( 2227.650 5363.917 622.356 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -88.468 -127.945 -0.242 ) ( 103.306 354.101 90.520 )
+
+// coop_build #7 models/emitters/firegood.tik
+local.m = spawn script_model
+local.m model "models/emitters/firegood.tik"
+local.m.origin = ( 2014.693 5219.982 752.085 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #8 models/emitters/firefill.tik
+local.m = spawn script_model
+local.m model "models/emitters/firefill.tik"
+local.m.origin = ( 2307.941 5008.952 646.497 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #9 models/emitters/firefill.tik
+local.m = spawn script_model
+local.m model "models/emitters/firefill.tik"
+local.m.origin = ( 1775.830 5325.165 901.691 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #10 models/emitters/tehao_firesmoke.tik
+local.m = spawn script_model
+local.m model "models/emitters/tehao_firesmoke.tik"
+local.m.origin = ( 2353.833 5024.533 578.850 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #11 models/emitters/generic_spark.tik
+local.m = spawn script_model
+local.m model "models/emitters/generic_spark.tik"
+local.m.origin = ( 2271.400 5351.787 663.001 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #12 models/emitters/electric_arc.tik
+local.m = spawn script_model
+local.m model "models/emitters/electric_arc.tik"
+local.m.origin = ( 2042.228 5264.047 780.937 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #13 models/emitters/firefill.tik
+local.m = spawn script_model
+local.m model "models/emitters/firefill.tik"
+local.m.origin = ( 1939.166 5526.189 863.070 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #14 models/emitters/firefill.tik
+local.m = spawn script_model
+local.m model "models/emitters/firefill.tik"
+local.m.origin = ( 1937.744 5523.646 1000.962 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #15 models/emitters/electrical_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/electrical_fire.tik"
+local.m.origin = ( 1890.727 5358.237 754.332 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #16 models/emitters/linger_smoke.tik
+local.m = spawn script_model
+local.m model "models/emitters/linger_smoke.tik"
+local.m.origin = ( 2211.752 5355.132 639.195 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #17 models/emitters/linger_smoke.tik
+local.m = spawn script_model
+local.m model "models/emitters/linger_smoke.tik"
+local.m.origin = ( 2012.376 5407.992 773.703 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #18 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2419.164 3993.221 423.538 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #19 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2165.648 5075.073 659.885 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #20 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2172.136 5054.615 617.783 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #21 models/emitters/inferno.tik
+local.m = spawn script_model
+local.m model "models/emitters/inferno.tik"
+local.m.origin = ( 2079.431 5013.208 657.288 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #22 models/emitters/inferno.tik
+local.m = spawn script_model
+local.m model "models/emitters/inferno.tik"
+local.m.origin = ( 2077.069 5008.282 803.730 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #23 models/emitters/inferno.tik
+local.m = spawn script_model
+local.m model "models/emitters/inferno.tik"
+local.m.origin = ( 2077.156 5367.513 714.964 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #24 models/emitters/inferno.tik
+local.m = spawn script_model
+local.m model "models/emitters/inferno.tik"
+local.m.origin = ( 2239.439 5293.415 703.204 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #25 models/emitters/inferno.tik
+local.m = spawn script_model
+local.m model "models/emitters/inferno.tik"
+local.m.origin = ( 2381.497 5389.352 594.708 )
+local.m.angles = ( 0 283 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -5.593 -5.594 -5.693 ) ( 5.607 5.606 5.507 )
+
+// coop_build #26 models/static/dead_paratrooper.tik
+local.m = spawn script_model
+local.m model "models/static/dead_paratrooper.tik"
+local.m.origin = ( 2472.455 5239.917 590.221 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -72.378 -32.873 -3.698 ) ( 58.802 43.947 26.984 )
+
+// coop_build #27 models/fx/truckslide_drag.tik
+local.m = spawn script_model
+local.m model "models/fx/truckslide_drag.tik"
+local.m.origin = ( 2384.726 3974.715 322.011 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #28 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2499.962 4856.109 612.134 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #29 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2467.568 4905.135 654.509 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #30 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2518.926 4726.771 619.410 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+
+// coop_build #31 models/emitters/t2l4_fire.tik
+local.m = spawn script_model
+local.m model "models/emitters/t2l4_fire.tik"
+local.m.origin = ( 2397.728 4773.557 606.537 )
+local.m.angles = ( 0 208 0 )
+local.m scale 0.700
+local.m solid
+local.m setsize ( -0.065 -0.037 -0.009 ) ( 0.068 0.076 0.000 )
+}end

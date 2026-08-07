@@ -1,0 +1,304 @@
+//====================================================================
+// coop_selftest_engine.scr - HZM dev engine-stress self-tests (2026-07-23)
+//====================================================================
+// Engine-level stress + resource-limit + crash-guard probes for the
+// automated harness. Each is INERT for real players: nothing runs unless
+// coop_st_engine==1 AND that test's own sub-cvar is set by the test cfg.
+//
+// The dispatcher (st_engine_run) is launched once from coop_mod/main.scr::main
+// when coop_st_engine==1, then threads whichever sub-probes are enabled:
+//    coop_entstress 1 -> coop_engine_entstress : bounded spawn+delete churn
+//                        toward the 2048 edict pool (drives AllocEdict guards)
+//    coop_csstress  1 -> coop_engine_csstress  : register many distinct models
+//                        (CS_MODELS 2048 configstring pressure)
+//    coop_sndstress 1 -> coop_engine_sndstress : force many sound plays across
+//                        all players (CS_SOUNDS 1280 channel/registration load)
+//    coop_soakbeat  1 -> coop_engine_soakbeat  : per-minute heartbeat with the
+//                        script-readable entity/player counts for soak trending
+//    coop_tgatest   1 -> coop_engine_tgatest   : load a (harness-authored)
+//                        malformed-TGA test tik, prove the host survives
+//
+// Markers are "^~^~^ <NAME> ..." like coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+// The real pass/fail for the resource-limit tests also comes from the engine's
+// own greppable lines the harness watches:
+//    ^~^~^ EDICTHI alloc slot=..            (fgame/level.cpp:1756)
+//    ^~^~^ INVSTALE pruned .. / INVDUP add refused .. (fgame/sentient.cpp:1122,986)
+//    WARNING: SV_FindIndex overflow (max=..) (server/sv_init.c:195)
+//    Level::AllocEdict: no free edicts       (clean ERR_DROP, not a crash)
+//====================================================================
+
+//--------------------------------------------------------------------
+// Dispatcher: launched from main.scr only when coop_st_engine==1. Threads
+// each enabled sub-probe (the harness enables exactly one per boot, but the
+// engine probes are independent so concurrent is safe). A short settle lets
+// the map's own prespawn/init finish before we pile stress on it.
+//--------------------------------------------------------------------
+st_engine_run:{
+	wait 2
+	if( getcvar( "coop_soakbeat" ) == "1" ){
+		thread coop_engine_soakbeat
+	}
+	if( getcvar( "coop_entstress" ) == "1" ){
+		thread coop_engine_entstress
+	}
+	if( getcvar( "coop_csstress" ) == "1" ){
+		thread coop_engine_csstress
+	}
+	if( getcvar( "coop_sndstress" ) == "1" ){
+		thread coop_engine_sndstress
+	}
+	if( getcvar( "coop_tgatest" ) == "1" ){
+		thread coop_engine_tgatest
+	}
+}end
+
+//====================================================================
+// ENTITY-POOL EXHAUSTION DRIVE (coop_entstress). Repeatedly spawns cheap
+// throwaway script_models in batches while holding a bounded live window
+// (delete-oldest churn), so the create+free traffic exercises the edict
+// free-list reuse path that produced the stale-slot crash family - without
+// the probe itself uncontrollably OOMing the pool. Combined with 4P
+// count-scaled AI this pushes num_entities toward the 2048 ceiling so the
+// engine's EDICTHI tracer and AllocEdict guards get exercised.
+// Tunables (boot cfg): coop_entstress_ceil (live window, def 120),
+//   coop_entstress_batch (spawns/batch, def 20), coop_entstress_batches
+//   (batch count, def 200).
+//====================================================================
+coop_engine_entstress:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	local.ceil = int( getcvar "coop_entstress_ceil" )
+	if( local.ceil <= 0 ){ local.ceil = 120 }
+	local.batch = int( getcvar "coop_entstress_batch" )
+	if( local.batch <= 0 ){ local.batch = 20 }
+	local.maxb = int( getcvar "coop_entstress_batches" )
+	if( local.maxb <= 0 ){ local.maxb = 200 }
+	local.base = ( 0 0 0 )
+	if( local.p != NULL && local.p != NIL ){ local.base = local.p.origin + ( 0 0 4096 ) }
+	println( "^~^~^ ENTSTRESS begin ceil=" + local.ceil + " batch=" + local.batch + " batches=" + local.maxb + " map=" + level.coop_mapname )
+
+	local.spawned = 0
+	local.live    = 0
+	local.peak    = 0
+	local.head    = 0
+	local.tail    = 0
+	local.b = 0
+	while( local.b < local.maxb && getcvar( "coop_entstress" ) == "1" ){
+		local.k = 0
+		while( local.k < local.batch ){
+			local.e = spawn script_model
+			local.e model "models/static/sandbag_large_semicircle.tik"
+			local.e.origin = local.base
+			local.ring[local.head] = local.e
+			local.head++
+			local.spawned++
+			local.live++
+			local.k++
+		}
+		while( local.live > local.ceil ){
+			local.old = local.ring[local.tail]
+			if( local.old != NULL && local.old != NIL ){ local.old delete }
+			local.tail++
+			local.live--
+		}
+		if( local.live > local.peak ){ local.peak = local.live }
+		println( "^~^~^ ENTSTRESS batch=" + local.b + " spawned=" + local.spawned + " peakslot=" + local.peak + " live=" + local.live )
+		local.b++
+		wait 1
+	}
+	// tear down any still-live probe ents so we do not leak the window on exit
+	while( local.tail < local.head ){
+		local.old = local.ring[local.tail]
+		if( local.old != NULL && local.old != NIL ){ local.old delete }
+		local.tail++
+	}
+	println( "^~^~^ ENTSTRESS done spawned=" + local.spawned + " peakslot=" + local.peak )
+}end
+
+//====================================================================
+// CONFIGSTRING / MODEL-POOL PRESSURE (coop_csstress). Spawns script_models
+// cycling a curated list of DISTINCT real model tiks; each distinct name
+// registers a CS_MODELS configstring (SV_ModelIndex). We churn the entities
+// (bounded live window) but the distinct registrations persist, adding
+// CS_MODELS pressure on top of the map's organic officer/reinforcement
+// model+skin combos. Every spawned ent is validity-checked (non-NULL with
+// the model applied) as a script-side proxy for "registered index != 0".
+// Tunables: coop_csstress_ceil (live window, def 60), coop_csstress_cycles
+//   (list passes, def 40).
+//====================================================================
+coop_engine_csstress:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	local.models[0]  = "models/static/sandbag_large_semicircle.tik"
+	local.models[1]  = "models/static/sandbag_small_semicircle.tik"
+	local.models[2]  = "models/items/item_grenade_ammobox.tik"
+	local.models[3]  = "models/items/item_50_healthbox.tik"
+	local.models[4]  = "models/items/item_25_healthbox.tik"
+	local.models[5]  = "models/items/item_pistol_ammobox.tik"
+	local.models[6]  = "models/items/item_heavy_ammobox.tik"
+	local.models[7]  = "models/items/item_smg_ammobox.tik"
+	local.models[8]  = "models/items/item_rifle_ammobox.tik"
+	local.models[9]  = "models/items/item_mg_ammobox.tik"
+	local.models[10] = "models/items/binoculars.tik"
+	local.models[11] = "models/items/cigarette.tik"
+	local.models[12] = "models/items/walkietalkie.tik"
+	local.models[13] = "models/items/dm_50_healthbox.tik"
+	local.models[14] = "models/statweapons/aagun_lowcount.tik"
+	local.models[15] = "models/static/speakerbox1.tik"
+	local.nmodels = 16
+
+	local.ceil = int( getcvar "coop_csstress_ceil" )
+	if( local.ceil <= 0 ){ local.ceil = 60 }
+	local.cycles = int( getcvar "coop_csstress_cycles" )
+	if( local.cycles <= 0 ){ local.cycles = 40 }
+	local.base = ( 0 0 0 )
+	if( local.p != NULL && local.p != NIL ){ local.base = local.p.origin + ( 0 0 3000 ) }
+	println( "^~^~^ CSSTRESS begin models=" + local.nmodels + " ceil=" + local.ceil + " cycles=" + local.cycles + " map=" + level.coop_mapname )
+
+	local.spawned = 0
+	local.valid   = 0
+	local.live    = 0
+	local.head    = 0
+	local.tail    = 0
+	local.c = 0
+	while( local.c < local.cycles && getcvar( "coop_csstress" ) == "1" ){
+		local.m = 0
+		while( local.m < local.nmodels ){
+			local.e = spawn script_model
+			local.e model local.models[local.m]
+			local.e.origin = local.base
+			if( local.e != NULL && local.e != NIL ){ local.valid++ }
+			local.ring[local.head] = local.e
+			local.head++
+			local.spawned++
+			local.live++
+			local.m++
+		}
+		while( local.live > local.ceil ){
+			local.old = local.ring[local.tail]
+			if( local.old != NULL && local.old != NIL ){ local.old delete }
+			local.tail++
+			local.live--
+		}
+		println( "^~^~^ CSSTRESS cycle=" + local.c + " models=" + local.nmodels + " spawned=" + local.spawned + " valid=" + local.valid + " live=" + local.live )
+		local.c++
+		wait 1
+	}
+	while( local.tail < local.head ){
+		local.old = local.ring[local.tail]
+		if( local.old != NULL && local.old != NIL ){ local.old delete }
+		local.tail++
+	}
+	println( "^~^~^ CSSTRESS done models=" + local.nmodels + " spawned=" + local.spawned + " valid=" + local.valid )
+}end
+
+//====================================================================
+// SOUND-INDEX / CHANNEL SATURATION DRIVER (coop_sndstress). Best-effort
+// script driver: on every alive player it fires a rotating set of confirmed
+// aliascache'd sounds (ubersound.scr) as fast as the wait allows, maximizing
+// simultaneous channels + play traffic on top of the map's organic 4P HD-pack
+// combat. Pure script cannot ENUMERATE registered sounds or read the CS_SOUNDS
+// high-water, so the definitive pass/fail is the engine's greppable
+// "WARNING: SV_FindIndex overflow (max=1280 ...)" line (server/sv_init.c:195),
+// which the harness watches during the run. The probe's own count is the
+// number of play volleys it has issued (a driver/heartbeat, not the true HWM).
+// Tunable: coop_sndstress_iters (volley count, def 240).
+//====================================================================
+coop_engine_sndstress:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ SNDSTRESS abort=no_host"
+		end
+	}
+	local.snd[0] = "coop_ammobox_drop"
+	local.snd[1] = "coop_mg_overheat"
+	local.snd[2] = "coop_para_heal"
+	local.snd[3] = "steamloop"
+	local.snd[4] = "explode_gastank1"
+	local.snd[5] = "explode_gastank2"
+	local.snd[6] = "pickup_gasmask"
+	local.nsnd = 7
+
+	local.iters = int( getcvar "coop_sndstress_iters" )
+	if( local.iters <= 0 ){ local.iters = 240 }
+	println( "^~^~^ SNDSTRESS begin aliases=" + local.nsnd + " iters=" + local.iters + " map=" + level.coop_mapname )
+
+	local.reg  = 0
+	local.peak = 0
+	local.si   = 0
+	local.it   = 0
+	while( local.it < local.iters && getcvar( "coop_sndstress" ) == "1" ){
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.pl = $player[local.i]
+				if( local.pl == NULL || local.pl == NIL ){ continue }
+				if( isAlive local.pl ){
+					local.a = local.snd[local.si]
+					local.pl playsound local.a
+					local.si++
+					if( local.si >= local.nsnd ){ local.si = 0 }
+					local.reg++
+				}
+			}
+		}
+		if( local.reg > local.peak ){ local.peak = local.reg }
+		println( "^~^~^ SNDSTRESS iter=" + local.it + " registered=" + local.reg + " peak=" + local.peak )
+		wait 0.5
+		local.it++
+	}
+	println( "^~^~^ SNDSTRESS done registered=" + local.reg )
+}end
+
+//====================================================================
+// SOAK HEARTBEAT (coop_soakbeat). Per-minute liveness beacon for the multi-
+// hour soak. Emits the counts a SCRIPT can read (uptime minutes, connected
+// player count, german actor-array size + alive count) so the harness can
+// trend engagement over hours; the harness pairs each beat with its own
+// process working-set (rssMB) + crash-dump sample. A missing SOAKBEAT for a
+// sample window while the proc pegs CPU is a corroborating hang/crash signal.
+//====================================================================
+coop_engine_soakbeat:{
+	local.t = 0
+	while( getcvar( "coop_soakbeat" ) == "1" ){
+		wait 60
+		local.t++
+		local.pc = 0
+		if( $player != NULL && $player.size >= 1 ){ local.pc = $player.size }
+		local.german = 0
+		local.alive  = 0
+		if( level.coop_actorArray != NIL && level.coop_actorArray["german"] != NIL ){
+			for( local.i = 1; local.i <= level.coop_actorArray["german"].size; local.i++ ){
+				local.a = level.coop_actorArray["german"][local.i]
+				if( local.a == NIL || local.a == NULL ){ continue }
+				local.german++
+				if( isAlive local.a ){ local.alive++ }
+			}
+		}
+		println( "^~^~^ SOAKBEAT t=" + local.t + " pc=" + local.pc + " german=" + local.german + " alive=" + local.alive )
+	}
+}end
+
+//====================================================================
+// LoadTGA / BAD-ASSET CRASH GUARD (coop_tgatest). Script-drivable half of the
+// test: force the listen host to LOAD a test tik that references a deliberately
+// malformed TGA (unsupported image_type / bad pixel_size), then prove the host
+// process stays alive with the asset skipped-to-default rather than ERR_DROP.
+// The malformed .tga + its test .tik must be authored into a maintt-only test
+// pk3 by the harness (needs-human asset step); this probe only forces the load
+// and emits the survival marker. Harness pairs it with a grep for
+// "LoadTGA: unsupported image_type" / "unsupported pixel_size ... using default
+// texture" (renderercommon/tr_image_tga.c, renderergl1/tr_image.c).
+// Tunable: coop_tgatest_tik (test tik path, def models/coop/test_badtga.tik).
+//====================================================================
+coop_engine_tgatest:{
+	local.tik = getcvar "coop_tgatest_tik"
+	if( local.tik == "" || local.tik == NIL ){ local.tik = "models/coop/test_badtga.tik" }
+	println( "^~^~^ TGATEST begin tik=" + local.tik + " map=" + level.coop_mapname )
+	local.e = spawn script_model
+	local.e model local.tik
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 30
+	if( local.p != NULL && local.p != NIL ){ local.e.origin = local.p.origin + ( 64 0 0 ) }
+	wait 5
+	local.ok = 0
+	if( local.e != NULL && local.e != NIL ){ local.ok = 1 }
+	println( "^~^~^ TGATEST survived=" + local.ok + " map=" + level.coop_mapname )
+	if( local.e != NULL && local.e != NIL ){ local.e delete }
+}end

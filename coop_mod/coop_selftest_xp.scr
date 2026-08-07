@@ -1,0 +1,696 @@
+//====================================================================
+// coop_selftest_xp.scr - HZM dev automated self-tests: XP / CHALLENGES
+// / SERVICE-RECORD / AUDIO subsystem (2026-07-23)
+//====================================================================
+// Cvar-gated probes for the automated test harness. INERT for real
+// players: nothing runs unless the harness sets coop_st_xp 1 in the
+// boot cfg. Launched from coop_mod/main.scr::main:
+//
+//    if( getcvar( "coop_st_xp" ) == "1" ){
+//        thread coop_mod/coop_selftest_xp.scr::st_xp_run
+//    }
+//
+// Sub-mode selected by coop_st_xp_mode:
+//    ""/"all"  -> the self-contained battery (owner/assist/valor/cap/
+//                 rank/wpn/popup/ccclean/audband), run in SEQUENCE so
+//                 the tests never race over the shared players.
+//    "chalA"   -> CHALPERSIST map-A phase (bump + save a counter)
+//    "chalB"   -> CHALPERSIST map-B phase (read-back + double mission-complete)
+//    "join"    -> XPJOIN late-join identity poll
+//
+// Markers are prefixed ST_XP_ and greppable ("^~^~^ ST_XP_...").
+// The existing coop_selftest.scr::xptest_run (bug-1065 NIL/NULL guard,
+// gated coop_xptest) is SEPARATE and unchanged.
+//====================================================================
+
+
+//--------------------------------------------------------------------
+// helpers
+//--------------------------------------------------------------------
+
+// coop_xp_total flag for a player (0 if unset/NULL).
+st_xp_total local.p:{
+	local.v = 0
+	if( local.p != NULL && local.p != NIL && local.p.flags["coop_xp_total"] != NIL ){ local.v = local.p.flags["coop_xp_total"] }
+	end local.v
+}end
+
+// coop_xp_b_kills bucket for a player (0 if unset/NULL).
+st_xp_bkills local.p:{
+	local.v = 0
+	if( local.p != NULL && local.p != NIL && local.p.flags["coop_xp_b_kills"] != NIL ){ local.v = local.p.flags["coop_xp_b_kills"] }
+	end local.v
+}end
+
+// coop_xp_b_valor bucket for a player (0 if unset/NULL).
+st_xp_bvalor local.p:{
+	local.v = 0
+	if( local.p != NULL && local.p != NIL && local.p.flags["coop_xp_b_valor"] != NIL ){ local.v = local.p.flags["coop_xp_b_valor"] }
+	end local.v
+}end
+
+// count connected players flagged coop_isActive.
+st_xp_countActive:{
+	local.np = 0
+	if( $player == NULL ){ end local.np }
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){ local.np = local.np + 1 }
+		local.i++
+	}
+	end local.np
+}end
+
+// progress of the HIGHEST-TARGET challenge mapped to a stat (0 if none).
+// Reading the highest-target member avoids the target-1 clamp so a small
+// bump is observable (e.g. stat "missions" has ms_1 target 1 AND ms_30
+// target 30; we read ms_30).
+st_xp_statProgMax local.player local.stat:{
+	local.v = 0
+	if( local.player == NULL || local.player == NIL ){ end local.v }
+	if( level.coop_chal_statN == NIL ){ end local.v }
+	local.cnt = level.coop_chal_statN[local.stat]
+	if( local.cnt == NIL || local.cnt <= 0 ){ end local.v }
+	local.bestTgt = 0
+	local.cid = NIL
+	local.j = 0
+	while( local.j < local.cnt ){
+		local.idx = level.coop_chal_statIdx[local.stat][local.j]
+		if( local.idx != NIL ){
+			local.tgt = level.coop_chal_target[local.idx]
+			if( local.tgt != NIL && local.tgt >= local.bestTgt ){
+				local.bestTgt = local.tgt
+				local.cid = level.coop_chal_id[local.idx]
+			}
+		}
+		local.j++
+	}
+	if( local.cid != NIL ){
+		local.p = local.player.flags["coop_chalP_" + local.cid]
+		if( local.p != NIL ){ local.v = local.p }
+	}
+	end local.v
+}end
+
+// count "|"-delimited tokens in a string (0 for empty/NIL).
+st_xp_countTokens local.s:{
+	local.c = 0
+	if( local.s == NIL || local.s == "" ){ end local.c }
+	local.c = 1
+	local.i = 0
+	while( local.i < local.s.size ){
+		if( local.s[local.i] == "|" ){ local.c = local.c + 1 }
+		local.i++
+	}
+	end local.c
+}end
+
+
+//====================================================================
+// DISPATCHER
+//====================================================================
+st_xp_run:{
+	local.mode = getcvar( "coop_st_xp_mode" )
+	if( local.mode == "" || local.mode == NIL ){ local.mode = "all" }
+
+	if( local.mode == "chalA" ){ waitthread st_xp_chalpersist_A; end }
+	if( local.mode == "chalB" ){ waitthread st_xp_chalpersist_B; end }
+	if( local.mode == "join" ){ waitthread st_xp_join; end }
+
+	// default battery - self-contained, needs live players
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_XP abort=no_host"
+		end
+	}
+	local.pc = 0
+	if( $player != NULL ){ local.pc = $player.size }
+	println( "^~^~^ ST_XP begin map=" + level.coop_mapname + " players=" + local.pc )
+
+	waitthread st_xp_owner
+	wait 1
+	waitthread st_xp_assist
+	wait 1
+	waitthread st_xp_valor
+	wait 1
+	waitthread st_xp_cap
+	wait 1
+	waitthread st_xp_rank
+	wait 1
+	waitthread st_xp_wpn
+	wait 1
+	waitthread st_xp_popup
+	wait 1
+	waitthread st_xp_ccclean
+	wait 1
+	waitthread st_xp_audband
+	println( "^~^~^ ST_XP done map=" + level.coop_mapname )
+}end
+
+
+//====================================================================
+// XPOWN - kill ownership: the killer is credited, no cross-credit.
+// For each connected player i, fabricate a plain victim (no fact, no
+// assist ledger) at the killer's origin and route it through the REAL
+// xp_ai_killed; the only award is the base "Kill" and it must land on i.
+//====================================================================
+st_xp_owner:{
+	if( $player == NULL || $player.size < 1 ){ println "^~^~^ ST_XP_XPOWN abort=no_players"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_XPOWN abort=xp_off"; end }
+	local.n = $player.size
+	local.i = 1
+	while( local.i <= local.n ){
+		local.killer = $player[local.i]
+		if( local.killer != NULL && isAlive local.killer ){
+			// snapshot: killer total + the summed total of everyone else
+			local.killerBefore = waitthread st_xp_total local.killer
+			local.othersBefore = 0
+			local.j = 1
+			while( local.j <= local.n ){
+				if( local.j != local.i ){ local.othersBefore = local.othersBefore + ( waitthread st_xp_total $player[local.j] ) }
+				local.j++
+			}
+			local.victim = spawn script_model
+			local.victim notsolid
+			local.victim.origin = local.killer.origin
+			local.victim.team   = "german"
+			waitthread coop_mod/xp.scr::xp_ai_killed local.victim local.killer
+			wait 1
+			local.killerAfter = waitthread st_xp_total local.killer
+			local.othersAfter = 0
+			local.j = 1
+			while( local.j <= local.n ){
+				if( local.j != local.i ){ local.othersAfter = local.othersAfter + ( waitthread st_xp_total $player[local.j] ) }
+				local.j++
+			}
+			local.gainSelf   = local.killerAfter - local.killerBefore
+			local.gainOthers = local.othersAfter - local.othersBefore
+			println( "^~^~^ ST_XP_XPOWN idx=" + local.i + " killer=" + local.killer.netname + " gainSelf=" + local.gainSelf + " gainOthers=" + local.gainOthers + " total=" + local.killerAfter )
+			local.victim delete
+		}
+		local.i++
+	}
+}end
+
+
+//====================================================================
+// XPASSIST - assist attribution: killer p1; seed the victim ledger so
+// p2 is stale (>10s), p3 under 25%, p4 zero. None must be paid an assist.
+//====================================================================
+st_xp_assist:{
+	if( $player == NULL || $player.size < 4 ){ println "^~^~^ ST_XP_XPASSIST abort=need_4"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_XPASSIST abort=xp_off"; end }
+	local.killer = $player[1]
+	if( local.killer == NULL || !isAlive local.killer ){ println "^~^~^ ST_XP_XPASSIST abort=no_killer"; end }
+
+	local.victim = spawn script_model
+	local.victim notsolid
+	local.victim.origin      = local.killer.origin
+	local.victim.team        = "german"
+	local.victim.coop_xp_hp0 = 100
+	local.e1 = $player[1].entnum
+	local.e2 = $player[2].entnum
+	local.e3 = $player[3].entnum
+	local.victim.coop_xp_dmg[local.e1]  = 30
+	local.victim.coop_xp_dmgT[local.e1] = level.time
+	local.victim.coop_xp_dmg[local.e2]  = 30
+	local.victim.coop_xp_dmgT[local.e2] = level.time - 15
+	local.victim.coop_xp_dmg[local.e3]  = 10
+	local.victim.coop_xp_dmgT[local.e3] = level.time
+
+	local.pre2 = waitthread st_xp_bkills $player[2]
+	local.pre3 = waitthread st_xp_bkills $player[3]
+	local.pre4 = waitthread st_xp_bkills $player[4]
+	waitthread coop_mod/xp.scr::xp_ai_killed local.victim local.killer
+	wait 1
+	local.post2 = waitthread st_xp_bkills $player[2]
+	local.post3 = waitthread st_xp_bkills $player[3]
+	local.post4 = waitthread st_xp_bkills $player[4]
+	local.a2 = 0
+	local.a3 = 0
+	local.a4 = 0
+	if( local.post2 > local.pre2 ){ local.a2 = 1 }
+	if( local.post3 > local.pre3 ){ local.a3 = 1 }
+	if( local.post4 > local.pre4 ){ local.a4 = 1 }
+	println( "^~^~^ ST_XP_XPASSIST killer=1 assist2=" + local.a2 + " assist3=" + local.a3 + " assist4=" + local.a4 )
+	local.victim delete
+}end
+
+
+//====================================================================
+// XPVALOR - Savior + Guardian valor bonuses.
+//   a) victim was engaging a DIFFERENT player (enemyAtPain=p2) -> Savior on p1
+//   b) enemyAtPain=p1 (self) -> NO Savior
+//   c) a downed teammate (p3) within 512u, no enemyAtPain -> Guardian on p1
+// The Savior/Guardian scans run synchronously inside xp_ai_killed, so the
+// transient p3 dbno flag is cleared the same frame (no monitor observes it).
+//====================================================================
+st_xp_valor:{
+	if( $player == NULL || $player.size < 4 ){ println "^~^~^ ST_XP_XPVALOR abort=need_4"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_XPVALOR abort=xp_off"; end }
+	local.p1 = $player[1]
+	if( local.p1 == NULL || !isAlive local.p1 ){ println "^~^~^ ST_XP_XPVALOR abort=no_killer"; end }
+
+	// case a: Savior (enemyAtPain = a different player)
+	local.pre = waitthread st_xp_bvalor local.p1
+	local.victim = spawn script_model
+	local.victim notsolid
+	local.victim.origin      = local.p1.origin
+	local.victim.team        = "german"
+	local.fact = spawn script_origin
+	local.fact.location    = 99
+	local.fact.meansofdeath = 0
+	local.fact.enemyAtPain  = $player[2]
+	local.victim.fact = local.fact
+	waitthread coop_mod/xp.scr::xp_ai_killed local.victim local.p1
+	wait 1
+	local.post = waitthread st_xp_bvalor local.p1
+	local.ga = local.post - local.pre
+	println( "^~^~^ ST_XP_XPVALOR case=a valorGain=" + local.ga )
+	local.victim delete
+	local.fact delete
+
+	// case b: self-target (enemyAtPain = killer) -> no Savior
+	local.pre = waitthread st_xp_bvalor local.p1
+	local.victim = spawn script_model
+	local.victim notsolid
+	local.victim.origin      = local.p1.origin
+	local.victim.team        = "german"
+	local.fact = spawn script_origin
+	local.fact.location    = 99
+	local.fact.meansofdeath = 0
+	local.fact.enemyAtPain  = local.p1
+	local.victim.fact = local.fact
+	waitthread coop_mod/xp.scr::xp_ai_killed local.victim local.p1
+	wait 1
+	local.post = waitthread st_xp_bvalor local.p1
+	local.gb = local.post - local.pre
+	println( "^~^~^ ST_XP_XPVALOR case=b valorGain=" + local.gb )
+	local.victim delete
+	local.fact delete
+
+	// case c: Guardian (a downed teammate within 512u, no enemyAtPain)
+	local.pre = waitthread st_xp_bvalor local.p1
+	local.victim = spawn script_model
+	local.victim notsolid
+	local.victim.origin = local.p1.origin
+	local.victim.team   = "german"
+	local.fact = spawn script_origin
+	local.fact.location    = 99
+	local.fact.meansofdeath = 0
+	local.victim.fact = local.fact
+	local.p3save = $player[3].origin
+	$player[3].origin = local.victim.origin + ( 100 0 0 )
+	$player[3].flags["coop_dbno_active"] = 1
+	waitthread coop_mod/xp.scr::xp_ai_killed local.victim local.p1
+	$player[3].flags["coop_dbno_active"] = NIL
+	$player[3].origin = local.p3save
+	wait 1
+	local.post = waitthread st_xp_bvalor local.p1
+	local.gc = local.post - local.pre
+	println( "^~^~^ ST_XP_XPVALOR case=c valorGain=" + local.gc )
+	local.victim delete
+	local.fact delete
+}end
+
+
+//====================================================================
+// XPCAP - kill soft-cap factor scales with the ACTIVE player count.
+// Pure reads of the real xp_killcap_factor against seeded teamkills.
+// Everything is synchronous (no wait) between the flag flip and the
+// factor read, so the transient state is confined to one frame.
+//====================================================================
+st_xp_cap:{
+	if( $player == NULL || $player.size < 1 ){ println "^~^~^ ST_XP_XPCAP abort=no_players"; end }
+	local.save = level.coop_xp_teamkills
+	if( local.save == NIL ){ local.save = 0 }
+
+	local.np = waitthread st_xp_countActive
+
+	level.coop_xp_teamkills = 300
+	local.f1 = waitthread coop_mod/xp.scr::xp_killcap_factor
+	println( "^~^~^ ST_XP_XPCAP np=" + local.np + " teamkills=300 factor=" + local.f1 )
+
+	level.coop_xp_teamkills = 400
+	local.f2 = waitthread coop_mod/xp.scr::xp_killcap_factor
+	println( "^~^~^ ST_XP_XPCAP np=" + local.np + " teamkills=400 factor=" + local.f2 )
+
+	level.coop_xp_teamkills = 800
+	local.f3 = waitthread coop_mod/xp.scr::xp_killcap_factor
+	println( "^~^~^ ST_XP_XPCAP np=" + local.np + " teamkills=800 factor=" + local.f3 )
+
+	// flip one active player inactive -> np-1, re-check the low boundary
+	local.flip = NULL
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( local.flip == NULL && $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){ local.flip = $player[local.i] }
+		local.i++
+	}
+	if( local.flip != NULL ){
+		local.flip.flags["coop_isActive"] = 0
+		local.np2 = waitthread st_xp_countActive
+		level.coop_xp_teamkills = 300
+		local.f4 = waitthread coop_mod/xp.scr::xp_killcap_factor
+		local.flip.flags["coop_isActive"] = 1
+		println( "^~^~^ ST_XP_XPCAP np=" + local.np2 + " teamkills=300 factor=" + local.f4 )
+	}
+
+	level.coop_xp_teamkills = local.save
+}end
+
+
+//====================================================================
+// XPRANK - a multi-rank XP lump promotes once and the unlock grant
+// dedups. Seeds p1 just below Corporal (rankXP[3]=2200) at rank 2,
+// awards 5000 (-> total 7100 -> rank 5), counts unlocks added, then
+// re-backfills 0..rank and asserts the set size is unchanged.
+//====================================================================
+st_xp_rank:{
+	if( $player == NULL || $player.size < 1 ){ println "^~^~^ ST_XP_XPRANK abort=no_players"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_XPRANK abort=xp_off"; end }
+	local.p1 = $player[1]
+	if( local.p1 == NULL || !isAlive local.p1 ){ local.p1 = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 10 }
+	if( local.p1 == NULL ){ println "^~^~^ ST_XP_XPRANK abort=no_host"; end }
+	// make sure identity + unlock set are loaded so the before-count is accurate
+	if( local.p1.flags["coop_xp_id"] == NIL ){ waitthread coop_mod/xp.scr::xp_identify local.p1 }
+	waitthread coop_mod/challenges.scr::chal_ensure local.p1
+	if( local.p1 == NULL ){ println "^~^~^ ST_XP_XPRANK abort=host_gone"; end }
+
+	local.p1.flags["coop_xp_total"] = 2100
+	local.p1.flags["coop_xp_rank"]  = 2
+	local.uBefore   = local.p1.flags["coop_chal_unlocks"]
+	local.cntBefore = waitthread st_xp_countTokens local.uBefore
+
+	waitthread coop_mod/xp.scr::xp_award local.p1 5000 "kills" "rankprobe"
+	wait 3
+	local.newrank  = 0
+	if( local.p1.flags["coop_xp_rank"] != NIL ){ local.newrank = local.p1.flags["coop_xp_rank"] }
+	local.uAfter   = local.p1.flags["coop_chal_unlocks"]
+	local.cntAfter = waitthread st_xp_countTokens local.uAfter
+	local.added    = local.cntAfter - local.cntBefore
+
+	// simulate a reconnect backfill (0..rank) - must add nothing new
+	waitthread coop_mod/xp.scr::xp_rank_unlock local.p1 0 local.newrank
+	wait 2
+	local.uReb   = local.p1.flags["coop_chal_unlocks"]
+	local.cntReb = waitthread st_xp_countTokens local.uReb
+	local.addedReb = local.cntReb - local.cntBefore
+
+	println( "^~^~^ ST_XP_XPRANK p=1 fromRank=2 toRank=" + local.newrank + " unlocksAdded=" + local.added + " unlocksAfterRebackfill=" + local.addedReb )
+}end
+
+
+//====================================================================
+// CHALWPN - the per-weapon challenge credits the weapon the killer is
+// HOLDING (via chal_weaponId -> returnActiveWeapon), and an allied
+// (teamkill) victim never bumps the kill family.
+// NOTE: server-side give may not RAISE the weapon on an idle client, so
+// held=thompson is best-effort ("other" = a kill landed on a different
+// gun); the teamkill kill==0 assertion is robust regardless.
+//====================================================================
+st_xp_wpn:{
+	if( $player == NULL || $player.size < 1 ){ println "^~^~^ ST_XP_CHALWPN abort=no_players"; end }
+	if( level.coop_chal_enabled != 1 ){ println "^~^~^ ST_XP_CHALWPN abort=chal_off"; end }
+	local.p1 = $player[1]
+	if( local.p1 == NULL || !isAlive local.p1 ){ local.p1 = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 10 }
+	if( local.p1 == NULL ){ println "^~^~^ ST_XP_CHALWPN abort=no_host"; end }
+
+	// held = thompson
+	local.p1 takeall
+	local.p1 item "models/weapons/thompson.tik"
+	local.p1 ammo smg 60
+	wait 1.5
+	local.preT    = waitthread st_xp_statProgMax local.p1 "wpn_thompson"
+	local.killPre = waitthread st_xp_statProgMax local.p1 "kill"
+	local.victim = spawn script_model
+	local.victim notsolid
+	local.victim.origin = local.p1.origin
+	local.victim.team   = "german"
+	waitthread coop_mod/challenges.scr::chal_ai_killed local.victim local.p1
+	wait 1
+	local.postT    = waitthread st_xp_statProgMax local.p1 "wpn_thompson"
+	local.killPost = waitthread st_xp_statProgMax local.p1 "kill"
+	local.bumped = "none"
+	if( local.postT > local.preT ){ local.bumped = "thompson" }
+	else if( local.killPost > local.killPre ){ local.bumped = "other" }
+	println( "^~^~^ ST_XP_CHALWPN held=thompson bumped=" + local.bumped )
+	local.victim delete
+
+	// teamkill: allied victim -> no kill-family bump
+	local.killPre2 = waitthread st_xp_statProgMax local.p1 "kill"
+	local.victim2 = spawn script_model
+	local.victim2 notsolid
+	local.victim2.origin = local.p1.origin
+	local.victim2.team   = "american"
+	waitthread coop_mod/challenges.scr::chal_ai_killed local.victim2 local.p1
+	wait 1
+	local.killPost2 = waitthread st_xp_statProgMax local.p1 "kill"
+	local.tk = 0
+	if( local.killPost2 > local.killPre2 ){ local.tk = 1 }
+	println( "^~^~^ ST_XP_CHALWPN teamkill kill=" + local.tk )
+	local.victim2 delete
+
+	// restore a sane default weapon
+	local.p1 takeall
+	local.p1 item "models/weapons/m1_garand.tik"
+	local.p1 ammo rifle 40
+}end
+
+
+//====================================================================
+// XPPOPUP - the micro-gain popup has 3 slots (73-75); a 4th simultaneous
+// award is dropped, and every slot flag clears back to NIL after the fade.
+//====================================================================
+st_xp_popup:{
+	if( $player == NULL || $player.size < 1 ){ println "^~^~^ ST_XP_XPPOPUP abort=no_players"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_XPPOPUP abort=xp_off"; end }
+	local.p1 = $player[1]
+	if( local.p1 == NULL || !isAlive local.p1 ){ local.p1 = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 10 }
+	if( local.p1 == NULL ){ println "^~^~^ ST_XP_XPPOPUP abort=no_host"; end }
+
+	local.p1.flags["coop_xp_mp73"] = NIL
+	local.p1.flags["coop_xp_mp74"] = NIL
+	local.p1.flags["coop_xp_mp75"] = NIL
+
+	thread coop_mod/xp.scr::xp_award local.p1 5 "kills" "PopA"
+	thread coop_mod/xp.scr::xp_award local.p1 5 "kills" "PopB"
+	thread coop_mod/xp.scr::xp_award local.p1 5 "kills" "PopC"
+	thread coop_mod/xp.scr::xp_award local.p1 5 "kills" "PopD"
+	wait 0.2
+	local.used = 0
+	if( local.p1.flags["coop_xp_mp73"] == 1 ){ local.used = local.used + 1 }
+	if( local.p1.flags["coop_xp_mp74"] == 1 ){ local.used = local.used + 1 }
+	if( local.p1.flags["coop_xp_mp75"] == 1 ){ local.used = local.used + 1 }
+
+	wait 3
+	local.leaked = 0
+	if( local.p1.flags["coop_xp_mp73"] == 1 ){ local.leaked = 1 }
+	if( local.p1.flags["coop_xp_mp74"] == 1 ){ local.leaked = 1 }
+	if( local.p1.flags["coop_xp_mp75"] == 1 ){ local.leaked = 1 }
+	println( "^~^~^ ST_XP_XPPOPUP fired=4 slotsUsed=" + local.used + " leaked=" + local.leaked )
+}end
+
+
+//====================================================================
+// CCCLEAN - the no-down campaign feat awards ONLY active players who
+// never went down THIS map. p2 is downed (disqualified), p4 is flipped
+// inactive (skipped), p1/p3 stay clean+active and get the feat.
+//====================================================================
+st_xp_ccclean:{
+	if( $player == NULL || $player.size < 4 ){ println "^~^~^ ST_XP_CCCLEAN abort=need_4"; end }
+	if( level.coop_chal_enabled != 1 ){ println "^~^~^ ST_XP_CCCLEAN abort=chal_off"; end }
+	local.p2 = $player[2]
+	local.p4 = $player[4]
+	if( local.p2 == NULL || local.p4 == NULL ){ println "^~^~^ ST_XP_CCCLEAN abort=missing_player"; end }
+
+	// down p2 (stamps coop_wentDownMap = this map)
+	thread coop_mod/dbno.scr::dbno_enter local.p2 "chest"
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( local.p2.flags["coop_dbno_active"] == 1 ){ break }
+		local.w++
+	}
+
+	// flip p4 inactive for the duration of the award
+	local.p4wasActive = local.p4.flags["coop_isActive"]
+	local.p4.flags["coop_isActive"] = 0
+
+	local.pre1 = waitthread st_xp_statProgMax $player[1] "cc_earn_this"
+	local.pre2 = waitthread st_xp_statProgMax $player[2] "cc_earn_this"
+	local.pre3 = waitthread st_xp_statProgMax $player[3] "cc_earn_this"
+	local.pre4 = waitthread st_xp_statProgMax $player[4] "cc_earn_this"
+
+	waitthread coop_mod/challenges.scr::cc_award_clean "cc_earn_this"
+	wait 1
+
+	local.post1 = waitthread st_xp_statProgMax $player[1] "cc_earn_this"
+	local.post2 = waitthread st_xp_statProgMax $player[2] "cc_earn_this"
+	local.post3 = waitthread st_xp_statProgMax $player[3] "cc_earn_this"
+	local.post4 = waitthread st_xp_statProgMax $player[4] "cc_earn_this"
+
+	// restore p4 active flag
+	if( local.p4wasActive == NIL ){ local.p4.flags["coop_isActive"] = NIL }
+	else { local.p4.flags["coop_isActive"] = local.p4wasActive }
+
+	local.b1 = 0
+	local.b2 = 0
+	local.b3 = 0
+	local.b4 = 0
+	if( local.post1 > local.pre1 ){ local.b1 = 1 }
+	if( local.post2 > local.pre2 ){ local.b2 = 1 }
+	if( local.post3 > local.pre3 ){ local.b3 = 1 }
+	if( local.post4 > local.pre4 ){ local.b4 = 1 }
+	println( "^~^~^ ST_XP_CCCLEAN p1=" + local.b1 + " p2=" + local.b2 + " p3=" + local.b3 + " p4=" + local.b4 )
+
+	// revive the downed patient so the map stays playable
+	waitthread coop_mod/dbno.scr::dbno_ai_revive local.p2
+}end
+
+
+//====================================================================
+// AUDBAND - death-voice proximity: replicates deathvox.play's closest-of-N
+// min-distance scan + band select against a fabricated dying entity, using
+// the same cvars. Players are teleported to controlled offsets so the
+// nearest index is known; origins are restored afterward.
+//====================================================================
+st_xp_audband_emit local.ent local.range local.farRange:{
+	if( $player == NULL || $player.size < 1 ){ end }
+	local.mindist = 999999
+	local.closest = 0
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			local.d = vector_length( $player[local.i].origin - local.ent.origin )
+			if( local.d < local.mindist ){
+				local.mindist = local.d
+				local.closest = local.i
+			}
+		}
+		local.i++
+	}
+	local.band = "none"
+	local.mute = 0
+	if( local.mindist <= local.farRange ){
+		local.mute = 1
+		if( local.mindist > local.range ){ local.band = "far" }
+		else { local.band = "near" }
+	}
+	println( "^~^~^ ST_XP_AUDBAND mindist=" + int( local.mindist ) + " band=" + local.band + " mute=" + local.mute + " closest=" + local.closest )
+}end
+
+st_xp_audband:{
+	if( $player == NULL || $player.size < 4 ){ println "^~^~^ ST_XP_AUDBAND abort=need_4"; end }
+	local.range = 1500
+	if( getcvar( "coop_deathvox_range" ) != "" ){ local.range = float( getcvar( "coop_deathvox_range" ) ) }
+	local.farRange = 3500
+	if( getcvar( "coop_deathvox_farRange" ) != "" ){ local.farRange = float( getcvar( "coop_deathvox_farRange" ) ) }
+
+	local.anchor = $player[1].origin
+	local.s1 = $player[1].origin
+	local.s2 = $player[2].origin
+	local.s3 = $player[3].origin
+	local.s4 = $player[4].origin
+
+	local.ent = spawn script_origin
+
+	// sub-case A: dying ent coincident with p2 -> near band, closest = 2
+	$player[1].origin = local.anchor + ( 600 0 0 )
+	$player[2].origin = local.anchor + ( 100 0 0 )
+	$player[3].origin = local.anchor + ( 900 0 0 )
+	$player[4].origin = local.anchor + ( 1200 0 0 )
+	local.ent.origin  = local.anchor + ( 100 0 0 )
+	waitthread st_xp_audband_emit local.ent local.range local.farRange
+
+	// sub-case B: dying ent far from all -> far band, closest = 4 (p4 is nearest at 1200)
+	local.ent.origin = local.anchor + ( 3000 0 0 )
+	waitthread st_xp_audband_emit local.ent local.range local.farRange
+
+	local.ent delete
+	$player[1].origin = local.s1
+	$player[2].origin = local.s2
+	$player[3].origin = local.s3
+	$player[4].origin = local.s4
+}end
+
+
+//====================================================================
+// CHALPERSIST (map A) - bump a per-weapon counter, persist it.
+// The harness then transitions A->B (via the real missioncomplete path,
+// e.g. coop_wintest) so map B's chal_ensure reloads the saved progress.
+//====================================================================
+st_xp_chalpersist_A:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){ println "^~^~^ ST_XP_CHALPERSIST abort=no_host"; end }
+	if( level.coop_chal_enabled != 1 ){ println "^~^~^ ST_XP_CHALPERSIST abort=chal_off"; end }
+	waitthread coop_mod/challenges.scr::chal_ensure local.p
+	if( local.p == NULL ){ println "^~^~^ ST_XP_CHALPERSIST abort=host_gone"; end }
+	waitthread coop_mod/challenges.scr::chal_bump local.p "wpn_thompson" 3
+	wait 0.5
+	waitthread coop_mod/challenges.scr::chal_save_player local.p
+	local.wpn   = waitthread st_xp_statProgMax local.p "wpn_thompson"
+	local.saved = 0
+	if( local.p.flags["coop_chal_id"] != NIL ){ local.saved = 1 }
+	println( "^~^~^ ST_XP_CHALPERSIST map=A wpn=" + local.wpn + " saved=" + local.saved )
+}end
+
+
+//====================================================================
+// CHALPERSIST (map B) - read back the counter after the transition, then
+// double-fire the REAL chal_mission_complete in one frame and confirm the
+// "missions" counter advances exactly once (missionPaid guard holds).
+//====================================================================
+st_xp_chalpersist_B:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){ println "^~^~^ ST_XP_CHALPERSIST abort=no_host"; end }
+	if( level.coop_chal_enabled != 1 ){ println "^~^~^ ST_XP_CHALPERSIST abort=chal_off"; end }
+	waitthread coop_mod/challenges.scr::chal_ensure local.p
+	if( local.p == NULL ){ println "^~^~^ ST_XP_CHALPERSIST abort=host_gone"; end }
+
+	local.wpn     = waitthread st_xp_statProgMax local.p "wpn_thompson"
+	local.mBefore = waitthread st_xp_statProgMax local.p "missions"
+
+	thread coop_mod/challenges.scr::chal_mission_complete level.coop_mapname
+	thread coop_mod/challenges.scr::chal_mission_complete level.coop_mapname
+	wait 2
+
+	local.mAfter = waitthread st_xp_statProgMax local.p "missions"
+	println( "^~^~^ ST_XP_CHALPERSIST map=B wpn=" + local.wpn + " missionsBefore=" + local.mBefore + " missionsAfterDouble=" + local.mAfter )
+}end
+
+
+//====================================================================
+// XPJOIN (partial) - late-join identity. The harness connects a 4th
+// client with a pre-seeded saved total; this polls the joiner once its
+// identity settles and fires two concurrent awards to exercise the
+// identify/award race. Double-init is structurally guarded (xp_identify
+// early-outs once coop_xp_id is set); a correct totalAfter proves no
+// re-init clobbered the awards.
+//====================================================================
+st_xp_join:{
+	local.w = 0
+	while( local.w < 60 && ( $player == NULL || $player.size < 4 ) ){
+		wait 1
+		local.w++
+	}
+	if( $player == NULL || $player.size < 4 ){ println "^~^~^ ST_XP_XPJOIN abort=no_join"; end }
+	local.jp = $player[4]
+	local.w = 0
+	while( local.w < 30 && ( local.jp != NULL && local.jp.flags["coop_xp_id"] == NIL ) ){
+		wait 1
+		local.w++
+	}
+	if( local.jp == NULL ){ println "^~^~^ ST_XP_XPJOIN abort=joiner_gone"; end }
+
+	local.id = local.jp.flags["coop_xp_id"]
+	if( local.id == NIL ){ local.id = "unknown" }
+	local.totalBefore = waitthread st_xp_total local.jp
+	local.rank = 0
+	if( local.jp.flags["coop_xp_rank"] != NIL ){ local.rank = local.jp.flags["coop_xp_rank"] }
+
+	thread coop_mod/xp.scr::xp_award local.jp 10 "kills" "joinprobe"
+	thread coop_mod/xp.scr::xp_award local.jp 10 "kills" "joinprobe"
+	wait 2
+	local.totalAfter = waitthread st_xp_total local.jp
+	println( "^~^~^ ST_XP_XPJOIN id=" + local.id + " totalBefore=" + local.totalBefore + " totalAfter=" + local.totalAfter + " rank=" + local.rank )
+}end

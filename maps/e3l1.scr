@@ -123,6 +123,7 @@ main: {
 	waitthread maps/e3l1/BritHQ.scr::CleanupIntro
 	// waitthread maps/e3l1/BritHQ.scr::CleanupBritHQ
 	waitthread maps/e3l1/JeepRidePart1.scr::DoMedicRide
+	waitthread coop_e3l1_unloadRiders	//[user 2026-08-05] bug-1429 - free glued riders BEFORE the courtyard warp
 	waitthread maps/e3l1/JeepRidePart1.scr::CleanupJeepRidePart1
 	// waitthread maps/e3l1/JeepStuck.scr::CleanupJeepStuck
 	waitthread maps/e3l1/Courtyard.scr::DoObjectiveMedicReachGoal
@@ -166,7 +167,7 @@ main: {
 	
 	//update objectives
 	waitthread global/objectives.scr::add_objectives level.objCity 3
-	waitthread maps/e3l1/JeepRidePart1.scr::CleanupJeepRidePart3
+	waitthread maps/e3l1/JeepRidePart3.scr::CleanupJeepRidePart3	//[user 2026-08-05] bug-1431 - label lives in Part3; the Part1 call was a missing-label ScriptError
 	waitthread maps/e3l1/Courtyard.scr::CleanupCourtyard
 	waitthread maps/e3l1/AfterSnipers.scr::CleanupAfterSnipers
 	wait 1.5
@@ -257,7 +258,11 @@ SetPlayerHealthScale local.scale: {
 	
 	
 	//[206] chrissstrahl - physics_off
-	thread coop_mod/replace.scr::physics_off
+	//[user 2026-08-05] bug-1431 - only freeze players for a real scale CHANGE. The ride-end
+	//reset (StopSecondChaseTruck -> scale 1.0) was re-arming the regime with no release.
+	if(local.scale != 1.0){
+		thread coop_mod/replace.scr::physics_off
+	}
 
 	//[206] chrissstrahl - lets not do this in coop - yet
 	if(level.gametype != 0){
@@ -324,5 +329,82 @@ end
 coop_playerJustLeft:
 end
 
-coop_playerJustRespawned:
+coop_playerJustRespawned local.player:
+//[user 2026-08-05] bug-1429 - death during the medic jeep ride used to respawn you at the map
+//start FROZEN (the ride's physics_off shim flags every player, and nothing re-seated anyone).
+//Now: gunner slot first - the death that triggered this respawn usually vacated the .30cal -
+//otherwise glue to a trailing seat so you ride along (m1l3b recipe, passenger_seat tag).
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( level.playerInJeep != 1 || $jeep == NULL ){ end }
+
+	local.player physics_on
+	local.player takedamage
+	local.player immune vehicle
+	waitframe
+
+	if( level.playerJeepGunner == NULL || level.playerJeepGunner == NIL || !(isAlive level.playerJeepGunner) || level.playerJeepGunner == local.player ){
+		$jeep.turret = $jeep queryturretslotentity 0
+		$jeep unlock
+		$jeep.turret unlock
+		$jeep attachturretslot 0 local.player
+		level.playerJeepGunner = local.player
+		$jeep.turret lock
+		$jeep lock
+		local.player forcelegsstate COOP_TURRET_MAN_F
+		local.player iprint "Back on the .30cal!" 1
+		println( "^~^~^ E3L1 ride-respawn: gunner re-seated" )
+		end
+	}
+
+	waitthread coop_e3l1_makeSeats
+	for( local.i = 2 ; local.i <= 5 ; local.i++ ){
+		local.seat = $("e3l1seat"+local.i)
+		if( local.seat == NULL ){ continue }
+		if( local.seat.coop_occupant == NIL || local.seat.coop_occupant == local.player || !(isAlive local.seat.coop_occupant) ){
+			local.seat.coop_occupant = local.player
+			local.player notsolid
+			local.player origin local.seat.origin
+			local.player forcelegsstate CROUCH_IDLE
+			local.player glue local.seat
+			local.player iprint "Riding along - you unload when the jeep stops" 1
+			println( "^~^~^ E3L1 ride-respawn: passenger glued to seat " + local.i )
+			end
+		}
+	}
+end
+
+//[user 2026-08-05] bug-1429 - trailing seat dummies for respawned non-gunners, spawned once.
+//m1l3b's proven offsets (behind the jeep, z+55 so riders do not sink into the road), anchored
+//to passenger_seat - a real tag on this jeep (JeepStuck.scr attaches to it).
+coop_e3l1_makeSeats:
+	if( level.coop_e3l1_seats == 1 ){ end }
+	level.coop_e3l1_seats = 1
+	for( local.i = 2 ; local.i <= 5 ; local.i++ ){
+		local.offset = ( -100 -30 55 )
+		if( local.i == 3 ){ local.offset = ( -100 30 55 ) }
+		if( local.i == 4 ){ local.offset = ( -150 -30 55 ) }
+		if( local.i == 5 ){ local.offset = ( -150 30 55 ) }
+		local.ent = spawn script_model model "models/fx/dummy.tik" targetname ("e3l1seat"+local.i) notsolid 1
+		waitframe
+		local.ent attach $jeep "passenger_seat" 0 ( local.offset )
+	}
+end
+
+//[user 2026-08-05] bug-1429 - the ride is over: free every glued rider BEFORE the courtyard
+//warp, and drop the ride flag so later respawns are normal again.
+coop_e3l1_unloadRiders:
+	level.playerInJeep = 0
+	for( local.i = 2 ; local.i <= 5 ; local.i++ ){
+		local.seat = $("e3l1seat"+local.i)
+		if( local.seat == NULL ){ continue }
+		local.rider = local.seat.coop_occupant
+		if( local.rider != NIL && local.rider != NULL ){
+			local.rider unglue
+			local.rider solid
+			local.rider physics_on
+			local.rider takedamage
+			local.rider forcelegsstate STAND
+			local.seat.coop_occupant = NIL
+		}
+	}
 end

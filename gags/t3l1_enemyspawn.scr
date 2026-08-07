@@ -1,5 +1,6 @@
-// HZM coop [user 07-22 bug-1032] override of retail gags/t3l1_enemyspawn.scr:
-// single-entity $player -> $player[1] (2-player array-cast fix, 6 hits)
+// [user 08-02] SHIPPED BY THE COOP MOD ON PURPOSE - do not delete.
+// Extracted from pak1.pk3 and patched for ONE race in DoSanta/JeepExplosion
+// (see the inline note). Everything else is retail-verbatim.
 //------------------------------------------------------------------------------
 //	T3L1_EnemySpawn.Scr
 //
@@ -63,6 +64,18 @@ DoSanta:
 	wait 1.0
 
 	$santa exec global/shoot.scr
+	// [user 08-02] HZM coop - RACE FIX. level.bJeepCanExplode was set a full second AFTER
+	// this shot (see below), but JeepExplosion's loop is
+	//     while (level.bJeepCanExplode==0) { self waittill damage ; self health 3000 }
+	// so if santa's rocket reaches the truck in UNDER one second the gate is still 0, the
+	// truck absorbs the hit and is reset to 3000hp, and the loop keeps waiting. Nothing else
+	// ever damages that truck, so it NEVER explodes - the reported 'mortar hits the Opel but
+	// there is no explosion'. Coop frame pacing makes the short flight time far more likely
+	// than it was in SP. Opening the gate here removes the race entirely; the gate's actual
+	// purpose ('don't let anyone but santa blow us up') is unaffected, because the player
+	// cannot meaningfully damage the truck in the instant between this line and impact.
+	level.bJeepCanExplode = 1	// [user 08-02] now redundant - set at the shot above; kept harmless
+
 
 	$santa threatbias 50000
 
@@ -75,13 +88,8 @@ DoSanta:
 
 	wait 4
 
-	// HZM coop [2026-07-22]: $santa was deleted above (line ~73); re-enabling AI on the
-	// freed listener throws "command applied to NULL". Guard so it no-ops when absent.
-	if( $santa != NULL )
-	{
-		$santa exec global/enable_ai.scr
-		$santa accuracy 75
-	}
+	$santa exec global/enable_ai.scr
+	$santa accuracy 75
 
 	End
 
@@ -357,6 +365,20 @@ JeepExplosion:
 
 	radiusdamage (self.origin + (0 0 256) ) 700 800 1
 
+	// [2026-08-02] bug-1282 - guarantee the scripted deaths. The probe this replaces answered the
+	// question exactly: the two riflemen are NOT coop-buffered any more (the soviet exemption works -
+	// they sit on their authored 100 hp, not 1000), but they still survived the blast at 3.756 and
+	// 8.900 hp. radiusdamage falls off with distance, and from where these two stand the 700 lands as
+	// roughly 96 - so whether they die is decided by a couple of hit points of rounding, which is why
+	// the same scene killed them on one run and not the next. The map's authored intent is not
+	// ambiguous: in single player the mortar kills them, and the player is meant to see it. So finish
+	// them deterministically instead of leaving it to falloff. Targeted at these two scripted actors
+	// only - the radiusdamage above still does the real work on everything else nearby, including the
+	// player. NOTE the map's own spelling: 'solidier', not 'soldier' (t3l1.scr:226-227).
+	waitframe
+	if ( $startingsolidier6 != NULL && $startingsolidier6.health > 0 ){ $startingsolidier6 kill }
+	if ( $startingsolidier7 != NULL && $startingsolidier7.health > 0 ){ $startingsolidier7 kill }
+
 	self playsound explode_truck
 	exec global/earthquake.scr .2 4 0 0	
 	local.explosion1 = spawn script_model model models/fx/fx_truck_explosion.tik
@@ -364,6 +386,12 @@ JeepExplosion:
 //	local.explosion1.angles = self gettagangles "engine1"
 	local.explosion1 anim start
 	local.explosion1 notsolid
+
+	// [user 2026-08-02] bug-1289 - "you should be frozen until that open truck gets destroyed".
+	// The intro lock in maps/t3l1.scr waits on this flag, so control comes back on the BLAST
+	// rather than 10.5s in when the title cards happen to finish. Set after the explosion model
+	// is spawned and playing, so the player is still held while they actually see it go up.
+	level.coop_introTruckBlown = 1
 
 	wait .4
 
@@ -513,28 +541,38 @@ TruckLookForPlayer local.sightdist local.viewangle local.reverseviewangle:
 
 	while (IsAlive self && self.playerlook==1)
 	{
-		if( $player[1] == NULL ){ wait 0.35; continue }
-		local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget $player[1] local.sightdist local.viewangle 0
-
-		if ( local.bCanSee==0 && local.reverseviewangle!=0 )
+		//[user 2026-08-06] bug-1473 - same defect as TankLookForPlayer below: the bare $player token is
+		//the coop player ARRAY, which CanSeeTarget's (local.target==NIL) guard does not catch, so it
+		//dereferenced .origin on an array every 0.35s. Trucks never spotted a player either.
+		local.coopplr = exec coop_mod/replace.scr::player_closestTo self	// HZM coop: nearest player (was $player array)
+		if ( local.coopplr == NULL || local.coopplr == NIL )
 		{
-			// check behind us...
-			local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget $player[1] local.sightdist local.reverseviewangle 1
+			wait 0.35
 		}
-
-		if ( local.bCanSee==1 )
+		else
 		{
-			// they are within the sightdist and viewangle.  Now see if anything
-			// is in the way...
-			if ( sighttrace $player[1].origin (self.origin + (0 0 150)) 1 )
+			local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget local.coopplr local.sightdist local.viewangle 0
+
+			if ( local.bCanSee==0 && local.reverseviewangle!=0 )
 			{
-				// we can see the player...
-				self thread TruckStop 1
-				End
+				// check behind us...
+				local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget local.coopplr local.sightdist local.reverseviewangle 1
 			}
-		}
 
-		wait 0.35
+			if ( local.bCanSee==1 )
+			{
+				// they are within the sightdist and viewangle.  Now see if anything
+				// is in the way...
+				if ( sighttrace local.coopplr.origin (self.origin + (0 0 150)) 1 )
+				{
+					// we can see the player...
+					self thread TruckStop 1
+					End
+				}
+			}
+
+			wait 0.35
+		}
 	}
 
 	if ( self && self.playerlook==1 )
@@ -566,28 +604,40 @@ TankLookForPlayer local.sightdist local.viewangle local.reverseviewangle:
 
 	while (IsAlive self && self.driving==1)
 	{
-		if( $player[1] == NULL ){ wait 0.35; continue }
-		local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget $player[1] local.sightdist local.viewangle 0
-
-		if ( local.bCanSee==0 && local.reverseviewangle!=0 )
+		//[user 2026-08-06] bug-1473 - the bare $player token handed CanSeeTarget the coop player ARRAY.
+		//Its only guard is (local.target==NIL), and an array is not NIL, so it fell through to
+		//local.target.origin: 8 errors per iteration, 12690 across the sweep - 48% of every script
+		//error in the trilogy - while ALWAYS reporting "cannot see", so tanks never stopped for a
+		//player. player_closestTo ends $player under gametype 0, so single-player is unchanged.
+		local.coopplr = exec coop_mod/replace.scr::player_closestTo self	// HZM coop: nearest player (was $player array)
+		if ( local.coopplr == NULL || local.coopplr == NIL )
 		{
-			// check behind us...
-			local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget $player[1] local.sightdist local.reverseviewangle 1
+			wait 0.35
 		}
-
-		if ( local.bCanSee==1 )
+		else
 		{
-			// they are within the sightdist and viewangle.  Now see if anything
-			// is in the way...
-			if ( sighttrace $player[1].origin (self.origin + (0 0 64)) 1 )
+			local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget local.coopplr local.sightdist local.viewangle 0
+
+			if ( local.bCanSee==0 && local.reverseviewangle!=0 )
 			{
-				dprintln "STOPPING TANK -- FOUND PLAYER!"
-				// we can see the player...
-				self stop
-				End
+				// check behind us...
+				local.bCanSee = waitthread global/vehicle_warning.scr::CanSeeTarget local.coopplr local.sightdist local.reverseviewangle 1
 			}
+
+			if ( local.bCanSee==1 )
+			{
+				// they are within the sightdist and viewangle.  Now see if anything
+				// is in the way...
+				if ( sighttrace local.coopplr.origin (self.origin + (0 0 64)) 1 )
+				{
+					dprintln "STOPPING TANK -- FOUND PLAYER!"
+					// we can see the player...
+					self stop
+					End
+				}
+			}
+			wait 0.35
 		}
-		wait 0.35
 	}
 	
 	End

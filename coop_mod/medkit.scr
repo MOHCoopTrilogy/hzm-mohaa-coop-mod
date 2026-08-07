@@ -85,7 +85,21 @@ medkit_hud_monitor local.player:{
 			if( local.scan_timer >= 50 ){
 				local.scan_timer = 0
 				if( local.player.health >= level.coop_health ){
-					if( local.player.flags["coop_medkits"] < 1 ){
+					//[user 08-02] "at full health you cannot pick up a 2nd medkit" - this gate was
+					//"< 1", so the ONLY path that works at full health refused to bank a second kit.
+					//The other two paths cannot cover it: the engine returns from Item pickup before
+					//ItemPickup() when health >= max_health (fgame/health.cpp), so at full health the
+					//pack is never consumed, no heal delta occurs, and the pack entity never vanishes
+					//- which is precisely what those two paths watch for. Raised to the same max
+					//carry of 2 used everywhere else in this file.
+					//Reuse the SAME cooldown + in-use flags the other two pickup paths already use, so
+					//the three paths cannot double-grant off one pack. NIL-guarded: an unset flag
+					//reads as 'none' and "level.time >= none" throws (the dbno threshold spam shape).
+					local.cd3 = local.player.flags["coop_medkit_refill_cooldown"]
+					if( local.cd3 == NIL ){ local.cd3 = 0 }
+					local.mk3 = local.player.flags["coop_medkits"]
+					if( local.mk3 == NIL ){ local.mk3 = 0 }
+					if( local.mk3 < 2 && level.time >= local.cd3 && local.player.flags["coop_medkit_in_use"] != 1 ){
 						local.si = 0
 						while( local.si < local.maxent ){
 							local.sent = getentbyentnum local.si
@@ -93,8 +107,15 @@ medkit_hud_monitor local.player:{
 								if( local.sent.classname == "Health" ){
 									if( vector_length(local.player.origin - local.sent.origin) <= 100 ){
 										println "^~^~^ DBNO health_pickup_while_down"
-										local.player.flags["coop_medkits"] = 1
-										local.player iprint "Medkit refilled!" 1
+										local.player.flags["coop_medkits"] = local.mk3 + 1
+										//CONSUME the pack. Without this the same box could be farmed
+										//every scan tick, because at full health the engine never
+										//removes it. Cooldown is a second belt for map-placed packs
+										//that respawn or that we fail to hide.
+										local.sent hide
+										local.sent notsolid
+										local.player.flags["coop_medkit_refill_cooldown"] = level.time + 5
+										local.player iprint ( "Medkit stowed (" + ( local.mk3 + 1 ) + "/2)" ) 1
 										local.si = local.maxent
 									}
 								}
@@ -303,6 +324,15 @@ dbno_selfrevive local.player:{
 					local.player.flags["coop_dbno_dead"]    = 1
 					local.player.flags["coop_dbno_healing"] = NIL
 					local.player.flags["coop_dbno_active"]  = NIL
+					//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
+					if (local.player != NULL){ local.player coop_setdbno 0 }
+					//[bug-1236] Hooked HERE - immediately after the state flags flip and BEFORE the ihuddraw
+					//block - deliberately. Every revive in the log throws two "Failed execution of command
+					//ihuddraw_alpha/ihuddraw_string" errors, because this path clears HUD slots that were never
+					//created for it. Anything sequenced AFTER that block is hostage to whether a failed command
+					//aborts the running thread. `thread` spawns an independent thread, so re-hatting first means
+					//the helmet is restored even if the rest of the revive body dies partway.
+					thread coop_mod/helmet.scr::helmet_apply local.player
 
 					ihuddraw_alpha  local.player 33 0
 					ihuddraw_alpha  local.player 34 0
@@ -326,6 +356,16 @@ dbno_selfrevive local.player:{
 					local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
 					wait 0.1
+
+					//[user 2026-08-02] bug-1293 - RAISE THE SNAPSHOT GUARD BEFORE takeall, not inside
+					//coop_ammoRestore. bug-913 added coop_ammoRestorePending so a snapshot tick could not
+					//clobber the down-moment ammo with the DEFAULT ammo a re-give hands out - but the flag
+					//was only set once coop_ammoRestore itself started, ~60 lines and several waits AFTER
+					//the takeall below has already zeroed every pool. The snapshot loop ticks every 0.5s
+					//and is gated ONLY on this flag and coop_dbno_active (already cleared by now), so a
+					//tick landing in that gap records ZEROES as the saved reserve - and the restore then
+					//faithfully re-applies zero. That is the "lost all my ammo after self-revive" report.
+					local.player.flags["coop_ammoRestorePending"] = 1
 
 					local.player takeall
 					//[user 07-19] e1l3 PAPERS-ONLY DISGUISE: skip the ENTIRE weapon re-give while weapons are
@@ -379,6 +419,12 @@ dbno_selfrevive local.player:{
 						local.player item "weapons/colt45.tik"
 						local.player item "weapons/frag_grenade.tik"
 					}
+					//[user 07-28] bug-1204: exact mirror of the dbno.scr::dbno_ai_revive addition - the tiers
+					//above are EXCLUSIVE, so a registered inventory of primaries only left the self-revived
+					//player with no handgun. Re-issue the armory-picked sidearm on top (SECONDARY weapon class:
+					//never collides with the one-primary rule; a no-op when already held). noWrap=1 - already
+					//inside the gametype-0 window.
+					local.player waitthread coop_mod/itemhandler.scr::coop_giveSidearmPick local.player 1
 					waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
 					}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
 					//[user 07-16] bug-625 / [user 07-19] bug-893: mission-critical map gear (bug-620,

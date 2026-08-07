@@ -33,7 +33,10 @@ coop_maptest_tick:{
 	waitthread coop_mod/main.scr::waitForMainScript
 
 	// Re-confirm we are actually meant to be running (cvar may have been cleared).
-	if( getcvar( "coop_maptest" ) != "1" ){
+	//[user 2026-08-05] bug-1440 - this ENTRY guard also killed Phase 3 silently: only the
+	//mid-tick stop check was widened for "3", not this one. The sweep armed, threaded the tick,
+	//and died right here with zero output.
+	if( getcvar( "coop_maptest" ) != "1" && getcvar( "coop_maptest" ) != "3" ){
 		end
 	}
 
@@ -77,7 +80,33 @@ coop_maptest_tick:{
 	println( "^~^~^ MAPTEST_LOADED " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
 	iprintlnbold( "MAPTEST: " + local.cur + " (" + local.idx + "/" + local.maps.size + ")" )
 
-	// end of list (or map not found) -> stop here
+	//[user 2026-08-06] bug-1500 - Phase 3 must run BEFORE the end-of-list check. This block used to
+	//sit below it, so the LAST map in the rotation (t3l2, 54/54) printed MAPTEST_COMPLETE and ended
+	//the tick without ever starting the walker: covwalk.scr::run is the only thing that embodies the
+	//headless clients, so t3l2 sat with 4 spectators and 0/104 triggers across every attempt while
+	//every OTHER map measured fine - it looked exactly like a broken map and burned a whole
+	//investigation before the off-by-one-position in THIS file was found. The block uses nothing
+	//from local.next, so hoisting it is data-flow clean.
+	//[user 2026-08-05] Phase 3: walk every trigger volume with covtrace on BEFORE the dwell
+	if( getcvar( "coop_maptest" ) == "3" ){
+		waitthread coop_mod/covwalk.scr::run
+		//[user 2026-08-05] bug-1448 - NO MAP CHANGE until this map's cycle finished with the full
+		//roster embodied. Holding here beats advancing on partial data: a short-roster walk still
+		//prints coverage numbers and would poison the report.
+		local.hold = 0
+		while( level.covwalk_ok != 1 && local.hold < 240 ){
+			wait 0.5
+			local.hold = local.hold + 1
+			if( local.hold == ( int( local.hold / 60 ) * 60 ) ){
+				println( "^~^~^ MAPTEST_HOLD " + level.coop_mapname + " - waiting for a clean full-roster cycle (" + ( local.hold / 2 ) + "s)" )
+			}
+		}
+		if( level.covwalk_ok != 1 ){
+			println( "^~^~^ MAPTEST_HOLD_TIMEOUT " + level.coop_mapname + " - advancing anyway, this map is graded INVALID" )
+		}
+	}
+
+	// end of list (or map not found) -> stop here (AFTER the walk, so map 54/54 still gets measured)
 	if( local.next == "" ){
 		println "^~^~^ MAPTEST_COMPLETE"
 		iprintlnbold "MAPTEST COMPLETE"
@@ -96,7 +125,7 @@ coop_maptest_tick:{
 	wait local.dwell
 
 	// allow a mid-run stop
-	if( getcvar( "coop_maptest" ) != "1" ){
+	if( getcvar( "coop_maptest" ) != "1" && getcvar( "coop_maptest" ) != "3" ){
 		println "^~^~^ MAPTEST_PAUSED"
 		end
 	}

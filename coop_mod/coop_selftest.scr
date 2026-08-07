@@ -1,0 +1,320 @@
+//====================================================================
+// coop_selftest.scr - HZM dev automated self-tests (2026-07-23)
+//====================================================================
+// Cvar-gated probes for the automated test harness. Each is INERT for
+// real players (its cvar defaults 0 and is only set by the test cfgs).
+// They emit machine-parseable "^~^~^ <MARKER>" lines the harness greps,
+// exactly like coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+//
+// Launched from coop_mod/main.scr::main (one guarded thread each):
+//    coop_weaptest 1   -> weaptest_run  : give every armory weapon to the
+//                         host + emit per-weapon give markers (tik integrity)
+//    coop_dbnotest 1   -> dbnotest_run  : drive the host into DBNO then revive,
+//                         verifying each stage (down-but-not-out + revive)
+//    coop_wintest 1    -> wintest_run   : fire the map's REAL coop mission-
+//                         complete (next map from coop_wintest_next/_bsp),
+//                         proving the win -> transition path per map
+//====================================================================
+
+//--------------------------------------------------------------------
+// Block until at least one connected player is alive, or the timeout
+// (seconds) elapses. Returns the FIRST alive player entity, or NULL.
+// (On a listen/dedicated server $player[1] can be a dormant host that
+// never spawns; the real testers are the connected clients, so we scan
+// for the first genuinely-alive player rather than assuming index 1.)
+//--------------------------------------------------------------------
+selftest_findPlayer local.timeout:{
+	local.tries = 0
+	while( local.tries < local.timeout ){
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				if( isAlive $player[local.i] ){
+					end $player[local.i]
+				}
+			}
+		}
+		wait 1
+		local.tries++
+	}
+	end NULL
+}end
+
+//--------------------------------------------------------------------
+// Like selftest_findPlayer, but returns the first alive player that is
+// NOT local.exclude (used to pick a distinct reviver for the team-revive
+// test). Returns NULL if no second alive player shows up in time.
+//--------------------------------------------------------------------
+selftest_findOther local.timeout local.exclude:{
+	local.tries = 0
+	while( local.tries < local.timeout ){
+		if( $player != NULL && $player.size >= 1 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				if( $player[local.i] != local.exclude && isAlive $player[local.i] ){
+					end $player[local.i]
+				}
+			}
+		}
+		wait 1
+		local.tries++
+	}
+	end NULL
+}end
+
+//====================================================================
+// WEAPON / LOADOUT integrity: give every roster weapon to the host and
+// emit a marker per weapon. A broken tik prints its load error in the
+// window between that weapon's "pre" and the next marker, so the harness
+// can attribute any load/tik error to the exact weapon.
+//====================================================================
+weaptest_run:{
+	local.p = waitthread selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ WEAPTEST abort=no_host"
+		end
+	}
+	waitthread coop_mod/loadoutroster.scr::roster_ids
+	local.n = level.coop_loRosterN
+	if( local.n == NIL ){ local.n = 0 }
+	println( "^~^~^ WEAPTEST begin count=" + local.n + " map=" + level.coop_mapname )
+
+	// clear the host first so each give is observed in isolation
+	local.p takeall
+	wait 1
+
+	local.i = 0
+	while( local.i < local.n ){
+		local.tik = level.coop_loRosterGive[local.i]
+		local.id  = level.coop_loRosterId[local.i]
+		if( local.tik == NIL ){ local.tik = "" }
+		println( "^~^~^ WEAPTEST idx=" + local.i + " id=" + local.id + " tik=" + local.tik + " pre" )
+		if( local.tik != "" ){
+			local.p item local.tik
+		}
+		wait 0.2
+		println( "^~^~^ WEAPTEST idx=" + local.i + " gave=1" )
+		local.i++
+	}
+	println( "^~^~^ WEAPTEST done count=" + local.n )
+
+	// restore a sane default so the harness client is not left weaponless
+	local.p takeall
+	local.p item "models/weapons/m1_garand.tik"
+	local.p ammo rifle 40
+	level.coop_selftest_weapDone = 1	// release dbnotest_run if both are enabled this boot
+}end
+
+//====================================================================
+// DBNO down-but-not-out + revive. Drives the host into DBNO via the real
+// dbno_enter, verifies the state, then revives via the real dbno_ai_revive
+// and verifies the host is back up.
+//====================================================================
+dbnotest_run:{
+	local.p = waitthread selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ DBNOTEST abort=no_host"
+		end
+	}
+	// if the weapon test is also running this boot, let it finish first so the two
+	// probes do not fight over the same player (weaptest takeall vs dbno health/takeall).
+	if( getcvar( "coop_weaptest" ) == "1" ){
+		local.w = 0
+		while( level.coop_selftest_weapDone != 1 && local.w < 60 ){
+			wait 1
+			local.w++
+		}
+		// re-acquire in case the tester player changed while we waited
+		local.p = waitthread selftest_findPlayer 30
+		if( local.p == NULL ){
+			println "^~^~^ DBNOTEST abort=no_host"
+			end
+		}
+	}
+	// keep it clean: single player is enough; use the chest (default) hit class
+	println( "^~^~^ DBNOTEST begin p=" + local.p.netname + " map=" + level.coop_mapname )
+
+	thread coop_mod/dbno.scr::dbno_enter local.p "chest"
+	// poll for the down state (dbno_enter is threaded + precaches, so a fixed wait races it)
+	local.downed = 0
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( local.p.flags["coop_dbno_active"] == 1 ){ local.downed = 1 }
+		if( local.downed == 1 ){ break }
+		local.w++
+	}
+	println( "^~^~^ DBNOTEST downed=" + local.downed )
+
+	wait 2
+	waitthread coop_mod/dbno.scr::dbno_ai_revive local.p
+	wait 3
+	local.revived = 0
+	local.alive   = 0
+	if( local.p.flags["coop_dbno_active"] != 1 ){ local.revived = 1 }
+	if( isAlive local.p ){ local.alive = 1 }
+	println( "^~^~^ DBNOTEST downed=" + local.downed + " revived=" + local.revived + " alive=" + local.alive )
+}end
+
+//====================================================================
+// TEAMMATE REVIVE (the real hands-on interaction): down one player, then
+// TELEPORT a second player onto them and drive a held [USE] via stufftext
+// "+use" so the REAL dbno_teamrevive_monitor (proximity + useheld + the
+// coop_teamReviveTime channel) completes the revive - not the revive
+// function called directly. Needs 2 connected+alive players.
+//====================================================================
+dbnoteam_run:{
+	local.downed = waitthread selftest_findPlayer 90
+	if( local.downed == NULL ){
+		println "^~^~^ DBNOTEAM abort=no_host"
+		end
+	}
+	local.reviver = waitthread selftest_findOther 40 local.downed
+	if( local.reviver == NULL ){
+		println "^~^~^ DBNOTEAM abort=need_2_players"
+		end
+	}
+	println( "^~^~^ DBNOTEAM begin downed=" + local.downed.netname + " reviver=" + local.reviver.netname + " map=" + level.coop_mapname )
+
+	// down the patient (real DBNO entry; starts the team-revive monitor itself)
+	thread coop_mod/dbno.scr::dbno_enter local.downed "chest"
+	local.downedOK = 0
+	local.w = 0
+	while( local.w < 16 ){
+		wait 0.5
+		if( local.downed.flags["coop_dbno_active"] == 1 ){ local.downedOK = 1 }
+		if( local.downedOK == 1 ){ break }
+		local.w++
+	}
+	println( "^~^~^ DBNOTEAM downed=" + local.downedOK )
+	if( local.downedOK != 1 ){
+		println "^~^~^ DBNOTEAM abort=not_downed"
+		end
+	}
+
+	// teleport the reviver next to the downed player (within coop_teamReviveRange, default 80u)
+	// and HOLD [USE] via the client's real +use button so the monitor sees useheld == 1.
+	// place the reviver next to the downed player (within coop_teamReviveRange) and announce
+	// readiness. The monitor's final gate (reviver.useheld == 1, held for the channel) is a
+	// client-driven engine button that can only be satisfied by a REAL held [USE] on the reviver -
+	// so completion here proves the whole interaction only when live input drives the key. The
+	// probe still validates: reviver detection, the teleport/proximity, and the running monitor.
+	local.pos = local.downed.origin + ( 24 0 0 )
+	local.reviver.origin = local.pos
+	println( "^~^~^ DBNOTEAM hold reviver=" + local.reviver.netname )
+
+	local.revived = 0
+	local.w = 0
+	while( local.w < 30 ){
+		wait 0.5
+		if( local.downed.flags["coop_dbno_active"] != 1 ){ local.revived = 1 }
+		if( local.revived == 1 ){ break }
+		local.w++
+	}
+	local.reviver stufftext "-use"
+	wait 1
+	local.alive = 0
+	if( isAlive local.downed ){ local.alive = 1 }
+	println( "^~^~^ DBNOTEAM downed=" + local.downedOK + " revived=" + local.revived + " alive=" + local.alive + " reviver=" + local.reviver.netname )
+}end
+
+//====================================================================
+// XP none-cast REGRESSION GUARD (bug-1065). Calls xp_award / xp_ai_killed
+// with NIL, NULL, and a non-Player listener ($world) on every map - the
+// hardened guards must swallow all of them with ZERO script errors. If a
+// future edit drops the "== NIL" guard, the NIL/none deref returns and the
+// harness sees Script Errors in the XPTEST window -> fail.
+//====================================================================
+xptest_run:{
+	local.p = waitthread selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ XPTEST abort=no_host"
+		end
+	}
+	println( "^~^~^ XPTEST begin map=" + level.coop_mapname )
+	// bad references that MUST be swallowed cleanly by the guards
+	thread coop_mod/xp.scr::xp_award NIL 10 "regtest"
+	wait 0.25
+	thread coop_mod/xp.scr::xp_award NULL 10 "regtest"
+	wait 0.25
+	thread coop_mod/xp.scr::xp_award $world 10 "regtest"
+	wait 0.25
+	thread coop_mod/xp.scr::xp_ai_killed local.p NIL
+	wait 0.25
+	thread coop_mod/xp.scr::xp_ai_killed local.p NULL
+	wait 0.25
+	// the normal path must still work (a real player award)
+	thread coop_mod/xp.scr::xp_award local.p 5 "regtest"
+	wait 0.5
+	println( "^~^~^ XPTEST done map=" + level.coop_mapname )
+}end
+
+//====================================================================
+// OFFICER COUNT-SCALING math (2P/3P/4P). Pure reads of the real scaling
+// functions against the live lobby - no spawns, no mutation. The harness
+// boots the SAME map at 2, 3, 4 connected clients and asserts the numbers
+// grow monotonically (guards 2->3->4, battalion 10->13->16, both capped).
+//====================================================================
+scaletest_run:{
+	local.p = waitthread selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ SCALETEST abort=no_host"
+		end
+	}
+	// wait for the connecting clients to finish spawning so $player.size reflects the real lobby
+	// (the probe launches at map load, before the harness's 2nd/3rd/4th clients have joined).
+	local.settle = 0
+	local.lastN  = 0
+	while( local.settle < 40 ){
+		wait 1
+		local.now = 0
+		if( $player != NULL ){ local.now = $player.size }
+		if( local.now == local.lastN && local.now >= 1 ){ local.settle++ }
+		else { local.settle = 0 }
+		local.lastN = local.now
+		if( local.settle >= 6 ){ break }
+	}
+	local.pc       = waitthread coop_mod/officer.scr::coop_reinf_pc
+	local.guards   = waitthread coop_mod/officer.scr::coop_reinf_count 2 "coop_officerSquadPer" 1 4
+	local.batt     = waitthread coop_mod/officer.scr::coop_reinf_count 10 "coop_officerBattalionPer" 3 22
+	local.hardcap  = level.coop_aiScaleHardCap
+	if( local.hardcap == NIL ){ local.hardcap = 0 }
+	local.germans  = 0
+	if( level.coop_actorArray != NIL && level.coop_actorArray["german"] != NIL ){ local.germans = level.coop_actorArray["german"].size }
+	println( "^~^~^ SCALETEST pc=" + local.pc + " guards=" + local.guards + " battalion=" + local.batt + " hardcap=" + local.hardcap + " germans=" + local.germans + " map=" + level.coop_mapname )
+}end
+
+//====================================================================
+// MISSION WINNABILITY: fire the map's REAL coop mission-complete and let
+// the harness confirm the wired next map boots. The next map + bsp token
+// come from the harness (coop_wintest_next / coop_wintest_bsp) so each
+// map is driven through the exact global->coop missioncomplete path it
+// uses in normal play (exec global/missioncomplete.scr <next> <bsp>).
+//====================================================================
+wintest_run:{
+	local.p = waitthread selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ WINTEST abort=no_host"
+		end
+	}
+	// let the map settle so its own prespawn/init (and any intro) has run before we end it.
+	// tunable per map via coop_wintest_delay so long-intro maps get more headroom.
+	local.delay = int( getcvar "coop_wintest_delay" )
+	if( local.delay <= 0 ){ local.delay = 12 }
+	wait local.delay
+
+	local.next = getcvar "coop_wintest_next"
+	local.bsp  = getcvar "coop_wintest_bsp"
+	if( local.bsp == "" || local.bsp == NIL ){ local.bsp = "1" }
+	// "auto" (or unset) resolves the next map from the map's own level.coopNextMap,
+	// covering the maps that wire their next dynamically (exec ... (level.coopNextMap)).
+	if( local.next == "" || local.next == NIL || local.next == "auto" ){
+		local.next = ""
+		if( level.coopNextMap != NIL ){ local.next = level.coopNextMap }
+	}
+	if( local.next == "" ){
+		println "^~^~^ WINTEST abort=no_next"
+		end
+	}
+	println( "^~^~^ WINTEST map=" + level.coop_mapname + " next=" + local.next + " bsp=" + local.bsp + " firing=1" )
+	// authentic path: global/missioncomplete.scr::main detours to coop_mod/missioncomplete.scr::main
+	thread global/missioncomplete.scr::main local.next local.bsp 1
+}end

@@ -1,0 +1,77 @@
+//====================================================================
+// morale.scr - HZM coop SQUAD MORALE (ME1, coop_moraleEnable, default off)
+//====================================================================
+// When the German force is whittled below half its PEAK strength, surviving
+// ENGAGED germans react so the fight gets a visible morale arc: most FALTER
+// (fall back to regroup via the proven tactical-retreat), a cornered minority
+// go BERSERK (aggr last-stand charge). Map-wide v1 - tracks total live german
+// count vs its running peak. Reuses the tactical-retreat + aggr-advance
+// primitives; NEVER the despawn-flee (would strand an "eliminate all" gate).
+// One reaction per actor (coop_moraleDone latch) + per-tick capped.
+// Launched from main.scr, gated coop_moraleEnable.
+//====================================================================
+
+main:{
+	level.coop_germanPeak = 0
+	while( getcvar( "coop_moraleEnable" ) == "1" ){
+		wait 3
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		// count live germans + update the running peak
+		local.live = 0
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.e = local.arr[local.i]
+			if( local.e != NIL && local.e != NULL && isAlive local.e ){ local.live = local.live + 1 }
+		}
+		if( local.live > level.coop_germanPeak ){ level.coop_germanPeak = local.live }
+		if( level.coop_germanPeak < 4 ){ continue }			// too small a force to have "morale"
+
+		// broken when the live force falls below coop_moraleFrac of its peak (default 0.5 = half)
+		local.frac = getcvar "coop_moraleFrac"
+		if( local.frac == "" ){ local.frac = "0.5" }
+		local.frac = float( local.frac )
+		if( local.frac <= 0 ){ local.frac = 0.5 }
+		local.threshold = level.coop_germanPeak * local.frac
+		if( local.live >= local.threshold ){ continue }
+
+		// MORALE BROKEN: react a capped number of engaged survivors, once each
+		local.reacted = 0
+		local.cap = 4
+		local.dbgF = 0
+		local.dbgB = 0
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			if( local.reacted >= local.cap ){ break }
+			local.e = local.arr[local.i]
+			if( local.e == NIL || local.e == NULL ){ continue }
+			if( !isAlive local.e ){ continue }
+			if( local.e.coop_moraleDone == 1 ){ continue }			// one morale reaction per actor
+			if( local.e.enemy == NULL || local.e.enemy == NIL ){ continue }	// only the engaged react
+			if( local.e.flags["coop_role"] == "prone" ){ continue }
+			if( local.e.flags["coop_limping"] == 1 ){ continue }
+			if( local.e.flags["coop_actorStopPainHandler"] == 1 ){ continue }
+			if( local.e.turret != NULL ){ continue }
+			local.e.coop_moraleDone = 1
+			local.reacted = local.reacted + 1
+			if( ( randomint 100 ) < 70 && getcvar( "coop_retreatEnable" ) == "1" ){
+				// FALTER: fall back to regroup (forced re-engaging tactical retreat)
+				local.e.coop_painStreak = 9
+				local.e.coop_retreatNext = 0
+				thread coop_mod/wounded.scr::coop_checkTacticalRetreat local.e
+				local.dbgF = local.dbgF + 1
+			} else {
+				// BERSERK: last-stand charge (aimaneuver aggr-advance carries the push)
+				local.e.flags["coop_role"] = "aggr"
+				local.e.leash = 4096
+				local.e.nosurprise = 1
+				local.e attackplayer
+				local.e forceactivate
+				local.dbgB = local.dbgB + 1
+			}
+		}
+		// log only when a reaction actually committed (avoid spamming every broken tick during a playtest)
+		if( ( local.dbgF > 0 || local.dbgB > 0 ) && getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+			println( "^~^~^ MORALE live=" + local.live + " peak=" + level.coop_germanPeak + " falter=" + local.dbgF + " berserk=" + local.dbgB )
+		}
+	}
+}end

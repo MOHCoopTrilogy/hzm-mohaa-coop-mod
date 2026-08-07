@@ -1,0 +1,759 @@
+//=========================================================================
+// HOLDOUT - checkpoint wave-defence gametype                [user 2026-08-04]
+//=========================================================================
+// "full single player maps where you move from checkpoint to checkpoint and defend waves of
+// enemies - think how Sniper Elite 5 does this."  (docs/proposals/holdout_gametype.md)
+//
+// ---------------------------------------------------------------------
+//  SETUP IS FOUR KEYS.  Load ANY map the normal way, then:
+//
+//     exec coop_mod/cfg/holdout.cfg
+//
+//     F5  stand where players defend        -> checkpoint
+//     F6  stand where enemies come from     -> approach (repeat, up to 8)
+//     F7  save this map
+//     F8  play it / stop it
+//
+//  Walk, F5. Walk, F6 a few times. F7. F8. That is the whole thing. Repeat F5 elsewhere for
+//  a second checkpoint - the squad is moved to each in turn and their respawns follow them.
+//  Saved per map, auto-loaded forever after.
+// ---------------------------------------------------------------------
+//
+// Console equivalents: set coop_holdout_cmd arena|spawn|save|start|stop|toggle|clear
+// Tuning: coop_holdoutWaves (3) waves per checkpoint, coop_holdoutBase (6) size of wave 1,
+//         coop_holdoutCap (24) HARD live-enemy ceiling - this is the entity-pool guard.
+//
+// ENTITY BUDGET IS THE PRIMARY RISK (bugs 914-927 were entity-pool exhaustion, and indefinite
+// wave spawning is precisely that failure shape). Three hard defences, all non-negotiable:
+//   1. every `spawn` is NULL-checked - officer.scr's wave path has ~10 unguarded ones
+//   2. a HARD live cap (coop_holdoutCap) counted from the live array, not a guess
+//   3. the actor array is COMPACTED every wave, so it can never grow unbounded
+//=========================================================================
+
+//=========================================================================
+holdout_init:{
+	if( level.coop_holdout_init == 1 ){ end }
+	level.coop_holdout_init = 1
+
+	level.coop_ho_state    = "idle"
+	level.coop_ho_arenaN   = 0
+	level.coop_ho_cur      = 0
+	level.coop_ho_wave     = 0
+	level.coop_ho_actorN   = 0
+	level.coop_ho_authorA  = 0
+
+	if( getcvar "coop_holdout" == "" ){ setcvar "coop_holdout" "0" }
+	if( getcvar "coop_holdoutWaves" == "" ){ setcvar "coop_holdoutWaves" "3" }
+	if( getcvar "coop_holdoutCap" == "" ){ setcvar "coop_holdoutCap" "24" }
+	if( getcvar "coop_holdoutBase" == "" ){ setcvar "coop_holdoutBase" "6" }
+	if( getcvar "coop_holdoutRamp" == "" ){ setcvar "coop_holdoutRamp" "2" }
+	setcvar "coop_holdout_cmd" ""
+
+	waitthread holdout_load
+
+	thread holdout_cmd_monitor
+	println( "^~^~^ HOLDOUT ready (arenas " + level.coop_ho_arenaN + ") - set coop_holdout_cmd arena|spawn|save|start" )
+}end
+
+//=========================================================================
+// Console bus. Same pattern as the fog editor / probe: poll a cvar, act, clear it.
+//=========================================================================
+holdout_cmd_monitor:{
+	while( 1 ){
+		wait 0.5
+		local.c = getcvar "coop_holdout_cmd"
+		if( local.c == "" ){ continue }
+		setcvar "coop_holdout_cmd" ""
+
+		if( local.c == "arena" ){ waitthread holdout_author_arena }
+		else if( local.c == "spawn" ){ waitthread holdout_author_spawn }
+		else if( local.c == "save" ){ waitthread holdout_save }
+		else if( local.c == "clear" ){ waitthread holdout_clear }
+		else if( local.c == "start" ){ thread holdout_run }
+		else if( local.c == "stop" ){ waitthread holdout_stop }
+		else if( local.c == "toggle" ){
+			//[user 2026-08-04] one key for start AND stop - the setup cfg binds F8 to this so
+			//there is nothing to remember mid-fight.
+			if( level.coop_ho_state == "running" ){ waitthread holdout_stop }
+			else { thread holdout_run }
+		}
+		else { println( "^~^~^ HOLDOUT unknown cmd '" + local.c + "'" ) }
+	}
+}end
+
+//=========================================================================
+// AUTHORING - stand where you want it and type the command.
+//=========================================================================
+holdout_author_arena:{
+	local.p = waitthread holdout_first_player
+	if( local.p == NULL ){ println( "^~^~^ HOLDOUT no player to author from" ) ; end }
+
+	local.i = level.coop_ho_arenaN + 1
+	level.coop_ho_arenaN = local.i
+	level.coop_ho_authorA = local.i
+	level.coop_ho_pos[local.i]    = local.p.origin
+	level.coop_ho_ang[local.i]    = local.p.angles[1]
+	level.coop_ho_spawnN[local.i] = 0
+
+	local.p iprint ( "CHECKPOINT " + local.i + " SET.  Next: walk to where enemies should come from and press F6." ) 1
+	println( "^~^~^ HOLDOUT arena " + local.i + " @ " + local.p.origin )
+}end
+
+//=========================================================================
+holdout_author_spawn:{
+	local.p = waitthread holdout_first_player
+	if( local.p == NULL ){ end }
+	local.a = level.coop_ho_authorA
+	if( local.a < 1 ){
+		local.p iprint "Press F5 first to place a checkpoint, then F6 for enemy approaches." 1
+		end
+	}
+	local.n = level.coop_ho_spawnN[local.a] + 1
+	if( local.n > 8 ){
+		local.p iprint "HOLDOUT: 8 spawn points per arena is the limit" 1
+		end
+	}
+	level.coop_ho_spawnN[local.a] = local.n
+	level.coop_ho_spawn[local.a][local.n] = local.p.origin
+	local.p iprint ( "ENEMY APPROACH " + local.n + " SET for checkpoint " + local.a + ".  More F6, or F5 for the next checkpoint, or F7 to save." ) 1
+	println( "^~^~^ HOLDOUT arena " + local.a + " spawn " + local.n + " @ " + local.p.origin )
+}end
+
+//=========================================================================
+holdout_clear:{
+	level.coop_ho_arenaN  = 0
+	level.coop_ho_authorA = 0
+	println "^~^~^ HOLDOUT arenas cleared (not yet saved - use save to persist)"
+}end
+
+//=========================================================================
+// PERSISTENCE - one line per arena:  ho1,<x> <y> <z>,<yaw>,<sx sy sz>|<sx sy sz>|...
+//=========================================================================
+holdout_save:{
+	local.name = getcvar "mapname"
+	local.txt = ""
+	local.i = 1
+	while( local.i <= level.coop_ho_arenaN ){
+		local.p = level.coop_ho_pos[local.i]
+		local.txt = local.txt + "ho1," + local.p[0] + " " + local.p[1] + " " + local.p[2] + "," + level.coop_ho_ang[local.i] + ","
+		local.j = 1
+		while( local.j <= level.coop_ho_spawnN[local.i] ){
+			local.s = level.coop_ho_spawn[local.i][local.j]
+			if( local.j > 1 ){ local.txt = local.txt + "|" }
+			local.txt = local.txt + local.s[0] + " " + local.s[1] + " " + local.s[2]
+			local.j++
+		}
+		local.txt = local.txt + "\n"
+		local.i++
+	}
+	fs_write_content ( "coop_mod/save/holdout_" + local.name + ".dat" ) local.txt
+	println( "^~^~^ HOLDOUT saved " + level.coop_ho_arenaN + " arena(s) -> coop_mod/save/holdout_" + local.name + ".dat" )
+	local.p = waitthread holdout_first_player
+	if( local.p != NULL ){ local.p iprint ( "SAVED " + level.coop_ho_arenaN + " checkpoint(s) for this map. Press F8 to play it." ) 1 }
+}end
+
+//=========================================================================
+holdout_load:{
+	local.name = getcvar "mapname"
+	local.txt = fs_read_content ( "coop_mod/save/holdout_" + local.name + ".dat" )
+	if( local.txt == NIL || local.txt == "" ){
+		local.txt = fs_read_content ( "coop_mod/holdout/" + local.name + ".dat" )
+	}
+	if( local.txt == NIL || local.txt == "" ){ end }
+
+	//[user 2026-08-04] bug-1381 - REAL PARSER. This was a stub that found the file and printed
+	//"phase 2" without reading it, so an authored arena never came back and checkpoints had to be
+	//re-placed every session. Format written by holdout_save:
+	//    ho1,<x y z>,<yaw>,<sx sy sz>|<sx sy sz>|...
+	//Character scan, because this dialect has no split(). Commas separate the 4 columns, pipes
+	//separate the enemy spawns inside column 4.
+	local.field = ""
+	local.c1 = ""
+	local.c2 = ""
+	local.col = 0
+	local.i = 0
+	local.len = local.txt.size
+	local.n = 0
+
+	while( local.i < local.len ){
+		local.ch = local.txt[local.i]
+		if( local.ch == "," ){
+			if( local.col == 1 ){ local.c1 = local.field }
+			if( local.col == 2 ){ local.c2 = local.field }
+			local.col++
+			local.field = ""
+		} else if( local.ch == "\n" ){
+			if( local.col == 3 && local.c1 != "" ){
+				local.n++
+				level.coop_ho_pos[local.n] = waitthread coop_mod/props.scr::prop_vec local.c1
+				level.coop_ho_ang[local.n] = float( local.c2 )
+				level.coop_ho_spawnN[local.n] = 0
+				waitthread holdout_load_spawns local.n local.field
+			}
+			local.field = ""
+			local.col = 0
+			local.c1 = ""
+		} else {
+			local.field += local.ch
+		}
+		local.i++
+	}
+	if( local.col == 3 && local.c1 != "" ){
+		local.n++
+		level.coop_ho_pos[local.n] = waitthread coop_mod/props.scr::prop_vec local.c1
+		level.coop_ho_ang[local.n] = float( local.c2 )
+		level.coop_ho_spawnN[local.n] = 0
+		waitthread holdout_load_spawns local.n local.field
+	}
+	level.coop_ho_arenaN = local.n
+	println( "^~^~^ HOLDOUT LOADED " + local.n + " arena(s) for " + local.name )
+}end
+
+//=========================================================================
+// LIVE READOUT.                                        [user 2026-08-05] bug-1410
+// "Started the first wave, idk how to tell if any enemies are coming."
+//
+// The wave HAD spawned - the console said "wave 1 spawned 5 (live 5/24)" - but nothing on screen
+// said so, and the enemy approach points are 2500-4400u out, so there is a long silent walk before
+// the first contact. A holdout with no feedback is indistinguishable from a broken one, which is
+// the actual problem here.
+//
+// Slot 97: free. NOT from the slot map, which was wrong about 88-94 (bug-1402) - taken from a
+// census of every ihuddraw call. 95/96 are the arena deploy curtain.
+//=========================================================================
+holdout_hud:{
+	while( level.coop_ho_state == "running" ){
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL ){
+				local.txt = "WAVE " + level.coop_ho_wave + " / " + int( getcvar "coop_holdoutWaves" )
+				local.txt = local.txt + "      ENEMIES " + level.coop_ho_actorN
+				ihuddraw_virtualsize local.p 97 1
+				ihuddraw_align       local.p 97 left top
+				ihuddraw_font        local.p 97 "facfont-20"
+				ihuddraw_color       local.p 97 1 0.86 0.55
+				ihuddraw_rect        local.p 97 232 40 0 0
+				ihuddraw_string      local.p 97 local.txt
+				ihuddraw_alpha       local.p 97 1
+			}
+			local.i++
+		}
+		wait 1
+	}
+	//clear it when the holdout ends, or it hangs on screen forever
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_alpha  local.p 97 0
+			ihuddraw_string local.p 97 ""
+		}
+		local.i++
+	}
+}end
+
+//=========================================================================
+// THE DIRECTOR
+//=========================================================================
+holdout_run:{
+	if( level.coop_ho_state != "idle" ){
+		println "^~^~^ HOLDOUT already running"
+		end
+	}
+	if( level.coop_ho_arenaN < 1 ){
+		local.p = waitthread holdout_first_player
+		if( local.p != NULL ){ local.p iprint "Nothing to defend yet - press F5 where you want a checkpoint." 1 }
+		end
+	}
+
+	//[user 2026-08-05] bug-1418 - STARTING THE HOLDOUT MUST END BUILD MODE. The log shows the
+	//failure exactly: notarget ON at 17:40, holdout started at 17:46 with build mode still live,
+	//and 4 of 5 enemies stood at their spawns while one ran in and never engaged. Build mode sets
+	//NOTARGET on the builder, and coop_wave_hunt targets the closest TARGETABLE player - with
+	//notarget there is none, so no destination, so they stand. F8 lives in the same toolkit as
+	//the build keys, so authoring straight into a test run is the natural flow; the mode switch
+	//has to be automatic. The build session loop tears down notarget itself when the cvar drops.
+	if( getcvar "coop_build" == "1" ){
+		setcvar "coop_build" "0"
+		waitthread holdout_announce "BUILD MODE OFF - GOING LIVE"
+		wait 1.5
+	}
+
+	level.coop_ho_state = "running"
+	level.coop_ho_cur   = 0
+	thread holdout_hud
+	level.coop_ho_waveActive = 0
+	thread holdout_watch_wipe
+	waitthread holdout_announce "HOLDOUT BEGINS"
+
+	local.a = 1
+	while( local.a <= level.coop_ho_arenaN && level.coop_ho_state == "running" ){
+		level.coop_ho_cur = local.a
+
+		// move the squad to the checkpoint and RE-PIN their respawns there, so a death does not
+		// send anyone back across the map (main.scr::playersWarpto ... 1 does both)
+		//[user 2026-08-05] bug-1389 - playersWarpto wants a VECTOR angle (it defaults to ( 0 1 0 )
+		//and assigns it straight into coop_spawnNangles), but holdout_author_arena stores
+		//coop_ho_ang as a FLOAT yaw (local.p.angles[1]). Passing the float threw
+		//"Cannot cast 'float' to vector" and aborted the warp - which is why the squad never
+		//moved to the checkpoint. Build the vector from a plain local first (line ~305 already
+		//did this correctly for the enemy spawn angle).
+		local.hoyaw = level.coop_ho_ang[local.a]
+		local.hoang = ( 0 local.hoyaw 0 )
+		waitthread coop_mod/main.scr::playersWarpto level.coop_ho_pos[local.a] local.hoang 1
+		waitthread holdout_announce ( "CHECKPOINT " + local.a + " OF " + level.coop_ho_arenaN + " - DIG IN" )
+		wait 4
+
+		local.waves = int( getcvar "coop_holdoutWaves" )
+		if( local.waves < 1 ){ local.waves = 3 }
+		local.w = 1
+		while( local.w <= local.waves && level.coop_ho_state == "running" ){
+			level.coop_ho_wave = local.w
+			waitthread holdout_announce ( "WAVE " + local.w + " / " + local.waves )
+			thread holdout_music 1
+			level.coop_ho_waveActive = 1
+			waitthread holdout_spawn_wave local.a local.w
+			//[user 2026-08-05] bug-1422 - the LAST wave of the LAST outpost is led by an officer
+			//boss: eagle icon, no radio, no reinforcement calls, boss-elimination XP on death.
+			//Spawned BEFORE wait_cleared so the wave gate counts him.
+			if( local.a == level.coop_ho_arenaN && local.w == local.waves ){
+				waitthread holdout_boss local.a
+			}
+			waitthread holdout_wait_cleared
+			level.coop_ho_waveActive = 0
+			if( level.coop_ho_state != "running" ){ break }
+			println( "^~^~^ HOLDOUT_WAVE_CLEARED arena=" + local.a + " wave=" + local.w )
+			thread holdout_music 0
+			waitthread holdout_announce "WAVE CLEARED"
+			//[user 2026-08-05] everyone who fell this wave rejoins now - the pinned checkpoint
+			//respawn puts them straight back on the point
+			waitthread holdout_respawn_dead
+			thread coop_mod/xp.scr::xp_team_award 100 "valor" "Wave Cleared"
+			//[user 2026-08-05] 30s breather between waves; checkpoint ADVANCES skip it (the
+			//warp + DIG IN beat already paces those)
+			if( local.w < local.waves ){
+				local.cd = int( getcvar "coop_holdoutCooldown" )
+				if( local.cd <= 0 ){ local.cd = 30 }
+				waitthread holdout_cooldown local.cd
+			}
+			else{
+				wait 5
+			}
+		}
+		local.a++
+	}
+
+	if( level.coop_ho_state == "running" ){
+		waitthread holdout_announce "HOLDOUT COMPLETE"
+		thread coop_mod/xp.scr::xp_team_award 500 "valor" "Holdout Complete"
+		thread coop_mod/challenges.scr::chal_team_bump "ho_complete" 1
+	}
+	level.coop_ho_state = "idle"
+}end
+
+//=========================================================================
+// One wave. Count scales with player count; the HARD CAP is enforced against the LIVE count.
+//=========================================================================
+holdout_spawn_wave local.arena local.wave:{
+	waitthread holdout_compact
+
+	local.base = int( getcvar "coop_holdoutBase" )
+	if( local.base < 1 ){ local.base = 6 }
+	//[user 2026-08-05] bug-1413 - the per-wave RAMP was hardcoded at +2, which is the one number
+	//that decides whether a holdout escalates or plateaus, so it had no business being baked in.
+	//Wave size = base + (wave-1)*ramp, then player-count scaled by coop_reinf_count.
+	local.ramp = int( getcvar "coop_holdoutRamp" )
+	if( local.ramp < 0 ){ local.ramp = 2 }
+	local.want = local.base + ( local.wave - 1 ) * local.ramp
+	local.want = waitthread coop_mod/officer.scr::coop_reinf_count local.want 2 1 40
+
+	local.cap = int( getcvar "coop_holdoutCap" )
+	if( local.cap < 4 ){ local.cap = 24 }
+	local.room = local.cap - level.coop_ho_actorN
+	if( local.want > local.room ){ local.want = local.room }
+	if( local.want < 1 ){
+		println( "^~^~^ HOLDOUT cap reached (" + level.coop_ho_actorN + "/" + local.cap + ") - no spawn this wave" )
+		end
+	}
+
+	local.sn = level.coop_ho_spawnN[local.arena]
+	local.i = 0
+	local.made = 0
+	while( local.i < local.want ){
+		local.pos = level.coop_ho_pos[local.arena]
+		if( local.sn > 0 ){
+			local.pick = ( local.i % local.sn ) + 1
+			local.pos = level.coop_ho_spawn[local.arena][local.pick]
+		}
+		local.at = waitthread coop_mod/officer.scr::coop_spread_pos local.pos local.i
+
+		local.mdl = waitthread coop_mod/officer.scr::coop_model_for "infantry"
+		local.a = spawn local.mdl
+		// NULL GUARD - officer.scr's wave path omits this at ~10 sites; under entity pressure a
+		// failed spawn returns NULL and every following command throws on a NULL listener.
+		if( local.a == NULL ){
+			println "^~^~^ HOLDOUT spawn returned NULL - entity pool pressure, stopping this wave"
+			break
+		}
+		local.a.origin = local.at
+		local.a droptofloor
+		local.a.angles = ( 0 level.coop_ho_ang[local.arena] 0 )
+		//[user 2026-08-05] bug-1422 - PLAIN ENEMIES. No coop_xpClass: holdout troopers pay
+		//standard axis-kill XP, not the officer-reinforcement bonus class. No overhead icons
+		//either: the swastika/eagle draw is gated on RF_COOP_BOSS (cg_modelanim.c:1770), so strip
+		//it defensively below in case any shared path re-adds it. (If icons STILL show, they are
+		//the coop_aiBehav debug role tracker - a dev cvar, set it 0.)
+		local.a.health = 100 + local.wave * 10
+		local.a.accuracy = 60
+		local.a thread coop_mod/officer.scr::coop_reinf_scale local.a
+
+		//[user 2026-08-05] bug-1411 - THEY NEVER MOVED. The user reported not being convinced the
+		//enemies spawned or moved after standing out there a while - and was right. The wave DID
+		//spawn (the console logged wave 1 spawned 5), but the code above only set origin, angles,
+		//health and accuracy.
+		//A MOHAA actor with no orders idles where it stands until it SEES a player, and the enemy
+		//approach points are 2500-4400u from the checkpoint, so it never will. Five men stood in a
+		//field indefinitely.
+		//
+		//coop_reinf_scale is health/accuracy tuning ONLY - it is not, and never was, a movement
+		//order. The advance behaviour lives in officer.scr::coop_wave_hunt: roster registration,
+		//nosurprise, forceactivate, a per-trooper standoff, a lateral fan so they do not stack on
+		//one player, and an anti-stuck re-path. The officer waves have called it all along
+		//(officer.scr:1928, :2043); the holdout simply never did.
+		//
+		//Copying that call site verbatim rather than inventing an order:
+		//    attackplayer  -> gives them a target at all
+		//    squadSlot     -> the fan offset, so a wave spreads instead of single-filing
+		//    personality   -> the shipped role mix (cover / flank / rusher)
+		//    coop_wave_hunt-> the actual advance loop
+		local.a attackplayer
+		local.a.flags["coop_squadSlot"] = local.i
+		waitthread coop_mod/officer.scr::coop_apply_personality local.a
+		thread coop_mod/officer.scr::coop_wave_hunt local.a
+		local.a rendereffects "-coopboss"
+
+		local.made++
+		level.coop_ho_actorN = level.coop_ho_actorN + 1
+		level.coop_ho_actor[level.coop_ho_actorN] = local.a
+		local.i++
+		waitframe
+	}
+	println( "^~^~^ HOLDOUT wave " + local.wave + " spawned " + local.made + " (live " + level.coop_ho_actorN + "/" + local.cap + ")" )
+}end
+
+//=========================================================================
+holdout_wait_cleared:{
+	local.guard = 0
+	while( level.coop_ho_state == "running" ){
+		wait 2
+		local.guard = local.guard + 2
+		waitthread holdout_compact
+		if( level.coop_ho_actorN <= 0 ){ end }
+		if( local.guard > 600 ){
+			println "^~^~^ HOLDOUT wave watchdog: 10 min elapsed, forcing clear"
+			end
+		}
+	}
+}end
+
+//=========================================================================
+// Rebuild the actor array from the ones still alive. This is what stops the array growing
+// without bound across a long holdout - the failure mode that ate the entity pool before.
+//=========================================================================
+holdout_compact:{
+	local.keepN = 0
+	local.i = 1
+	while( local.i <= level.coop_ho_actorN ){
+		local.a = level.coop_ho_actor[local.i]
+		if( local.a != NULL && local.a != NIL ){
+			if( isAlive local.a ){
+				local.keepN++
+				level.coop_ho_keep[local.keepN] = local.a
+			}
+		}
+		local.i++
+	}
+	local.i = 1
+	while( local.i <= local.keepN ){
+		level.coop_ho_actor[local.i] = level.coop_ho_keep[local.i]
+		local.i++
+	}
+	level.coop_ho_actorN = local.keepN
+}end
+
+//=========================================================================
+holdout_stop:{
+	level.coop_ho_state = "idle"
+	local.i = 1
+	while( local.i <= level.coop_ho_actorN ){
+		local.a = level.coop_ho_actor[local.i]
+		if( local.a != NULL && local.a != NIL ){ local.a remove }
+		local.i++
+	}
+	level.coop_ho_actorN = 0
+	println "^~^~^ HOLDOUT stopped, actors cleaned up"
+	level.coop_ho_waveActive = 0
+	waitthread holdout_respawn_dead
+	thread holdout_music 0
+	waitthread holdout_announce "HOLDOUT ABORTED"
+}end
+
+//=========================================================================
+holdout_announce local.msg:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){ local.p iprint local.msg 1 }
+		local.i++
+	}
+	println( "^~^~^ HOLDOUT " + local.msg )
+}end
+
+//=========================================================================
+holdout_first_player:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.classname == "Player" ){ end local.p }
+		local.i++
+	}
+	end NULL
+}end
+//=========================================================================
+// "<x y z>|<x y z>|..." -> level.coop_ho_spawn[arena][n]. Capped at 8 to match the author path.
+//=========================================================================
+holdout_load_spawns local.a local.list:{
+	if( local.list == NIL || local.list == "" ){ end }
+	local.one = ""
+	local.k = 0
+	local.i = 0
+	while( local.i < local.list.size ){
+		local.ch = local.list[local.i]
+		if( local.ch == "|" ){
+			if( local.one != "" && local.k < 8 ){
+				local.k++
+				level.coop_ho_spawn[local.a][local.k] = waitthread coop_mod/props.scr::prop_vec local.one
+			}
+			local.one = ""
+		} else {
+			local.one += local.ch
+		}
+		local.i++
+	}
+	if( local.one != "" && local.k < 8 ){
+		local.k++
+		level.coop_ho_spawn[local.a][local.k] = waitthread coop_mod/props.scr::prop_vec local.one
+	}
+	level.coop_ho_spawnN[local.a] = local.k
+}end
+
+//=========================================================================
+// OFFICER FINALE.                                      [user 2026-08-05] bug-1422
+// The lean boss: the officer ACTOR with the eagle, minus everything radio-shaped. The full
+// officer system (officer.scr::coop_officer_init) spawns a radio, bodyguards, heal-retreat and
+// the reinforcement threshold loop - none of which belongs in a holdout, where the WAVES are the
+// reinforcements. So this spawns only the man:
+//   * eagle icon = RF_COOP_BOSS gate + RF_ADDITIVE_DLIGHT selector (cg_modelanim.c:1780), the
+//     same pair the real officer uses, re-asserted by officer.scr::coop_mark_boss
+//   * no coop_xpClass - his death pays through xp_officer_killed (75 valor Officer Down),
+//     the boss-elimination exception the user asked for
+//   * registered in coop_ho_actor so the wave-clear gate counts him
+//=========================================================================
+holdout_boss local.arena:{
+	local.pos = level.coop_ho_pos[local.arena]
+	if( level.coop_ho_spawnN[local.arena] > 0 ){ local.pos = level.coop_ho_spawn[local.arena][1] }
+	local.mdl = waitthread coop_mod/officer.scr::coop_model_for "officer"
+	local.b = spawn local.mdl
+	if( local.b == NULL ){ println "^~^~^ HOLDOUT boss spawn NULL - entity pressure" ; end }
+	local.b.origin = local.pos
+	local.b droptofloor
+	local.b.angles = ( 0 level.coop_ho_ang[local.arena] 0 )
+	local.b.health = 500
+	local.b.accuracy = 75
+	local.b thread coop_mod/officer.scr::coop_reinf_scale local.b
+	local.b rendereffects "+coopboss"
+	local.b rendereffects "+additivedynamiclight"
+	thread coop_mod/officer.scr::coop_mark_boss local.b
+	local.b attackplayer
+	local.b.nosurprise = 1
+	local.b.leash = 4096
+	local.b.flags["coop_squadSlot"] = 0
+	thread coop_mod/officer.scr::coop_wave_hunt local.b
+	level.coop_ho_actorN = level.coop_ho_actorN + 1
+	level.coop_ho_actor[level.coop_ho_actorN] = local.b
+	thread holdout_boss_death local.b
+	waitthread holdout_announce "AN OFFICER LEADS THE FINAL WAVE"
+	println( "^~^~^ HOLDOUT boss spawned at " + local.pos )
+}end
+
+//=========================================================================
+holdout_boss_death local.b:{
+	local.b waittill death
+	thread coop_mod/xp.scr::xp_officer_killed local.b
+	waitthread holdout_announce "OFFICER ELIMINATED"
+}end
+
+//=========================================================================
+// WAVE MUSIC.                                          [user 2026-08-05] bug-1426
+// The track the user heard leak from the baked TunnelAutoSave trigger - and liked - is the
+// campaign's tunnel action theme. Promoted to a feature: it starts with every wave (including
+// the officer finale, which is just the last wave) and stops on wave clear and on abort. Bare
+// tmstartloop/tmstop ONLY - tmvolume would stomp the music-slider mixer, so it is never sent.
+//=========================================================================
+holdout_music local.on:{
+	local.cmd = "tmstop"
+	if( local.on == 1 ){ local.cmd = "tmstartloop sound/music/mus_10a_action.mp3" }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			local.p stufftext local.cmd
+		}
+		local.i++
+	}
+}end
+
+//=========================================================================
+// DEATH = SPECTATE UNTIL THE WAVE CLEARS.               [user 2026-08-05]
+// Called from player.scr::manageAliveSpawning right after the LMS check, and uses the exact LMS
+// force-spectate recipe. coop_respawning TRUE at that point means THIS pass is a death-respawn
+// (first spawns and idle-spectate returns are FALSE), so mid-wave late joins still work.
+// The rejoin (holdout_respawn_dead) deliberately does NOT set coop_specReturn: that restore
+// would bring back the pre-death snapshot - including near-zero HP - where the standard respawn
+// kit + full coop_health is what a wave rejoin should be.
+//=========================================================================
+holdout_spec_gate local.player:{
+	if( level.coop_ho_state != "running" ){ end 0 }
+	if( level.coop_ho_waveActive != 1 ){ end 0 }
+	if( local.player == NULL || local.player == NIL ){ end 0 }
+	if( local.player.flags["coop_respawning"] != TRUE ){ end 0 }
+	local.player.flags["coop_ho_waveDead"] = 1
+	if( local.player.dmteam != "spectator" ){
+		if( local.player.health == 0 ){ local.player hide }
+		local.player spectator
+	}
+	local.player.flags["coop_respawning"] = FALSE
+	local.player.flags["coop_iAmTruelyActive"] = 0
+	local.player iprint "You fell - you rejoin when the wave is cleared" 1
+	end 1
+}end
+
+//=========================================================================
+// WIPE WATCH. A player is UP if they hold a team, have health, and are not DBNO-down. All-down
+// counts as a wipe even mid-DBNO: with nobody standing there is nobody left to revive, so the
+// bleed-out is theater - fail now and restart clean. Covers solo (1 up -> 0 up) for free.
+//=========================================================================
+holdout_watch_wipe:{
+	while( level.coop_ho_state == "running" ){
+		if( level.coop_ho_waveActive == 1 && $player.size >= 1 ){
+			local.up = waitthread holdout_count_up
+			if( local.up <= 0 ){
+				level.coop_ho_state = "failed"
+				level.coop_ho_waveActive = 0
+				thread holdout_music 0
+				waitthread holdout_announce "THE POINT IS LOST - MISSION FAILED"
+				wait 3
+				thread coop_mod/replace.scr::missionfailed
+				end
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+holdout_count_up:{
+	local.n = 0
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.dmteam != "spectator" && local.p.health > 0 && local.p.flags["coop_dbno_active"] != 1 ){
+				local.n++
+			}
+		}
+		local.i++
+	}
+	end local.n
+}end
+
+//=========================================================================
+// REJOIN THE FALLEN. join_team is the same call the LMS auto-rejoin uses; the pinned checkpoint
+// respawn does the placement. Only players GATED BY THIS SYSTEM are touched - an idle spectator
+// without the flag stays a spectator.
+//=========================================================================
+holdout_respawn_dead:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.flags["coop_ho_waveDead"] == 1 ){
+				local.p.flags["coop_ho_waveDead"] = NIL
+				if( local.p.dmteam == "spectator" ){
+					local.p iprint "You are back in the fight!" 0
+					local.p join_team ( "allies" )
+				}
+			}
+		}
+		local.i++
+	}
+}end
+
+//=========================================================================
+// BETWEEN-WAVE COOLDOWN.                                [user 2026-08-05]
+//=========================================================================
+holdout_cooldown local.cd:{
+	waitthread holdout_announce ( "NEXT WAVE IN " + local.cd + " SECONDS" )
+	while( local.cd > 0 ){
+		if( level.coop_ho_state != "running" ){ end }
+		if( local.cd == 10 ){ waitthread holdout_announce "NEXT WAVE IN 10 SECONDS" }
+		if( local.cd <= 5 ){ waitthread holdout_announce ( "WAVE IN " + local.cd ) }
+		wait 1
+		local.cd--
+	}
+}end
+
+//=========================================================================
+// CALL RADIO.                                           [user 2026-08-05]
+// Armed on every placed/reloaded models/miscobj/radio_military.tik (props.scr + buildmode.scr
+// diverts). Live ONLY when a wave is active, exactly ONE player is up, and at least one player
+// is wave-dead: the last man holds USE within 100u to respawn the squad mid-wave. One call per
+// radio - and the user places one radio per point, so that IS once per outpost. The used flag
+// lives on the entity: a mission restart rebuilds the props and re-arms every radio clean.
+//=========================================================================
+holdout_radio_watch local.r:{
+	while( local.r != NULL && local.r != NIL ){
+		if( level.coop_ho_state == "running" && level.coop_ho_waveActive == 1 && local.r.coop_ho_radioUsed != 1 ){
+			local.up = 0
+			local.dead = 0
+			local.i = 1
+			while( local.i <= $player.size ){
+				local.p = $player[local.i]
+				if( local.p != NULL && local.p != NIL ){
+					if( local.p.flags["coop_ho_waveDead"] == 1 ){
+						local.dead++
+					}
+					else{
+						if( local.p.dmteam != "spectator" && local.p.health > 0 && local.p.flags["coop_dbno_active"] != 1 ){
+							local.up++
+							local.last = local.p
+						}
+					}
+				}
+				local.i++
+			}
+			if( local.up == 1 && local.dead >= 1 && local.last != NIL ){
+				if( vector_length( local.r.origin - local.last.origin ) < 100 ){
+					local.last iprint "HOLD USE - RADIO HQ TO RESPAWN YOUR SQUAD (one call per point)" 1
+					if( local.last.useheld == 1 ){
+						local.r.coop_ho_radioUsed = 1
+						waitthread holdout_announce "HQ ACKNOWLEDGES - REINFORCEMENTS INBOUND"
+						waitthread holdout_respawn_dead
+					}
+				}
+			}
+		}
+		wait 0.3
+	}
+}end

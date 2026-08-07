@@ -26,6 +26,8 @@ import struct. This is the **authoritative allocation** for the coop mod.
 | 62-75     | **XP system**                           | xp.scr                           | gain popup 62-69, promo ceremony 70-73, micro popup 73-75; **debrief card reuses 62-71 SEQUENTIALLY** (gated by `coop_xp_summaryActive` — see bug-553) |
 | 76-78     | challenge completion toast              | challenges.scr                   | |
 | 84-87     | challenge progress popup                | challenges.scr                   | |
+| 88-94     | **fog mode**                            | fogmode.scr                      | was ABSENT from this table, which implied 88-99 free |
+| 95-96     | arena deploy curtain (black + "CLICK TO DEPLOY") | maps/e3l4_arena.scr     | arena maps only; torn down on deploy, 25s failsafe |
 | 100-114   | lobby roster (100-111, 3 per row x 4 rows) + help (112-113) + countdown (114) | lobby.scr | fade-exempt persistent-UI range (>=100); wiped 100-114 on lobby end |
 | 115-116   | briefing / lobby ready gate             | readygate.scr                    | |
 | 117-126   | **lobby NEW UNLOCKS list** (header 117, 8 lines 118-125, "+N more" 126) | lobby.scr (lobbyUnlockList), fed by challenges.scr | lobby-time only; fade-exempt; wiped on lobby end |

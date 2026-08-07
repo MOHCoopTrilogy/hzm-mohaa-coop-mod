@@ -30,6 +30,7 @@ flchatter_init:{
 	level.coop_flchatUSn = 0
 	level.coop_flchatCombat = 0 - 1000
 	level.coop_flchatTaunt = 0 - 1000		// last MP-taunt time; taunts get a longer cooldown than normal chatter
+	level.coop_flchatEngaged = 0 - 1000		//[bug-taunt-intro] last time a registered German AI was GENUINELY engaged
 
 	thread flchatter_combat_monitor
 	thread flchatter_loop
@@ -37,8 +38,13 @@ flchatter_init:{
 
 //=========================================================================
 // combat heat - same cheap proxy as ambience.scr (player firing / losing health)
+//[bug-taunt-intro] plus a GENUINE-engagement scan every 2s: the heat proxy alone is not combat
+// (a player firing at nothing during a scripted intro heats it), so we also track when a
+// registered German AI was last actually fighting (aibehav.scr pattern: thinkstate attack or
+// a live .enemy). The loop gate requires BOTH signals before any bark/taunt rolls.
 flchatter_combat_monitor:{
 	local.last[1] = 0
+	local.tick = 0
 	while( 1 ){
 		local.i = 1
 		while( $player != NULL && local.i <= $player.size ){
@@ -57,6 +63,24 @@ flchatter_combat_monitor:{
 			}
 			local.i++
 		}
+		local.tick++
+		if( ( local.tick % 4 ) == 0 && level.coop_flchatDEn > 0 ){
+			local.j = 0
+			while( local.j < level.coop_flchatDEn ){
+				local.a = level.coop_flchatDE[local.j]
+				local.j++
+				if( local.a == NULL || local.a == NIL ){ continue }
+				if( !( isAlive local.a ) ){ continue }
+				if( local.a.thinkstate == "attack" ){
+					level.coop_flchatEngaged = level.time
+					break
+				}
+				if( local.a.enemy != NULL && local.a.enemy != NIL ){
+					level.coop_flchatEngaged = level.time
+					break
+				}
+			}
+		}
 		wait 0.5
 	}
 }end
@@ -74,8 +98,21 @@ flchatter_loop:{
 			if( local.dbg == 1 ){ println( "^~^~^ TAUNT skip: coop_flchatter is 0" ) }
 			continue
 		}
+		//[bug-taunt-intro] hard-block the intro window: nothing plays in the first 15s of a map
+		// unless genuine AI combat has already begun (some maps start hot)
+		if( level.time < 15 && level.coop_flchatEngaged < 0 ){
+			if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: intro window, no combat yet" ) }
+			continue
+		}
 		if( ( level.time - level.coop_flchatCombat ) > 8 ){	// only during/just after a fight
 			if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: no combat for " + ( level.time - level.coop_flchatCombat ) + "s" ) }
+			continue
+		}
+		//[bug-taunt-intro] heat proxy passed, but ALSO require a German AI to have been genuinely
+		// engaged within the last 10s - kills taunts/barks during intros and quiet periods where a
+		// player merely fired at nothing or took scripted damage
+		if( ( level.time - level.coop_flchatEngaged ) > 10 ){
+			if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: no AI engagement for " + ( level.time - level.coop_flchatEngaged ) + "s" ) }
 			continue
 		}
 		if( $player == NULL || $player.size < 1 ){ continue }
@@ -89,6 +126,15 @@ flchatter_loop:{
 		// coop_taunt_us1..29 (ubersound/coop_taunt.scr, bug-775 rebuilt sizes).
 		local.taunt = 0
 
+		//[user 2026-07-28] "I want the dialogue to be more logical, not so random". While the
+		// situational layer is running (coop_aiVoice != 0, the default) this loop no longer fires
+		// the generic coop_flvo_* battle bark at all - coop_mod/aivoice.scr covers under-fire /
+		// man-down / reload / press-the-attack from real actor state. What survives here is the MP
+		// TAUNT, which is already combat-gated above (heat proxy + a genuinely engaged German AI)
+		// and so reads as a jeer rather than random muttering.
+		local.tauntOnly = 1
+		if( getcvar( "coop_aiVoice" ) == "0" ){ local.tauntOnly = 0 }
+
 		// 70% german enemy chatter, 30% allied bark (allied AI are rarer anyway)
 		if( randomfloat( 1 ) < 0.7 ){
 			if( randomfloat( 1 ) < 0.45 && ( level.time - level.coop_flchatTaunt ) > 12 ){ local.taunt = 1 }
@@ -100,9 +146,13 @@ flchatter_loop:{
 					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT play de: " + local.snd + " speaker " + local.speaker.model ) }
 					local.speaker playsound local.snd
 				} else {
-					local.snd = ( "coop_flvo_de" + ( ( randomint 90 ) + 1 ) )
-					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark de: " + local.snd ) }
-					local.speaker playsound local.snd
+					if( local.tauntOnly == 1 ){
+						if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: generic de bark owned by aivoice" ) }
+					} else {
+						local.snd = ( "coop_flvo_de" + ( ( randomint 90 ) + 1 ) )
+						if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark de: " + local.snd ) }
+						local.speaker playsound local.snd
+					}
 				}
 			} else if( local.dbg == 1 ){
 				println ( "^~^~^ TAUNT skip: no de speaker in range (registry " + level.coop_flchatDEn + ")" )
@@ -111,6 +161,24 @@ flchatter_loop:{
 			//[user 07-17] allied taunts bumped too (actors + paratroopers - all managed allied AI register)
 			if( randomfloat( 1 ) < 0.40 && ( level.time - level.coop_flchatTaunt ) > 15 ){ local.taunt = 1 }
 			local.speaker = waitthread flchatter_pick_us local.range
+			//[user 2026-07-28] "US should not use british dialogue, so whatever dialogue they are
+			// using should be accurate to their character model." BOTH allied pools here
+			// (coop_taunt_us* = AMdfr MP reels, coop_flvo_us* = MOH Frontline squad reels) are
+			// AMERICAN recordings, so a BRITISH model (allied_uk_*, sc_al_brit_*, SAS/commando)
+			// must never draw from them. British AI get their lines from coop_mod/aivoice.scr,
+			// which uses the verified DFRUK reels only.
+			if( local.speaker != NULL ){
+				if( waitthread coop_mod/main.scr::containsText local.speaker.model "_uk_" 0 ){ local.speaker = NULL }
+			}
+			if( local.speaker != NULL ){
+				if( waitthread coop_mod/main.scr::containsText local.speaker.model "brit" 0 ){ local.speaker = NULL }
+			}
+			if( local.speaker != NULL ){
+				if( waitthread coop_mod/main.scr::containsText local.speaker.model "sas_" 0 ){ local.speaker = NULL }
+			}
+			if( local.speaker != NULL ){
+				if( waitthread coop_mod/main.scr::containsText local.speaker.model "commando" 0 ){ local.speaker = NULL }
+			}
 			if( local.speaker != NULL ){
 				if( local.taunt == 1 ){
 					level.coop_flchatTaunt = level.time
@@ -118,9 +186,13 @@ flchatter_loop:{
 					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT play us: " + local.snd + " speaker " + local.speaker.model ) }
 					local.speaker playsound local.snd
 				} else {
-					local.snd = ( "coop_flvo_us" + ( ( randomint 45 ) + 1 ) )
-					if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark us: " + local.snd ) }
-					local.speaker playsound local.snd
+					if( local.tauntOnly == 1 ){
+						if( local.dbg == 1 ){ println ( "^~^~^ TAUNT skip: generic us bark owned by aivoice" ) }
+					} else {
+						local.snd = ( "coop_flvo_us" + ( ( randomint 45 ) + 1 ) )
+						if( local.dbg == 1 ){ println ( "^~^~^ TAUNT bark us: " + local.snd ) }
+						local.speaker playsound local.snd
+					}
 				}
 			} else if( local.dbg == 1 ){
 				println ( "^~^~^ TAUNT skip: no us speaker in range (registry " + level.coop_flchatUSn + ")" )
@@ -139,6 +211,10 @@ flchatter_pick_de local.range:{
 		local.try++
 		local.ai = level.coop_flchatDE[ randomint level.coop_flchatDEn ]
 		if( local.ai != NULL && local.ai != NIL && local.ai.coop_noChatter == 1 ){ continue }	//bug-725
+		//[user 08-02] Same scripted-scene gate as aivoice.scr: no_idle == 1 means the actor is
+		//mid-authored-sequence, and chatter shares the DIALOG channel so it REPLACES the scene's
+		//VO rather than overlapping it. SP has no chatter layer at all - this restores that.
+		if( local.ai != NULL && local.ai.no_idle == 1 ){ continue }
 		if( local.ai == NULL || local.ai == NIL ){ continue }
 		if( !( isAlive local.ai ) ){ continue }
 		local.i = 1
@@ -163,6 +239,7 @@ flchatter_pick_us local.range:{
 		local.ai = level.coop_flchatUS[ randomint level.coop_flchatUSn ]
 		if( local.ai == NULL || local.ai == NIL ){ continue }
 		if( local.ai.coop_noChatter == 1 ){ continue }	//[user 07-17] story actors stay silent (bug-725)
+		if( local.ai.no_idle == 1 ){ continue }	//[user 08-02] never talk over a scripted scene
 		if( !( isAlive local.ai ) ){ continue }
 		local.i = 1
 		while( local.i <= $player.size ){

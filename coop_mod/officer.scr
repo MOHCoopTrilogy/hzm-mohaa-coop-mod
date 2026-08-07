@@ -548,6 +548,8 @@ coop_officer_spawn local.pos:{
 	level.coop_officer_busy = 0
 	level.coop_wave_recalls = 0
 	level.coop_officer_canteens = 0
+	level.coop_officer_heals = 0			// [318] lifetime FULL-HEAL retreats used (cap = coop_officerMaxHeals)
+	level.coop_officer_healCapNoted = 0		// [318] one-shot "cap reached" diagnostic latch
 	level.coop_officer_lastseen = level.time
 	forcemusic "action"
 	println ("OFFICER SPAWNED HP: " + local.officer.health)
@@ -725,8 +727,20 @@ coop_officer_brain local.officer:{
 			local.unseen = level.time - level.coop_officer_lastseen
 
 			if( level.coop_officer_busy != 1 ){
-				// Under 40% HP and out of contact: ALWAYS retreat to a health post (full heal + back to radio)
-				if( local.officer.health < 480 && local.unseen >= 8 && local.retreat_rolled == 0 ){
+				// Under 40% HP and out of contact: retreat to a health post (full heal + back to radio).
+				// [318] BOUNDED: only while he still has heal-retreats left in his lifetime budget
+				// (coop_officerMaxHeals, def 2). At the cap he simply stops retreating and keeps
+				// fighting - he is NOT made passive, and the canteen sip below is still available
+				// (itself capped at 3), so the fall-through degrades gracefully instead of stranding him.
+				local.wantheal = 0
+				if( local.officer.health < 480 && local.unseen >= 8 && local.retreat_rolled == 0 ){ local.wantheal = 1 }
+				if( local.wantheal == 1 ){
+					if( (exec coop_mod/officer.scr::coop_officer_healsLeft) == 0 ){
+						local.wantheal = 0
+						exec coop_mod/officer.scr::coop_officer_healcap_note "cap_reached_brain"
+					}
+				}
+				if( local.wantheal == 1 ){
 					local.retreat_rolled = 1
 					iprintlnbold "Recon reports the Officer has slipped away to find a health post!"
 					thread coop_officer_medkit_retreat local.officer
@@ -834,10 +848,70 @@ coop_officer_retreat_monitor local.officer:{
 }end
 
 
+//[318] HZM coop - LIFETIME BUDGET for the officer's full-heal retreats. The retreat itself is a
+// deliberate boss mechanic (he slips away, heals to full, comes back) and is kept - it is only
+// BOUNDED here, because with nothing but line-of-sight gating him he could heal to full forever.
+// coop_officerMaxHeals: how many COMPLETED full heals he gets per life. Default 2. 0 disables the
+// heal-retreat outright; a NEGATIVE value restores the old unlimited behaviour. Naming/format
+// matches the other officer cvars (coop_officerScale / coop_officerBasePc / coop_officerHealthPct),
+// which are likewise read inline with an empty-string fallback rather than registered in a cfg.
+coop_officer_maxheals:{
+	local.m = getcvar "coop_officerMaxHeals"
+	if( local.m == "" ){ end 2 }		// same empty-string fallback the other coop_officer* cvars use
+	local.m = int( local.m )
+	end local.m
+}end
+
+
+// Returns 1 while the officer may still spend a full-heal retreat, 0 once the budget is used up.
+coop_officer_healsLeft:{
+	local.max = exec coop_mod/officer.scr::coop_officer_maxheals
+	if( local.max < 0 ){ end 1 }				// negative cvar = unlimited (legacy behaviour)
+	local.used = level.coop_officer_heals
+	if( local.used == NIL ){ local.used = 0 }		// NIL and NULL are different - guard the unset case
+	if( local.used >= local.max ){ end 0 }
+	end 1
+}end
+
+
+// Machine-parseable heal diagnostic ("^~^~^ " prefix, watched by maptest_monitor.ps1 /
+// maptest_watchdog.ps1). GATED behind the officer trace flag (level.cMTE_coop_officer = 1) exactly
+// like the rest of officer.scr's tracing, so a normal game prints nothing at all.
+coop_officer_healdiag local.what:{
+	if( level.cMTE_coop_officer ){
+		local.used = level.coop_officer_heals
+		if( local.used == NIL ){ local.used = 0 }
+		local.max = exec coop_mod/officer.scr::coop_officer_maxheals
+		local.hp = 0
+		if( level.coop_officer != NULL && level.coop_officer != NIL ){ local.hp = level.coop_officer.health }
+		println( "^~^~^ OFFICERHEAL " + local.what + " used=" + local.used + " max=" + local.max + " hp=" + local.hp )
+	}
+}end
+
+
+// One-shot version of the above: latches level.coop_officer_healCapNoted so the 1 Hz officer brain
+// cannot spam the trace once the budget is gone. Explicit NIL guard - the latch is initialised at
+// officer spawn, but comparing an unset (none) var against an int throws "Cannot cast none to float".
+coop_officer_healcap_note local.what:{
+	if( level.coop_officer_healCapNoted == NIL ){ level.coop_officer_healCapNoted = 0 }
+	if( level.coop_officer_healCapNoted == 1 ){ end }
+	level.coop_officer_healCapNoted = 1
+	exec coop_mod/officer.scr::coop_officer_healdiag local.what
+}end
+
+
 coop_officer_medkit_retreat local.officer:{
-	// Repeatable: re-triggered when the officer drops to poor health (re-armed after a full heal).
+	// Repeatable, but BOUNDED: re-triggered when the officer drops to poor health (re-armed after a
+	// full heal), up to coop_officerMaxHeals completed full heals per life. See coop_officer_maxheals.
 	if( level.coop_officer_busy == 1 ){ end }			// already retreating/healing - don't stack another
 	if( local.officer == NULL || !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
+	// [318] budget check BEFORE claiming BUSY, so a refused retreat leaves the busy accounting
+	// completely untouched and he just carries on fighting (the guard_radio keepalive keeps
+	// forceactivate/attackplayer running for him because busy stays 0).
+	if( (exec coop_mod/officer.scr::coop_officer_healsLeft) == 0 ){
+		exec coop_mod/officer.scr::coop_officer_healcap_note "retreat_refused_cap"
+		end
+	}
 	level.coop_officer_busy = 1					// claim BUSY now so threshold/brain calls can't interrupt the heal
 
 	// Scan for nearest health item on this map
@@ -959,6 +1033,14 @@ coop_officer_medkit_retreat local.officer:{
 
 	local.officer.health = 1200	// [209] -20% HP (was 1500)
 	local.officer gore_reset	// HZM coop - gore tier 1: full heal = clean uniform + stop dripping
+	// [318] spend one unit of the lifetime heal budget. Counted HERE, on a COMPLETED full heal, so a
+	// retreat that the players interrupt (they killed him on the way) never costs him a charge.
+	if( level.coop_officer_heals == NIL ){ level.coop_officer_heals = 0 }
+	level.coop_officer_heals++
+	exec coop_mod/officer.scr::coop_officer_healdiag "full_heal"
+	if( (exec coop_mod/officer.scr::coop_officer_healsLeft) == 0 ){
+		exec coop_mod/officer.scr::coop_officer_healdiag "budget_exhausted"
+	}
 	iprintlnbold "The Officer has been fully healed! Thresholds reset!"
 	level.coop_xp_heal_pending = 0	// [302] HZM XP - heal completed, denial window over
 	level.coop_officer_threshold_reset = 1
@@ -1051,7 +1133,15 @@ coop_officer_reinforcements local.officer:{
 				if(level.cMTE_coop_officer){ iprintlnbold ("REINF STATE: poor health (HP " + local.hp + ") - reinforcements called, falling back to heal") }
 				thread coop_call_reinforcements
 			}
-			thread coop_officer_medkit_retreat local.officer
+			// [318] the fall-back-to-heal only happens while he still has heal-retreats left
+			// (coop_officerMaxHeals, def 2). At the cap he stays put and keeps fighting; the
+			// battalion/wave above is still called, and the thresholds stay latched exactly as they
+			// already do whenever a retreat gets interrupted - no new state, nothing to strand him.
+			if( (exec coop_mod/officer.scr::coop_officer_healsLeft) == 1 ){
+				thread coop_officer_medkit_retreat local.officer
+			} else {
+				exec coop_mod/officer.scr::coop_officer_healcap_note "cap_reached_threshold"
+			}
 		}
 		if( local.fired == 0 && local.t50_done == 0 && local.hp <= local.thresh50 ){
 			local.t50_done = 1
@@ -1547,13 +1637,15 @@ coop_apply_personality local.actor:{
 	// pose + a decoupled gun entity for the real bullets; the actor never runs the attack.scr prone
 	// loop that crashes the server.
 	if( local.roll >= 88 ){
-		local.wg = local.actor.weapongroup
-		if( local.wg == "rifle" || local.wg == "mp40" || local.wg == "mp44" || local.wg == "bar" || local.wg == "thompson" || local.wg == "vickers" || local.wg == "pistol" ){
-			local.actor.flags["coop_role"] = "prone"
-			local.actor.leash = 2048
-			thread coop_prone_shooter local.actor
-			end
-		}
+		// PRONE SHOOTER (~12%). Do NOT gate the DECISION on a live weapongroup read at this spawn frame -
+		// the active MAIN weapon slot is usually still empty here (weapongroup reads "unarmed"), so the old
+		// group test failed, the roll degraded to the flank else-branch, and the coop_personality_set latch
+		// meant it never re-rolled once armed (bug: prone=0 in every tracker sample). coop_prone_shooter
+		// waits for the weapon to populate, THEN validates the group (crash-safe: never poses unsupported).
+		local.actor.flags["coop_role"] = "prone"
+		local.actor.leash = 2048
+		thread coop_prone_shooter local.actor
+		end
 	}
 	if( local.roll < 35 ){
 		local.actor.flags["coop_role"] = "aggr"
@@ -1584,16 +1676,45 @@ coop_prone_shooter local.actor:{
 //=========================================================================
 	wait 0.5
 	if( local.actor == NULL || !isAlive local.actor ){ end }
+	// Wait for the active MAIN weapon slot to populate. weapongroup reads "unarmed" until the engine
+	// finishes assigning/drawing the weapon (Holster does NOT clear the slot), so a single read at spawn
+	// is unreliable - retry ~2s before deciding. This is what makes the prone role actually appear.
 	local.wg = local.actor.weapongroup
+	local.tries = 0
+	while( ( local.wg == "unarmed" || local.wg == "" || local.wg == NIL ) && local.tries < 8 ){
+		wait 0.25
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		local.wg = local.actor.weapongroup
+		local.tries++
+	}
+	// DIAG (coop_aiBehav): capture what weapongroup a prone-rolled actor actually resolves to, so the
+	// whitelist below can be corrected to the real German AI strings instead of guessed (why prone is rare).
+	if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
+		println( "^~^~^ PRONEDBG wg=" + local.wg + " tries=" + local.tries )
+	}
+	// Only groups with a real <wg>_prone_shoot anim can pose; anything else (bazooka/grenade/mg42/
+	// generic) or still-unarmed after the wait -> a moving cover role (never a broken anim_scripted).
+	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" && local.wg != "vickers" && local.wg != "pistol" ){
+		local.actor.flags["coop_role"] = "cover"
+		local.actor type_attack "cover"
+		end
+	}
 	// lock the prone pose; enableEnemy 0 + anim_scripted stops the normal think (no attack.scr crash)
 	local.actor.enableEnemy = 0
 	local.actor anim_scripted (local.wg + "_prone_shoot")
-	// the entity that actually fires (hitscan bullets, like the Stuka MG strafe)
+	// The entity that actually fires. CRITICAL (bug-1185): this class is NOT hitscan - GunFire()
+	// always calls ProjectileAttack(), and "bulletdamage" is dead code it accepts and ignores.
+	// With no override it defaults to models/projectiles/stukaround.tik (a dive-bomber HE round)
+	// at firedelay 0.05 = 20 explosive rounds/sec, aimed straight at the player. That is what was
+	// insta-killing players from a prone rifleman with no plane overhead and no officer in sight.
+	// Both the projectile AND the fire rate must be set explicitly for a man-portable weapon.
 	local.gun = spawn script_aimedstrafinggunfire
 	local.gun.origin = local.actor.origin + (0 0 20)
+	local.gun projectile "models/projectiles/coop_ai_rifleround.tik"
+	local.gun firedelay 0.9			// bolt/semi cadence, NOT the 0.05 default
 	local.gun bulletspread 16 16
 	local.gun tracerfreq 0
-	local.gun bulletdamage 12
+	local.gun bulletdamage 12		// ignored by the engine; kept for intent/readability
 	local.lostsight = 0
 	local.refresh = 0
 	while( local.actor != NULL && isAlive local.actor ){
@@ -1630,7 +1751,19 @@ coop_prone_shooter local.actor:{
 		local.actor forceactivate
 		local.actor.flags["coop_personality_set"] = 0	// let it pick up a normal role next
 		waitthread coop_apply_personality local.actor
-		local.actor attackplayer
+		//[user 2026-08-06] bug-1479 - 'attackplayer' ScriptErrors "player doesn't exist" whenever
+		//gentity slot 0 is empty: Actor::EventAttackPlayer tests G_GetEntity(0), which is slot 0 ONLY,
+		//and in coop the players occupy whatever slots they get. This threw 666 times across 48 maps -
+		//the most widespread error in the mod's own code - and because ScriptError aborts the event
+		//BEFORE ForceAttackPlayer runs, the actor stood up from the prone-shooter state with no enemy
+		//at all. 'attackentity' takes a real Sentient and returns silently on a bad target, and
+		//player_closestTo ends $player under gametype 0, so single-player behaviour is unchanged.
+		//(The only thing attackplayer adds is m_bForceAttackPlayer, which merely suppresses disguise
+		//recognition - irrelevant here, and disguises do not work in MP anyway.)
+		local.coopplr = exec coop_mod/replace.scr::player_closestTo local.actor
+		if( local.coopplr != NULL && local.coopplr != NIL ){
+			local.actor attackentity local.coopplr
+		}
 	}
 }end
 
@@ -2362,6 +2495,7 @@ coop_air_bombing_run local.target local.fwd local.strafe local.model local.leadi
 	local.holdp = local.startp - (vector_scale local.fwd local.legdist)
 
 	local.plane = spawn script_model
+	if( local.plane == NULL ){ end }	//[user 08-02] entity-pool guard
 	local.plane model local.model
 	local.plane.origin = local.holdp
 	local.plane.angles = local.fwdang
@@ -2484,6 +2618,7 @@ coop_stuka_mg_strafe local.stuka local.aim_pos:{
 	local.gun1 = spawn script_aimedstrafinggunfire
 	local.gun1 attach local.stuka tag_barrel1
 	local.gun1 aimtarget local.aim
+	local.gun1 firedelay 0.15	// bug-1185: default 0.05 = 20 HE rounds/sec PER GUN. Unsurvivable.
 	local.gun1 bulletspread 24 24
 	local.gun1 tracerfreq 1
 	local.gun1 bulletdamage 15
@@ -2492,12 +2627,23 @@ coop_stuka_mg_strafe local.stuka local.aim_pos:{
 	local.gun2 = spawn script_aimedstrafinggunfire
 	local.gun2 attach local.stuka tag_barrel2
 	local.gun2 aimtarget local.aim
+	local.gun2 firedelay 0.15	// bug-1185: see gun1
 	local.gun2 bulletspread 24 24
 	local.gun2 tracerfreq 1
 	local.gun2 bulletdamage 15
 	local.gun2 on
 
-	wait 2
+	// HZM fix (bug-1172): "bulletdamage 15" above is dead code - ScriptSimpleStrafingGunfire's
+	// ProjectileAttack() call (weaputils.cpp) never receives a damage parameter at all, so real
+	// damage comes entirely from the fired projectile's own tik (defaults to
+	// models/projectiles/stukaround.tik, a dive-bomber explosive round, at a ~20rd/sec/gun
+	// fire rate with no script-exposed way to slow it). Vanilla uses this same
+	// script_aimedstrafinggunfire pattern for a sweeping flyover with built-in cover; this coop
+	// wave attack aimtarget-locks it directly onto the player's exact position for the full
+	// duration, so the vanilla-tolerable rate become up to ~80 explosive impacts homed on one
+	// spot. Cut burst length so a locked-on player has a real chance to break line of sight
+	// instead of eating the whole barrage.
+	wait 0.5
 
 	local.gun1 off
 	local.gun2 off
@@ -2953,6 +3099,60 @@ coop_dog_hunt local.dog:{
 }end
 
 
+//====================================================================
+// ME2 - OFFICER-DEATH SURVIVOR REACTION (coop_deathReact, default off). Killing the officer visibly
+// galvanizes nearby germans: most turn aggressive + push the players (REVENGE), a minority fall back to
+// regroup (PANIC - only when the tactical-retreat stack is on). Reuses the proven aggr-advance + re-engaging
+// tactical-retreat primitives; NEVER the despawn-flee (that would strand an "eliminate all enemies" gate).
+// Radius-scoped + concurrency-capped so it's a reaction, not a whole-map stampede.
+//====================================================================
+coop_officer_death_reaction local.dead_pos:{
+	if( getcvar "coop_deathReact" != "1" ){ end }
+	wait 0.3
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end }
+	local.radius = 1200
+	local.r2 = local.radius * local.radius
+	local.cap = 10
+	local.nearby = 0
+	local.panic = 0
+	local.revenge = 0
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.e = local.arr[local.i]
+		if( local.e == NIL || local.e == NULL ){ continue }
+		if( !isAlive local.e ){ continue }
+		if( level.coop_officer != NULL && local.e == level.coop_officer ){ continue }
+		if( local.e.flags["coop_actorStopPainHandler"] == 1 ){ continue }
+		if( local.e.flags["coop_limping"] == 1 ){ continue }
+		if( local.e.flags["coop_role"] == "prone" ){ continue }
+		if( local.e.turret != NULL ){ continue }
+		local.dx = local.e.origin[0] - local.dead_pos[0]
+		local.dy = local.e.origin[1] - local.dead_pos[1]
+		local.d2 = ( local.dx * local.dx ) + ( local.dy * local.dy )
+		if( local.d2 > local.r2 ){ continue }
+		if( local.nearby >= local.cap ){ break }
+		local.nearby = local.nearby + 1
+		if( ( randomint 100 ) < 30 && getcvar "coop_retreatEnable" == "1" ){
+			// PANIC: force the re-engaging tactical retreat (arm the pain-streak, clear the cooldown)
+			local.e.coop_painStreak = 9
+			local.e.coop_retreatNext = 0
+			thread coop_mod/wounded.scr::coop_checkTacticalRetreat local.e
+			local.panic = local.panic + 1
+		} else {
+			// REVENGE: turn aggressive + push the players (aimaneuver's aggr-advance carries the move)
+			local.e.flags["coop_role"] = "aggr"
+			local.e.leash = 4096
+			local.e.nosurprise = 1
+			local.e attackplayer
+			local.e forceactivate
+			local.revenge = local.revenge + 1
+		}
+	}
+	if( getcvar "coop_aiBehav" != "0" && getcvar "coop_aiBehav" != "" ){
+		println( "^~^~^ DEATHREACT nearby=" + local.nearby + " panic=" + local.panic + " revenge=" + local.revenge )
+	}
+}end
+
 coop_officer_death_monitor local.officer:{
 	local.officer waittill death
 	level.coop_officer_alive = 0
@@ -2979,6 +3179,7 @@ coop_officer_death_monitor local.officer:{
 	local.officer playsound coop_radio_off
 	local.dead_pos = local.officer.origin
 	thread coop_officer_death_drops local.dead_pos
+	thread coop_officer_death_reaction local.dead_pos	// ME2: nearby survivors panic/revenge (coop_deathReact)
 	thread coop_replacement_officer_watch
 	thread coop_radio_bomb_enable
 	// HZM COOP: per-map avenging battalion (set in officer_positions.scr). Spawns at a fixed
@@ -3671,6 +3872,12 @@ coop_drop_bombs local.center local.fwd local.alt local.wide:{
 // One visible bomb: a us_bomb model falls from plane altitude, then explodes on impact.
 coop_one_bomb local.airpos local.gnd local.alt:{
 	local.b = spawn script_model
+	//[user 08-02] NULL-GUARD the spawn. The player bombing run allocates ~22 entities in
+	//~2s (8 bombs + 8 blasts + smoke + 3 fires + 2 debris), the densest burst allocator in
+	//the mod, against maxentities 2048 == MAX_GENTITIES. When the pool is exhausted `spawn`
+	//returns NULL and the very next line dereferenced it. bug-927's root cause was exactly
+	//this shape (Entity::attach with a NULL parent).
+	if( local.b == NULL ){ end }
 	local.b model "models/ammo/us_bomb.tik"
 	local.start = local.airpos
 	local.start[2] = local.gnd[2] + local.alt
@@ -3692,6 +3899,7 @@ coop_one_bomb local.airpos local.gnd local.alt:{
 	if( local.b != NULL ){ local.b delete }
 	// Impact blast + varied detonation sound.
 	local.blast = spawn "models/emitters/explosion_bombwall.tik"
+	if( local.blast == NULL ){ end }	//[user 08-02] see note above
 	local.blast.origin = local.gnd
 	local.blast anim start
 	local.blast notsolid
@@ -3722,9 +3930,11 @@ coop_bomb_aftermath local.center:{
 
 	// One lingering smoke column rising from the crater.
 	local.smoke = spawn "models/emitters/linger_smoke.tik"
+	if( local.smoke != NULL ){	//[user 08-02] entity-pool guard
 	local.smoke.origin = local.cg + (0 0 8)
 	local.smoke notsolid
 	local.smoke anim start
+	}
 
 	// A few scattered ground fires -- each runs its own hurt loop until the deadline.
 	local.fi = 0
@@ -3733,6 +3943,7 @@ coop_bomb_aftermath local.center:{
 		local.fg = exec coop_mod/officer.scr::coop_find_ground local.fp
 		if( local.fg == NIL ){ local.fg = local.fp }
 		local.fire = spawn "models/emitters/firegood.tik"
+		if( local.fire == NULL ){ local.fi++; continue }	//[user 08-02] entity-pool guard
 		local.fire.origin = local.fg + (0 0 4)
 		local.fire notsolid
 		local.fire anim start
@@ -3751,6 +3962,7 @@ coop_bomb_aftermath local.center:{
 		local.dg = exec coop_mod/officer.scr::coop_find_ground local.dp
 		if( local.dg == NIL ){ local.dg = local.dp }
 		local.deb = spawn "models/emitters/explosion_bombdirt.tik"
+		if( local.deb == NULL ){ local.di++; continue }	//[user 08-02] entity-pool guard
 		local.deb.origin = local.dg
 		local.deb notsolid
 		local.deb anim start

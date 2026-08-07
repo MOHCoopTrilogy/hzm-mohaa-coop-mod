@@ -46,15 +46,31 @@ coop_build_monitor:{
 
 	while( 1 ){
 		if( getcvar( "coop_build" ) == "1" ){
-			if( int( getcvar( "coop_dev" ) ) != 1 ){
+			//[user 08-02] BUILD MODE STOPPED WORKING - this gate was one of the two causes.
+			//coop_mod/start_server.cfg does "set coop_dev 0" on EVERY server start, and starting a
+			//server is how you launch a coop map (the Apply button execs it). So the sequence
+			//"exec buildmode.cfg -> start a map" always wiped the dev flag back to 0, this branch
+			//printed BUILD_BLOCKED, and the numpad did nothing - exactly the reported symptom.
+			//coop_build_boot is ARCHIVED and is only ever set by cfg/buildmode.cfg, so it is
+			//already a deliberate, persistent opt-in; requiring coop_dev on top of it was
+			//redundant AND self-defeating. Either flag now opens the gate.
+			if( int( getcvar( "coop_dev" ) ) != 1 && getcvar( "coop_build_boot" ) != "1" ){
 				if( level.coop_build_devWarned != 1 ){
 					level.coop_build_devWarned = 1
-					println "^~^~^ BUILD_BLOCKED coop_dev is not 1 - build mode is dev-gated"
+					println "^~^~^ BUILD_BLOCKED need coop_dev 1 or coop_build_boot 1 (exec coop_mod/cfg/buildmode.cfg)"
 				}
 			}else{
 				local.player = waitthread coop_build_findHost
 				if( local.player != NIL && local.player != NULL ){
 					waitthread coop_build_session local.player
+				}else{
+					//[user 08-02] SELF-DIAGNOSIS. "Build mode does nothing" has now been reported
+					//with no way to tell WHICH gate is closed, so say it out loud (once) instead of
+					//failing silently. Needs `developer 1` to be visible, like every script println.
+					if( level.coop_build_hostWarned != 1 ){
+						level.coop_build_hostWarned = 1
+						println "^~^~^ BUILD_BLOCKED no active HOST player found (needs entnum 0 with coop_isHost + coop_isActive)"
+					}
 				}
 			}
 		}
@@ -129,6 +145,19 @@ coop_build_session local.player:{
 		}else{
 			level.coop_build_basetext = local.prev
 		}
+		//[user 07-29] SESSION HEADER. This capture is APPEND-ONLY across sessions: basetext is the whole
+		//previous file and is replayed verbatim on every save. Undo only reaches THIS session's blocks
+		//(coop_build_dumpline), because props from earlier sessions are never respawned as live entities -
+		//so an object you place, leave, and later decide against stays in the file forever and gets baked
+		//in. That is exactly how deleted flak88s and lobby props ended up in m1l2a. Stamping each session
+		//makes the boundary explicit for whoever bakes the file; `coop_build_cmd fresh` discards
+		//everything above the marker when you want a clean slate.
+		//[2026-08-02] bug-1283 - ONE LINE. This was written as a string literal spanning four lines,
+		//which the parser cannot do: it read the opening quote as a bare command ('unknown command: "')
+		//and failed to compile buildmode.scr ENTIRELY - a compile error is file-wide, not line-local, so
+		//the whole build-mode tool silently disappeared. Newlines inside the banner are not worth a
+		//dead file; keep the marker to a single line.
+		level.coop_build_basetext = level.coop_build_basetext + "// ===== SESSION START - blocks below are from THIS session. Anything above is an EARLIER session and CANNOT be undone in-game; use coop_build_cmd fresh to discard it. ====="
 	}
 
 	// protect the builder so the AI never engages (developer.scr recipe: notarget event +
@@ -139,7 +168,7 @@ coop_build_session local.player:{
 	setcvar "coop_build_cmd" ""
 	local.player iprint "BUILD MODE: ON (numpad controls)" 1
 	println( "^~^~^ BUILD_ON " + level.coop_mapname )
-	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo, SEMICOLON snap, ' bpmark; console: set coop_build_bpname <n> + coop_build_cmd bpsave / bpremove"
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo (THIS session only), SEMICOLON snap, ' bpmark; console: set coop_build_bpname <n> + coop_build_cmd bpsave / bpremove / fresh (discard earlier sessions)"
 
 	thread coop_build_hud local.player
 	waitthread coop_build_ghostRefresh local.player
@@ -174,13 +203,57 @@ coop_build_session local.player:{
 
 // Dispatch one control-bus action.
 //=========================================================================
+//=========================================================================
+//[user 08-02] FOG SUBMODE key translation. The numpad bus speaks build-mode action names, so
+//map them onto fog actions rather than rebinding the pad (see the modeswap note below).
+//Physical layout in fog submode:
+//   8 / 2  distance +/-      <- ALSO clamps AI sight to distance * 0.828, see fogmode.scr
+//   6 / 4  bias +/-
+//   7 / 1  red +/-      9 / 3  green +/-      / and *  blue +/-
+//   + / -  skybox farplane +/-
+//   ENTER  save this map     KP_5  reset to native     KP_INS  night preset   KP_DEL  mist preset
+//=========================================================================
+coop_fog_mapKey local.cmd:{
+//=========================================================================
+	local.out = ""
+	if( local.cmd == "up" ){ local.out = "distup" }
+	else if( local.cmd == "down" ){ local.out = "distdown" }
+	else if( local.cmd == "next" ){ local.out = "biasup" }
+	else if( local.cmd == "prev" ){ local.out = "biasdown" }
+	else if( local.cmd == "yawminus" ){ local.out = "rup" }
+	else if( local.cmd == "catprev" ){ local.out = "rdown" }
+	else if( local.cmd == "yawplus" ){ local.out = "gup" }
+	else if( local.cmd == "catnext" ){ local.out = "gdown" }
+	else if( local.cmd == "pitchminus" ){ local.out = "bup" }
+	else if( local.cmd == "pitchplus" ){ local.out = "bdown" }
+	else if( local.cmd == "scaleup" ){ local.out = "skyup" }
+	else if( local.cmd == "scaledown" ){ local.out = "skydown" }
+	else if( local.cmd == "place" ){ local.out = "save" }
+	else if( local.cmd == "reset" ){ local.out = "reset" }
+	else if( local.cmd == "solid" ){ local.out = "night" }
+	else if( local.cmd == "undo" ){ local.out = "mist" }
+	else if( local.cmd == "snap" ){ local.out = "cull" }
+}end local.out
+
+//=========================================================================
 coop_build_doCmd local.player local.cmd:{
 //=========================================================================
 	// [user 07-09] SOUND mode: '\' toggles object<->sound; when in sound mode the whole numpad bus
 	// is reinterpreted by buildmode_sounds.scr::coop_snd_doCmd (see that file's header for the map).
+	//[user 08-02] modeswap now cycles THREE modes: object -> sound -> fog -> object.
+	//FOG was originally given its own cfg with its own numpad binds, which was a mistake: it
+	//rebound all 16 numpad keys and so silently destroyed build mode's bindings (and vice versa,
+	//whichever cfg was exec'd last won). Routing it through this existing bus means ONE keymap,
+	//one cfg, and no collision - which is exactly what this modeswap hook was built for.
 	if( local.cmd == "modeswap" ){
-		if( level.coop_build_mode == "sound" ){ level.coop_build_mode = "object" }
-		else{
+		if( level.coop_build_mode == "sound" ){
+			level.coop_build_mode = "fog"
+			waitthread coop_mod/fogmode.scr::coop_fog_captureNative
+			level.coop_fogDirty = 1
+			thread coop_mod/fogmode.scr::coop_fog_hud local.player	//fog panel owns HUD slots 88-94; build mode owns 54-61, so they coexist
+		}else if( level.coop_build_mode == "fog" ){
+			level.coop_build_mode = "object"
+		}else{
 			level.coop_build_mode = "sound"
 			waitthread coop_mod/buildmode_sounds.scr::coop_snd_loadDefaults
 		}
@@ -191,6 +264,19 @@ coop_build_doCmd local.player local.cmd:{
 	}
 	if( level.coop_build_mode == "sound" ){
 		waitthread coop_mod/buildmode_sounds.scr::coop_snd_doCmd local.player local.cmd
+		level.coop_build_hudDirty = 1
+		end
+	}
+	if( level.coop_build_mode == "fog" ){
+		//[user 08-02] Must be TWO statements. Nesting the inner call as an argument
+		//   waitthread ...::coop_fog_doCmd ( waitthread coop_fog_mapKey local.cmd )
+		//parses clean to a brace/label scanner but the ENGINE rejects the whole file with
+		//"Script 'coop_mod/buildmode.scr' was not properly loaded" - which killed build mode
+		//outright. A failed compile takes the entire file, not just the offending line.
+		local.fogcmd = waitthread coop_fog_mapKey local.cmd
+		if( local.fogcmd != "" ){
+			waitthread coop_mod/fogmode.scr::coop_fog_doCmd local.fogcmd
+		}
 		level.coop_build_hudDirty = 1
 		end
 	}
@@ -320,6 +406,18 @@ coop_build_doCmd local.player local.cmd:{
 	}
 	else if( local.cmd == "undo" ){
 		waitthread coop_build_undo local.player
+	}
+	//[user 07-29] FRESH: throw away every EARLIER session from the capture and keep only what was
+	//placed in THIS one. The append-only basetext is why a deleted object can come back - undo cannot
+	//reach it. This is the escape hatch: build what you actually want, run `coop_build_cmd fresh`
+	//once, and the file becomes a true snapshot of what is standing.
+	else if( local.cmd == "fresh" ){
+		//[2026-08-02] bug-1283 - ONE LINE, same reason as the SESSION START marker above: a string
+		//literal cannot span lines, and one that does kills the compile for the WHOLE file.
+		level.coop_build_basetext = "// HZM coop BUILD MODE capture for map " + level.coop_mapname + " - paste-ready script blocks; bake recipe in _research/build_mode.md - FRESH capture, earlier sessions discarded on purpose."
+		waitthread coop_build_save
+		local.player iprint ( "BUILD: capture reset - now holds ONLY this session (" + level.coop_build_count + " props)" ) 1
+		println( "^~^~^ BUILD_FRESH kept " + level.coop_build_count )
 	}
 	level.coop_build_hudDirty = 1
 }end
@@ -487,12 +585,87 @@ coop_build_place local.player:{
 	local.isActor = 0
 	if( level.coop_build_cat == level.coop_build_actorCat ){ local.isActor = 1 }
 
+	//[user 2026-08-05] bug-1403 - DYNAMIC LIGHT BUDGET.
+	//MAX_DLIGHTS is 32 for the whole renderer and tr_types.h:27 states it cannot be increased,
+	//because bit flags are used on surfaces - an architectural ceiling, not a tunable. Muzzle
+	//flashes, explosions and every impact effect draw from that same 32, so authored lights must
+	//stay well under it or a firefight will start silently dropping them. Refuse past the budget
+	//rather than let the map look fine while building and fall apart under fire.
+	local.isLight = 0
+	local.lbud = 14
+	if( waitthread coop_mod/main.scr::containsText level.coop_build_tik "coop_build/light_" 0 ){
+		local.isLight = 1
+		if( level.coop_lightN == NIL ){ level.coop_lightN = 0 }
+		local.lbud = int( getcvar "coop_lightBudget" )
+		if( local.lbud < 1 ){ local.lbud = 14 }
+		if( level.coop_lightN >= local.lbud ){
+			local.player iprint ( "LIGHT BUDGET FULL " + level.coop_lightN + "/" + local.lbud + " - engine cap is 32 dlights shared with muzzle flashes and explosions" ) 1
+			println( "^~^~^ BUILD_LIGHT refused: budget " + level.coop_lightN + "/" + local.lbud )
+			end
+		}
+	}
+
+	//[bug-1415] ladders divert BEFORE any model spawn - they are beams + a trigger now, not a
+	//model (the FuncLadder/model attempt was a cube). Height = 128 * build scale, so KP+/- is the
+	//height control; the capture row still writes the marker tik, so save/reload keeps working.
+	if( waitthread coop_mod/props.scr::prop_isLadder level.coop_build_tik ){
+		local.lh = 128 * level.coop_build_scale
+		if( local.lh < 70 ){ local.lh = 70 }
+		local.lstyle = waitthread coop_mod/props.scr::prop_ladderStyle level.coop_build_tik
+		waitthread coop_mod/ladder.scr::main level.coop_build_lastpos level.coop_build_yaw local.lh local.lstyle
+		local.player iprint ( "ladder placed (h " + int( local.lh ) + ") - KP+/- sets height. Face it and walk forward to climb" ) 1
+
+		//write a REAL capture block (same shape as the model path builds inline) so undo keeps
+		//counting and buildmode_to_props.py persists the marker row - the loader then rebuilds
+		//the ladder from it. There is no coop_build_capture helper; the block + dumpline +
+		//coop_build_save trio below IS the capture mechanism (see coop_build_save).
+		local.n = level.coop_build_count + 1
+		local.px = level.coop_build_lastpos[0]
+		local.py = level.coop_build_lastpos[1]
+		local.pz = level.coop_build_lastpos[2]
+		local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + " (LADDER h " + int( local.lh ) + ")\n"
+		local.block = local.block + "local.m = spawn script_model\n"
+		local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
+		local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
+		local.block = local.block + "local.m.angles = ( 0 " + level.coop_build_yaw + " 0 )\n"
+		local.block = local.block + "local.m scale " + level.coop_build_scale + "\n\n"
+		level.coop_build_dumpline[local.n] = local.block
+		//[bug-1421] THIS is where the undo registration belongs. The first attempt anchored on
+		//the dumpline/count/save trio, which appears in THREE capture paths in this file, and
+		//replace-first put the assignment into the STRUCT path instead - so ladder undo read NIL
+		//and silently did nothing, while struct placements stamped stale ladder indices. Anchors
+		//for generated edits must be unique strings, never shared idioms.
+		level.coop_build_ladderIdx[local.n] = level.coop_ladder_n
+		level.coop_build_count = local.n
+		waitthread coop_build_save
+		println( "^~^~^ BUILD_PLACE " + local.n + " " + level.coop_build_tik + " org " + local.px + " " + local.py + " " + local.pz + " ang 0 " + level.coop_build_yaw + " 0 scale " + level.coop_build_scale + " solid 0" )
+		end
+	}
+
 	local.m = spawn script_model model level.coop_build_tik
 	local.m.origin = level.coop_build_lastpos
 	local.m.angles = level.coop_build_lastang
 	if( level.coop_build_scale != 1.0 ){ local.m scale level.coop_build_scale }
-	if( level.coop_build_solid == 1 ){ local.m solid }
+	//a light emitter is an invisible point source - never give it a collision hull, whatever the
+	//solid toggle happens to be set to
+	if( local.isLight == 1 ){ local.m notsolid }
+	else if( level.coop_build_solid == 1 ){ local.m solid }
 	else{ local.m notsolid }
+
+	if( local.isLight == 1 ){
+		local.m.coop_buildIsLight = 1
+		//[bug-1423] the light is native constantLight now, applied here - the TIK is only a marker
+		waitthread coop_mod/props.scr::prop_lightApply local.m level.coop_build_tik
+		level.coop_lightN = level.coop_lightN + 1
+		if( level.coop_lightN >= ( local.lbud - 4 ) ){
+			local.player iprint ( "light " + level.coop_lightN + "/" + local.lbud + " - approaching the dlight cap" ) 1
+		}
+	}
+
+	//[user 2026-08-05] HOLDOUT CALL RADIO - arm the last-man respawn watcher on placement
+	if( waitthread coop_mod/main.scr::containsText level.coop_build_tik "radio_military" 0 ){
+		thread coop_mod/holdout.scr::holdout_radio_watch local.m
+	}
 
 	// [bug-829] SOLID HULL AT SCALE: in MOHAA 'scale' resizes only the VISUAL mesh - the collision
 	// bbox stays the model's BASE bounds (engine entity.cpp setScale never touches r.mins/r.maxs), so
@@ -603,8 +776,19 @@ coop_build_undo local.player:{
 	if( level.coop_bp_kind[local.n] == "struct" ){
 		waitthread coop_mod/blueprint.scr::bs_remove level.coop_bp_sid[local.n] local.player
 	}else{
+		//[bug-1419] a ladder placement has no single entity - delete its whole piece set
+		if( level.coop_build_ladderIdx[local.n] != NIL ){
+			waitthread coop_mod/ladder.scr::ladder_remove level.coop_build_ladderIdx[local.n]
+			level.coop_build_ladderIdx[local.n] = NIL
+		}
 		local.m = level.coop_build_ent[local.n]
 		if( local.m != NIL && local.m != NULL ){
+			//[bug-1403] give the dlight budget its slot back, or undoing a light would leak the
+			//count and eventually refuse placements with nothing actually on the map
+			if( local.m.coop_buildIsLight == 1 ){
+				if( level.coop_lightN == NIL ){ level.coop_lightN = 0 }
+				if( level.coop_lightN > 0 ){ level.coop_lightN = level.coop_lightN - 1 }
+			}
 			// detach an actor prop first so it is removed with the model, not orphaned
 			if( local.m.coop_buildPropTag != NIL && local.m.coop_buildPropTag != "" ){
 				local.m removeattachedmodel local.m.coop_buildPropTag

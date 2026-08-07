@@ -1,0 +1,231 @@
+//=========================================================================
+// HZM coop - PLACEABLE CLIMBABLE LADDERS               [user 2026-08-05] bug-1415
+//
+// Ported from github.com/mohaa-moddb/ladder-spawning-mod (global/spawnladder.scr), which the user
+// pointed at after the first FuncLadder-based attempt rendered as a bare cube. The port follows the
+// project rule: copy the proven recipe - the latch geometry, angle window, top-mount flip and
+// status loop below are that mod's, near-verbatim. Changes from the source:
+//
+//   * VISUAL: the source draws blue debug lasers. Here laser option 3 (rails + rungs every 16u,
+//     "same as original maps' ladders") is ALWAYS drawn, as textured func_beams - beam.cpp takes a
+//     "shader" - so the ladder is a real visible object, not a wireframe.
+//   * The solid clip is spawned per the source's option, since an arena ladder usually stands
+//     against baked geometry the player must not clip through.
+//   * State hook renamed to coop_mod/ladder_state.scr (see that file); the source expects
+//     global/legs_movement.scr.
+//
+// REQUIRED TORSO STATEMAP EDITS (done in coop_mod/player_Torso.st, per the source README):
+//   * all 8 CAN_CLIMB_UP_LADDER / CAN_CLIMB_DOWN_LADDER conditions removed from LADDER_IDLE_LEFT
+//     and LADDER_IDLE_RIGHT - those conditions TRACE FOR A REAL func_ladder, so with them in place
+//     a script ladder can latch you on but never lets you climb a single rung.
+//   * ON_LADDER / OFF_LADDER exec hooks in the four mount/dismount states.
+//
+// The climbing itself is the statemap's: LADDER_IDLE_* carries "movetype climbwall", so once the
+// torso is forced into GET_ON_LADDER the engine's climb movement takes over. No func_ladder entity
+// is involved at all - which is why this works where SOLID_BSP could not.
+//=========================================================================
+
+//=========================================================================
+// Spawn one ladder.
+//   local.origin     base of the ladder (ground, at the climbing face)
+//   local.angle      yaw players face while climbing (INTO the wall)
+//   local.height     climbable height, minimum 70
+//   local.style      beam shader for rails+rungs (NIL -> dark metal)
+// Returns the trigger entity.
+//=========================================================================
+main local.origin local.angle local.height local.style:{
+
+	if( local.origin == NIL ){ println "^~^~^ LADDER: origin missing" ; end }
+	if( local.angle == NIL ){ println "^~^~^ LADDER: angle missing" ; end }
+	if( local.height == NIL || local.height < 70 ){ local.height = 70 }
+	if( local.style == NIL || local.style == "" ){ local.style = "metal" }
+
+	local.width = 13.5
+	local.thickness = 1
+
+	local.setsize1 = ( 0 (local.width * -1) 0 )
+	local.setsize2 = ( local.thickness local.width local.height )
+	local.behind_vec = -1 * (angles_toforward( 0 local.angle 0 ))
+	local.left_vec = angles_toleft( 0 local.angle 0 )
+	local.right_vec = -1 * (angles_toleft( 0 local.angle 0 ))
+
+	if( level.coop_ladder_n == NIL ){ level.coop_ladder_n = 0 }
+	level.coop_ladder_n++
+	local.idx = level.coop_ladder_n
+	level.coop_ladder_pieceN[local.idx] = 0
+
+	local.ladder = spawn trigger_multiple targetname "coop_ladder_trigger"
+	if( local.ladder == NULL ){ println "^~^~^ LADDER: spawn NULL - entity pressure" ; end }
+	// source: keep climbers 20u clear of walls/solidclips behind the origin
+	local.ladder.origin = trace local.origin (local.origin + local.behind_vec * 20)
+	local.ladder.angle = local.angle
+	local.ladder setsize local.setsize1 local.setsize2
+	local.ladder.height = local.height
+	local.ladder setthread ladder
+	local.ladder.offset = 14	// hands-to-ladder distance; > 18 and players cannot climb (source note)
+	waitthread ladder_track local.idx local.ladder
+
+	// solid clip so the rails are not walked through where there is no wall behind them
+	local.clip = waitthread solidclip local.origin local.setsize1 local.setsize2 local.angle
+	waitthread ladder_track local.idx local.clip
+	local.laserorigin = trace local.origin (local.origin + local.behind_vec * 2)
+
+	// rails + rungs, textured (source laser option 3)
+	local.leftorigin = trace local.laserorigin (local.laserorigin + local.left_vec * local.width)
+	local.bb = waitthread beam ( local.leftorigin[0] local.leftorigin[1] (local.leftorigin[2] + local.height) ) ( local.leftorigin[0] local.leftorigin[1] local.leftorigin[2] ) local.style
+	waitthread ladder_track local.idx local.bb
+	local.rightorigin = trace local.laserorigin (local.laserorigin + local.right_vec * local.width)
+	local.bb = waitthread beam ( local.rightorigin[0] local.rightorigin[1] (local.rightorigin[2] + local.height) ) ( local.rightorigin[0] local.rightorigin[1] local.rightorigin[2] ) local.style
+	waitthread ladder_track local.idx local.bb
+
+	local.segment_dist = 16		// rung spacing, "same as original maps' ladders" (source)
+	local.leftorigin += ( 0 0 local.height )
+	local.rightorigin += ( 0 0 local.height )
+	for( local.s = local.laserorigin[2] + local.height; local.s >= local.laserorigin[2] + local.segment_dist; local.s -= local.segment_dist ){
+		local.leftorigin -= ( 0 0 local.segment_dist )
+		local.rightorigin -= ( 0 0 local.segment_dist )
+		local.bb = waitthread beam local.leftorigin local.rightorigin local.style
+		waitthread ladder_track local.idx local.bb
+	}
+
+	println( "^~^~^ LADDER spawned at " + local.ladder.origin + " h " + local.height + " yaw " + local.angle )
+}end local.ladder
+
+//=========================================================================
+// The latch. Verbatim logic from the source mod: angle window +-70, top-mount flips the player,
+// falling players must hold USE to grab, spectators/dead/already-climbing rejected.
+//=========================================================================
+ladder:{
+
+	local.player = parm.other
+	local.vangle = local.player.viewangles[0]
+
+	if( local.player == NULL || local.player.climbing_ladder == 1 || local.player.dead == 1 || !isalive local.player || local.player.dmteam == "spectator" || local.player.velocity == ( 0 0 0 ) ){ end }
+	if( (local.vangle > -30 && local.vangle < 30) || local.player.origin[2] > self.origin[2] + self.height + 18 || (local.player.origin[2] > self.origin[2] + self.height - 50 && local.vangle < 40) ){ end }
+	if( local.player getposition == "offground" && local.player.useheld != 1 ){ end }
+
+	local.langle = self.angle
+	if( local.langle < 0 ){ local.langle += 360 }
+	else if( local.langle > 360 ){ local.langle -= 360 }
+
+	local.pangle = local.player.viewangles[1]
+	if( local.player.origin[2] > self.origin[2] + self.height - 50 && local.vangle >= 40 ){ local.pangle -= 180 }
+	if( local.pangle < 0 ){ local.pangle += 360 }
+	else if( local.pangle > 360 ){ local.pangle -= 360 }
+
+	local.lower = local.langle - 70
+	local.upper = local.langle + 70
+	if( local.lower < 0 ){ local.add360 = 1 }
+	if( local.upper > 360 ){ local.sub360 = 1 }
+	if( local.add360 == 1 ){
+		if( local.pangle < local.lower + 360 && local.pangle > local.upper ){ end }
+	}
+	else if( local.sub360 == 1 ){
+		if( local.pangle < local.lower && local.pangle > local.upper - 360 ){ end }
+	}
+	else if( local.pangle < local.lower || local.pangle > local.upper ){ end }
+
+	local.player.angle = self.angle
+	local.player face ( local.player.viewangles[0] self.angle local.player.viewangles[2] )
+	local.player.climbing_ladder = 1
+	if( local.player.origin[2] >= self.origin[2] + self.height - 50 && local.vangle >= 40 ){
+		local.player forcetorsostate LADDER_DOWN_LEFT
+		local.player.origin = ( self.origin[0] self.origin[1] (local.player.origin[2] - 66 ) ) + (( self.forwardvector[0] self.forwardvector[1] 0 ) * -1)
+	}
+	else{
+		local.player forcetorsostate GET_ON_LADDER
+		local.player.origin = ( self.origin[0] self.origin[1] local.player.origin[2] ) + (( self.forwardvector[0] self.forwardvector[1] 0 ) * self.offset * -1)
+	}
+	local.player thread status_check self
+}end
+
+//=========================================================================
+status_check local.ladder:{
+	local.team = self.dmteam
+	while( isalive self && self.dmteam == local.team && self.dead != 1 && self.legs_state_using_ladder == 1 ){
+		self.angle = local.ladder.angle
+		waitframe
+	}
+	if( self != NULL ){
+		self.climbing_ladder = 0
+		self.origin += ( 0 0 10 )	// hop off the top cleanly instead of re-grabbing (source)
+		if( isalive self && self.dmteam != "spectator" && self.dead != 1 ){ self forcetorsostate STAND }
+	}
+}end
+
+//=========================================================================
+solidclip local.origin local.setsize1 local.setsize2 local.angle:{
+	local.clip = spawn script_object targetname "coop_ladder_solidclip"
+	if( local.clip == NULL ){ end }
+	local.clip.origin = local.origin
+	local.clip setsize local.setsize1 local.setsize2
+	local.clip.angle = local.angle
+	local.clip solid
+	local.clip nodamage
+}end local.clip
+
+//=========================================================================
+// One textured rail/rung. The source's spawnlaser with the debug-blue swapped for a real shader -
+// beam.cpp documents "shader" ("Set the shader of the beam"), which is what stops them being blue.
+//=========================================================================
+beam local.origin local.endpoint local.style:{
+	local.b = spawn func_beam targetname "coop_ladder_beam"
+	if( local.b == NULL ){ end }
+	local.b minoffset 0.0
+	local.b maxoffset 0.0
+	local.b numsegments 1
+	local.b life 0
+	//[user 2026-08-05] bug-1424 CORRECTED - TEXTURED beams are back. The user had wood-textured
+	//rails working, which disproves the earlier ".spr" theory: SetBeamShader's appended ".spr" is
+	//only a CacheResource hint, while the shader registers from the RAW name and the client
+	//auto-creates a shader from the texture path. The intervening tint version rendered as
+	//translucent "lasers" because the DEFAULT beamshader is additive. So: texture per style,
+	//white colour, full alpha. (The one genuinely-invisible episode is unexplained; the dark
+	//"metal" texture on this night map is the leading suspect.)
+	local.tex = "textures/mohtest/drkgry1flt"
+	if( local.style == "wood" ){ local.tex = "textures/mohtest/flrwood1_rep" }
+	if( local.style == "rusty" ){ local.tex = "textures/mohtest/rustflat" }
+	if( local.style == "clean" ){ local.tex = "textures/mohtest/argent2d2" }
+	local.b shader local.tex
+	local.b color ( 1 1 1 )
+	local.b alpha 1
+	local.b scale 2.5
+	local.b alwaysdraw
+	local.b activate
+	local.b notsolid
+	local.b.origin = local.origin
+	local.b endpoint local.endpoint
+}end local.b
+
+//=========================================================================
+// Piece registry + removal.                            [user 2026-08-05] bug-1419
+// User report: deleting a ladder in build mode did not actually delete it. The build divert
+// never registered the ladder's pieces (trigger + clip + up to ~22 beams) with undo, so KP_DEL
+// had nothing to grab. Every piece is tracked per ladder index; ladder_remove deletes the lot.
+//=========================================================================
+ladder_track local.idx local.e:{
+	if( local.e == NULL || local.e == NIL ){ end }
+	local.n = level.coop_ladder_pieceN[local.idx] + 1
+	level.coop_ladder_pieceN[local.idx] = local.n
+	level.coop_ladder_piece[local.idx][local.n] = local.e
+}end
+
+//=========================================================================
+ladder_remove local.idx:{
+	if( local.idx == NIL || local.idx < 1 ){ end }
+	local.n = level.coop_ladder_pieceN[local.idx]
+	if( local.n == NIL ){ end }
+	local.i = 1
+	local.gone = 0
+	while( local.i <= local.n ){
+		local.e = level.coop_ladder_piece[local.idx][local.i]
+		if( local.e != NULL && local.e != NIL ){
+			local.e delete
+			local.gone++
+		}
+		level.coop_ladder_piece[local.idx][local.i] = NIL
+		local.i++
+	}
+	level.coop_ladder_pieceN[local.idx] = 0
+	println( "^~^~^ LADDER " + local.idx + " removed (" + local.gone + " pieces)" )
+}end

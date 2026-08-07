@@ -1,0 +1,398 @@
+//=========================================================================
+// HZM coop - SITUATIONAL AI VOICE  (user report 2026-07-28: "make the dialogue more logical,
+// not so random ... a taunt when in combat, 'Need backup' / 'Take cover' when under fire ...
+// and the sound should come from the actor and be impacted by distance").
+//
+// WHAT THIS IS
+// ------------
+// The engine already owns three GENUINELY situational barks through the actor say system
+// (SimpleActor::Anim_Say -> anim/say_*.scr -> setsay):
+//     say_sighted.scr         - I just spotted an enemy
+//     say_grenade_sighted.scr - a live grenade landed near me
+//     say_curious_sound/sight - I heard / half-saw something
+// Those stay exactly where they are: they are frame-accurate, they drive the head/mouth
+// animation, and (after the alias repairs in ubersound/ubersound.scr + uberdialog.scr) their
+// line pools are semantically correct again.
+//
+// This file covers the situations the engine NEVER speaks for, which is what made coop chatter
+// feel random - previously the only extra voice was a timer rolling a random line:
+//     under fire      -> "take cover" (and, if it is getting bad, "call for reinforcements")
+//     man down        -> a squadmate near a body that just dropped
+//     reloading       -> during sustained trading of fire
+//     press the attack-> while actually engaged
+//     taunt           -> ONLY while engaged with a live enemy
+//     kill            -> right after the actor's target dies
+//     fall back       -> badly wounded
+//     contact         -> ALLIED AI only (their retail sighted aliases are map-scoped and simply
+//                        do not load on the Spearhead t-series, so allied AI were mute there)
+//
+// HOW IT SOUNDS RIGHT
+// -------------------
+//  * Lines are played with `<actor> playsound <alias>`, so the sound is emitted BY THE ACTOR
+//    ENTITY - it pans and attenuates with distance instead of arriving flat in your head.
+//  * The pool for every situation is picked from the actor's MODEL NATIONALITY, not its team:
+//    de / it / us / uk.  A British model never gets US lines and a US model never gets British
+//    lines (see aivoice_nationality).  Pools live in ubersound/coop_aivoice.scr.
+//  * Per-actor cooldown + a global concurrency cap so a firefight never turns into a chorus.
+//
+// CVARS
+//   coop_aiVoice 1|0       master switch (default 1 - set 0 to fall back to engine-only VO)
+//   coop_aiVoiceMax <n>    how many AI may be mid-line at once (default 2)
+//   coop_aiVoiceRange <u>  max actor->nearest player distance to bother speaking (default 2600)
+//   coop_aiVoiceDebug 1    greppable ^~^~^ AIVOICE trace of every line played
+//
+// Registered from coop_mod/aihandler.scr::actorHandler, same as flchatter.
+//=========================================================================
+
+aivoice_init:{
+	if( level.coop_aivoiceInit == 1 ){ end }
+	level.coop_aivoiceInit = 1
+
+	level.coop_avN = 0
+	level.coop_avSlots = 2
+	level.coop_avSlot[0] = 0 - 1000
+	level.coop_avSlot[1] = 0 - 1000
+	level.coop_avSlot[2] = 0 - 1000
+	level.coop_avSlot[3] = 0 - 1000
+	level.coop_avRange = 2600
+
+	thread aivoice_loop
+}end
+
+//=========================================================================
+// Called once per managed actor by aihandler.scr::actorHandler (self = the actor).
+// Mirrors flchatter's story-actor blocklist so named/civilian characters stay silent.
+aivoice_register:{
+	if( level.coop_aivoiceInit != 1 ){ end }
+	if( self == NULL ){ end }
+	if( self.coop_noChatter == 1 ){ end }
+	if( self.model == NIL ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "grillo" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "manon" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "civil" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "village" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "priest" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText self.model "nun_" 0 ){ end }
+
+	local.nat = waitthread aivoice_nationality
+	if( local.nat == "" ){ end }
+
+	self.coop_avNat = local.nat
+	self.coop_avNext = 0
+	self.coop_avDead = 0
+	self.coop_avEng = 0
+	self.coop_avHp = waitthread aivoice_health self
+	self.coop_avHadEnemy = 0
+
+	level.coop_avList[level.coop_avN] = self
+	level.coop_avN++
+}end
+
+//=========================================================================
+// MODEL-DRIVEN nationality. This is the fix for "US should not use British dialogue": the
+// retail team flag is only american/german, so British paratroopers and Italian infantry both
+// report as the wrong side for VO purposes. We read the model path instead.
+//   models/human/allied_uk_*, sc_al_brit_*   -> uk
+//   models/human/*italian*, *_ital*          -> it
+// self = the actor.
+aivoice_nationality:{
+	if( self == NULL ){ end "" }
+	if( self.model == NIL ){ end "" }
+
+	if( self.team == "german" ){
+		if( waitthread coop_mod/main.scr::containsText self.model "italian" 0 ){ end "it" }
+		if( waitthread coop_mod/main.scr::containsText self.model "_ital" 0 ){ end "it" }
+		//[user 2026-08-02] bug-1288 - SOVIET ALLIES. "we should never have any actors/reinforcements
+		//speaking the wrong language". These are checked INSIDE the german branch on purpose: MOHAA's
+		//team enum holds only american/german with no Soviet value, so Spearhead's Soviet allies fall
+		//through here as german - and without this they returned "de" and spoke GERMAN barks at the
+		//player on the Berlin maps. Same model-driven approach as the uk/it tests, and the same
+		//detection used by the soviet health exemption in aihandler.scr::initialisePainVars.
+		if( waitthread coop_mod/main.scr::containsText self.model "soviet" 0 ){ end "ru" }
+		if( waitthread coop_mod/main.scr::containsText self.model "russian" 0 ){ end "ru" }
+		end "de"
+	}
+	if( self.team == "american" ){
+		if( waitthread coop_mod/main.scr::containsText self.model "_uk_" 0 ){ end "uk" }
+		if( waitthread coop_mod/main.scr::containsText self.model "brit" 0 ){ end "uk" }
+		if( waitthread coop_mod/main.scr::containsText self.model "sas_" 0 ){ end "uk" }
+		if( waitthread coop_mod/main.scr::containsText self.model "commando" 0 ){ end "uk" }
+		//[user 2026-08-02] bug-1288 - FRENCH resistance (allied_resistance, allied_misc_manon).
+		//They are allied so they report team american, and before this they drew AMERICAN lines.
+		//No French combat reel ships - the retail MP voice sets are American/British/German/
+		//Italian/Russian only - so return "" and let them stay SILENT. Silence is the house rule
+		//when a language has no verified pool (same reason the uk pool leaves most situations
+		//empty); speaking American is the one outcome that is definitely wrong.
+		if( waitthread coop_mod/main.scr::containsText self.model "resistance" 0 ){ end "" }
+		if( waitthread coop_mod/main.scr::containsText self.model "manon" 0 ){ end "" }
+		end "us"
+	}
+	end ""
+}end
+
+//=========================================================================
+// Real hit points. Troops running the coop pain handler carry a 5000 buffer in self.health and
+// keep the true value in flags["coop_actorActualHealth"] (see aihandler.scr).
+aivoice_health local.a:{
+	if( local.a == NULL || local.a == NIL ){ end 0 }
+	local.hp = local.a.flags["coop_actorActualHealth"]
+	if( local.hp == NIL ){ local.hp = local.a.health }
+	if( local.hp == NIL ){ local.hp = 0 }
+	end local.hp
+}end
+
+//=========================================================================
+// Situation -> alias name for this nationality. Situations with no verified line in that
+// language return "" and the actor simply stays silent rather than speaking the wrong accent.
+// Pools are declared in ubersound/coop_aivoice.scr.
+aivoice_alias local.nat local.sit:{
+	local.a = ( "coop_av_" + local.nat + "_" + local.sit )
+
+	if( local.nat == "it" ){
+		// Breakthrough Italians: only alert / fear / grenade / anger reels exist
+		if( local.sit == "backup" ){ local.a = "coop_av_it_contact" }
+		if( local.sit == "spot" ){ local.a = "coop_av_it_contact" }
+		if( local.sit == "mandown" ){ local.a = "coop_av_it_cover" }
+		if( local.sit == "fallback" ){ local.a = "coop_av_it_cover" }
+		if( local.sit == "kill" ){ local.a = "coop_av_it_taunt" }
+		if( local.sit == "attack" ){ local.a = "coop_av_it_taunt" }
+		if( local.sit == "reload" ){ local.a = "" }
+	}
+	if( local.nat == "ru" ){
+		// Soviet allies (bug-1288). The Russian source is the retail MP voice reel, which is a
+		// command vocabulary rather than a full combat reel, so two situations have no honest
+		// line and stay SILENT - same rule as uk below, never borrow another language.
+		if( local.sit == "mandown" ){ local.a = "" }
+		if( local.sit == "reload" ){ local.a = "" }
+	}
+	if( local.nat == "uk" ){
+		// British commandos: only the BT alert / suppress / reload reels are verified British.
+		// Everything else stays SILENT on purpose - never borrow the US pool for a UK model.
+		if( local.sit == "spot" ){ local.a = "coop_av_uk_contact" }
+		if( local.sit == "fallback" ){ local.a = "coop_av_uk_cover" }
+		if( local.sit == "grenade" ){ local.a = "" }
+		if( local.sit == "mandown" ){ local.a = "" }
+		if( local.sit == "kill" ){ local.a = "" }
+		if( local.sit == "attack" ){ local.a = "" }
+		if( local.sit == "taunt" ){ local.a = "" }
+	}
+	end local.a
+}end
+
+//=========================================================================
+// 1 if any living player is inside coop_aiVoiceRange of this actor.
+aivoice_nearPlayer local.a:{
+	if( local.a == NULL || local.a == NIL ){ end 0 }
+	if( $player == NULL ){ end 0 }
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			if( ( vector_length( $player[local.i].origin - local.a.origin ) ) < level.coop_avRange ){ end 1 }
+		}
+		local.i++
+	}
+	end 0
+}end
+
+//=========================================================================
+// THE ONE PLACE A LINE IS EVER SPOKEN.
+// Deliberately contains NO wait/waitthread, so a caller can `thread aivoice_say ...` and the
+// cooldown + concurrency bookkeeping is applied in the same frame (no double-speak race).
+//   local.a   = actor
+//   local.sit = situation key
+//   local.cd  = per-actor cooldown in seconds before this actor may speak again
+aivoice_say local.a local.sit local.cd:{
+	if( getcvar( "coop_aiVoice" ) == "0" ){ end }
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !( isAlive local.a ) ){ end }
+	if( local.a.coop_noChatter == 1 ){ end }
+	if( local.a.coop_avNat == NIL ){ end }
+	if( local.a.coop_avNat == "" ){ end }
+	if( local.a.coop_avNext != NIL && level.time < local.a.coop_avNext ){ end }
+
+	local.near = waitthread aivoice_nearPlayer local.a
+	if( local.near != 1 ){ end }
+
+	// global concurrency cap - find a talk slot that has expired
+	local.slot = 0 - 1
+	local.i = 0
+	while( local.i < level.coop_avSlots ){
+		if( level.time >= level.coop_avSlot[local.i] ){
+			local.slot = local.i
+			local.i = level.coop_avSlots
+		} else {
+			local.i++
+		}
+	}
+	if( local.slot < 0 ){ end }
+
+	local.alias = waitthread aivoice_alias local.a.coop_avNat local.sit
+	if( local.alias == "" ){ end }
+
+	level.coop_avSlot[local.slot] = level.time + 2.5
+	local.a.coop_avNext = level.time + local.cd + randomfloat( 3 )
+	local.a playsound local.alias
+
+	if( getcvar( "coop_aiVoiceDebug" ) == "1" ){
+		println( "^~^~^ AIVOICE " + local.sit + " nat " + local.a.coop_avNat + " alias " + local.alias + " model " + local.a.model )
+	}
+}end
+
+//=========================================================================
+// A squadmate near a body that just dropped calls it in.
+aivoice_manDown local.org local.team:{
+	if( getcvar( "coop_aiVoice" ) == "0" ){ end }
+	if( local.org == NIL ){ end }
+	local.i = 0
+	while( local.i < level.coop_avN ){
+		local.b = level.coop_avList[local.i]
+		local.i++
+		if( local.b == NULL || local.b == NIL ){ continue }
+		if( !( isAlive local.b ) ){ continue }
+		if( local.b.team != local.team ){ continue }
+		if( ( vector_length( local.b.origin - local.org ) ) > 800 ){ continue }
+		waitthread aivoice_say local.b "mandown" 14
+		end
+	}
+}end
+
+//=========================================================================
+// Single manager thread. Polls the registry and derives the situation from state changes:
+//   health dropped since last tick   -> under fire
+//   .enemy went NULL -> live         -> contact  (allied only; the engine already covers Axis)
+//   .enemy stays live               -> sustained combat rolls (attack / taunt / reload / kill)
+//   was alive, now is not           -> man down from a nearby squadmate
+// 0.4s tick over a handful of registry entries is cheap; nothing here blocks.
+aivoice_loop:{
+	local.tick = 0
+	while( 1 ){
+		wait 0.4
+		local.tick++
+
+		if( getcvar( "coop_aiVoice" ) == "0" ){ continue }
+		if( level.coop_avN < 1 ){ continue }
+		if( $player == NULL || $player.size < 1 ){ continue }
+
+		// re-read tunables every ~4s
+		if( ( local.tick % 10 ) == 0 ){
+			if( getcvar( "coop_aiVoiceMax" ) != "" ){
+				local.mx = int( getcvar( "coop_aiVoiceMax" ) )
+				if( local.mx > 0 && local.mx < 5 ){ level.coop_avSlots = local.mx }
+			}
+			if( getcvar( "coop_aiVoiceRange" ) != "" ){
+				local.rg = float( getcvar( "coop_aiVoiceRange" ) )
+				if( local.rg > 200 ){ level.coop_avRange = local.rg }
+			}
+		}
+
+		// Rolling window: never walk more than 40 registry entries in one tick. Enemy count-scaling
+		// (aihandler.scr::coop_tryDuplicateActor) can push the registry into the hundreds and a full
+		// walk every 0.4s would be the most expensive loop in the mod for no benefit - health only
+		// ever falls, so a 2s sampling interval still catches "took fire".
+		if( level.coop_avCursor == NIL ){ level.coop_avCursor = 0 }
+		if( level.coop_avCursor >= level.coop_avN ){ level.coop_avCursor = 0 }
+		local.scanned = 0
+		local.i = level.coop_avCursor
+		while( local.i < level.coop_avN && local.scanned < 40 ){
+			local.a = level.coop_avList[local.i]
+			local.i++
+			local.scanned++
+			level.coop_avCursor = local.i
+			if( local.a == NULL || local.a == NIL ){ continue }
+
+			//[user 08-02] NEVER TALK OVER A SCRIPTED SCENE. self.no_idle == 1 is the established
+			//"this actor is mid-scripted-sequence" marker across the gag scripts (t3l1_fourrussians
+			//PlayAnim, t1l1_end, t1l2_cappy, and aihandler sets it too). Situational chatter and the
+			//authored scene VO both play on the DIALOG channel, so a chatter line does not overlap
+			//the scripted line - it REPLACES it, cutting the scene off partway.
+			//That is the whole SP-vs-coop difference on t3l1: the four Soviet recon soldiers are not
+			//on aivoice_register's story blocklist (which only covers grillo/manon/civilians/priest/
+			//nun), so coop registered them and chattered over their ~29s scripted conversation.
+			//Single player has no such layer, which is why the scene completes there. Requested
+			//explicitly: "the behavior that the mission is scripted to have in single player".
+			//Gating on no_idle fixes this for EVERY scripted scene, not just t3l1.
+			if( local.a.no_idle == 1 ){ continue }
+
+			//----- death edge: somebody nearby calls it in -------------------
+			if( !( isAlive local.a ) ){
+				if( local.a.coop_avDead != 1 ){
+					local.a.coop_avDead = 1
+					thread aivoice_manDown local.a.origin local.a.team
+				}
+				continue
+			}
+
+			local.hp = waitthread aivoice_health local.a
+			local.hurt = 0
+			if( local.a.coop_avHp != NIL && local.hp < local.a.coop_avHp ){ local.hurt = 1 }
+			local.a.coop_avHp = local.hp
+
+			local.hasEnemy = 0
+			if( local.a.enemy != NULL && local.a.enemy != NIL ){ local.hasEnemy = 1 }
+
+			//----- UNDER FIRE ------------------------------------------------
+			// took damage this tick: shout for cover, or if he is getting chewed up, for help.
+			if( local.hurt == 1 ){
+				if( local.hp > 0 && local.hp < 40 ){
+					if( ( randomint 100 ) < 55 ){
+						thread aivoice_say local.a "fallback" 12
+					} else {
+						thread aivoice_say local.a "backup" 18
+					}
+				} else {
+					if( ( randomint 100 ) < 35 ){
+						thread aivoice_say local.a "backup" 18
+					} else {
+						thread aivoice_say local.a "cover" 9
+					}
+				}
+				continue
+			}
+
+			//----- CONTACT ---------------------------------------------------
+			// Allied AI only. Axis get their sighted bark from the engine say system on every
+			// map family; the allied retail sighted aliases are scoped to specific m-maps and
+			// never load on the Spearhead t-series, which is why allied AI were silent there.
+			if( local.hasEnemy == 1 && local.a.coop_avHadEnemy != 1 ){
+				local.a.coop_avHadEnemy = 1
+				//[2026-08-02] bug-1288 - "ru" added. This gate means ALLIED AI, and Soviets are
+				//allied; without it the new Russian pool would never fire on the contact beat,
+				//which is the most frequent bark there is.
+				if( local.a.coop_avNat == "us" || local.a.coop_avNat == "uk" || local.a.coop_avNat == "ru" ){
+					thread aivoice_say local.a "contact" 10
+				}
+				continue
+			}
+			if( local.hasEnemy != 1 ){
+				local.a.coop_avHadEnemy = 0
+				continue
+			}
+
+			//----- SUSTAINED COMBAT ------------------------------------------
+			// Only while he actually has a live enemy - this is what makes the taunt read as a
+			// taunt instead of random muttering. Rolled about once every 4s per actor, then
+			// gated again by the per-actor cooldown inside aivoice_say.
+			if( ( local.tick % 10 ) != 0 ){ continue }
+
+			// target just died -> he calls the kill (re-check for NULL: the enemy can be removed
+			// between the hasEnemy test above and here on a later tick)
+			if( local.a.enemy == NULL || local.a.enemy == NIL ){
+				local.a.coop_avHadEnemy = 0
+				continue
+			}
+			if( !( isAlive local.a.enemy ) ){
+				thread aivoice_say local.a "kill" 12
+				continue
+			}
+
+			local.r = randomint 100
+			if( local.r < 22 ){
+				thread aivoice_say local.a "attack" 14
+			} else if( local.r < 38 ){
+				thread aivoice_say local.a "taunt" 24
+			} else if( local.r < 50 ){
+				thread aivoice_say local.a "reload" 26
+			}
+		}
+	}
+}end

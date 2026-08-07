@@ -238,7 +238,18 @@ TruckGuyWaitsToDie: {
 //============================================================================
 monitortruckhealth: {
 //============================================================================
+	//[user 2026-08-03] bug-1308 (C2) - retail keeps this truck invulnerable until it finishes
+	//its drive-in so the scripted arrival cannot be shot out from under itself. The hazard is
+	//that "drive" is a notify from truck_drive's path completion; if it never arrives the truck
+	//is nodamage for the whole map (this addon class has hung on exactly this notify before -
+	//e3l3, bug-240). Timeout thread so a hang costs seconds, not the mission. Deliberately NO
+	//"endon drive" here: Unregister drains the end-list FIRST and deletes the thread, so an
+	//endon on the same event as the waittill would kill this thread before takedamage ran -
+	//converting a hypothetical hang into an unconditional 45s invulnerability window
+	//(adversarial-review finding). takedamage is idempotent, so the timeout firing after a
+	//normal arrival is a no-op.
 	self nodamage
+	thread coop_truckDamageTimeout self 45
 	self waittill drive
 	self takedamage
 
@@ -331,4 +342,16 @@ Charge: {
 		self thread coop_mod/replace.scr::runto //[202] chrissstrahl
 		self.enableEnemy = 1
 	}
+}end
+
+//============================================================================
+coop_truckDamageTimeout local.truck local.seconds: {
+//============================================================================
+	//[user 2026-08-03] bug-1308 (C2) failsafe for monitortruckhealth's waittill drive.
+	wait local.seconds
+	if (local.truck == NULL || local.truck == NIL) { end }
+	//isalive is literally health > 0 (bug-1251); Vehicle's ctor sets health 1000, so a live
+	//but never-inited truck passes. A destroyed one is skipped rather than re-armed.
+	if (!(isalive local.truck)) { end }
+	local.truck takedamage
 }end

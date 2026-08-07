@@ -70,7 +70,26 @@ if (level.rain_min_dist == NIL)
 		level.wind = exec global/makearray.scr $wind
 
 
-	level waittill spawn
+	//[user 08-02] was a bare "level waittill spawn", which threw
+	//    Script Error : invalid waittill spawn for 'Level'
+	//and KILLED this thread before it could reach the rain/thunder driver below. Observed live on
+	//t3l1: the map sets coop_weatherTheme "rain" and still had no rain at all.
+	//Cause: once the engine has spawned, that waittill is REMOVED, not merely already-fired
+	//(Level::ServerSpawned -> RemoveWaitTill(STRING_SPAWN), fgame/level.cpp), so any exec that
+	//lands after spawn dies here. coop_mod/weather.scr execs this at PREspawn, but
+	//waitTillPrespawn is only a short coop wait and on some maps the engine spawn beats it.
+	//coop_mod/replace.scr::waitTillSpawn is the purpose-built shim for this: in coop it waits on
+	//the $coop_levelWaitTillSpawn trigger (which is re-armable and therefore safe both before and
+	//after spawn), and in SP it falls through to the original waittill, so the SP path is
+	//byte-identical.
+	//CHECKED, because the obvious worry is that this resurrects dead map-level execs into a second
+	//weather thread: m5l1a:48, m5l1b:36 and e3l1/JeepRidePart3.scr:309 all exec this file with NO
+	//spawn gate above them, i.e. PRE-spawn - so they were already reaching and passing the old
+	//waittill successfully and their behaviour is unchanged by this. The maps that were dying here
+	//are the ones that exec POST-spawn, which is why e3l2/e3l4 had their execs removed outright.
+	//NOTE (open, pre-existing): because m5l1a/m5l1b set coop_weatherTheme "rain" AND exec this
+	//themselves, they may be running two weather instances. Not introduced here; worth a look.
+	waitthread coop_mod/replace.scr::waitTillSpawn
 //end
 
 	level.gametype = int( getcvar( g_gametype ) )

@@ -303,14 +303,25 @@ BloodyHell: {
 	$jeepCrashGate_BloodyHell waittill trigger
 	$starttank.gun anim fire
 
-	// HZM coop [2026-07-22]: driveNoWait with a NULL path is a no-op that only emits
-	// "Vehicle Given Drive Command with NULL path" (engine returns early, vehicle.cpp
-	// EventDriveInternal). Re-issuing with the real $jeeppath would reset the vehicle to
-	// path node 0 (a visible jerk-back), so we let the jeep/tank continue on the path
-	// already set by IntroDrive instead of firing these dead retail commands.
-	//$startjeep driveNoWait NULL 500 level.jeepaccel 400 200
+	// [user 08-02] CORRECTION - the 2026-07-22 note here was wrong, and disabling these two lines
+	// is what broke Lyndon and the gate crash.
+	// It claimed "driveNoWait with a NULL path is a no-op". It is not. Vehicle::EventDriveInternal
+	// is a FALL-THROUGH switch on NumArgs: with 5 args it runs case 5 (lookahead), case 4
+	// (distance), case 3 (accel) and case 2 - which sets m_fIdealSpeed AND m_fMaxSpeed to 500 -
+	// and only THEN reaches case 1, finds the NULL path, and returns. The ScriptError is
+	// non-fatal. So retail really was doubling the jeep's speed here for the gate dash; the
+	// commented-out lines were load-bearing.
+	// With them gone the leg ran at level.jeepspeed (260), blowing the hard-coded 8.45 + 9.4 s
+	// budget in jeepFailSave, which then fired unloadJeepFailsave - and that skips
+	// "$startjeep waittill drive", sets level.JeepInPosAndGood = 1 (killing the real
+	// continuation) and ejects Lyndon onto a moving jeep with disable_ai still applied. He then
+	// hard-stalls waiting on level.duckManDuck, which is only set inside the tank sequence that
+	// never happens. Exactly the reported "he just stands there on the road".
+	// modifydrive is the clean equivalent: same three fields (speed/accel/lookahead), no
+	// ScriptError, and valid mid-autopilot so it does NOT reset the vehicle to path node 0.
+	$startjeep modifydrive 500 level.jeepaccel 200
 	local.s = $starttank QuerySpeed
-	//$starttank driveNoWait NULL 500 level.jeepaccel 400 200
+	$starttank modifydrive 500 level.jeepaccel 200
 
 	if ($driver) {
 		$driver upperanim A_23_TerryTalkB
@@ -542,6 +553,12 @@ StartTankThinkThread local.delay: {
 
 		// As long as our target isn't the player, remove it after we've shot at it, so we don't target it again
 		if (self.tankTarget.targetname != "player") { //[204]chrissstrahl
+			//[user 08-06] bug-1505 - "Not One Stone" challenge signal: the tank only reaches this
+			//branch when it actually fires on one of the named house targets (tankfire_target1-6),
+			//never when it's shooting at the player instead - see the targetname check above. A
+			//level flag survives past this entity's own lifetime, unlike checking the target
+			//entities themselves at mission-complete (they're gone by then either way).
+			level.e2l3_farmhouseHit = 1
 			self.tankTarget remove
 		}
 		wait 1

@@ -1,0 +1,282 @@
+//=========================================================================
+// COVERAGE WALK - trilogy sweep layer 3.               [user 2026-08-05]
+// coop_maptest 3 = Phase 3: after each map loads, every player is teleported through EVERY
+// trigger volume from the generated walk list (maps/cov/<map>_walk.scr), with coop_covtrace 1
+// so the engine logs each committed fire / alias play / alias MISS as ^~^~^ COV lines. The
+// python reporter diffs those against _research/cov_manifests.json: what never fired is the
+// miss-list. coop_covwalk_force 1 additionally direct-fires every NAMED trigger (off by
+// default - out-of-order sequence firing is intentional chaos, use on a throwaway run).
+//=========================================================================
+run:{
+	setcvar "coop_covtrace" "1"
+	if( $player.size < 1 ){ end }
+	//[user 2026-08-05] bot-harness support: connected clients may still sit at team select -
+	//force-join them (the LMS rejoin call) so they spawn and can walk; then make every walker
+	//invulnerable so deaths do not teleport them away mid-list (coverage wants uninterrupted
+	//touching, and trigger_hurt fires on touch regardless of damage)
+	//[user 2026-08-05] bug-1443 - WAIT FOR CLIENTS TO BE ALIVE. Remote clients load these HD-pak
+	//maps far slower than the host; the rotation used to advance while they were still loading, so
+	//they were perpetually mid-load ("server disconnected" screens) and their teleports touched
+	//nothing. Poll until every connected client is spawned and alive, up to 90s.
+	//[user 2026-08-05] bug-1444 - also wait for the EXPECTED client count and shove menu-stuck
+	//clients through team select: a client sitting on the team menu never sends usercmds, so it
+	//never runs a think frame and cannot touch anything (that is the "spectator / team select"
+	//screens the user saw). popmenu closes their menu; join_team puts them on a team server-side.
+	local.want = int( getcvar "coop_covwalk_clients" )
+	if( local.want < 1 ){ local.want = 1 }
+	//[user 2026-08-05] bug-1448 - HARD ROSTER GATE. Nothing happens until every expected client
+	//is CONNECTED. Logs every 20s so a missing client is visible instead of silently walking
+	//with a short roster.
+	local.cg = 0
+	while( $player.size < local.want && local.cg < 480 ){
+		wait 0.25
+		local.cg = local.cg + 1
+		if( local.cg == ( int( local.cg / 80 ) * 80 ) ){
+			println( "^~^~^ COVWALK WAITING roster " + $player.size + "/" + local.want )
+		}
+	}
+	level.covwalk_ok = 0
+	level.covwalk_nowalk = 0
+	local.rg = 0
+	while( local.rg < 1200 ){
+		local.ready = 1
+		local.ji = 1
+		while( local.ji <= $player.size ){
+			local.jp = $player[local.ji]
+			if( local.jp != NULL && local.jp != NIL ){
+				//[user 2026-08-05] bug-1447 - EVERY client (host included) sat in SPECTATOR:
+				//nobody clicks the team-select menu in an automated run, and a bare join_team is
+				//undone by the engine's "no dm_primary -> force spectator" re-push loop. Use the
+				//mod's own proven recipe (main.scr::skipTeamAndWeaponSelect: primarydmweapon
+				//BEFORE join_team, teamswitchdelay 0, staggered popmenu) - the same call the
+				//lobby uses. A spectator is non-solid and touches NOTHING, so without this the
+				//entire touch pass was measuring nothing.
+				//[user 2026-08-05] bug-1455 - isSpectator is the AUTHORITATIVE not-spawned signal.
+				//A client sitting on the team-select screen already has a server-side team
+				//(dmteam=="allies"), so gating on the team string passed it as ready while it had
+				//never spawned - the user watched exactly this: "one of the players still stuck on
+				//team select". The give-away in our own log was health: host 100 (engine default,
+				//never spawned) vs bots 750 (coop_health, real coop spawn path).
+				//[user 2026-08-05] bug-1456 - DO NOT force-join during a scripted intro. Several
+				//maps deliberately hold players in spectator until the intro ends (m1l1's truck
+				//ride is the archetype); yanking them out with a forced join would BREAK the very
+				//sequence the sweep is meant to exercise. The distinguisher is the freeze shim:
+				//   level.coop_physicsOff == 1  -> a scripted sequence owns the players: WAIT
+				//   otherwise + isSpectator     -> genuinely stuck at team select: force the join
+				if( local.jp.isSpectator || local.jp.dmteam == "spectator" || local.jp.dmteam == "" || !( isAlive local.jp ) ){
+					if( level.coop_physicsOff == 1 ){
+						local.ready = 0
+						if( local.rg == ( int( local.rg / 40 ) * 40 ) ){
+							println( "^~^~^ COVWALK INTRO " + level.coop_mapname + " - scripted intro owns the squad; waiting it out (" + ( local.rg / 4 ) + "s)" )
+						}
+					}
+					else{
+						waitthread coop_mod/main.scr::skipTeamAndWeaponSelect local.jp
+						local.jp stufftext ( "popmenu 0" )
+						local.ready = 0
+					}
+				}
+			}
+			local.ji++
+		}
+		if( local.ready == 1 ){ break }
+		wait 0.25
+		local.rg = local.rg + 1
+	}
+	//[bug-1448] if the roster never fully embodied, the map is NOT walked and NOT advanced past -
+	//a partial walk is worse than none because it reads as coverage.
+	//[user 2026-08-05] bug-1450 - a client that DISCONNECTS can never satisfy a hard gate, so the
+	//original "hold forever" deadlocked the whole rotation on m1l2b for 10 minutes. Now: if the
+	//roster is short or unspawned after the wait, still run the cycle (so the map is not skipped
+	//entirely) but mark it DEGRADED - the report grades it INVALID and the harness relaunches the
+	//missing client. Never silently count a short-roster walk as coverage.
+	if( local.ready != 1 || $player.size < local.want ){
+		println( "^~^~^ COVWALK DEGRADED " + level.coop_mapname + " - roster " + $player.size + "/" + local.want + " - map graded INVALID" )
+		level.covwalk_degraded = 1
+	}
+	println( "^~^~^ COVWALK READY players=" + $player.size + " waited=" + ( local.rg / 4 ) + "s" )
+	//[bug-1447] EMBODIMENT PROOF - print each client's team/health/origin so the report can show
+	//they were really in the world, instead of inferring it from ping
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.pp = $player[local.pi]
+		if( local.pp != NULL && local.pp != NIL ){
+			println( "^~^~^ COV EMBODY " + local.pp.netname + " team=" + local.pp.dmteam + " spec=" + local.pp.isSpectator + " hp=" + local.pp.health + " org=" + local.pp.origin )
+		}
+		local.pi++
+	}
+	//[user 2026-08-05] bug-1450 - the bots were being SHOT mid-walk and going DBNO
+	//("BLEEDING OUT: 47s" in the client logs), which failed the alive-check and deadlocked the
+	//roster gate. Walkers must be untouchable for the whole cycle: DBNO off map-wide, nodamage
+	//re-applied per teleport (a respawn or map load clears it), and health topped up.
+	level.coop_dbno_disabled = 1
+	local.ji = 1
+	while( local.ji <= $player.size ){
+		local.jp = $player[local.ji]
+		if( local.jp != NULL && local.jp != NIL ){
+			//[user 2026-08-05] bug-1453 - dismiss the team menu on EVERY client, every map, not
+			//just the ones that read "spectator". A client that carries an allies team across a
+			//map change (typically the host) skipped the join path entirely, so its menu stayed
+			//up on screen - visible as a stuck team-select window - and it never received the
+			//coop spawn treatment (host hp 100 vs the bots' coop 750). Harmless to send twice.
+			local.jp stufftext ( "popmenu 0" )
+			local.jp nodamage
+			local.jp.health = 1000
+		}
+		local.ji++
+	}
+	wait 1
+	//[user 2026-08-05] detector rank 1: once per boot, compile EVERY shipped script through the
+	//real parser - a parse-killed file is invisible to fire-coverage by construction
+	if( getcvar( "coop_censusdone" ) != "1" ){
+		setcvar "coop_censusdone" "1"
+		compilecensus "coop_mod/cov/scr_census.txt"
+	}
+	level.covwalk_i = 0
+	//[user 2026-08-05] bug-1451 - SCRIPTED SEQUENCES. Many maps open with an intro the player is
+	//locked into (m1l1's truck ride, the e3l4 convoy, the m1l3a/b jeeps): the player is glued,
+	//physics_off, or riding a turret. Teleporting them then either BREAKS the sequence or is
+	//silently undone by it - either way the numbers are garbage. There is no reliable per-map flag
+	//for "intro over", so prove agency EMPIRICALLY: nudge the player and see whether the engine
+	//lets the move stick. Only walk once it does.
+	//[user 2026-08-05] bug-1454 - the nudge probe was a FALSE NEGATIVE machine: nudging a grounded
+	//player +24 units and re-reading after a frame just measures GRAVITY pulling them back, so a
+	//completely free squad read as "sequence locked" (m1l2a skipped its whole touch pass this way).
+	//Test the real thing instead - the states that actually lock a player out of free movement:
+	//the physics_off shim (every scripted sequence uses it), a vehicle/turret ride, or spectator.
+	local.ag = 0
+	local.agency = 0
+	while( local.ag < 40 && local.agency == 0 ){
+		//[bug-1454b] name the blocker - a gate that says "locked" without saying WHY is how the
+		//nudge-probe wasted two runs. Every condition prints itself.
+		local.locked = 0
+		local.why = ""
+		if( level.coop_physicsOff == 1 ){ local.locked = 1 local.why = local.why + "levelPhysicsOff " }
+		local.tp = $player[1]
+		if( local.tp == NULL || local.tp == NIL ){ local.locked = 1 local.why = local.why + "noPlayer1 " }
+		else{
+			if( local.tp.isSpectator ){ local.locked = 1 local.why = local.why + "spectator " }
+			if( local.tp.flags["coop_inJeep"] == game.true ){ local.locked = 1 local.why = local.why + "inJeep " }
+			if( local.tp.flags["coop_inAB41"] == game.true ){ local.locked = 1 local.why = local.why + "inAB41 " }
+			if( local.tp.flags["coop_physicsOff"] == 1 ){ local.locked = 1 local.why = local.why + "playerPhysicsOff " }
+		}
+		if( local.locked == 0 ){ local.agency = 1 }
+		else{
+			wait 3
+			local.ag = local.ag + 1
+			if( local.ag == ( int( local.ag / 5 ) * 5 ) ){
+				println( "^~^~^ COVWALK SEQUENCE " + level.coop_mapname + " - locked by: " + local.why + "(" + ( local.ag * 3 ) + "s)" )
+			}
+		}
+	}
+	if( local.agency == 0 ){
+		println( "^~^~^ COVWALK NOWALK " + level.coop_mapname + " - locked by: " + local.why + "- force pass only" )
+		level.covwalk_nowalk = 1
+	}
+	else{
+		println( "^~^~^ COVWALK AGENCY " + level.coop_mapname + " ok after " + ( local.ag * 3 ) + "s" )
+	}
+	println( "^~^~^ COVWALK START " + level.coop_mapname )
+	//[user 2026-08-05] bug-1442 - main.scr::startThread is ASYNCHRONOUS (it spawns a trigger_once
+	//and returns), so 'waitthread startThread' returned instantly: the map dwelled 8s and ADVANCED
+	//while the walk list was still on its first few entries - ~1 trigger touched per map. The walk
+	//list now raises level.covwalk_done at its end and we BLOCK here until it does.
+	level.covwalk_done = 0
+	if( level.covwalk_nowalk == 1 ){
+		level.covwalk_done = 1
+	}
+	else{
+		waitthread coop_mod/main.scr::startThread ( "maps/cov/" + level.coop_mapname + "_walk.scr::main" )
+	}
+	local.wg = 0
+	while( level.covwalk_done != 1 && local.wg < 2400 ){
+		wait 0.25
+		local.wg = local.wg + 1
+	}
+	if( level.covwalk_done != 1 ){
+		println( "^~^~^ COVWALK TIMEOUT " + level.coop_mapname + " after " + ( local.wg / 4 ) + "s" )
+	}
+	//[user 2026-08-05] bug-1443 - TOUCH IS NOT ENOUGH. A teleport only fires a trigger the player
+	//physically lands inside AND that accepts them (trigger_use needs +use, sided triggers need an
+	//approach angle, trigger_once may already be spent). To actually MAKE THE EVENTS HAPPEN, every
+	//NAMED trigger is direct-fired after the touch pass. The reporter splits fires before/after
+	//this marker, so we still learn which triggers are organically reachable.
+	println( "^~^~^ COVWALK FORCE BEGIN " + level.coop_mapname )
+	waitthread coop_mod/main.scr::startThread ( "maps/cov/" + level.coop_mapname + "_force.scr::main" )
+	wait 6
+	//[user 2026-08-05] bug-1443 - the decisive pass: most map triggers are UNNAMED brush volumes
+	//that no script can address, so touch + named-force still left ~85% of the manifest untouched.
+	//forcealltriggers activates every Trigger in the level engine-side (transition classes skipped).
+	forcealltriggers
+	wait 4
+	//[bug-1448] POST-CHECK: everyone must still be embodied at the end of the cycle, otherwise the
+	//coverage we just recorded was collected with a short roster. Only a clean cycle clears the
+	//map for transition (maptest phase 3 blocks on level.covwalk_ok).
+	local.stillok = 1
+	local.qi = 1
+	while( local.qi <= $player.size ){
+		local.qp = $player[local.qi]
+		if( local.qp != NULL && local.qp != NIL ){
+			if( local.qp.dmteam == "spectator" || !( isAlive local.qp ) ){ local.stillok = 0 }
+		}
+		local.qi++
+	}
+	if( $player.size < local.want ){ local.stillok = 0 }
+	level.covwalk_ok = local.stillok
+	println( "^~^~^ COV MAPDONE " + level.coop_mapname + " players=" + $player.size + "/" + local.want + " ok=" + local.stillok )
+	println( "^~^~^ COVWALK END " + level.coop_mapname )
+}end
+
+//=========================================================================
+visit local.pos local.class local.tn:{
+	if( $player.size < 1 ){ end }
+	level.covwalk_i = level.covwalk_i + 1
+	local.idx = level.covwalk_i - ( int( level.covwalk_i / $player.size ) * $player.size ) + 1
+	if( local.idx > $player.size ){ local.idx = 1 }
+	//[bug-1443] pick an ALIVE player - teleporting a corpse or a still-loading client fires nothing
+	local.p = $player[local.idx]
+	if( local.p == NULL || local.p == NIL || !(isAlive local.p) || local.p.dmteam == "spectator" ){
+		local.si = 1
+		local.p = NULL
+		while( local.si <= $player.size ){
+			local.sp = $player[local.si]
+			if( local.sp != NULL && local.sp != NIL ){
+				if( isAlive local.sp && local.sp.dmteam != "spectator" ){
+					local.p = local.sp
+					local.si = $player.size + 1
+				}
+			}
+			local.si++
+		}
+	}
+	if( local.p == NULL || local.p == NIL ){ end }
+	//[bug-1454] a player who slipped back to spectator mid-walk touches nothing - re-join them
+	if( local.p.isSpectator ){
+		waitthread coop_mod/main.scr::skipTeamAndWeaponSelect local.p
+		local.p stufftext ( "popmenu 0" )
+	}
+	//[bug-1450] re-assert invulnerability on every hop - one AI burst mid-walk used to end the run
+	local.p nodamage
+	if( local.p.health < 500 ){ local.p.health = 1000 }
+	local.p.origin = local.pos + ( 0 0 12 )
+	wait 0.15
+	if( getcvar( "coop_covwalk_force" ) == "1" && local.tn != "-" ){
+		local.e = $(local.tn)
+		if( local.e != NULL && local.e != NIL ){
+			trigger local.e
+			wait 0.10
+		}
+	}
+}end
+
+//=========================================================================
+// Direct-fire one named trigger.                        [user 2026-08-05] bug-1443
+// Guarded: a missing name is normal (many manifest names are map-conditional). The trigger
+// command posts EV_Activate, which runs the trigger's setthread exactly as a touch would.
+//=========================================================================
+forcefire local.tn:{
+	local.e = $(local.tn)
+	if( local.e == NULL || local.e == NIL ){ end }
+	trigger local.e
+	wait 0.2
+}end

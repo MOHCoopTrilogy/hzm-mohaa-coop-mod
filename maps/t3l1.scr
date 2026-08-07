@@ -226,6 +226,18 @@ $mg42 convergetime 0.25
 	$startingsolidier6 gun "nagant rifle"
 	$startingsolidier7 gun "nagant rifle"
 
+	// [user 2026-08-02] "give the other 4 russians a bit more HP at the beginning so they dont die
+	// so easily". These four are the recon team that walks and talks you through the opening; losing
+	// one early costs dialogue and makes the sequence read as broken. They sit on the authored 100 hp
+	// because the soviet-ally exemption (aihandler.scr::initialisePainVars) keeps allies OFF the coop
+	// damage buffer - correct, but it also means they are as fragile as a stock SP actor while facing
+	// coop-scaled opposition. 250 makes them meaningfully tougher without making them invulnerable.
+	// Deliberately NOT applied to solidier6/7: those two are scripted to die to the mortar (bug-1282).
+	$startingsoldier1.health = 250
+	$startingsoldier2.health = 250
+	$startingsoldier3.health = 250
+	$startingsoldier4.health = 250
+
 //-------------------------------------------------------------------
 
 /////	self waitthread global/vehicles_thinkers.scr::truck_INIT
@@ -314,6 +326,13 @@ intro_fade_in:
 	hidemouse
 
 	wait 1
+	// [user 2026-08-02] bug-1289 - "you should be frozen until that open truck gets destroyed".
+	// The title cards finish 10.5s in, but the Opel truck is not hit until later, so the authored
+	// release handed control back mid-scene. Hold the lock until the blast instead. Safe to wait
+	// on: DoSanta is entirely time-driven (aim -> wait 1.0 -> shoot), so it never depends on the
+	// player doing anything, and the guard below caps the wait regardless.
+	waitthread coop_introWaitTruck
+
 	// HZM coop - per-player release (was global releaseplayer + singular viewangles)
 	waitthread coop_introRelease "0 -90 0"
 
@@ -334,9 +353,75 @@ coop_introFreeze local.ang:
 		if ( local.player.dmteam != "spectator" )
 			local.player freezecontrols 1
 	}
+	// [2026-08-02] bug-1286 - a ONE-SHOT freezecontrols does not hold in coop. The probe that
+	// preceded this reported players=1 froze=1, i.e. the freeze WAS applied and the player could
+	// still walk: the engine's m_bFrozen is cleared again by the coop spawn/respawn churn that runs
+	// right after the intro starts. This is known and already solved twice in this mod the same way -
+	// coop_mod/lobby.scr::lobbyLockWatch and the xp.scr debrief both re-assert the lock on a loop -
+	// so copy that recipe rather than invent one. The watchdog also covers a player who finishes
+	// spawning AFTER this ran, which the plain loop above cannot.
+	level.coop_introLock = 1
+	thread coop_introLockWatch
+	println "^~^~^ INTROLOCK on at t="
+	println level.time
+end
+
+//=========================================================================
+// Hold the intro until the Opel truck is destroyed (bug-1289). The flag is set by
+// gags/t3l1_enemyspawn.scr::JeepExplosion once the explosion model is up.
+// The 60s guard is a deliberate safety net, NOT an expected path: if the gag ever fails to
+// fire, the player must still get control back rather than be frozen for the whole map.
+//=========================================================================
+coop_introWaitTruck:
+	local.guard = 0
+	while ( level.coop_introTruckBlown != 1 && local.guard < 600 )
+	{
+		local.guard = local.guard + 1
+		wait 0.1
+	}
+	println "^~^~^ INTROLOCK truck-wait ended, blown="
+	if ( level.coop_introTruckBlown != NIL )
+		println level.coop_introTruckBlown
+	println "^~^~^ INTROLOCK truck-wait ticks="
+	println local.guard
+end
+
+//=========================================================================
+// Re-assert the intro movement lock every frame until coop_introRelease clears it (bug-1286).
+//=========================================================================
+coop_introLockWatch:
+	local.beat = 0
+	while ( level.coop_introLock == 1 )
+	{
+		for ( local.i = 1; local.i <= $player.size; local.i++ )
+		{
+			local.player = $player[local.i]
+			if ( local.player != NULL && local.player.dmteam != "spectator" )
+				local.player freezecontrols 1
+		}
+		// heartbeat roughly once a second so the log shows whether this loop is alive at the
+		// moment the player reports being able to walk (safe probe: separate single-value printlns)
+		local.beat = local.beat + 1
+		if ( local.beat >= 20 )
+		{
+			local.beat = 0
+			println "^~^~^ INTROLOCK alive t="
+			println level.time
+		}
+		waitframe
+	}
+	println "^~^~^ INTROLOCK loop exited at t="
+	println level.time
 end
 
 coop_introRelease local.ang:
+	// [2026-08-02] bug-1286 - clear the lock FIRST. The watchdog re-asserts freezecontrols 1 every
+	// frame, so unfreezing while it still runs would just be undone on the next frame.
+	level.coop_introLock = 0
+	println "^~^~^ INTROLOCK released at t="
+	println level.time
+	waitframe
+
 	for ( local.i = 1; local.i <= $player.size; local.i++ )
 	{
 		local.player = $player[local.i]
@@ -357,6 +442,14 @@ coop_trackTankTarget:
 		local.p = exec coop_mod/replace.scr::player_anyValid
 		if ( local.p != NULL && local.p != NIL )
 			level.playertanktarget = local.p
+		else
+			// HZM coop [user 08-02]: clear to the 0 sentinel when no player is valid.
+			// Without this else the var kept a STALE entity reference (e.g. a player who
+			// just disconnected or is mid-respawn), and the tank/flak thinkers deref it.
+			// The consumers guard on "== 0 || == NIL" (global/vehicles_thinkers.scr:1038),
+			// so 0 is the value they expect. This is the fix bug-1054 made for t2l2 and
+			// which was never copied here.
+			level.playertanktarget = 0
 		wait 1
 	}
 end

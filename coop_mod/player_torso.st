@@ -3249,6 +3249,7 @@ state GET_ON_LADDER
 	// will be standing when he gets off the ladder
 	entrycommands
 	{
+		exec coop_mod/ladder_state.scr "ON_LADDER"
 		modheight "stand"
 		movementstealth "1.0"
 		moveposflags "standing"
@@ -3278,6 +3279,7 @@ state LATCH_ONTO_LADDER
 	// will be standing when he gets off the ladder
 	entrycommands
 	{
+		exec coop_mod/ladder_state.scr "ON_LADDER"
 		modheight "stand"
 		movementstealth "1.0"
 		moveposflags "standing"
@@ -3330,6 +3332,7 @@ state FINISHED_GET_OFF_LADDER
 	
 	entrycommands
 	{
+		exec coop_mod/ladder_state.scr "OFF_LADDER"
 		unattachfromladder
 		safeholster 0 // pull weapon back out if we put it away to get on the ladder
 	}
@@ -3347,6 +3350,7 @@ state JUMP_OFF_LADDER
 	
 	entrycommands
 	{
+		exec coop_mod/ladder_state.scr "OFF_LADDER"
 		unattachfromladder
 		safeholster 0 // pull weapon back out if we put it away to get on the ladder
 		jumpxy -70 0 150
@@ -3390,11 +3394,11 @@ state LADDER_IDLE_LEFT
 		GET_OFF_LADDER_BOTTOM	      : FORWARD !LOOKING_UP "-30" CAN_GET_OFF_LADDER_BOTTOM
 		GET_OFF_LADDER_BOTTOM	      : BACKWARD LOOKING_UP "-30" CAN_GET_OFF_LADDER_BOTTOM
 		
-		LADDER_UP_RIGHT			: FORWARD LOOKING_UP "-30" CAN_CLIMB_UP_LADDER
-		LADDER_UP_RIGHT			: BACKWARD !LOOKING_UP "-30" CAN_CLIMB_UP_LADDER
+		LADDER_UP_RIGHT			: FORWARD LOOKING_UP "-30"
+		LADDER_UP_RIGHT			: BACKWARD !LOOKING_UP "-30"
 		
-		LADDER_DOWN_LEFT			: FORWARD !LOOKING_UP "-30" CAN_CLIMB_DOWN_LADDER
-		LADDER_DOWN_LEFT			: BACKWARD LOOKING_UP "-30" CAN_CLIMB_DOWN_LADDER
+		LADDER_DOWN_LEFT			: FORWARD !LOOKING_UP "-30"
+		LADDER_DOWN_LEFT			: BACKWARD LOOKING_UP "-30"
 	}
 }
 
@@ -3430,11 +3434,11 @@ state LADDER_IDLE_RIGHT
 		GET_OFF_LADDER_BOTTOM	      : FORWARD !LOOKING_UP "-30" CAN_GET_OFF_LADDER_BOTTOM
 		GET_OFF_LADDER_BOTTOM	      : BACKWARD LOOKING_UP "-30" CAN_GET_OFF_LADDER_BOTTOM
 		
-		LADDER_UP_LEFT			: FORWARD LOOKING_UP "-30" CAN_CLIMB_UP_LADDER
-		LADDER_UP_LEFT			: BACKWARD !LOOKING_UP "-30" CAN_CLIMB_UP_LADDER
+		LADDER_UP_LEFT			: FORWARD LOOKING_UP "-30"
+		LADDER_UP_LEFT			: BACKWARD !LOOKING_UP "-30"
 		
-		LADDER_DOWN_RIGHT			: FORWARD !LOOKING_UP "-30" CAN_CLIMB_DOWN_LADDER
-		LADDER_DOWN_RIGHT			: BACKWARD LOOKING_UP "-30" CAN_CLIMB_DOWN_LADDER
+		LADDER_DOWN_RIGHT			: FORWARD !LOOKING_UP "-30"
+		LADDER_DOWN_RIGHT			: BACKWARD LOOKING_UP "-30"
 	}
 }
 

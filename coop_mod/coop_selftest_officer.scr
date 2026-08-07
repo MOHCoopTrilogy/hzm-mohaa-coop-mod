@@ -1,0 +1,474 @@
+//====================================================================
+// coop_selftest_officer.scr - HZM dev officer/DDA subsystem self-tests
+//====================================================================
+// Cvar-gated probes for the automated test harness. INERT for real
+// players: nothing runs unless coop_st_officer==1, and each individual
+// test is selected by coop_st_officer_mode so the harness boots one
+// scenario at a time (different maps / cvars per test). Markers are the
+// machine-parseable "^~^~^ OFFICERTEST <mode> ..." lines the harness greps,
+// exactly like coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+//
+// Launched from coop_mod/main.scr::main (one guarded thread):
+//    if( getcvar("coop_st_officer")=="1" ){ thread ...::st_officer_run }
+//
+// NOTE: the pure count-scaling math test (mode=scale) is already covered by
+// coop_mod/coop_selftest.scr::scaletest_run and is NOT reimplemented here.
+//
+// Shared cvars:
+//    coop_st_officer_mode    which test to run (cap/wave/heal/dda_up/dda_wipe/
+//                            cooldown/airstrike/latejoin/acc/doubleinit/engage)
+//    coop_st_officer_secs    duration for the polling tests (default per-test)
+//    coop_st_officer_iters   iteration count for the airstrike test (default 10)
+//    coop_st_officer_maxscalar  forced level.coop_maxPlayerScalar for the acc test
+//====================================================================
+
+
+//--------------------------------------------------------------------
+// DISPATCHER - routes to exactly ONE test per boot (harness sets the mode).
+// A bare coop_st_officer 1 with no mode runs the safe read-only acc probe.
+//--------------------------------------------------------------------
+st_officer_run:{
+	local.mode = getcvar "coop_st_officer_mode"
+	println( "^~^~^ OFFICERTEST dispatch mode=" + local.mode + " map=" + level.coop_mapname )
+	if( local.mode == "cap" ){
+		waitthread officertest_cap
+		end
+	}
+	if( local.mode == "wave" || local.mode == "engage" ){
+		waitthread officertest_wave
+		end
+	}
+	if( local.mode == "heal" ){
+		waitthread officertest_heal
+		end
+	}
+	if( local.mode == "dda_up" ){
+		waitthread officertest_dda_up
+		end
+	}
+	if( local.mode == "dda_wipe" ){
+		waitthread officertest_dda_wipe
+		end
+	}
+	if( local.mode == "cooldown" ){
+		waitthread officertest_cooldown
+		end
+	}
+	if( local.mode == "airstrike" ){
+		waitthread officertest_airstrike
+		end
+	}
+	if( local.mode == "latejoin" ){
+		waitthread officertest_latejoin
+		end
+	}
+	if( local.mode == "acc" ){
+		waitthread officertest_acc
+		end
+	}
+	if( local.mode == "doubleinit" ){
+		waitthread officertest_doubleinit
+		end
+	}
+	// default: safe, self-restoring read-only probe
+	waitthread officertest_acc
+	println "^~^~^ OFFICERTEST dispatch done"
+}end
+
+
+//--------------------------------------------------------------------
+// Return a boss entity for the count/gate tests. Reuses the map's real
+// officer when one is alive; otherwise spawns a stand-in and wires the
+// globals the wave/reinforcement code reads (level.coop_officer /
+// level.coop_officer_alive / level.coop_officer_reinf_zone). Returns NULL
+// only if the spawn itself failed.
+//--------------------------------------------------------------------
+officertest_ensure_officer local.p:{
+	if( level.coop_officer != NULL && level.coop_officer != NIL ){
+		if( isAlive level.coop_officer ){
+			level.coop_officer_alive = 1
+			end level.coop_officer
+		}
+	}
+	cache models/human/german_waffenss_officer.tik
+	local.m = "models/human/german_waffenss_officer.tik"
+	local.off = spawn local.m
+	if( local.off == NULL ){ end NULL }
+	local.base = local.p.origin + ( 256 0 48 )
+	local.off.origin = local.base
+	local.off droptofloor
+	local.off.health = 1200
+	level.coop_officer = local.off
+	level.coop_officer_alive = 1
+	level.coop_officertest_fake = 1
+	if( level.coop_officer_reinf_zone == NIL ){
+		level.coop_officer_reinf_zone = local.p.origin + ( 512 0 0 )
+	}
+	end local.off
+}end
+
+
+//====================================================================
+// mode=cap - enemy per-spawn clone hardcap holds at 4P. Boot a dense
+// combat map with coop_aiScale 1 + coop_aiScaleChance 100 (force max
+// duplication) and sample the live german array + replica tally each
+// tick; the harness asserts german never exceeds the hardcap.
+//====================================================================
+officertest_cap:{
+	local.secs = int( getcvar "coop_st_officer_secs" )
+	if( local.secs <= 0 ){ local.secs = 60 }
+	local.hardcap = level.coop_aiScaleHardCap
+	if( local.hardcap == NIL ){ local.hardcap = 0 }
+	local.t = 0
+	while( local.t < local.secs ){
+		local.g = 0
+		local.reps = 0
+		if( level.coop_actorArray != NIL && level.coop_actorArray["german"] != NIL ){
+			local.arr = level.coop_actorArray["german"]
+			local.i = 1
+			while( local.i <= local.arr.size ){
+				local.e = local.arr[local.i]
+				if( local.e != NULL && local.e != NIL ){
+					local.g++
+					if( local.e.flags["coop_isReplica"] == 1 ){ local.reps++ }
+				}
+				local.i++
+			}
+		}
+		println( "^~^~^ OFFICERTEST cap german=" + local.g + " replicas=" + local.reps + " hardcap=" + local.hardcap )
+		wait 5
+		local.t = local.t + 5
+	}
+}end
+
+
+//====================================================================
+// mode=wave (+engage) - officer battalion troops are flagged coop_waveActor
+// (excluded from the generic per-spawn cloner) and coop_actorStopAccuracy
+// (excluded from the generic accuracy scaler), so they never double-dip.
+// Then confirm the spawned wave actually stays alive and acquires targets.
+//====================================================================
+officertest_wave:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST wave abort=no_host"
+		end
+	}
+	local.off = waitthread officertest_ensure_officer local.p
+	if( local.off == NULL ){
+		println "^~^~^ OFFICERTEST wave abort=no_officer"
+		end
+	}
+	wait 1
+	thread coop_mod/officer.scr::coop_spawn_battalion
+	wait 3
+	local.bn = level.coop_battalion_n
+	if( local.bn == NIL ){ local.bn = 0 }
+	local.flagged = 0
+	local.reps = 0
+	local.stopacc = 0
+	local.i = 1
+	while( local.i <= local.bn ){
+		local.b = level.coop_battalion[local.i]
+		if( local.b != NULL && local.b != NIL ){
+			if( local.b.flags["coop_waveActor"] == 1 ){ local.flagged++ }
+			if( local.b.flags["coop_isReplica"] == 1 ){ local.reps++ }
+			if( local.b.flags["coop_actorStopAccuracy"] == 1 ){ local.stopacc++ }
+		}
+		local.i++
+	}
+	println( "^~^~^ OFFICERTEST wave battalion_n=" + local.bn + " flagged=" + local.flagged + " replicas_among_wave=" + local.reps + " stopacc=" + local.stopacc )
+	// engage: after they path out, count wave troops still alive that acquired a target
+	wait 8
+	local.alive = 0
+	local.targeting = 0
+	local.j = 1
+	while( local.j <= local.bn ){
+		local.e = level.coop_battalion[local.j]
+		if( local.e != NULL && local.e != NIL && isAlive local.e ){
+			local.alive++
+			if( local.e.enemy != NULL && local.e.enemy != NIL ){ local.targeting++ }
+		}
+		local.j++
+	}
+	println( "^~^~^ OFFICERTEST engage spawned=" + local.bn + " alive=" + local.alive + " targeting=" + local.targeting )
+}end
+
+
+//====================================================================
+// mode=heal - officer heal/retreat completes when damaged + unseen. Needs a
+// real living boss on the map (fake stand-ins can't path to a medkit). Drop
+// his HP below the gate, shove every player far away so the "unseen" gate
+// passes, then poll until the retreat/heal loop restores him to 1200 and the
+// busy latch clears (re-armable).
+//====================================================================
+officertest_heal:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST heal abort=no_host"
+		end
+	}
+	if( level.coop_officer == NULL || level.coop_officer == NIL ){
+		println "^~^~^ OFFICERTEST heal abort=no_officer"
+		end
+	}
+	if( !isAlive level.coop_officer ){
+		println "^~^~^ OFFICERTEST heal abort=officer_dead"
+		end
+	}
+	local.off = level.coop_officer
+	level.coop_officer_alive = 1
+	level.coop_officer_busy = 0
+	level.coop_officer_heals = 0		// [318] clear the lifetime heal budget so the test retreat is never refused
+	level.coop_officer_healCapNoted = 0
+	local.off.health = 400
+	// push every player far from the boss so his unseen heal-retreat gate passes
+	local.i = 1
+	while( $player != NIL && local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			$player[local.i].origin = local.off.origin + ( 6000 0 0 )
+		}
+		local.i++
+	}
+	thread coop_mod/officer.scr::coop_officer_medkit_retreat local.off
+	local.reached = 0
+	local.finalhp = 400
+	local.ticks = 0
+	local.w = 0
+	while( local.w < 110 ){
+		wait 0.5
+		if( level.coop_officer != NULL && level.coop_officer != NIL && isAlive level.coop_officer ){
+			local.finalhp = level.coop_officer.health
+		}
+		if( local.finalhp >= 1200 ){ local.reached = 1 }
+		if( local.reached == 1 ){ break }
+		local.ticks++
+		local.w++
+	}
+	local.busy = level.coop_officer_busy
+	if( local.busy == NIL ){ local.busy = 0 }
+	println( "^~^~^ OFFICERTEST heal startHP=400 busy=" + local.busy + " reachedPost=" + local.reached + " finalHP=" + local.finalhp + " ticks=" + local.ticks )
+}end
+
+
+//====================================================================
+// mode=dda_up - director steamroll ramp. Feed the kill counter (~10 kills
+// every 5s) while topping up player HP so no downs pull EI back. The
+// director (director.scr, coop_ddaDebug 1) prints its own DDA: ei= lines;
+// this probe mirrors the levers (ei via coop_ddaSkill writeback, cd, ch)
+// so the harness can parse rising ei / falling cooldown / rising chance.
+//====================================================================
+officertest_dda_up:{
+	setcvar "coop_ddaDebug" "1"
+	if( level.coop_dda_kills == NIL ){ level.coop_dda_kills = 0 }
+	local.secs = int( getcvar "coop_st_officer_secs" )
+	if( local.secs <= 0 ){ local.secs = 60 }
+	local.t = 0
+	while( local.t < local.secs ){
+		level.coop_dda_kills = level.coop_dda_kills + 10
+		local.i = 1
+		while( $player != NIL && local.i <= $player.size ){
+			if( isAlive $player[local.i] ){
+				local.mh = level.coop_health
+				if( local.mh == NIL || local.mh <= 0 ){ local.mh = 100 }
+				$player[local.i].health = local.mh
+			}
+			local.i++
+		}
+		local.ei = getcvar "coop_ddaSkill"
+		local.cd = getcvar "coop_officerWaveCooldown"
+		local.ch = getcvar "coop_aiScaleChance"
+		println( "^~^~^ OFFICERTEST dda phase=up ei=" + local.ei + " cd=" + local.cd + " ch=" + local.ch )
+		wait 5
+		local.t = local.t + 5
+	}
+}end
+
+
+//====================================================================
+// mode=dda_wipe - near-wipe valley. Drive every active player into DBNO so
+// the director's upN==0 branch latches: it snaps EI to the floor, prints
+// DDA: WIPE, forces coop_aiScaleChance 0 and coop_officerWaveCooldown=valley.
+// The probe waits past one director cadence, mirrors the levers, then revives
+// everyone so the boot recovers.
+//====================================================================
+officertest_dda_wipe:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST dda phase=wipe abort=no_host"
+		end
+	}
+	local.i = 1
+	while( $player != NIL && local.i <= $player.size ){
+		if( isAlive $player[local.i] ){
+			thread coop_mod/dbno.scr::dbno_enter $player[local.i] "chest"
+		}
+		local.i++
+	}
+	local.cad = int( getcvar "coop_ddaCadence" )
+	if( local.cad <= 0 ){ local.cad = 10 }
+	local.ww = local.cad + 3
+	wait local.ww
+	local.ei = getcvar "coop_ddaSkill"
+	local.cd = getcvar "coop_officerWaveCooldown"
+	local.ch = getcvar "coop_aiScaleChance"
+	println( "^~^~^ OFFICERTEST dda phase=wipe ei=" + local.ei + " cd=" + local.cd + " ch=" + local.ch )
+	// recover the squad so the boot is not left permanently downed
+	local.j = 1
+	while( $player != NIL && local.j <= $player.size ){
+		if( $player[local.j] != NULL && $player[local.j].flags["coop_dbno_active"] == 1 ){
+			waitthread coop_mod/dbno.scr::dbno_ai_revive $player[local.j]
+		}
+		local.j++
+	}
+}end
+
+
+//====================================================================
+// mode=cooldown - the wave cooldown gate rejects rapid re-calls. Reset the
+// last-wave stamp so the first coop_call_reinforcements passes (stamps
+// lastWaveTime BEFORE any spawn work), then a second call inside the 30s
+// window must be rejected (no new stamp; the "not ready yet" line fires).
+//====================================================================
+officertest_cooldown:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST cooldown abort=no_host"
+		end
+	}
+	local.off = waitthread officertest_ensure_officer local.p
+	if( local.off == NULL ){
+		println "^~^~^ OFFICERTEST cooldown abort=no_officer"
+		end
+	}
+	setcvar "coop_officerWaveCooldown" "30"
+	level.coop_officer_lastWaveTime = NIL
+	wait 0.5
+	thread coop_mod/officer.scr::coop_call_reinforcements
+	wait 1
+	local.t1 = level.coop_officer_lastWaveTime
+	if( local.t1 == NIL ){ local.t1 = 0 }
+	thread coop_mod/officer.scr::coop_call_reinforcements
+	wait 1
+	local.t2 = level.coop_officer_lastWaveTime
+	if( local.t2 == NIL ){ local.t2 = 0 }
+	local.blocked = 0
+	if( local.t2 == local.t1 ){ local.blocked = 1 }
+	println( "^~^~^ OFFICERTEST cooldown t1=" + local.t1 + " t2=" + local.t2 + " blocked=" + local.blocked )
+}end
+
+
+//====================================================================
+// mode=airstrike - never Stuka/Artillery on an interior/no-airstrike map.
+// Force cooldown 0 and fire a bounded batch of reinforcement calls; on a map
+// flagged coop_officer_no_airstrikes the r==4/5 rolls reroll to infantry, so
+// the "called in a Stuka" / "Artillery barrage" iprintlnbold lines must never
+// appear in the begin..done window (the harness greps for them).
+//====================================================================
+officertest_airstrike:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST airstrike abort=no_host"
+		end
+	}
+	local.off = waitthread officertest_ensure_officer local.p
+	if( local.off == NULL ){
+		println "^~^~^ OFFICERTEST airstrike abort=no_officer"
+		end
+	}
+	local.flag = level.coop_officer_no_airstrikes
+	if( local.flag == NIL ){ local.flag = 0 }
+	local.iters = int( getcvar "coop_st_officer_iters" )
+	if( local.iters <= 0 ){ local.iters = 10 }
+	setcvar "coop_officerWaveCooldown" "0"
+	local.map = level.coop_mapname
+	println( "^~^~^ OFFICERTEST airstrike map=" + local.map + " no_airstrikes=" + local.flag + " begin iters=" + local.iters )
+	local.n = 0
+	while( local.n < local.iters ){
+		level.coop_officer_lastWaveTime = NIL
+		thread coop_mod/officer.scr::coop_call_reinforcements
+		wait 1.5
+		local.n++
+	}
+	println( "^~^~^ OFFICERTEST airstrike map=" + local.map + " no_airstrikes=" + local.flag + " done calls=" + local.iters )
+}end
+
+
+//====================================================================
+// mode=latejoin - subsequent wave size tracks the LIVE player count. Poll
+// the real scalers as the harness adds clients; emit the battalion count
+// whenever the effective player count changes. No cast-array errors as the
+// array grows (coop_reinf_pc / coop_reinf_count guard $player).
+//====================================================================
+officertest_latejoin:{
+	local.secs = int( getcvar "coop_st_officer_secs" )
+	if( local.secs <= 0 ){ local.secs = 90 }
+	local.lastpc = 0 - 1
+	local.t = 0
+	while( local.t < local.secs ){
+		local.pc = waitthread coop_mod/officer.scr::coop_reinf_pc
+		if( local.pc != local.lastpc ){
+			local.bt = waitthread coop_mod/officer.scr::coop_reinf_count 10 "coop_officerBattalionPer" 3 22
+			println( "^~^~^ OFFICERTEST latejoin pc=" + local.pc + " battalion=" + local.bt )
+			local.lastpc = local.pc
+		}
+		wait 3
+		local.t = local.t + 3
+	}
+}end
+
+
+//====================================================================
+// mode=acc - accuracy scaler divide-by-zero guard at the coop_maxPlayerScalar
+// edge. Force the level var the scaler actually reads (variables.scr default
+// 4) to the edge value (0, then 1 on a second boot) and run the real
+// per-enemy recompute over the whole german array; the guard must clamp so
+// the division at calculateAccuracy never faults. Harness counts Script Errors.
+//====================================================================
+officertest_acc:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST acc abort=no_host"
+		end
+	}
+	local.ms = getcvar "coop_st_officer_maxscalar"
+	local.msv = 0
+	if( local.ms != "" ){ local.msv = int( local.ms ) }
+	local.saved = level.coop_maxPlayerScalar
+	level.coop_maxPlayerScalar = local.msv
+	local.enemies = 0
+	if( level.coop_actorArray != NIL && level.coop_actorArray["german"] != NIL ){ local.enemies = level.coop_actorArray["german"].size }
+	thread coop_mod/aihandler.scr::updateEnemyTeamDifficulty
+	wait 1
+	println( "^~^~^ OFFICERTEST acc maxscalar=" + local.msv + " enemies=" + local.enemies + " done=1" )
+	level.coop_maxPlayerScalar = local.saved
+}end
+
+
+//====================================================================
+// mode=doubleinit - officer init is idempotent. With a boss already present
+// (real map officer, or a stand-in), a second coop_officer_init MUST hit the
+// "already exists" abort and leave level.coop_officer unchanged (no second
+// OFFICER SPAWNED HP line). Harness greps the abort message.
+//====================================================================
+officertest_doubleinit:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ OFFICERTEST doubleinit abort=no_host"
+		end
+	}
+	local.off = waitthread officertest_ensure_officer local.p
+	if( local.off == NULL ){
+		println "^~^~^ OFFICERTEST doubleinit abort=no_officer"
+		end
+	}
+	wait 1
+	local.before = level.coop_officer
+	thread coop_mod/officer.scr::coop_officer_init
+	wait 2
+	local.same = 0
+	if( level.coop_officer == local.before ){ local.same = 1 }
+	local.alive = 0
+	if( level.coop_officer_alive == 1 ){ local.alive = 1 }
+	println( "^~^~^ OFFICERTEST doubleinit officer_alive=" + local.alive + " officer_same=" + local.same )
+}end

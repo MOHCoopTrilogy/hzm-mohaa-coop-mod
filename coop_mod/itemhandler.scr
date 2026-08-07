@@ -1128,6 +1128,10 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	//[user 07-19] bug-897 v2: clear the stashed kit up front so a spawnInventory early-return (no
 	//loadout found) cannot leave a STALE kit from a previous spawn for coop_backfillPrimaries to re-give.
 	group.coop_intendedKit = NIL
+	//[user 07-28] bug-1204: how many pickup entities spawnInventory actually put in the world for THIS
+	//give. 0 = do not touch $(group.invTargetname) at all (that lookup returns a NULL listener and every
+	//command on it is a script error - see the waitthread note below).
+	group.coop_kitEntN = 0
 	if (local.default){
 		if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
 			local.src = group.player.flags["coop_inventoryWeapons"]
@@ -1143,12 +1147,25 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		thread resetPlayerWeapons group.player
 	}
 	//spawn them in first and flag them as playerWeapon
-	thread spawnInventory local.default
+	//[user 07-28] bug-1204 THE WHOLE KIT WAS NEVER GIVEN: this used to be `thread spawnInventory` and
+	//the very next line read $(group.invTargetname). A MOHAA `waitthread` SUSPENDS its caller - the
+	//woken thread is put back on the scheduler timer list (engine: ScriptThread::StoppedWaitFor with
+	//name==0 -> StartTiming, and ScriptMaster::ExecuteRunning returns early while stackCount != 0), so
+	//it does NOT return inline. Once bug-897 put `waitthread mergeCarryWeapons` inside spawnInventory
+	//(armory-picks path only) spawnInventory gave up the frame BEFORE its spawn loop ran; control came
+	//back here with ZERO pickup entities in the world, group.weapons resolved to NULL, and every use of
+	//it errored - including the ACTUAL GIVE, `group.weapons triggereffect group.player` in giveInventory.
+	//Net effect for anyone with armory picks: no pistol, no grenade, no kit at all; only the bare `item`
+	//gives in coop_backfillPrimaries landed, and those were filtered to primaries. Waiting for
+	//spawnInventory to finish is the fix - the pickups exist before we look them up.
+	waitthread spawnInventory local.default
 
 	//store the targetname array into weapons var
 	group.weapons = $(group.invTargetname)
-	group.weapons notdroppable 				//don't allow players to drop weapons
-	group.weapons set_respawn 0
+	if (group.coop_kitEntN > 0){
+		group.weapons notdroppable 			//don't allow players to drop weapons
+		group.weapons set_respawn 0
+	}
 
 	wait game.ms 							//makes sure the default weapons spawned by engine are processed separately to our new ones
 											//0.0005 translates to 1ms in the engine: 0.0005 -> (int)( time * 1000.0f + 0.5f ) -> 1
@@ -1156,11 +1173,14 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 
 	thread giveInventory 					//actually give them the weapons and default ammo
 
-	group.weapons origin group.player.origin
-	group.weapons hide
-	group.weapons notsolid
-	group.weapons nottriggerable
-	
+	//[user 07-28] bug-1204: same NULL-listener guard as above - never command an unresolved lookup.
+	if (group.coop_kitEntN > 0){
+		group.weapons origin group.player.origin
+		group.weapons hide
+		group.weapons notsolid
+		group.weapons nottriggerable
+	}
+
 	//improve spawning when in disguise mission! 
 	if (group.player.has_disguise){ 
 		thread setIsDisguised group.player game.true //set initial disguise to true	
@@ -1278,9 +1298,16 @@ swa_latecheck:
 //bug-897's array-level mergeCarryWeapons fix did not stick. A bare `item` give (giveItem -> AddItem)
 //BYPASSES that pickup guard, and re-giving a weapon already held is a no-op (Item::Add just caps the
 //item's own amount; it does NOT touch the ammo pool, post GiveStartingAmmo, or duplicate), so we can
-//safely re-issue EVERY primary in the kit. Only runs when the kit has 2+ primaries (the collision
-//case) so a normal single-primary kit incurs no gametype churn. self unused; player + kit are params
-//to avoid racing the shared `group` on a concurrent spawn.
+//safely re-issue EVERY primary in the kit. self unused; player + kit are params to avoid racing the
+//shared `group` on a concurrent spawn.
+//[user 07-28] bug-1204 SIDEARM TOO: this used to be primaries-ONLY (coop_isPrimaryClass explicitly
+//excludes pistols), which is why the armory-picked handgun never came back on any spawn while the two
+//picked primaries did. Backfilling a pistol is safe and cannot collide with the one-primary rule:
+//WEAPON_CLASS_SECONDARY = WEAPON_CLASS_PISTOL | WEAPON_CLASS_GRENADE (bg_public.h:388), and
+//Weapon::PickupWeapon's guard (weapon.cpp:3136) is `!IsSecondaryWeapon() && sen->HasPrimaryWeapon()` -
+//a pistol short-circuits it. The bare `item` give path (Sentient::giveItem, sentient.cpp:1280) does not
+//consult that guard at all and posts EV_Weapon_GiveStartingAmmo for a fresh weapon, so the pistol
+//arrives loaded. Gate is now "2+ primaries OR a sidearm in the kit".
 //=========================================================================
 coop_backfillPrimaries local.player local.kit:{
 //=========================================================================
@@ -1290,18 +1317,23 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	if (local.kit == NIL){ end }
 	if (local.player == NULL){ end }
 
-	//count primaries first - only the multi-primary case needs the fix (avoids per-spawn gametype churn)
+	//count primaries AND sidearms first - a kit with one primary and no pistol needs nothing re-issued,
+	//so it still incurs no gametype churn (bug-897 v2's original reason for counting).
 	local.primaries = 0
+	local.sidearms  = 0
 	for (local.i = 1; local.i <= local.kit.size; local.i++){
 		local.w = local.kit[local.i]
 		if (local.w != NIL){
 			if (waitthread notStartGrenade local.w){
 				local.cls = waitthread getAmmoType local.w
 				if (waitthread coop_isPrimaryClass local.cls){ local.primaries++ }
+				if (local.cls == "pistol"){ local.sidearms++ }
 			}
 		}
 	}
-	if (local.primaries < 2){ end }			//single primary: the engine keeps it, nothing to backfill
+	//[user 07-28] bug-1204: a lone sidearm is reason enough to run - the picked handgun is the exact
+	//thing that used to fall through every give path.
+	if (local.primaries < 2 && local.sidearms < 1){ end }
 
 	//let the pickup-based give (giveInventory triggereffect) settle before re-issuing
 	waitframe
@@ -1344,23 +1376,34 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	}
 
 	local.n = 0
+	local.sn = 0
 	waitthread coop_mod/main.scr::changeGameType 0 0
 	for (local.i = 1; local.i <= local.kit.size; local.i++){
 		local.w = local.kit[local.i]
 		if (local.w != NIL){
 			if (waitthread notStartGrenade local.w){
 				local.cls = waitthread getAmmoType local.w
-				if (waitthread coop_isPrimaryClass local.cls){
+				local.isPrim = 0
+				local.isSide = 0
+				if (waitthread coop_isPrimaryClass local.cls){ local.isPrim = 1 }
+				if (local.cls == "pistol"){ local.isSide = 1 }
+				if (local.isPrim || local.isSide){
 					local.player item local.w
 					thread addWeaponToInventory local.player local.w	//[user 07-19] bug-912: the bare-item backfill bypasses pickup registration, so the 2nd primary never entered coop_inventoryWeapons and every revive re-give (which reads that registry) dropped it. Register here; addWeaponToInventory is idempotent.
-					local.n++
-					println ( "^~^~^ KITBACKFILL give " + local.w + " to " + local.player.netname )
+					if (local.isSide){
+						local.sn++
+						//[user 07-28] bug-1204: machine-parseable proof the picked handgun reached the player.
+						println ( "^~^~^ LOADOUTPISTOL give " + local.w + " to " + local.player.netname )
+					}else{
+						local.n++
+						println ( "^~^~^ KITBACKFILL give " + local.w + " to " + local.player.netname )
+					}
 				}
 			}
 		}
 	}
 	waitthread coop_mod/main.scr::changeGameType 2 0
-	println ( "^~^~^ KITBACKFILL done player=" + local.player.netname + " primaries=" + local.n )
+	println ( "^~^~^ KITBACKFILL done player=" + local.player.netname + " primaries=" + local.n + " sidearms=" + local.sn )
 }end
 
 //[user 07-19] bug-897 v2: the engine's "primary" weapon classes (subject to the one-primary pickup
@@ -1377,6 +1420,35 @@ coop_isPrimaryClass local.class:{
 			end(game.true)
 	}
 }end(game.false)
+
+//[user 07-28] bug-1204 SIDEARM RESTORE: re-issue the player's ARMORY-PICKED handgun (per-player flag
+//coop_loSlot3, set by loadoutpick.scr::loadout_setBody). Used by the DBNO / medkit stand-up revive
+//chains, which re-give the REGISTERED inventory first and stop there (local.gave = 1) - so a pistol
+//that never made it into coop_inventoryWeapons was silently skipped and the revived player came back
+//with primaries only ("after I die in DBNO I lose my secondary").
+//SAFE BY ENGINE RULE: a pistol is WEAPON_CLASS_PISTOL, part of WEAPON_CLASS_SECONDARY
+//(bg_public.h:388), so Weapon::PickupWeapon's one-primary guard (weapon.cpp:3136, gated on
+//!IsSecondaryWeapon()) never rejects it, and the bare `item` give (Sentient::giveItem,
+//sentient.cpp:1280) skips that path entirely - on an already-held weapon it degrades to
+//Item::Add (no duplicate, no ammo-pool change), so calling this twice costs nothing.
+//local.noWrap 1 = the caller is ALREADY inside a changeGameType-0 give window (do not nest one).
+//=========================================================================
+coop_giveSidearmPick local.player local.noWrap:{
+//=========================================================================
+if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/coop_giveSidearmPick->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
+	if (local.player == NIL){ end }			//NIL != NULL in MOHAA - guard BOTH before touching .flags
+	if (local.player == NULL){ end }
+	if (level.gametype == 0){ end }			//SP: the map script owns the kit
+	if (level.coop_noWeapon){ end }			//papers-only / disguise lockout
+	if (level.coop_loadoutLocked == 1){ end }	//scripted-kit map - armory picks are not applied there
+	local.gun = local.player.flags["coop_loSlot3"]
+	if (local.gun == NIL || local.gun == ""){ end }
+	if (local.noWrap != 1){ waitthread coop_mod/main.scr::changeGameType 0 0 }
+	local.player item local.gun
+	thread addWeaponToInventory local.player local.gun	//register it, else the NEXT revive re-give drops it again (the bug-912 lesson)
+	if (local.noWrap != 1){ waitthread coop_mod/main.scr::changeGameType 2 0 }
+	println ( "^~^~^ LOADOUTPISTOL revive " + local.gun + " to " + local.player.netname )
+}end
 
 //spawns the inventory in
 //=========================================================================
@@ -1403,6 +1475,25 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		if (local.default){
 			//[310] armory picks: a player's own loadout (coop_mod/loadoutpick.scr) replaces the
 			//map default kit. Force-weapon maps (branch above) and locked maps keep priority.
+			//[user 08-02] LOADOUT-SOURCE DIAGNOSTIC. The player reported spawning with the MAP kit
+			//(t3l1 Soviet weapons) instead of their armory picks, while the log showed
+			//"Armory: your loadout has been applied" - i.e. the log and the observed result disagree.
+			//Print which branch actually wins, and why, so the next run settles it instead of guessing.
+			//[user 08-02] DIAGNOSTIC REMOVED - it was the bug, twice over, and this is the note so it
+			//is never reintroduced casually.
+			//  1st attempt: the println was wrapped across six lines with continuations starting with
+			//     '+'. MOHAA allows multi-line statements only when the OPERATOR ENDS the line, so the
+			//     whole FILE failed to compile ("Script 'coop_mod/itemhandler.scr' was not properly
+			//     loaded") - taking the entire loadout system with it.
+			//  2nd attempt: on one line, but it concatenated level.coop_loadoutLocked, which is NIL on
+			//     any map that never sets it. "string + none" throws at RUNTIME, and a script error
+			//     ABORTS THE THREAD - so spawnInventory died right here, one line before the armory
+			//     picks branch, and the player kept whatever the earlier pass had given them (the map
+			//     default kit). Both times the reported symptom was "I only have the map default
+			//     weapons", and both times the instrumentation caused it rather than revealing it.
+			//ANY future probe here must NIL-guard every term before concatenating, e.g. copy each
+			//value into a local and substitute a literal when it is NIL. Cheaper still: read the
+			//branch taken from behaviour, not from a println inside the hot path.
 			if (group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1){
 				//[user 07-19] bug-897: picks stay authoritative, but ALSO carry over any weapon the player
 				//picked up in-level (a 2nd primary etc.) that lives in coop_inventoryWeapons yet is not one
@@ -1422,6 +1513,7 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	//must survive EVERY loadout source - registered inventory, armory picks, and map default all
 	//passed through takeall without it. Registered via addMissionItemToEveryone; appended to a
 	//COPY of the array (appending in place would permanently grow the shared level/picks arrays).
+
 	if (level.coop_missionItems.size > 0){
 		local.combined[1] = NIL
 		for (local.mi = 1; local.mi <= local.weaponArray.size; local.mi++){
@@ -1462,6 +1554,10 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	//ammo: the bSameAmmo / no-ammo returns) - the refused pickup ENTITIES then linger at the player's
 	//spawn origin until the NEXT respawn (deletePreviousInvWeapons), visibly floating there. They are
 	//script-spawned pickups, not Drop()-path items, so g_droppeditemlife never cleans them.
+	//[user 07-28] bug-1204 CORRECTION to the paragraph above: on the ARMORY-PICKS path the pickups were
+	//not being "refused" at all - giveInventory's triggereffect was running on a NULL listener and never
+	//touched them (see the waitthread note in giveWeaponLoadout), which is why the whole kit floated.
+	//The sweep is still correct for genuinely refused items (already-owned gear from the reissue path).
 	local.spawnedPickups[1] = NIL
 	local.spawnedNum = 0
 	for (local.i = local.weaponArray.size; local.i > 0; local.i--){ 	//do the spawning
@@ -1472,6 +1568,11 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		local.spawnedNum++
 		local.spawnedPickups[local.spawnedNum] = local.weapon
 	}
+	//[user 07-28] bug-1204: publish the real count so giveWeaponLoadout / giveInventory only touch
+	//$(group.invTargetname) when it can actually resolve. Machine-parseable so a playtest can prove
+	//the kit reached the world at all (ents=0 or a missing line = spawnInventory bailed early).
+	group.coop_kitEntN = local.spawnedNum
+	println ( "^~^~^ KITSPAWN player=" + group.player.netname + " ents=" + local.spawnedNum )
 	thread coop_cleanupSpawnedPickups local.spawnedPickups
 }end
 
@@ -1519,6 +1620,19 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		if( local.w != NIL ){
 			if( waitthread notStartGrenade local.w ){
 				local.skip = 0
+				//[user 08-02] NEVER carry the MAP DEFAULT kit across into a picks loadout.
+				//This merge exists to preserve weapons the player FOUND in the level (bug-897).
+				//It cannot otherwise tell those apart from the weapons the map default handed
+				//them at spawn, so the map kit rode in as "carry" and the player ended up with
+				//their armory picks AND the map kit - reported on t3l1 as "I get my loadout now
+				//but it also gives me the default map weapons too (ppsh, etc)". The class dedup
+				//below does not catch it reliably, because the mod's extended weapons report a
+				//different ammo class than their retail equivalents (xw_thompson50 vs ppsh).
+				//Anything present in level.coop_weaponLoadout was issued by the default path,
+				//not found in the world, so it is excluded here by name.
+				for( local.k = 1; local.k <= level.coop_weaponLoadout.size; local.k++ ){
+					if( level.coop_weaponLoadout[local.k] == local.w ){ local.skip = 1 }
+				}
 				for( local.j = 1; local.j <= local.out.size; local.j++ ){
 					if( local.out[local.j] == local.w ){ local.skip = 1 }
 				}
@@ -1548,7 +1662,15 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	local.threadName = "coop_mod/itemhandler.scr::giveInventory"
 	
 	waitthread coop_mod/main.scr::changeGameType 0 0
-	group.weapons triggereffect group.player
+	//[user 07-28] bug-1204: THIS is the give. Re-resolve the kit entities here rather than trusting the
+	//snapshot giveWeaponLoadout took - changeGameType above can wait several frames when another give
+	//holds the lock, and that stale snapshot was exactly what used to be NULL. Guarded on the spawn
+	//count so an empty kit can never hit a NULL listener again.
+	if (group.coop_kitEntN > 0){
+		group.weapons = $(group.invTargetname)
+		group.weapons triggereffect group.player
+		println ( "^~^~^ KITGIVE player=" + group.player.netname + " ents=" + group.coop_kitEntN )
+	}
 	for (local.i = 1; local.i <= level.coop_ammoLoadout.size; local.i++){
 		//[HZM coop 2026-07-22] skip ammo types with no configured loadout amount:
 		//level.coop_ammoLoadout[<type>] reads NIL for an unconfigured class and the
@@ -2512,6 +2634,13 @@ coop_ammoSnapshotLoop:{
 				self.flags[local.key] = self getammo local.type
 				local.i++
 			}
+			//[user 08-02] IDLE-SPECTATE RESTORE: also snapshot the non-ammo state, because
+			//Player::Spectator() destroys ALL of it in the engine before any script sees the
+			//transition (it sets health = max_health and calls FreeInventory()). Snapshotting
+			//here is the only way to have the values later.
+			self.flags["coop_hpSaved"]      = self.health
+			self.flags["coop_medkitsSaved"] = self.flags["coop_medkits"]
+			self.flags["coop_coverSaved"]   = self.flags["coop_cover_placements"]
 			self.flags["coop_ammoSaved_valid"] = 1
 		}
 		wait 0.5
@@ -2528,8 +2657,14 @@ coop_ammoSnapshotLoop:{
 //=========================================================================
 coop_ammoRestore:{
 //=========================================================================
-	if( getcvar( "coop_exactAmmo" ) == "0" ){ end }
-	if( self.flags["coop_ammoSaved_valid"] != 1 ){ end }
+	//[user 2026-08-02] bug-1293 - CLEAR THE GUARD ON EVERY EXIT. The revive paths now raise
+	//coop_ammoRestorePending BEFORE their takeall (so a snapshot tick cannot save the zeroed pools),
+	//which means this function no longer owns the only place it is set - and both early exits below
+	//used to return WITHOUT clearing it. Left set, the snapshot loop in coop_ammoSnapshot is gated
+	//off permanently and the player's ammo is never saved again for the rest of the map. Clear first,
+	//then re-raise for the duration of the restore itself.
+	if( getcvar( "coop_exactAmmo" ) == "0" ){ self.flags["coop_ammoRestorePending"] = NIL; end }
+	if( self.flags["coop_ammoSaved_valid"] != 1 ){ self.flags["coop_ammoRestorePending"] = NIL; end }
 	self.flags["coop_ammoRestorePending"] = 1	//[user 07-19] bug-913: block snapshot ticks until the restore lands
 
 	//let the async loadout-give finish setting default ammo first

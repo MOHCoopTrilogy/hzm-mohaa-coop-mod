@@ -1,13 +1,27 @@
 //[200] Smithy - modified original file. Engine calls this every time an actor feels pain
 start local.attacker local.damage local.inflictor local.position local.direction local.normal local.knockback local.dflags local.meansofdeath local.location:
 
-	if (self.flags["coop_painThread"]){
-		println "*=*=*=*=*=*=*=*=*=*global/pain.scr: killing thread for " self " as previous has not terminated yet...*=*=*=*=*=*=*=*=*=*"
+	//[user 08-02] *** THIS GUARD PERMANENTLY DISABLED THE COOP PAIN HANDLER AFTER ONE HIT. ***
+	//It was a boolean latch: set here and NEVER CLEARED ANYWHERE. A repo-wide grep found exactly
+	//two references to coop_painThread in the whole mod - this test and the assignment below - so
+	//nothing ever reset it. The engine calls global/pain.scr::start on EVERY pain event, so:
+	//   hit 1 -> flag unset -> passes -> sets flag -> threads actorPainHandler
+	//   hit 2..N -> flag still set -> prints the "killing thread" line -> ends immediately
+	//i.e. actorPainHandler ran exactly ONCE per actor for the life of the map. Since that handler
+	//is the ONLY thing that reconciles the engine health buffer (initialisePainVars parks every
+	//managed actor on coop_aiBuffer and moves the real hp into coop_actorActualHealth), every
+	//actor became a permanent bullet sponge after its first hit. That is BOTH reported symptoms:
+	//"axis that will not die" and "the truck explosion doesn't kill the allies like in single
+	//player" - the 700-damage radiusdamage cannot chew through an unreconciled buffer.
+	//The guard's real purpose is to stop SAME-FRAME re-entrancy (two pain events in one frame
+	//double-threading the handler). A timestamp does that and cannot leak: it self-clears the
+	//moment level.time advances, so there is no state left to forget to reset.
+	if (self.flags["coop_painFrame"] != NIL && self.flags["coop_painFrame"] == level.time){
 		end
 	}
 
-	self.flags["coop_painThread"] = local
-	
+	self.flags["coop_painFrame"] = level.time
+
 	//[200] Smithy - add our own handler here
 	//[200] Smithy - added check to force stop pain handler: ["coop_actorStopPainHandler"]
 	if (level.gametype != 0 && !self.flags["coop_actorStopPainHandler"] && (self.flags["coop_actorHandledPain"] || level.coop_actorPainHandler)){

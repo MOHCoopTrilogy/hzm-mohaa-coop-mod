@@ -1,0 +1,74 @@
+// probe.scr
+//
+// [user 2026-08-03] bug-1311 - ON-DEMAND ENTITY PROBE, for the e2l1 "statue" enemy (takes no
+// damage, does not react) and any future can-not-explain entity. Driven entirely over rcon so
+// the tester never gets debug homework (docs/21-user-preferences.md):
+//
+//     rcon set coop_probe list        <- dump every actor-ish entity within 500u of any player
+//     rcon set coop_probe hurt        <- same dump, PLUS a hurt-1 test: health before/after.
+//                                        unchanged health on a live actor = damage-proof
+//                                        (nodamage or an immunity), which is the whole question
+//
+// Output goes to the server console -> qconsole.log with the machine-parseable ^~^~^ PROBE
+// prefix. Iteration recipe copied from developer.scr::showtouch (getentbyentnum loop). The
+// hurt test uses EV_Hurt, which per its own help text only lands "if the entity is damageable".
+//=========================================================================
+boot:{
+//=========================================================================
+	while(1){
+		local.cmd = getcvar("coop_probe")
+		if(local.cmd == "list" || local.cmd == "hurt"){
+			setcvar "coop_probe" "0"
+			waitthread coop_probe_dump local.cmd
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+coop_probe_dump local.cmd:{
+//=========================================================================
+	println("^~^~^ PROBE START mode=" + local.cmd + " map=" + getcvar("mapname"))
+	local.maxentities = int(getcvar("maxentities"))
+	local.found = 0
+
+	for(local.i = 0; local.i < local.maxentities; local.i++){
+		local.ent = getentbyentnum local.i
+
+		if(local.ent != NULL && local.ent.model != NIL && local.ent.health != NIL){
+			//skip the players themselves
+			local.isplayer = 0
+			for(local.p = 1; local.p <= $player.size; local.p++){
+				if($player[local.p] && local.ent.entnum == $player[local.p].entnum){
+					local.isplayer = 1
+				}
+			}
+
+			if(local.isplayer == 0 && waitthread coop_mod/replace.scr::withinDistanceOf local.ent 500){
+				local.found++
+				local.vec = local.ent.origin
+				local.msg = "^~^~^ PROBE ent=" + local.ent.entnum + " tn='" + local.ent.targetname + "' class=" + local.ent.classname
+				local.msg = local.msg + " model=" + local.ent.model + " hp=" + local.ent.health
+				local.msg = local.msg + " @ " + int(local.vec[0]) + " " + int(local.vec[1]) + " " + int(local.vec[2])
+				println(local.msg)
+
+				if(local.cmd == "hurt" && local.ent.health > 0){
+					local.before = local.ent.health
+					local.ent hurt 1
+					waitframe
+					if(local.ent != NULL && local.ent != NIL){
+						if(local.ent.health >= local.before){
+							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: NO DAMAGE TAKEN (hp " + local.before + " -> " + local.ent.health + ") <-- damage-proof")
+						}else{
+							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: damage ok (hp " + local.before + " -> " + local.ent.health + ")")
+						}
+					}else{
+						println("^~^~^ PROBE HURT-1 RESULT: entity died/removed from 1 damage")
+					}
+				}
+			}
+		}
+	}
+
+	println("^~^~^ PROBE END found=" + local.found)
+}end

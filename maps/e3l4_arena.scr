@@ -1,0 +1,532 @@
+//=========================================================================
+// HOLDOUT ARENA - MONTE BATTAGLIA (map name e3l4_arena)
+//
+// NAMED e3l4_arena, NOT ho_battaglia, and the prefix is load-bearing: every sound alias carries a
+// maps "m e t dm obj train" filter, and a map whose name matches none of those tokens loads
+// almost NO sounds - the first build was called ho_battaglia and had no footsteps and no
+// ambience at all ("coop_amb_forest_night needs an alias in ubersound.scr"). Starting with 'e'
+// matches the same token every other Breakthrough map uses.          [user 2026-08-04] bug-1385
+//
+// A DEDICATED arena map, modelled on the lobby maps (co_lobby1..8): its own name, its own script,
+// its own save files. The geometry is a copy of e3l4's BSP shipped as loose files
+// (maintt/maps/e3l4_arena.bsp / _sml.bsp / .pth) rather than through build.ps1, so the 32 MB
+// never enters the code pk3 that repacks on every deploy.
+//
+// WHY A SEPARATE MAP AT ALL
+//   e3l4 is a campaign mission. While the arena shared its name, every arena save was keyed to
+//   "e3l4" - so a normal campaign run loaded 176 invisible barriers and 109 props and deleted the
+//   doors the arena had removed (bug-1384). That was patched with a coop_buildmap gate, but a gate
+//   is a promise you have to keep re-making. A separate map name makes the collision impossible:
+//   walls_e3l4_arena.dat simply is not walls_e3l4.dat.
+//
+// NO CAMPAIGN RUNS HERE
+//   None of e3l4's objective chain, bunkers, jeep sequence, castle or tower is threaded. The level
+//   is terrain plus its static entities, and the holdout director supplies all the enemies.
+//
+// FIVE BAKED SCRIPT REFERENCES survive inside the copied BSP - two door-lock triggers, the chapel
+// bong and two battle-zone ambient triggers, all pointing at maps/e3l4/*.scr. They are trigger_use
+// entities, so they are inert until touched; delete any that misbehave with the BACKSPACE tool.
+//=========================================================================
+main:
+{
+	level.coop_aaMap = 0
+	level.coop_btMap = 1
+	waitthread coop_mod/main.scr::main		//HZM coop - MUST be first, no waits before it
+
+	//ARENA IDENTITY. Read by wallgun/props/weather/ambience instead of the old coop_buildmap cvar,
+	//so arena behaviour follows the MAP rather than a setting the player has to remember to unset.
+	level.coop_arenaMap = 1
+
+	//No precipitation: rain leaks through the roofs of the interiors an arena gets built in, because
+	//cg_nature's per-drop SURF_SKY gate sees sky above them (bug-1383). coop_arenaAmb picks the bed
+	//that replaces the rain - wind | country | forest_night | night_calm | surf.
+	level.coop_weatherTheme = "none"
+
+	//WORLD SETUP. These Init* threads are what put the level into its correct pre-mission state -
+	//they hide the destroyed/late-mission variants, lock doors, and ai_off every campaign actor. The
+	//first build of this script threaded NONE of them, so the map rendered in its raw BSP state
+	//(user: "spawns me in a random place looking at the castle that is destroyed at the end").
+	//They are pure setup: hide / lock / ai_off, no sequence is started and no objective runs.
+	//Turning the campaign AI off is exactly what an arena wants - holdout supplies its own enemies.
+
+	level waittill prespawn
+
+	//[user 2026-08-05] bug-1391 - these run AFTER prespawn. Threading them earlier produced
+	//"Script Error : Cannot lock door before level prespawn" x5 from InitCastle's frontdoor
+	//locks - the engine refuses door state changes until prespawn has passed.
+	thread maps/e3l4/Bunker1.scr::InitBunker1
+	thread maps/e3l4/Bunker2.scr::InitBunker2
+	thread maps/e3l4/Bunker3.scr::InitBunker3
+	thread maps/e3l4/Bunker4.scr::InitBunker4
+	//[user 2026-08-05] bug-1426 - Tunnel.scr::Tunnel is NOT threaded. It does no world
+	//setup at all - it only arms SP watcher threads: TunnelAutoSave (touch trigger -> SP
+	//autosave + the campaign tunnel music the user heard leak in), STG/shotgun pickups
+	//($player item on the array) and fake-explosion watchers ($player waittill sounddone
+	//on the array). The track itself was promoted to the holdout wave theme instead
+	//(holdout.scr::holdout_music). arena_muteCampaign below removes the orphaned props.
+	thread maps/e3l4/Castle.scr::InitCastle
+	thread maps/e3l4/Tower.scr::InitTower
+	thread maps/e3l4/Escape.scr::InitEscape
+	thread maps/e3l4/Outro.scr::InitOutro
+	thread maps/e3l4/CastleAmbient.scr::InitCastleAmbient
+
+	level waittill spawn
+
+	//SPAWN AT THE ARENA, not wherever the BSP's default player start happens to be. If a checkpoint
+	//has been authored, put the squad on it and RE-PIN respawns there (the 1) so dying does not throw
+	//anyone back across the map - the same call holdout_run uses when it advances a checkpoint.
+	thread ho_arena_spawn
+	thread arena_clearActors
+	thread arena_muteCampaign
+	thread arena_unlockDoors
+	thread arena_spawnSounds
+	thread arena_curtain
+	thread arena_clearGateClips
+}end
+
+//=========================================================================
+// GATE CLIP BRUSHES.                                   [user 2026-08-05] bug-1405
+// Deleting a gate leaves an invisible wall behind, because the gate is TWO things: the visible
+// func_rotatingdoor pair, and a separate player-clip brush entity that stops you walking through
+// while the door is shut. In the campaign, Bunker2.scr:416 removes that clip
+// ($clipB2Gate remove) at the moment the gate opens - a beat inside the objective chain, which
+// the arena deliberately never runs. So the doors go and the clip stays.
+//
+// clipB2Gate is a script_object at (-4368 3432 1176), 151u from the jeepgate2 leaves - and Point
+// Baker sits ~500u away, so it is squarely inside the new outpost.
+//
+// Guarded on BOTH NULL and NIL: a targetname that matches nothing yields NIL, not NULL, and only
+// checking one of them is a known way to throw here (see mohaa_script_notes).
+//=========================================================================
+arena_clearGateClips:{
+	wait 1
+	if( $clipB2Gate != NULL && $clipB2Gate != NIL ){
+		$clipB2Gate remove
+		println( "^~^~^ E3L4_ARENA: removed clipB2Gate (invisible wall behind jeepgate2)" )
+	}
+	else{
+		println( "^~^~^ E3L4_ARENA: clipB2Gate not present" )
+	}
+}end
+
+//=========================================================================
+// DEPLOY CURTAIN.                                      [user 2026-08-05] bug-1401
+// Black the screen until the player fire-clicks to deploy.
+//
+// Correction to what I told the user earlier: I said coop has no black screen and that the free
+// camera is just MOHAA's native spectator. The spectator part is right - player.scr:858 gates the
+// deploy on primaryfireheld and nothing else - but the OBSERVED difference is real. A campaign map
+// puts the waiting spectator somewhere unremarkable; e3l4_arena has no MP spawn, so the engine
+// falls back to the intermission camera and you sit over the burning castle, free to fly around.
+// So rather than chase where the camera sits, cover it: with the screen black it does not matter
+// where the camera is or that it can drift, and the load-in reads the way the host expects.
+//
+// Slots 95/96. NOT 88-90 as the slot map claims are free - fogmode.scr actually holds 88-94, and
+// _research/hud_slot_map.md is out of date. A census of every ihuddraw call is the authority.
+// Draw pattern copied verbatim from challenges.scr:1746 (shader + virtualsize + align + rect +
+// color + alpha), which is the confirmed-working full-screen dim.
+//
+// TWO deliberate safety choices:
+//  * NO freezeplayer. bug-370: freezing before the deploy pinned PMF_FROZEN while the player was
+//    still in the spawn crouch and PM_CheckDuck never stood him up - a permanent crouch. The black
+//    screen already hides any camera drift, so the freeze buys nothing and risks that.
+//  * A HARD 25s failsafe per player. A curtain that fails to lift leaves someone blind with no way
+//    to diagnose it, which is far worse than seeing the castle. After 25s it drops for good.
+//=========================================================================
+arena_curtain:{
+	//let the client HUD initialise first - ihuddraw on a just-connected client throws
+	//"Failed execution" (player.scr:786-789 documents the same hazard).
+	wait 2
+
+	while( 1 ){
+		wait 0.2
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL ){
+				local.wants = 0
+				if( local.p.dmteam == "spectator" ){ local.wants = 1 }
+				//[user 2026-08-05] bug-1406 - ONLY on the initial join, never on a later spectator
+				//transition. The 15:38 log shows exactly why: the idle-spectate feature moved an
+				//AFK builder to spectator, this loop dutifully blacked their screen, and only the
+				//25s failsafe let them see again. Going idle must not blind you. coop_everActive is
+				//set once a player has spawned fully active (player.scr:790 uses it the same way),
+				//so it is the clean "has deployed before" test.
+				if( local.p.flags["coop_everActive"] == 1 ){ local.wants = 0 }
+				if( local.p.flags["coop_arenaCurtainOff"] == 1 ){ local.wants = 0 }
+
+				if( local.wants == 1 && local.p.flags["coop_arenaCurtain"] != 1 ){
+					local.p.flags["coop_arenaCurtain"] = 1
+					local.p.flags["coop_arenaCurtainT"] = level.time
+					ihuddraw_shader      local.p 95 "textures/mohmenu/black.tga"
+					ihuddraw_virtualsize local.p 95 1
+					ihuddraw_align       local.p 95 left top
+					ihuddraw_rect        local.p 95 0 0 640 480
+					ihuddraw_color       local.p 95 0 0 0
+					ihuddraw_alpha       local.p 95 1
+
+					ihuddraw_virtualsize local.p 96 1
+					ihuddraw_align       local.p 96 left top
+					ihuddraw_font        local.p 96 "facfont-20"
+					ihuddraw_color       local.p 96 1 0.92 0.72
+					ihuddraw_rect        local.p 96 252 252 0 0
+					ihuddraw_string      local.p 96 "CLICK TO DEPLOY"
+					ihuddraw_alpha       local.p 96 1
+					println( "^~^~^ E3L4_ARENA curtain UP for " + local.p.netname )
+				}
+				else if( local.wants == 1 ){
+					local.held = level.time - local.p.flags["coop_arenaCurtainT"]
+					if( local.held > 25 ){
+						local.p.flags["coop_arenaCurtainOff"] = 1
+						waitthread arena_curtainDown local.p
+						println( "^~^~^ E3L4_ARENA curtain FAILSAFE - 25s, dropping" )
+					}
+				}
+				else if( local.p.flags["coop_arenaCurtain"] == 1 ){
+					waitthread arena_curtainDown local.p
+					println( "^~^~^ E3L4_ARENA curtain DOWN - deployed" )
+				}
+			}
+			local.i++
+		}
+	}
+}end
+
+//=========================================================================
+arena_curtainDown local.p:{
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_arenaCurtain"] = NIL
+	ihuddraw_alpha  local.p 95 0
+	ihuddraw_alpha  local.p 96 0
+	ihuddraw_string local.p 96 ""
+}end
+
+//=========================================================================
+// AMBIENT SOUND BED.                                   [user 2026-08-05] bug-1398
+// Baked from coop_mod/save/snd_e3l4_arena.dat - 11 emitters the host placed in SOUND build mode.
+//
+// This bake is REQUIRED, not a convenience. snd_<map>.dat is written as paste-ready script text and
+// nothing in the mod ever reads it back: place-and-save leaves the emitters alive only for the rest
+// of that session, and the next map load comes up silent. Same recipe as the confirmed-working
+// maps/co_lobby4.scr:59 (spawnLobby4Objects), which was itself baked from snd_m1l3c.dat.
+//
+// 'fx/dummy.tik' resolves to models/fx/dummy.tik in Pak0 - a real but empty model, so the emitter is
+// a position with no mesh. That is why nothing is visible at these points; the speaker box the host
+// sees while authoring is the SOUND-mode aim ghost (buildmode_sounds.scr:154), never a placed entity.
+//
+// Weather is off for the arena (level.coop_weatherTheme "none"), so this bed is what replaces the
+// rain: wind in the treeline, a light breeze in the low ground, crickets through the bunker area.
+// After placing MORE sounds in build mode, re-bake this label from the .dat - it will not reload.
+//=========================================================================
+arena_spawnSounds:{
+	//[user 2026-08-05] REBAKED from save/snd_e3l4_arena.dat - 24 emitters: 22 loops (crickets,
+	//wind, small fires) + 2 distant-artillery oneshots. The dat is authoritative;
+	//regenerate this whole label from it after every sound-placement session.
+	// coop_build SOUND #1 coop_snd_wind_trees  (Wind in Trees, loop vol 0.400 min 528)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -418.705 -4278.151 872.112 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_trees" 0.400 528
+
+	// coop_build SOUND #2 coop_snd_wind_trees  (Wind in Trees, loop vol 0.300 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -1015.213 -6118.792 836.885 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_trees" 0.300 400
+
+	// coop_build SOUND #3 coop_snd_wind_trees  (Wind in Trees, loop vol 0.300 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 1375.926 -5266.249 860.869 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_trees" 0.300 400
+
+	// coop_build SOUND #4 coop_snd_wind_weak  (Light Breeze, loop vol 1.000 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 439.195 -7048.231 284.876 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 1.000 400
+
+	// coop_build SOUND #5 coop_amb_night_calm  (Calm Night, loop vol 0.300 min 300)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 1396.537 -5283.481 684.061 )
+	local.m notsolid
+	local.m loopsound "coop_amb_night_calm" 0.300 300
+
+	// coop_build SOUND #6 coop_snd_crickets  (Crickets, loop vol 0.300 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 1177.092 -6898.583 160.643 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.300 200
+
+	// coop_build SOUND #7 coop_snd_crickets  (Crickets, loop vol 0.300 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 125.618 -6158.801 326.890 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.300 200
+
+	// coop_build SOUND #8 coop_snd_crickets  (Crickets, loop vol 0.300 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( 1893.800 -5695.659 364.840 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.300 200
+
+	// coop_build SOUND #9 coop_snd_crickets  (Crickets, loop vol 0.300 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -1266.514 -5172.784 357.810 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.300 200
+
+	// coop_build SOUND #10 coop_snd_crickets  (Crickets, loop vol 0.300 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -437.211 -6170.724 335.266 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.300 200
+
+	// coop_build SOUND #11 coop_snd_crickets  (Crickets, loop vol 0.800 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -62.772 -6072.471 675.859 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 0.800 200
+
+	// coop_build SOUND #1 coop_snd_fire_small  (Small Fire, loop vol 0.200 min 160)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4960.048 3347.871 827.693 )
+	local.m notsolid
+	local.m loopsound "coop_snd_fire_small" 0.200 160
+
+	// coop_build SOUND #2 coop_snd_fire_small  (Small Fire, loop vol 0.200 min 160)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4819.119 3824.704 1030.185 )
+	local.m notsolid
+	local.m loopsound "coop_snd_fire_small" 0.200 160
+
+	// coop_build SOUND #3 coop_snd_crickets  (Crickets, loop vol 1.000 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -5065.005 3061.499 732.941 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 1.000 200
+
+	// coop_build SOUND #4 coop_snd_crickets  (Crickets, loop vol 1.000 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -5211.963 4633.153 743.431 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 1.000 200
+
+	// coop_build SOUND #5 coop_snd_crickets  (Crickets, loop vol 1.000 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -3995.729 4395.493 1087.583 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 1.000 200
+
+	// coop_build SOUND #6 coop_snd_crickets  (Crickets, loop vol 1.000 min 200)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -3938.675 3795.963 1115.270 )
+	local.m notsolid
+	local.m loopsound "coop_snd_crickets" 1.000 200
+
+	// coop_build SOUND #7 coop_snd_wind_weak  (Light Breeze, loop vol 0.200 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4041.810 3565.809 1154.666 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 0.200 400
+
+	// coop_build SOUND #8 coop_snd_wind_weak  (Light Breeze, loop vol 0.200 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4911.875 4081.609 877.234 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 0.200 400
+
+	// coop_build SOUND #9 coop_snd_wind_weak  (Light Breeze, loop vol 0.200 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4000.870 2747.778 961.653 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 0.200 400
+
+	// coop_build SOUND #10 coop_snd_wind_weak  (Light Breeze, loop vol 0.200 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4992.125 3649.744 852.504 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 0.200 400
+
+	// coop_build SOUND #11 coop_snd_wind_weak  (Light Breeze, loop vol 0.200 min 400)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4048.359 3660.831 1138.213 )
+	local.m notsolid
+	local.m loopsound "coop_snd_wind_weak" 0.200 400
+
+	// coop_build SOUND #12 coop_amb_artillery1  (Distant Artillery, oneshot ~15-30s)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -6441.162 3652.867 668.879 )
+	local.m notsolid
+	local.m.coop_sndAlias = "coop_amb_artillery1"
+	local.m.coop_sndEvery = 15
+	local.m thread coop_mod/buildmode_sounds.scr::coop_snd_oneshotLoop
+
+	// coop_build SOUND #13 coop_amb_artillery1  (Distant Artillery, oneshot ~15-30s)
+	local.m = spawn script_model
+	local.m model "fx/dummy.tik"
+	local.m.origin = ( -4443.344 6166.043 761.182 )
+	local.m notsolid
+	local.m.coop_sndAlias = "coop_amb_artillery1"
+	local.m.coop_sndEvery = 15
+	local.m thread coop_mod/buildmode_sounds.scr::coop_snd_oneshotLoop
+
+	println( "^~^~^ E3L4_ARENA: 24 ambient emitters spawned" )
+}end
+
+//=========================================================================
+ho_arena_spawn:
+//=========================================================================
+{
+	wait 1
+	if( level.coop_ho_arenaN == NIL || level.coop_ho_arenaN < 1 ){
+		println( "^~^~^ E3L4_ARENA: no checkpoint authored yet - spawning at the map default" )
+		end
+	}
+	//[user 2026-08-05] bug-1400 - PIN the spawn slots; do NOT teleport anyone. Requested: the arena
+	//load-in should behave exactly like coop does today.
+	//
+	//This used to call main.scr::playersWarpto, whose placement loop (main.scr:619-627) walks EVERY
+	//$player and does 'origin' + 'droptofloor' with no spectator check. One second after map start
+	//most players are still spectators who have not pressed fire yet, so it dragged their SPECTATOR
+	//camera to the checkpoint and dropped it there - the free-floating view the host reported. No
+	//coop campaign map warps at map start: you stay a spectator until the fire-click
+	//(player.scr:858), then manageAliveSpawning -> playerPlaceAtSpawn places you from spawnlocations.
+	//
+	//So keep only the half that mattered - playersWarpto's setSpawn branch (main.scr:609-617) - and
+	//let the stock coop path do the placing. Pinning is still required because the spawnlocations
+	//label is hardcoded to the ORIGINAL checkpoint; re-authoring one with F5 must move the spawn.
+	//[bug-1389] coop_ho_ang is a float yaw, so build the vector from a plain local first.
+	local.yaw = level.coop_ho_ang[1]
+	local.ang = ( 0 local.yaw 0 )
+	local.pos = level.coop_ho_pos[1]
+	for( local.i = 1; local.i <= 8; local.i++ ){
+		level.flags["coop_spawn"+local.i+"angles"] = ( local.ang )
+		level.flags["coop_spawn"+local.i+"origin"] = ( local.pos )
+	}
+	println( "^~^~^ E3L4_ARENA: 8 spawn slots pinned to checkpoint 1 @ " + local.pos )
+	println( "^~^~^ E3L4_ARENA arena ready - author with arena_tools.cfg" )
+}end
+
+//=========================================================================
+// REMOVE EVERY CAMPAIGN ACTOR.                        [user 2026-08-05] bug-1394
+// The Init* threads above ai_off/hide the actors each SECTION knows about, but plenty of allied and
+// axis AI are spawned by the map itself and simply stand around - the user reported them still
+// standing there after the Init sweep. An arena wants an empty stage - the holdout director supplies
+// enemies - so sweep the entity table and delete every Actor.
+//
+// getentbyentnum + .classname is the mod's established runtime scan (coop_mod/wounded.scr:262).
+// getentarray is NOT used: it misses whole entity families in this engine (maptest_waypoints.scr:36).
+//
+// Removing rather than hiding is deliberate: every actor deleted is an entity slot back, and the
+// entity pool is the holdout director's primary risk (bugs 914-927 were pool exhaustion).
+// Runs AFTER the Init* threads so nothing re-shows a corpse we already dropped.
+//=========================================================================
+arena_clearActors:{
+	wait 2
+	local.maxent = int( getcvar "maxentities" )
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+
+	local.gone = 0
+	local.ei = 0
+	while( local.ei < local.maxent ){
+		local.e = getentbyentnum local.ei
+		if( local.e != NULL && local.e != NIL ){
+			if( local.e.classname == "Actor" ){
+				local.e ai_off
+				local.e notsolid
+				local.e hide
+				local.e remove
+				local.gone++
+			}
+		}
+		local.ei++
+	}
+	println( "^~^~^ E3L4_ARENA: removed " + local.gone + " campaign actor(s) - stage is clear" )
+}end
+
+//=========================================================================
+// UNLOCK EVERY DOOR.                                  [user 2026-08-05] bug-1396
+// The Init* threads this script runs LOCK doors for the campaign - Castle.scr locks frontdoor2,
+// librarybackdoor and armoireroomdoor, Bunker2 locks jeepgate2 - because the mission gates progress
+// on them. In an arena that is just an obstacle: "can we at least make the door open/close?".
+//
+// Unlocking beats deleting. A removed door leaves a hole and cost a crash to discover; an unlocked
+// one still reads as architecture and you can shut it behind you during a wave.
+//
+// Runtime classnames come from fgame/doors.cpp: SlidingDoor "func_door", RotatingDoor
+// "func_rotatingdoor", ScriptDoor "script_door", base Door "NormalDoor". Scanned by entity number
+// because these are BRUSH entities and getentarray misses those (maptest_waypoints.scr:36).
+//=========================================================================
+arena_unlockDoors:{
+	wait 3
+	//[user 2026-08-05] bug-1396 - OFF BY DEFAULT, and it never could have fixed the door that
+	//prompted it. The BSP entity lump has 28 door/gate entities in the whole of e3l4; the nearest one
+	//to the arena checkpoint is 'jeepgate' at 1170u (removed), then nothing until 2843u. No entity in
+	//the map uses a door MODEL either. The .30cal-room door is therefore baked WORLD brushwork - which
+	//is exactly why BACKSPACE reported entity 2046 and why 'unlock' does nothing to it.
+	//Kept, because the Init* threads DO lock frontdoor2 / librarybackdoor / armoireroomdoor /
+	//jeepgate2, and an arena built in the castle later would be walled in by them.
+	//Enable then with:  seta coop_arenaUnlockDoors 1
+	if( int( getcvar "coop_arenaUnlockDoors" ) != 1 ){ end }
+
+	local.maxent = int( getcvar "maxentities" )
+	if( local.maxent <= 0 ){ local.maxent = 2048 }
+	//never touch the world / none slots - removing entity 2046 crashed the game once already (bug-1395)
+	local.top = local.maxent - 2
+
+	local.n = 0
+	local.ei = 1
+	while( local.ei < local.top ){
+		local.e = getentbyentnum local.ei
+		if( local.e != NULL && local.e != NIL ){
+			local.cn = local.e.classname
+			if( local.cn == "func_door" || local.cn == "func_rotatingdoor" || local.cn == "script_door" || local.cn == "NormalDoor" ){
+				local.e unlock
+				local.n++
+			}
+		}
+		local.ei++
+	}
+	println( "^~^~^ E3L4_ARENA: unlocked " + local.n + " door(s)" )
+}end
+
+//=========================================================================
+// CAMPAIGN LEFTOVER CLEANUP.                            [user 2026-08-05] bug-1426
+// With Tunnel.scr unthreaded its two weapon props have no pickup triggers armed, so they would
+// sit in the tunnel as dead scenery pretending to be pickups. Remove them.
+//=========================================================================
+arena_muteCampaign:
+{
+	if( $wpnTunnelSTG != NULL )
+	{
+		$wpnTunnelSTG remove
+	}
+	if( $wpnTunnelShotgun != NULL )
+	{
+		$wpnTunnelShotgun remove
+	}
+}end

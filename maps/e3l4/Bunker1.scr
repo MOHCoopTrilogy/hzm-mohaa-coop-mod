@@ -244,7 +244,10 @@ ObjectiveDeliverSuppliesBunker1:
 {
 	if (level.hackskipbunker1 == 1){		
 		waitthread PlayerGetOffJeepTurret
-		$player.origin = $bunker2deliverytrigger.origin		//MiaCosa @chrissstrahl
+		//[user 08-02] TRAPS T5: bare $player is an ARRAY with 2+ players and throws on cast.
+		for (local.tp = 1; local.tp <= $player.size; local.tp++){
+			if ($player[local.tp] != NULL){ $player[local.tp].origin = $bunker2deliverytrigger.origin }
+		}
 		end
 	}
 
@@ -281,8 +284,50 @@ ObjectiveDeliverSuppliesBunker1:
 
 	$startjeep setcollisionentity $jeepcollisionfull
 
-	while (level.gotSupplies < 2){
-		waitframe
+	//[user 2026-08-04] bug-1362 - SOFT-LOCK FAILSAFE. getSupplies is a long chain of
+	//'waittill movedone / turndone / animdone' plus a distance loop; if either actor cannot
+	//path to a crate, cannot turn, or its crate_* anim never reports done, gotSupplies never
+	//reaches 2 and the jeep NEVER leaves - the mission is unfinishable (user: 'the allied actor
+	//that gets out of the jeep to pick up the supplies cant complete what he needs to do').
+	//Retail could rely on a solo scripted path; coop adds players who body-block the route.
+	//After 45s we simply declare the supplies loaded and put the crew back in the jeep - the
+	//same failsafe shape used for the truck unload and the AB41 death (bugs 1315/1318).
+	local.wait = 0
+	while (level.gotSupplies < 2 && local.wait < 22){
+		wait 0.5
+		local.wait = local.wait + 0.5
+	}
+	if (level.gotSupplies < 2){
+		println( "^~^~^ E3L4 SUPPLY FAILSAFE: gotSupplies stuck at " + level.gotSupplies + " - forcing" )
+		//Kill the parked run thread BEFORE seating. Left alive, the stuck actor keeps re-issuing
+		//its runto after being seated and fights the recovery.
+		if ( level.e3l4_supplyThrD != NULL && level.e3l4_supplyThrD != NIL ){
+			level.e3l4_supplyThrD delete
+			level.e3l4_supplyThrD = NULL
+		}
+		//Kill the parked run thread BEFORE seating. Left alive, the stuck actor keeps re-issuing
+		//its runto after being seated and fights the recovery.
+		if ( level.e3l4_supplyThrP != NULL && level.e3l4_supplyThrP != NIL ){
+			level.e3l4_supplyThrP delete
+			level.e3l4_supplyThrP = NULL
+		}
+		//hide any crate a half-finished pickup left visible, so none float at the truck
+		local.hb = 1
+		while (local.hb <= $bunker1supplies.size){
+			$bunker1supplies[local.hb] hide
+			local.hb++
+		}
+		//[user 2026-08-04] bug-1366 - do NOT call DriverGetInJeep / PassengerGetInJeep here.
+		//Both OPEN with 'runto <enter tag>' + 'waittill movedone' (global/jeepanim.scr), which is
+		//the exact class of wait this failsafe exists to escape: the live log showed the passenger
+		//frozen at (1283 -6082 285) spamming "Path not found in Actor::MoveToPatrolCurrentNode"
+		//every 5s, so movedone never fired, the waitthread hung, gotSupplies=2 below never ran and
+		//the jeep never departed - the failsafe MOVED the soft-lock instead of removing it.
+		//Use only the TAIL of the vanilla routines (everything after the runto/walkto): seat the
+		//actor by origin + attach. Same recipe, zero movement, cannot block.
+		waitthread forceCrewIntoJeep $jeepdriver     "driver_enter"      "driver"     A_22_driver_idle
+		waitthread forceCrewIntoJeep $jeeppassenger  "passenger_enter"   "passenger0" A_31_GetIn_jeepidle
+		level.gotSupplies = 2
 	}
 
 	$jeeppassenger thread global/LoopAnim.scr::LoopUpperAnim A_34_Getin_jeepidle_danger
@@ -304,6 +349,94 @@ ObjectiveDeliverSuppliesBunker1:
 	waitthread deliverSupplies $jeepdriver $jeeppassenger
 	$jeeppassenger thread global/LoopAnim.scr::LoopUpperAnim A_34_Getin_jeepidle_danger
 	wait 1
+}end
+
+//=========================================================================
+//[user 2026-08-04] bug-1366. Seat one crewman in the jeep with NO movement and NO waits that can
+//hang. This is deliberately the tail of global/jeepanim.scr::DriverGetInJeep / PassengerGetInJeep,
+//copied verbatim from the point AFTER their runto/walkto pair - the vanilla recipe minus the walk.
+//It is only ever called from the supply failsafe, i.e. when an actor has already proven it cannot
+//path, so popping into the seat is correct: the alternative is an unfinishable mission. The
+//anim_noclip + 'waittill animdone' step is dropped too - anim_noclip only translates the origin,
+//which the explicit origin assignment already does, and any waittill here would reintroduce the
+//exact hang this exists to avoid.
+//=========================================================================
+//[user 2026-08-04] bug-1369. global/jeepanim.scr::PassengerGetInJeep CANNOT be used on this map.
+//Its first executable line is:
+//        local.dest = local.jeep gettagposition "passenger_enter0 1"
+//That tag exists on the Allied Assault jeep (models/vehicles/jeep/jeep.skd) but NOT on the willys
+//this map drives - $startjeep is vehicles/willys_playerturret.tik -> models/vehicles/willys/
+//baseframe.skd, whose tags are driver_enter / passenger_enter / passenger0..2 / *_seat.
+//Entity::GetTagPosition raises a ScriptError when the tag is missing (fgame/entity.cpp:5413), and a
+//ScriptError is UNCATCHABLE from script - so the very next line's 'if (!local.dest)' fallback is
+//dead code, and the thread is torn down before it issues a single command. That is the whole
+//driver/passenger asymmetry: DriverGetInJeep asks for "driver_enter", which the willys HAS.
+//This is a faithful copy of the vanilla routine with the correct tag, so the walk-in animation is
+//preserved (unlike forceCrewIntoJeep, which teleports and is only for the failsafe path).
+//NOTE: no 'waittill turndone' anywhere in here, deliberately - see bug-1368 at the box2 pickup.
+//'waittill movedone' IS safe even when the path fails: Actor::CheckUnregister (actor.cpp:7793)
+//unregisters MOVEDONE on parm.movefail.
+//=========================================================================
+passengerGetInWillys local.jeep local.passenger:
+//=========================================================================
+{
+	if (!local.passenger) end
+	if (!local.jeep) end
+
+	local.passenger holster
+	local.dest = local.jeep gettagposition "passenger_enter"
+
+	if (vector_length(local.passenger.origin - local.dest) > 70){
+		local.passenger.movedoneradius = 70
+		local.passenger runto local.dest
+		local.passenger waittill movedone
+	}
+	if (vector_length(local.passenger.origin - local.dest) > 20){
+		local.passenger.movedoneradius = 20
+		local.passenger walkto local.dest
+		local.passenger waittill movedone
+	}
+	local.passenger notsolid
+	local.passenger nodamage
+
+	local.passenger waitexec global/disable_ai.scr
+	local.passenger turnto NULL
+	local.passenger lookat NULL
+	local.passenger.origin = local.dest
+	local.passenger.angles = local.jeep.angles
+	local.passenger anim_noclip A_31_GetIn_jeep
+	local.passenger waittill animdone
+
+	local.passenger.angles = (0 0 0)
+	local.passenger attach local.jeep passenger0 1
+	local.passenger thread global/LoopAnim.scr::LoopAnim A_31_GetIn_jeepidle
+	local.passenger physics_off
+	println( "^~^~^ E3L4P " + local.passenger.targetname + " boarded (willys tag)" )
+}end
+
+//=========================================================================
+forceCrewIntoJeep local.actor local.entertag local.seattag local.idleanim:
+//=========================================================================
+{
+	if (!local.actor) end
+
+	local.actor thread global/LoopAnim.scr::LoopAnimStop
+	local.actor thread global/LoopAnim.scr::LoopUpperAnimStop
+
+	local.dest = $startjeep gettagposition local.entertag
+	if (!local.dest) local.dest = $startjeep.origin
+
+	local.actor notsolid
+	local.actor nodamage
+	local.actor waitexec global/disable_ai.scr
+	local.actor turnto NULL
+	local.actor lookat NULL
+	local.actor.origin = local.dest
+	local.actor.angles = (0 0 0)
+	local.actor attach $startjeep local.seattag 1
+	local.actor thread global/LoopAnim.scr::LoopAnim local.idleanim
+	local.actor physics_off
+	println( "^~^~^ E3L4 SUPPLY FAILSAFE: seated " + local.seattag + " at " + local.dest )
 }end
 
 //=========================================================================
@@ -356,9 +489,15 @@ JeepSteering2:
 doSupplyRunD:
 //=========================================================================
 {
+	//[user 2026-08-04] bug-1366 - publish this thread so the failsafe can DELETE it. 'local' is
+	//the running thread object; deleting it kills a thread parked on ANY waittill, which is the
+	//only recovery that works without knowing which of the 12 blocking calls below is stuck.
+	//Same mechanism global/LoopAnim.scr uses via .loop_upperanim_thread (see JeepIdle above).
+	level.e3l4_supplyThrD = local
 	waitthread global/jeepanim.scr::DriverGetOutJeep $startjeep self
 	self waitthread getSupplies 3 1 "spare_tire" // was dummy09
 	waitthread global/jeepanim.scr::DriverGetInJeep $startjeep self
+	level.e3l4_supplyThrD = NULL
 	level.gotSupplies++
 }end
 
@@ -366,9 +505,12 @@ doSupplyRunD:
 doSupplyRunP:
 //=========================================================================
 {
+	level.e3l4_supplyThrP = local	//[user 2026-08-04] bug-1366 - see doSupplyRunD
+	println( "^~^~^ E3L4P " + self.targetname + " P1-getout" )
 	waitthread global/jeepanim.scr::PassengerGetOutJeep $startjeep self
 	wait 1
 
+	println( "^~^~^ E3L4P " + self.targetname + " P2-supplies-start" )
 	self waitthread getSupplies 4 2 "spare_tire"
 
 	local.jeepback 	= -250 * (angles_toforward $startjeep.angles)
@@ -376,22 +518,33 @@ doSupplyRunP:
 	local.runto 	= $startjeep.origin + local.jeepback + local.jeepright
 	self runto local.runto
 
-	while (vector_length(self.origin - local.runto) > 30){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded; an unpathable 'runto' never converges here.
+	local.aq1 = 0
+	while (vector_length(self.origin - local.runto) > 30 && local.aq1 < 12){
+		wait 0.1
+		local.aq1 = local.aq1 + 0.1
 	}
+	if (local.aq1 >= 12){ println( "^~^~^ E3L4P reposition timed out - continuing" ) }
 
 	local.jeepback  = -250 * (angles_toforward $startjeep.angles)
 	local.jeepright =  200 * (angles_toleft $startjeep.angles)
 	local.runto 	= $startjeep.origin + local.jeepback + local.jeepright
 	self runto local.runto
 
-	while (vector_length(self.origin - local.runto) > 30){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded; an unpathable 'runto' never converges here.
+	local.aq2 = 0
+	while (vector_length(self.origin - local.runto) > 30 && local.aq2 < 12){
+		wait 0.1
+		local.aq2 = local.aq2 + 0.1
 	}
+	if (local.aq2 >= 12){ println( "^~^~^ E3L4P reposition timed out - continuing" ) }
 
-	waitthread global/jeepanim.scr::PassengerGetInJeep $startjeep self
+	println( "^~^~^ E3L4P " + self.targetname + " P4-getin" )
+	waitthread passengerGetInWillys $startjeep self	//[user 2026-08-04] bug-1369 - vanilla asks for a tag the willys lacks
 	wait 1
 
+	println( "^~^~^ E3L4P " + self.targetname + " P5-DONE" )
+	level.e3l4_supplyThrP = NULL
 	level.gotSupplies++
 }end
 
@@ -403,34 +556,58 @@ getSupplies local.box1 local.box2 local.deliveryPosName:
 	self.movedoneradius = 120
 	local.deliveryPos 	= $startjeep gettagposition local.deliveryPosName
 	
+	println( "^~^~^ E3L4P " + self.targetname + " A-runto-box1" )
 	self runto $bunker1supplies[local.box1]
+	println( "^~^~^ E3L4P " + self.targetname + " B-movedone-box1" )
 	self waittill movedone
 	self turnto $bunker1supplies[local.box1]
 	wait 0.5
 
 	//	self waittill turndone
 
+	println( "^~^~^ E3L4P " + self.targetname + " C-pickup1" )
 	self anim crate_pickup2
 	$bunker1supplies[local.box1] hide
 	self waittill animdone
 
+	println( "^~^~^ E3L4P " + self.targetname + " D-carry1" )
 	self turnto local.deliveryPos
 	self waittill turndone
 	self anim crate_walk
 
-	while (vector_length (self.origin - $startjeep.origin) > 150){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded. The carry is driven by the crate_walk anim's own
+	//motion; if the actor is body-blocked (coop players stand where retail had nobody) it never
+	//closes to 150 and spins forever. 15s is far longer than the real walk.
+	local.cw1 = 0
+	while (vector_length (self.origin - $startjeep.origin) > 150 && local.cw1 < 15){
+		wait 0.1
+		local.cw1 = local.cw1 + 0.1
 	}
+	if (local.cw1 >= 15){ println( "^~^~^ E3L4P " + self.targetname + " carry timed out - continuing" ) }
 
+	println( "^~^~^ E3L4P " + self.targetname + " E-putdown1" )
 	self anim crate_putdown2
 	self waittill animdone
 	self turnto NULL
 	wait .5
 	
+	println( "^~^~^ E3L4P " + self.targetname + " F-runto-box2" )
 	self runto $bunker1supplies[local.box2]
+	println( "^~^~^ E3L4P " + self.targetname + " G-movedone-box2" )
 	self waittill movedone
 	self turnto $bunker1supplies[local.box2]
-	self waittill turndone
+	//[user 2026-08-04] bug-1368 - THE HANG. Was 'self waittill turndone'.
+	//Unregister(STRING_TURNDONE) exists in exactly ONE place in the engine, actor.cpp:5032, inside
+	//Actor::IdleTurn - and IdleTurn is only ever called from Think_Anim (actor_anim.cpp:67) and
+	//Think_Idle (actor_idle.cpp:82/86). It is NEVER called from a runner think. A failed path leaves
+	//the actor pinned in THINK_RUNNER (actor.cpp:6469 returns without clearing m_patrolCurrentNode),
+	//so turndone can never fire and this line blocks forever - which is why the passenger froze at
+	//the crate while the driver, whose crates were reachable, sailed through.
+	//The fix is Ritual's own: they hit this at the box1 site 30 lines up and replaced turndone with
+	//a fixed wait (see the commented-out 'self waittill turndone' there) - and left this twin live.
+	//The two turndones that follow a crate_* anim are SAFE and stay: an anim puts the actor in
+	//THINK_ANIM, where IdleTurn does run.
+	wait 0.5
 	self anim crate_pickup2
 
 	$bunker1supplies[local.box2] hide
@@ -440,13 +617,20 @@ getSupplies local.box1 local.box2 local.deliveryPosName:
 	self waittill turndone
 	self anim crate_walk
 
-	while (vector_length (self.origin - $startjeep.origin) > 150){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded. The carry is driven by the crate_walk anim's own
+	//motion; if the actor is body-blocked (coop players stand where retail had nobody) it never
+	//closes to 150 and spins forever. 15s is far longer than the real walk.
+	local.cw2 = 0
+	while (vector_length (self.origin - $startjeep.origin) > 150 && local.cw2 < 15){
+		wait 0.1
+		local.cw2 = local.cw2 + 0.1
 	}
+	if (local.cw2 >= 15){ println( "^~^~^ E3L4P " + self.targetname + " carry timed out - continuing" ) }
 
 	self anim crate_putdown2
 	self waittill animdone
 	self turnto NULL
+	println( "^~^~^ E3L4P " + self.targetname + " Z-getSupplies-DONE" )
 	self.movedoneradius = local.moveradius
 }end
 
@@ -485,17 +669,58 @@ deliverSupplies:
 	thread Bunker1CrateDeliveryPassenger
 	wait 3
 
-	$startjeep setcollisionentity $jeepcollisionfull
+	//[user 2026-08-04] bug-1376 - do NOT restore the FULL hull here. The small $jeepcollision is
+	//set above precisely so the crew can walk their crate paths past the vehicle; putting the full
+	//hull back 3 seconds in re-solidifies the jeep while they are still carrying crates around it,
+	//and a crate carrier that walks into it treads in place forever (see the bounded loop in
+	//crateDeliver). Retail got away with the 3s because nothing slowed the crew down; coop players
+	//body-block them earlier in the sequence, so they are still en route. Restore the full hull
+	//AFTER both done-flags, just before the jeep needs to drive again.
 		
-	while ( level.driverdonedelivery == 0 || level.passengerdonedelivery == 0){
-		waitframe 	
+	//[user 2026-08-04] bug-1366 - SECOND SOFT-LOCK, same shape as the supply one above. Both
+	//Bunker1CrateDelivery* threads contain 'runto' + an UNBOUNDED 'while (vector_length(...) > 30)'
+	//distance loop, a 'waittill turndone', and a closing DriverGetInJeep/PassengerGetInJeep (which
+	//itself opens with runto + waittill movedone). An actor that cannot path never satisfies any of
+	//them, so its done-flag never sets and this loop spins forever with the players trapped at the
+	//bunker. Bound it, then force the crew back into the jeep by seating them directly.
+	local.dwait = 0
+	while (( level.driverdonedelivery == 0 || level.passengerdonedelivery == 0) && local.dwait < 30){
+		wait 0.5
+		local.dwait = local.dwait + 0.5
 	}
+	if ( level.driverdonedelivery == 0 || level.passengerdonedelivery == 0){
+		println( "^~^~^ E3L4 DELIVERY FAILSAFE: driver=" + level.driverdonedelivery + " passenger=" + level.passengerdonedelivery + " - forcing" )
+		//Kill the parked run thread BEFORE seating. Left alive, the stuck actor keeps re-issuing
+		//its runto after being seated and fights the recovery.
+		if ( level.e3l4_delThrD != NULL && level.e3l4_delThrD != NIL ){
+			level.e3l4_delThrD delete
+			level.e3l4_delThrD = NULL
+		}
+		//Kill the parked run thread BEFORE seating. Left alive, the stuck actor keeps re-issuing
+		//its runto after being seated and fights the recovery.
+		if ( level.e3l4_delThrP != NULL && level.e3l4_delThrP != NIL ){
+			level.e3l4_delThrP delete
+			level.e3l4_delThrP = NULL
+		}
+		if ( level.driverdonedelivery == 0){
+			waitthread forceCrewIntoJeep $jeepdriver    "driver_enter"    "driver"     A_22_driver_idle
+			level.driverdonedelivery = 1
+		}
+		if ( level.passengerdonedelivery == 0){
+			waitthread forceCrewIntoJeep $jeeppassenger "passenger_enter" "passenger0" A_31_GetIn_jeepidle
+			level.passengerdonedelivery = 1
+		}
+	}
+
+	//[bug-1376] both crew are done walking - safe to be a solid vehicle again before it drives
+	$startjeep setcollisionentity $jeepcollisionfull
 }end
 
 //=========================================================================
 Bunker1CrateDeliveryDriver:
 //=========================================================================
 {
+	level.e3l4_delThrD = local	//[user 2026-08-04] bug-1366 - killable by the delivery failsafe
 	waitthread global/jeepanim.scr::DriverGetOutJeep $startjeep $jeepdriver
 
 	local.jeeprear = -130 * (angles_toforward $startjeep.angles)
@@ -503,14 +728,25 @@ Bunker1CrateDeliveryDriver:
 	local.runto    = $startjeep.origin + local.jeeprear + local.jeepleft
 	$jeepdriver runto local.runto
 
-	while (vector_length($jeepdriver.origin - local.runto) > 30){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded. A failed 'runto' pins the actor in THINK_RUNNER, so
+	//BOTH of the original waits here are unbounded: this distance loop never converges, and the
+	//'waittill turndone' that followed could never fire (Unregister(STRING_TURNDONE) lives only
+	//in Actor::IdleTurn, which no runner think calls). Cap the approach and use the fixed wait
+	//Ritual themselves substituted at the box1 pickup instead of the turndone.
+	local.ap = 0
+	while (vector_length($jeepdriver.origin - local.runto) > 30 && local.ap < 12){
+		wait 0.1
+		local.ap = local.ap + 0.1
+	}
+	if (local.ap >= 12){
+		println( "^~^~^ E3L4P jeepdriver approach timed out - continuing" )
 	}
 
 	$jeepdriver turnto $startjeep
-	$jeepdriver waittill turndone
+	wait 0.5
 	$jeepdriver waitthread crateDeliver $cratepath2 $bunker1drivernode 0 "driver_enter"
 	waitthread global/jeepanim.scr::DriverGetInJeep $startjeep $jeepdriver 
+	level.e3l4_delThrD = NULL
 	level.driverdonedelivery = 1
 }end
 
@@ -518,6 +754,7 @@ Bunker1CrateDeliveryDriver:
 Bunker1CrateDeliveryPassenger:
 //=========================================================================
 {
+	level.e3l4_delThrP = local	//[user 2026-08-04] bug-1366 - killable by the delivery failsafe
 	waitthread global/jeepanim.scr::PassengerGetOutJeep $startjeep $jeeppassenger
 
 	local.jeeprear 	= -130 * (angles_toforward $startjeep.angles)
@@ -525,12 +762,22 @@ Bunker1CrateDeliveryPassenger:
 	local.runto 	= $startjeep.origin + local.jeeprear + local.jeepright
 	$jeeppassenger runto local.runto
 
-	while (vector_length($jeeppassenger.origin - local.runto) > 30){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded. A failed 'runto' pins the actor in THINK_RUNNER, so
+	//BOTH of the original waits here are unbounded: this distance loop never converges, and the
+	//'waittill turndone' that followed could never fire (Unregister(STRING_TURNDONE) lives only
+	//in Actor::IdleTurn, which no runner think calls). Cap the approach and use the fixed wait
+	//Ritual themselves substituted at the box1 pickup instead of the turndone.
+	local.ap = 0
+	while (vector_length($jeeppassenger.origin - local.runto) > 30 && local.ap < 12){
+		wait 0.1
+		local.ap = local.ap + 0.1
+	}
+	if (local.ap >= 12){
+		println( "^~^~^ E3L4P jeeppassenger approach timed out - continuing" )
 	}
 
 	$jeeppassenger turnto $startjeep
-	$jeeppassenger waittill turndone
+	wait 0.5
 	$jeeppassenger waitthread crateDeliver $cratepath $bunker1passengernode 0 "passenger_enter0 1"
 
 	local.jeepfront = -180 * (angles_toforward $startjeep.angles)
@@ -538,11 +785,16 @@ Bunker1CrateDeliveryPassenger:
 	local.runto 	= $startjeep.origin + local.jeepfront + local.jeepright
 	$jeeppassenger runto local.runto
 
-	while (vector_length($jeeppassenger.origin - local.runto) > 30){
-		waitframe
+	//[user 2026-08-04] bug-1368 - bounded; an unpathable 'runto' never converges here.
+	local.aq3 = 0
+	while (vector_length($jeeppassenger.origin - local.runto) > 30 && local.aq3 < 12){
+		wait 0.1
+		local.aq3 = local.aq3 + 0.1
 	}
+	if (local.aq3 >= 12){ println( "^~^~^ E3L4P reposition timed out - continuing" ) }
 
-	waitthread global/jeepanim.scr::PassengerGetInJeep $startjeep $jeeppassenger
+	waitthread passengerGetInWillys $startjeep $jeeppassenger	//[user 2026-08-04] bug-1369
+	level.e3l4_delThrP = NULL
 	level.passengerdonedelivery = 1
 }end
 
@@ -560,9 +812,21 @@ crateDeliver local.path local.pathcomplete local.doneDelay local.tag:
 		self turnto local.nextNode
 		self waittill turndone
 
-		while (vector_length (self.origin - local.nextNode.origin) > 20){	
+		//[user 2026-08-04] bug-1376 - BOUNDED. This is the loop the player actually got stuck on:
+		//'the passenger with his box is stuck walking into the willys jeep'. crate_walk is an ANIM,
+		//so the actor advances only by animation motion - walk him into a solid vehicle and he
+		//treads on the spot forever, never closing to 20 units, so pathComplete never sets, his
+		//done-flag never sets, and the jeep never departs. The earlier sweep bounded the N=30 and
+		//N=150 loops but MISSED this N=20 one. On timeout, give up on this node and move to the
+		//next so the delivery still finishes.
+		local.cw = 0
+		while (vector_length (self.origin - local.nextNode.origin) > 20 && local.cw < 12){
 			self anim crate_walk
-			waitframe
+			wait 0.1
+			local.cw = local.cw + 0.1
+		}
+		if (local.cw >= 12){
+			println( "^~^~^ E3L4P " + self.targetname + " crate node blocked - skipping to next" )
 		}
 		
 		if (local.nextNode.targetname == local.pathcomplete.targetname){
@@ -584,16 +848,43 @@ PlayerGetOnJeepTurret:
 //=========================================================================
 {
 	if (level.playeronjeep == 0){
-		//unlock the jeep and turret
+		//[user 08-02] REWRITTEN - this is why players were ejected from the jeep .30cal at map start.
+		//The retail call was "$startjeep doUse $player[N]", which lands in Vehicle::DriverUse
+		//(fgame/vehicle.cpp). That function picks the nearest slot and then does:
+		//    if (g_gametype->integer == GT_SINGLE_PLAYER || min_type == 2) { switch (min_type) ... }
+		//so in coop (gametype 2) ONLY min_type 2 (the DRIVER slot) is honoured - turret (1) and
+		//passenger (0) are skipped ENTIRELY, with no error printed. Because the line above teleported
+		//the player onto the turret origin first, min_type resolved to 1 every time, the switch was
+		//skipped, and the player stood unattached on the MG until the first "$startjeep drive" slid
+		//the vehicle out from under them.
+		//attachturretslot has no gametype gate, so use the shipped recipe from maps/m1l3b.scr
+		//(unlock -> attachturretslot -> perferredweapon -> lock -> forcelegsstate). The
+		//forcelegsstate is REQUIRED: the slot attach sets no player-side turret state (bug-309) and
+		//the gunner T-poses without it.
+		//Also: the old loop teleported EVERY player to the SAME origin, which is a telefrag waiting
+		//to happen. Only the gunner moves now; everyone else stays put.
 		$startjeep.turret = $startjeep queryturretslotentity 0
 		$startjeep unlock		//MiaCosa @Chrissstrahl
 		$startjeep.turret unlock
 
+		local.gunner = NULL
 		local.ji = 1
 		while (local.ji <= $player.size){
-			$player[local.ji].origin = $startjeep.turret.origin
-			$startjeep doUse $player[local.ji]
-			local.ji++
+			if ($player[local.ji] != NULL && isAlive $player[local.ji]){
+				local.gunner = $player[local.ji]
+				local.ji = $player.size + 1
+			} else {
+				local.ji++
+			}
+		}
+
+		if (local.gunner != NULL){
+			local.gunner notsolid
+			local.gunner.origin = $startjeep.turret.origin
+			$startjeep attachturretslot 0 local.gunner
+			local.gunner perferredweapon ".30cal Machine Gun"
+			local.gunner forcelegsstate COOP_TURRET_MAN_F
+			level.coop_e3l4JeepGunner = local.gunner
 		}
 
 		$startjeep lock
@@ -612,11 +903,37 @@ PlayerGetOffJeepTurret:
 		$startjeep unlock		//MiaCosa @Chrissstrahl
 		$startjeep.turret unlock
 
-		local.ji = 1
-		while (local.ji <= $player.size){
-			$player[local.ji].origin = $startjeep.turret.origin
-			$startjeep doUse $player[local.ji]
-			local.ji++
+		//[user 08-02] dismount via detachturretslot with an EXPLICIT exit position - "doUse" cannot
+		//release a turret occupant in coop for the same gametype reason as the mount above, and
+		//detachturretslot must never be handed vec_zero (that is the crew-eject path).
+		if (level.coop_e3l4JeepGunner != NULL && level.coop_e3l4JeepGunner != NIL){
+			//[user 2026-08-04] bug-1367 - EXIT BESIDE THE JEEP, NOT ON TOP OF IT.
+			//This used to be ( $startjeep.origin + (0 0 80) ), copied from maps/t2l2.scr:1468. That
+			//is 80 units straight UP, i.e. onto the jeep's roof. It is survivable in t2l2 because
+			//that ride is OVER - the player drops off the stationary jeep onto the ground. Here at
+			//Bunker2 the very next line threads JeepDriveAwayToBunker3, so the jeep departs with the
+			//player marooned on its roof: "I get detached from the jeep, and now im stuck standing
+			//on it". Step out to the RIGHT of the hood at near-ground height instead, and set the
+			//origin explicitly afterwards so the dismount cannot leave the player parented above.
+			//[user 2026-08-04] bug-1370 - exit on the AUTHORED dismount tag, not an invented offset.
+			//v1 used ( origin + (0 0 80) ) = the jeep's roof (bug-1367). v2 used a 96-unit lateral
+			//offset, which is an arbitrary guess about free space: at the Bunker2 stop it can drop
+			//the player inside the bunker wall, hence "i get dropped off and the jeep drives off,
+			//but im stuck standing here" - released correctly (VDETACH fired, GUNNERPROBE stopped)
+			//yet wedged in geometry. "passenger_enter" is the spot the artist placed for getting in
+			//and out of this exact vehicle, is guaranteed walkable, and is the same tag
+			//passengerGetInWillys boards on. Verified present on models/vehicles/willys/baseframe.skd.
+			local.jexit = $startjeep gettagposition "passenger_enter"
+			if (!local.jexit){
+				local.jexit = $startjeep.origin - ( 96 * ( angles_toleft $startjeep.angles ) )
+			}
+			local.jexit = local.jexit + (0 0 8)
+			$startjeep detachturretslot 0 local.jexit
+			level.coop_e3l4JeepGunner solid
+			level.coop_e3l4JeepGunner forcelegsstate STAND	//[221] release the forced manning pose
+			level.coop_e3l4JeepGunner.origin = local.jexit
+			println( "^~^~^ E3L4 JEEP DISMOUNT: gunner placed at " + local.jexit )
+			level.coop_e3l4JeepGunner = NULL
 		}
 
 		$startjeep lock
@@ -643,7 +960,10 @@ handlePlayerExit:
 	$startjeep doUse player
 	$startjeep.turret lock
 	$startjeep lock
-	$player.viewangles = "0 0 0"
+	//[user 08-02] TRAPS T5: bare $player is an ARRAY with 2+ players and throws on cast.
+	for (local.va = 1; local.va <= $player.size; local.va++){
+		if ($player[local.va] != NULL){ $player[local.va].viewangles = "0 0 0" }
+	}
 }end
 
 //=========================================================================

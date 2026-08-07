@@ -252,6 +252,7 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 	//fallback yields.
 	if( level.gametype != 0 ){
 		thread coop_autoDriveTankFallback
+		thread coop_t3l2_seatEveryone		//[user 08-02] mount every player, lock the seats
 	}
 
 	local.usekey = getboundkey1 "+attacksecondary"
@@ -1174,14 +1175,67 @@ coop_autoDriveTankFallback:
 		local.waited += 1
 	}
 
-	//still nobody driving -> claim the tank for itself so the boarding loop stops
-	//offering it (it would fight the scripted drive), set it as the activator so the
-	//bridge validator accepts the tank's own shells, then auto-drive the path.
-	if( level.coop_playerTank != NULL ){ end }
+	//[user 08-02] DISABLED. This fallback did two harmful things:
+	//  1. It set level.coop_playerTank = $playertank, and coop_selectDriverForTank's loop head is
+	//     "while (level.coop_playerTank == NULL)". A non-NULL value ends that loop PERMANENTLY, so
+	//     after 20 seconds nobody could board the tank for the rest of the map - which is the
+	//     reported "you spawn outside of the tank".
+	//  2. $playertank_trigger is a trigger_multiple, not a path, so drive_path had nothing to
+	//     follow and the tank did not move either.
+	//Players are now auto-seated at spawn by coop_t3l2_seatEveryone below, so there is no case
+	//left where the tank sits driverless waiting for someone to walk up and press USE.
+	println "coop_autoDriveTankFallback: disabled - players are auto-seated (see coop_t3l2_seatEveryone)"
+end
 
-	level.coop_playerTank = $playertank
-	println "coop_autoDriveTankFallback: no human driver, auto-driving T-34"
-	$playertank thread drive_path $playertank_trigger level.slowspeed
+//----------------------------------------------------------------------
+//[user 08-02] Seat EVERY player in the tank and keep them there.
+//Requested: "all players will need to be tank mounted" - previously coop replaced retail's
+//auto-mount with an opt-in USE-to-board loop, so at most one player ever got in and the rest
+//walked. Driver takes slot 0; the remaining players take turret slots if the T-34 exposes any,
+//otherwise they are glued to the hull so they ride along instead of being left behind.
+//----------------------------------------------------------------------
+coop_t3l2_seatEveryone:
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitForPlayer
+	wait 1
+
+	level.coop_lockVehicleSeats = 1		//global/vehicles_thinkers.scr refuses USE-to-exit while set
+
+	if( $playertank == NULL ){ end }
+
+	local.seated = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+
+		if( local.seated == 0 ){
+			//DRIVER - reuse the shipped path so the exit/monitor bookkeeping stays identical
+			$playertank thread coop_setDriverForTank local.p
+			local.seated = 1
+			wait 0.3
+			continue
+		}
+
+		//PASSENGERS - glue to the hull offset. attachturretslot is not used here because the
+		//T-34 exposes a single turret the driver already owns; glue keeps riders solid-free and
+		//moving with the tank (same idea as the t2l2 ride seats).
+		//$coop_tankOffset is built by this map's own pre-scan near the top of main (the stock scan
+		//never finds the T-34 cannon), so it CAN still be NULL if that scan failed - and `glue` on
+		//a NULL target throws. Guard, and move the rider onto the offset before gluing so they are
+		//not snapped across the map from wherever they spawned.
+		if( $coop_tankOffset == NULL ){
+			println "^~^~^ COOP_T3L2_SEAT no $coop_tankOffset - rider left on foot"
+			continue
+		}
+		local.p.origin = $coop_tankOffset.origin
+		local.p glue $coop_tankOffset
+		local.p notsolid
+		local.p nodamage
+		local.p iprint "You are riding the T-34. Seats are locked for this mission." 1
+		local.seated = local.seated + 1
+	}
+	println( "^~^~^ COOP_T3L2_SEATED " + local.seated )
 end
 
 get_random_entry local.entries:
@@ -1722,11 +1776,33 @@ removehealth:
 end
 
 // stub handlers - called by coop framework on player events
-coop_playerJustSpawned:
+//[user 2026-08-05] bug-1434 - the 08-02 re-seat was dead code twice over: the body sat under
+//coop_playerJustSpawned only (deaths dispatch JustRespawned), and it read the player from SELF,
+//which in these callbacks is the dispatch trigger, not the player (ride audit; the e3l1
+//verification proved the POSITIONAL parameter carries the player). Shared routine, both hooks.
+coop_playerJustSpawned local.player:
+	waitthread coop_t3l2_seatRider local.player
 end
 
 coop_playerJustLeft:
 end
 
-coop_playerJustRespawned:
+coop_playerJustRespawned local.player:
+	waitthread coop_t3l2_seatRider local.player
+end
+
+coop_t3l2_seatRider local.player:
+	if( level.gametype == 0 ){ end }
+	if( local.player == NULL || local.player == NIL ){ end }
+	wait 0.5
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( !(isAlive local.player) ){ end }
+	if( level.coop_playerTank == NULL ){ end }		//no driver yet - let them board as driver
+	if( level.coop_playerTank == local.player ){ end }	//the driver thread owns them
+	if( $coop_tankOffset == NULL ){ end }
+	local.player.origin = $coop_tankOffset.origin
+	local.player glue $coop_tankOffset
+	local.player notsolid
+	local.player nodamage
+	local.player iprint "You are riding the T-34." 1
 end

@@ -1,0 +1,401 @@
+//====================================================================
+// coop_selftest_objectives.scr - HZM dev objectives-subsystem probes
+//====================================================================
+// One cvar-gated dispatcher (st_objectives_run), launched from
+// coop_mod/main.scr::main only when getcvar("coop_st_objectives")=="1".
+// Every test is INERT for real players (the cvar defaults 0, set only by
+// the test-harness boot cfgs). Each test emits machine-parseable
+// "^~^~^ ST_OBJECTIVES_<TEST>" lines the harness greps, exactly like
+// coop_mod/maptest_phase2.scr::coop_maptest_aistate.
+//
+// Tests run in SEQUENCE (small waits between) so they never race over the
+// shared player. The destructive map-transition test (MCIDEM) runs LAST and
+// only when its own sub-gate coop_st_obj_mc==1, because it tears the map down.
+//
+// IMPORTANT: FANOUT + LATCH read the server-side mirror flags that
+// global/objectives.scr::coop_objectivesSendPlayer writes at :553-554. That
+// write is short-circuited when coop_objPanel==1 (:451 early end), so the
+// dispatcher forces coop_objPanel 0 before those tests.
+//====================================================================
+
+
+//====================================================================
+// DISPATCHER
+//====================================================================
+st_objectives_run:{
+	// force the URC send path so the server-side objective mirror is written
+	setcvar "coop_objPanel" "0"
+	// let the map settle so its own add_objectives / reconcile passes have run
+	wait 8
+
+	// 1) clean reconcile snapshot BEFORE we mutate any slots
+	waitthread st_obj_recon
+	wait 1
+
+	// 2) pure word-wrap unit test (no players, no objective side effects)
+	waitthread st_obj_wrap
+	wait 1
+
+	// player-dependent tests
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
+	if( local.p == NULL ){
+		println "^~^~^ ST_OBJECTIVES abort=no_host"
+	} else {
+		waitthread st_obj_fanout local.p
+		wait 2
+		waitthread st_obj_latch
+		wait 2
+		waitthread st_obj_idem
+		wait 2
+		waitthread st_obj_sideobj
+		wait 2
+	}
+
+	// t2l1-only destroyable-objective failsafe
+	if( level.coop_mapname == "t2l1" ){
+		waitthread st_obj_failsafe
+		wait 2
+	}
+
+	// destructive map-transition idempotency LAST (tears the level down)
+	waitthread st_obj_mcidem
+}end
+
+
+//====================================================================
+// Helpers: read the server-side level.coopObjectiveN mirror by slot.
+//====================================================================
+st_obj_slotStatus local.n:{
+	local.v = 0
+	switch local.n {
+	case 1:
+		local.v = level.coopObjective1
+		break
+	case 2:
+		local.v = level.coopObjective2
+		break
+	case 3:
+		local.v = level.coopObjective3
+		break
+	case 4:
+		local.v = level.coopObjective4
+		break
+	case 5:
+		local.v = level.coopObjective5
+		break
+	case 6:
+		local.v = level.coopObjective6
+		break
+	case 7:
+		local.v = level.coopObjective7
+		break
+	case 8:
+		local.v = level.coopObjective8
+		break
+	}
+	if( local.v == NIL ){ local.v = 0 }
+}end local.v
+
+
+st_obj_slotText local.n:{
+	local.t = ""
+	switch local.n {
+	case 1:
+		local.t = level.coopObjective1Text
+		break
+	case 2:
+		local.t = level.coopObjective2Text
+		break
+	case 3:
+		local.t = level.coopObjective3Text
+		break
+	case 4:
+		local.t = level.coopObjective4Text
+		break
+	case 5:
+		local.t = level.coopObjective5Text
+		break
+	case 6:
+		local.t = level.coopObjective6Text
+		break
+	case 7:
+		local.t = level.coopObjective7Text
+		break
+	case 8:
+		local.t = level.coopObjective8Text
+		break
+	}
+	if( local.t == NIL ){ local.t = "" }
+}end local.t
+
+
+// "s1,s2,...,s8" of the 8 slot statuses
+st_obj_slotsString:{
+	local.s = ""
+	local.i = 1
+	while( local.i <= 8 ){
+		local.st = waitthread st_obj_slotStatus local.i
+		if( local.i > 1 ){ local.s = local.s + "," }
+		local.s = local.s + local.st
+		local.i++
+	}
+}end local.s
+
+
+// Return 1 if the string contains a space, else 0 (MOHAA strings are 0-indexed).
+st_obj_hasSpace local.str:{
+	local.found = 0
+	local.n = local.str.size
+	local.j = 0
+	while( local.j < local.n ){
+		if( local.str[local.j] == " " ){ local.found = 1 }
+		local.j++
+	}
+}end local.found
+
+
+//====================================================================
+// TEST: RECON - stale-objective reconcile snapshot (server-side mirror).
+// Taken at dispatcher start, BEFORE any of our own mutations, so it reflects
+// the map's genuine objective state. The harness cross-checks that no slot is
+// active (status>=2 with text) on a map whose own script never set it.
+//====================================================================
+st_obj_recon:{
+	local.s = ""
+	local.active = 0
+	local.i = 1
+	while( local.i <= 8 ){
+		local.st = waitthread st_obj_slotStatus local.i
+		local.tx = waitthread st_obj_slotText local.i
+		if( local.i > 1 ){ local.s = local.s + "," }
+		local.s = local.s + local.st
+		if( local.st >= 2 && local.tx != "" ){ local.active++ }
+		local.i++
+	}
+	println( "^~^~^ ST_OBJECTIVES_RECON map=" + level.coop_mapname + " active=" + local.active + " slots=" + local.s )
+}end
+
+
+//====================================================================
+// TEST: WRAP - coop_objWrap word-wrap unit test (pure function, no players).
+//   a) 120-char multi-word sentence at maxc 55 -> lines>=3, maxlen<=55
+//   b) word landing on the boundary            -> clean 2-line split
+//   c) single ~70-char token                   -> 1 line (documented overflow)
+//   d) empty string                            -> 1 line == "" (no crash)
+//====================================================================
+st_obj_wrap:{
+	waitthread st_obj_wrapCase "a" "The quick brown fox jumps over the lazy dog while the regiment advances through the muddy field toward the distant church tower" 55
+	waitthread st_obj_wrapCase "b" "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 12345 67890" 55
+	waitthread st_obj_wrapCase "c" "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" 55
+	waitthread st_obj_wrapCase "d" "" 55
+}end
+
+
+st_obj_wrapCase local.case local.text local.maxc:{
+	local.lines = waitthread coop_mod/objectives.scr::coop_objWrap local.text local.maxc
+	local.cnt = 0
+	local.maxlen = 0
+	local.over = 0
+	if( local.lines != NIL ){
+		local.cnt = local.lines.size
+		local.k = 1
+		while( local.k <= local.cnt ){
+			local.ln = local.lines[local.k]
+			if( local.ln == NIL ){ local.ln = "" }
+			if( local.ln.size > local.maxlen ){ local.maxlen = local.ln.size }
+			if( local.ln.size > local.maxc ){
+				local.hs = waitthread st_obj_hasSpace local.ln
+				if( local.hs == 1 ){ local.over = 1 }
+			}
+			local.k++
+		}
+	}
+	println( "^~^~^ ST_OBJECTIVES_WRAP case=" + local.case + " lines=" + local.cnt + " maxlen=" + local.maxlen + " over=" + local.over )
+}end
+
+
+//====================================================================
+// TEST: FANOUT - objective push reaches ALL connected players' HUD mirror.
+// Fires the REAL add_objectives + current_objectives, waits for the per-player
+// sender queue to drain, then reads each player's server-side mirror flags
+// (objectiveStatus1 / objectiveText1) that coop_objectivesSendPlayer writes.
+//====================================================================
+st_obj_fanout local.p:{
+	setcvar "coop_objPanel" "0"
+	local.txt = "Regroup with the squad at the church"
+	thread global/objectives.scr::add_objectives 1 2 local.txt
+	thread global/objectives.scr::current_objectives 1
+	wait 3
+
+	local.total = 0
+	if( $player != NULL ){ local.total = $player.size }
+	local.sent = 0
+	local.i = 1
+	while( local.i <= local.total ){
+		local.e = $player[local.i]
+		if( local.e != NULL && local.e != NIL ){
+			local.st = local.e.flags["objectiveStatus1"]
+			if( local.st == NIL ){ local.st = "NIL" }
+			local.tk = 0
+			if( local.e.flags["objectiveText1"] == local.txt ){ local.tk = 1 }
+			if( local.st == 2 ){ local.sent++ }
+			println( "^~^~^ ST_OBJECTIVES_FANOUT idx=1 player=" + local.i + " name=" + local.e.netname + " status=" + local.st + " textok=" + local.tk )
+		}
+		local.i++
+	}
+	println( "^~^~^ ST_OBJECTIVES_FANOUT done sent=" + local.sent + " total=" + local.total )
+}end
+
+
+//====================================================================
+// TEST: LATCH - sender-latch stuck-1 self-heal (coopObjectivesSending).
+// Force the failure state on player 2 (latch set + timestamp older than the
+// 10s stale window), then push a new objective. The take-over branch
+// (global/objectives.scr:502-503) must process the queue despite the pre-set
+// latch and write objectiveStatus2==2. Needs 2+ connected players.
+//====================================================================
+st_obj_latch:{
+	setcvar "coop_objPanel" "0"
+	local.total = 0
+	if( $player != NULL ){ local.total = $player.size }
+	if( local.total < 2 ){
+		println "^~^~^ ST_OBJECTIVES_LATCH skipped=need_2_players"
+		end
+	}
+	local.e = $player[2]
+	if( local.e == NULL || local.e == NIL ){
+		println "^~^~^ ST_OBJECTIVES_LATCH skipped=no_p2"
+		end
+	}
+
+	// stuck-sender failure state: latch on, last-activity timestamp 15s in the past
+	local.e.flag[coopObjectivesSending] = 1
+	local.e.flag[coopObjectivesSendingAt] = level.time - 15
+
+	thread global/objectives.scr::add_objectives 2 2 "Destroy the fuel depot"
+	wait 3
+
+	local.st = local.e.flags["objectiveStatus2"]
+	if( local.st == NIL ){ local.st = "NIL" }
+	local.healed = 0
+	if( local.st == 2 ){ local.healed = 1 }
+	println( "^~^~^ ST_OBJECTIVES_LATCH player=2 before_latch=1 status2=" + local.st + " healed=" + local.healed )
+}end
+
+
+//====================================================================
+// TEST: IDEM - completed-objective idempotency (double-complete + no re-current).
+// Fire the completion twice in the same frame, then try to re-activate it as the
+// current objective. The complete-guard must block the re-current, and the xp
+// one-shot (level.coop_xp_objPaid[index]) must stay a single latch, not double-pay.
+//====================================================================
+st_obj_idem:{
+	thread global/objectives.scr::add_objectives 3 3 "Secure the courtyard"
+	thread global/objectives.scr::add_objectives 3 3 "Secure the courtyard"
+	wait 2
+	thread global/objectives.scr::current_objectives 3
+	wait 0.5
+
+	local.cf = $world.flags["objectiveComplete3"]
+	if( local.cf == NIL ){ local.cf = 0 }
+
+	local.xp = 0
+	if( level.coop_xp_objPaid != NIL ){
+		if( level.coop_xp_objPaid[3] != NIL ){ local.xp = level.coop_xp_objPaid[3] }
+	}
+
+	local.cur = level.coopCurrentObjective
+	if( local.cur == NIL ){ local.cur = 0 }
+
+	println( "^~^~^ ST_OBJECTIVES_IDEM complete_flag=" + local.cf + " xp_paid=" + local.xp + " current=" + local.cur )
+}end
+
+
+//====================================================================
+// TEST: SIDEOBJ - side-objective push + late-join repush.
+// Reads the natural registration state (level.coop_sideObjReg, gated off on
+// no-boss maps by coop_obj_register_delayed), then invokes the REAL fan-out
+// push (loops 1..$player.size, catches any error) and the late-join repush to
+// player 4. coop_obj_repush_player self-gates on coop_sideObjReg==1.
+//====================================================================
+st_obj_sideobj:{
+	local.reg = level.coop_sideObjReg
+	if( local.reg == NIL ){ local.reg = 0 }
+
+	local.total = 0
+	if( $player != NULL ){ local.total = $player.size }
+
+	if( local.total >= 1 ){
+		waitthread coop_mod/objectives.scr::coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
+	}
+	// coop_obj_push loops 1..$player.size (verified: coop_mod/objectives.scr:46)
+	local.pushed = local.total
+
+	local.repush4 = 0
+	if( local.total >= 4 && $player[4] != NULL ){
+		waitthread coop_mod/objectives.scr::coop_obj_repush_player $player[4]
+		if( local.reg == 1 ){ local.repush4 = 1 }
+	}
+
+	println( "^~^~^ ST_OBJECTIVES_SIDEOBJ reg=" + local.reg + " pushed=" + local.pushed + " total=" + local.total + " repush4=" + local.repush4 )
+}end
+
+
+//====================================================================
+// TEST: FAILSAFE - destroyable-objective failsafe fires on a non-plant kill.
+// t2l1 nebelwerfer flagship: re-enable damage on $nebel1 and kill it directly
+// (bypassing the plant path). coop_watchDestroyable ($nebel1 $nebel1_throbbox,
+// t2l1.scr:154) must then fire the box BlowUp so the objective still advances.
+// (t2l1-only; the dispatcher guards the map name. The $nebel1 reference parses
+// fine on every map - it just resolves NULL where the entity is absent.)
+//====================================================================
+st_obj_failsafe:{
+	local.tgt = $nebel1
+	if( local.tgt == NULL || local.tgt == NIL ){
+		println "^~^~^ ST_OBJECTIVES_FAILSAFE map=t2l1 abort=no_target"
+		end
+	}
+
+	local.before = waitthread st_obj_slotsString
+
+	// bypass the plant path: re-enable damage, then kill the target outright
+	local.tgt takedamage
+	local.tgt kill
+	wait 2
+
+	local.boxgone = 0
+	if( $nebel1_throbbox == NULL || $nebel1_throbbox == NIL ){ local.boxgone = 1 }
+
+	local.after = waitthread st_obj_slotsString
+	println( "^~^~^ ST_OBJECTIVES_FAILSAFE map=t2l1 target=nebel1 killed=1 box_gone=" + local.boxgone + " objs_before=" + local.before + " objs_after=" + local.after )
+}end
+
+
+//====================================================================
+// TEST: MCIDEM - missioncomplete double-fire idempotency (bug-818 end-trigger).
+// DESTRUCTIVE (tears the map down) - runs only when coop_st_obj_mc==1. Fires the
+// REAL global->coop missioncomplete path TWICE in the same frame. The guard
+// (coop_mod/missioncomplete.scr:19-20) must let only the FIRST clear through;
+// the gated marker in that file prints "^~^~^ ST_OBJECTIVES_MCIDEM pass=1"
+// exactly once, and the wired next map must boot a single time.
+//====================================================================
+st_obj_mcidem:{
+	if( getcvar( "coop_st_obj_mc" ) != "1" ){
+		println "^~^~^ ST_OBJECTIVES_MCIDEM skipped=not_enabled"
+		end
+	}
+	local.next = getcvar "coop_wintest_next"
+	local.bsp  = getcvar "coop_wintest_bsp"
+	if( local.bsp == "" || local.bsp == NIL ){ local.bsp = "1" }
+	if( local.next == "" || local.next == NIL || local.next == "auto" ){
+		local.next = ""
+		if( level.coopNextMap != NIL ){ local.next = level.coopNextMap }
+	}
+	if( local.next == "" ){
+		println "^~^~^ ST_OBJECTIVES_MCIDEM abort=no_next"
+		end
+	}
+	println( "^~^~^ ST_OBJECTIVES_MCIDEM firing map=" + level.coop_mapname + " next=" + local.next )
+	thread global/missioncomplete.scr::main local.next local.bsp 1
+	thread global/missioncomplete.scr::main local.next local.bsp 1
+}end

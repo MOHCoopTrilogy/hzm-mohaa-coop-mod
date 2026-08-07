@@ -710,6 +710,54 @@ coop_cvarFade local.cvar local.vlo local.vhi local.vdur:{
 	waitthread coop_mod/replace.scr::coop_setClientCvar local.cvar local.vhi
 }end
 
+//[user 08-06] bug-1502 - coop_cvarDuckStart/End: server-triggered, CLIENT-CAPTURED audio duck for
+//s_musicvolume/s_ambientvolume. coop_cvarFade above always fades to a hardcoded literal - correct
+//for s_sfxduck (an internal effect with no user-facing slider) but WRONG here: the server can never
+//read a client's live cvar back (stufftext has no $cvar substitution - confirmed dead code path,
+//Cmd_TokenizeString2 has zero '$' handling), so a script-side "restore to 0.9/0.6" is really "reset
+//to the coded default", clobbering anything the player set on the Music/Ambience sliders. This
+//instead stuffs a small set of whitelisted marker cvars (cg_servercmds_filter.cpp) and lets cgame
+//(code/cgame/cg_view.c, next to the existing breath-hold duck) capture+lerp itself, entirely
+//client-side - the same proven-correct pattern the breath-duck already uses.
+//PER-CHANNEL and independently triggerable on purpose: m3l1a.scr threads its music duck at map
+//start (coop_m3l1a_startMusic) and its ambient duck minutes later at the ramp-drop
+//(coop_m3l1a_beachAudio) - a single combined "one active duck" state would make the second call's
+//capture silently no-op (re-entrancy guard sees a duck already active from the first). Two fully
+//independent channels avoids that ordering hazard and generalizes to RoomTransform.scr, which only
+//ever ducks music, never ambient.
+//local.channel: "Music" or "Ambient" (matches the coop_duck<Channel>* cvar names cgame reads).
+//inDur/outDur: seconds to ramp in/out (cgame clamps to a 0.05s floor; 0 reads as ~instant).
+//=========================================================================
+coop_cvarDuckStart local.channel local.target local.inDur local.outDur:{
+//=========================================================================
+	if( local.channel == NIL || local.target == NIL ){ end }
+	if( local.inDur == NIL ){ local.inDur = 4 }
+	if( local.outDur == NIL ){ local.outDur = 12 }
+	for (local.i = 1;local.i <= $player.size;local.i++){
+		local.player = $player[local.i]
+		if( local.player != NULL ){
+			//order matters: target/durations must land before the trigger edge fires
+			local.player stufftext ( "coop_duck" + local.channel + "Target " + local.target )
+			local.player stufftext ( "coop_duck" + local.channel + "InDur " + local.inDur )
+			local.player stufftext ( "coop_duck" + local.channel + "OutDur " + local.outDur )
+			local.player stufftext ( "coop_duck" + local.channel + "Trigger 1" )
+		}
+	}
+}end
+
+//coop_cvarDuckEnd: begin the client-captured restore started by coop_cvarDuckStart above for the
+//same channel. Safe to call even if no duck is active (cgame no-ops on a falling edge with nothing
+//captured).
+//=========================================================================
+coop_cvarDuckEnd local.channel:{
+//=========================================================================
+	if( local.channel == NIL ){ end }
+	for (local.i = 1;local.i <= $player.size;local.i++){
+		local.player = $player[local.i]
+		if( local.player != NULL ){ local.player stufftext ( "coop_duck" + local.channel + "Trigger 0" ) }
+	}
+}end
+
 //[202] chrissstrahl
 //TURNTOLOOKAT
 //replaces $wooteva turnto $player
@@ -1171,6 +1219,43 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	}
 }end local.notBlocked
 
+//[HZM coop 2026-08-02] bug-1279 - does this player carry an armory-chosen loadout?
+//An armory pick is an explicit player choice, so it outranks a map's scripted SP kit.
+//NIL is tested BEFORE .size because an unset array throws on it, and an EMPTY array
+//reports -1 rather than 0 - only a positive size means real picks.
+//=========================================================================
+coop_armoryActive local.player:{
+//=========================================================================
+	if( local.player == NIL || local.player == NULL ){ end 0 }
+	if( level.coop_loadoutLocked == 1 ){ end 0 }
+	if( local.player.flags["coop_loWeapons"] == NIL ){ end 0 }
+	if( local.player.flags["coop_loWeapons"].size <= 0 ){ end 0 }
+	end 1
+}end 0
+
+//[HZM coop 2026-08-02] bug-1279 - classify a map-scripted give:
+//  0 = not a weapon (mission gear - binoculars, explosives, keys) - always hand it over
+//  1 = ordinary weapon - suppress for armory players, whose own picks replace it
+//  2 = rocket launcher - ALWAYS hand it over, even to armory players [user 2026-08-02]:
+//      a map hands you a bazooka/panzerschreck/PIAT because you need it to PROGRESS, so
+//      suppressing it can soft-lock the mission. Matched lowercased, because the shipped
+//      tik names disagree on case (Uk_W_Piat.tik vs bazooka.tik) and containsText is
+//      case-sensitive.
+//=========================================================================
+coop_isMapKitWeapon local.item:{
+//=========================================================================
+	if( local.item == NIL ){ end 0 }
+
+	local.low = waitthread coop_mod/strings.scr::to_lower local.item
+
+	if( waitthread coop_mod/main.scr::containsText local.low "bazooka" ){ end 2 }
+	if( waitthread coop_mod/main.scr::containsText local.low "panzerschreck" ){ end 2 }
+	if( waitthread coop_mod/main.scr::containsText local.low "piat" ){ end 2 }
+
+	if( waitthread coop_mod/main.scr::containsText local.low "weapons/" ){ end 1 }
+	end 0
+}end 0
+
 //=========================================================================
 item local.item local.use:{
 //=========================================================================
@@ -1186,12 +1271,26 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 		end
 	}
 
+	//[HZM coop 2026-08-02] bug-1279 - classified ONCE, outside the loop: the answer depends
+	//only on the item, not on who is receiving it.
+	local.kind = waitthread coop_isMapKitWeapon local.item
+
 	for (local.i = 1;local.i <= $player.size;local.i++){
 		local.player = $player[local.i]
 		if( local.player.health > 0 && local.player.dmteam != "spectator" && local.player.flags["coop_isActive"] == 1 ){
-			local.player item local.item
-			if(local.use != NIL && local.use == 1){
-				local.player use local.item
+			//kind 1 (an ordinary weapon) is the only thing an armory loadout displaces.
+			//Mission gear (0) and rocket launchers (2) always come through.
+			local.give = 1
+			if( local.kind == 1 ){
+				local.armory = waitthread coop_armoryActive local.player
+				if( local.armory == 1 ){ local.give = 0 }
+			}
+
+			if( local.give == 1 ){
+				local.player item local.item
+				if(local.use != NIL && local.use == 1){
+					local.player use local.item
+				}
 			}
 		}
 	}
@@ -1251,7 +1350,15 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	}
 	for (local.i = 1;local.i <= $player.size;local.i++){
 		local.player = $player[local.i]
-		local.player takeall
+		//[HZM coop 2026-08-02] bug-1279 - never strip an armory-chosen loadout. A map's
+		//scripted takeAll+item pair (maps/t3l1.scr:52-59 is the clearest case) runs from
+		//BEHIND waitForPlayer, i.e. after spawnInventory has already handed out the picks,
+		//so before this the picks were taken straight back on every armory map and only a
+		//death/revive re-give restored them.
+		local.armory = waitthread coop_armoryActive local.player
+		if( local.armory != 1 ){
+			local.player takeall
+		}
 	}
 
 	if( level.gametype == 0 ){ end }
@@ -2471,6 +2578,12 @@ missionfailed:{
 //=========================================================================
 if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread replace/missionfailed->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	if( level.gametype == 0 ){ end }
+	//[user 2026-08-05] bug-1452 - coverage sweep: a force-fired fail trigger would restart the map
+	//and destroy the run. Suppress + log while coop_maptest 3 is active.
+	if( getcvar( "coop_maptest" ) == "3" ){
+		println( "^~^~^ COV MISSIONFAILED_SUPPRESSED " + level.coop_mapname )
+		end
+	}
 	missionfailed //keep this, as we do not know what else it might trigger and signal the mission status
 
 	local.fadetime = 3

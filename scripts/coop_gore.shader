@@ -2244,3 +2244,100 @@ paul_dirty_skin2
 		rgbGen lightingSpherical
 	}
 }
+
+
+// [user 2026-08-03] bug-1314 - GORE TIER 1 skins for the e2l1 GLIDER PILOT
+// (models/human/SC_Al_US_pilot.tik). Retail ships him with one shader per surface, so the
+// engine's skin-offset tiers had nothing to select and he stayed clean while being shot to
+// pieces in the cockpit. Textures generated from HIS OWN diffuse (not the infantry one -
+// verified they are different images), blood alpha-BLENDED so the fabric weave survives,
+// coverage matched to the shipped Sc_AL_US_Inf reference (3.9/23.2%% vs its 4.6/19.6%%).
+// blood2 and blood3 carry bullet holes; blood3 is slashes per the lacerations art rule.
+
+Sc_AL_US_Pilot_tunic_blood1
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood1.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood1.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Sc_AL_US_Pilot_tunic_blood2
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood2.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood2.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Sc_AL_US_Pilot_tunic_blood3
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood3.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_tunic_blood3.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Sc_AL_US_Pilot_pants_blood1
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood1.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood1.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Sc_AL_US_Pilot_pants_blood2
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood2.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood2.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Sc_AL_US_Pilot_pants_blood3
+{
+	qer_editorimage textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood3.jpg
+	{
+		map textures/models/human/usmaintt/Sc_AL_US_Pilot_pants_blood3.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Bensonazi_blood1
+{
+	qer_editorimage textures/models/human/faces/Bensonazi_blood1.jpg
+	{
+		map textures/models/human/faces/Bensonazi_blood1.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+Bensonazi_blood2
+{
+	qer_editorimage textures/models/human/faces/Bensonazi_blood2.jpg
+	{
+		map textures/models/human/faces/Bensonazi_blood2.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+// [user 2026-08-03] bug-1316 - e2l1 glider WINDSCREEN BLOOD. Fourth skin on the glass surface
+// (offset 3 = both SKINOFFSET bits), so it sits after base / cracks001 / cracks002 in
+// CG4Aglider.tik. Composited over the SECOND crack stage - by the time the pilot is hit the
+// glass is already shattered - with arterial spray from the seat, runs dragged down by the
+// airflow, and fine mist. blendFunc/rgbGen copied from the retail glass shader so it lights
+// and blends identically.
+coop_glass_blood
+{
+	qer_editorimage textures/models/vehicles/CG4Aglider/coop_glass_blood.tga
+	{
+		map textures/models/vehicles/CG4Aglider/coop_glass_blood.tga
+		blendFunc blend
+		rgbGen lightingSpherical
+	}
+}
