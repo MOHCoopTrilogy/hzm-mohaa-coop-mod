@@ -577,85 +577,78 @@ xp_ai_killed local.victim local.killer:{
 	level.coop_xp_teamkills = level.coop_xp_teamkills + 1
 	local.factor = waitthread xp_killcap_factor
 
-	// [239] ITEMIZED awards - every component fires its own xp_award with a SPECIFIC label so
-	// the crosshair popup reads "+5 Headshot" / "+5 Blindfire", never a lumped "+12 Kill" (user).
-	// Buckets stay coarse (kills/valor) for the debrief categories. Each component is soft-capped
-	// by local.factor individually.
-	local.saviorPaid = 0
-	local.killPaid = 0		// [user 07-08] the base "Kill" pays ONLY for a plain kill; a headshot / reinforcement /
-							// wallbang / etc. REPLACES it (you get the specific bonus, NEVER bonus + base kill).
+	// [239] ITEMIZED awards - the crosshair popup reads "+5 Headshot" / "+5 Blindfire", never a
+	// lumped "+12 Kill" (user). Buckets stay coarse (kills/valor) for the debrief categories.
+	// [user 08-07] EXACTLY ONE bonus pays per kill now. Every condition below used to be an
+	// independent if-block that could co-fire with any other (a long-range headshot on a
+	// reinforcement paid Headshot + Long Shot + Reinforcement all at once) - all conditions are
+	// now evaluated as flags first, then a single priority chain picks the best-matching one.
+	local.killPaid = 0		// still governs the base-kill fallback below
+
+	local.isHeadshot = 0
+	local.isWallbang = 0
+	local.isMelee = 0
+	local.isSavior = 0
+	local.isLongShot = 0
+	local.isReinf = 0
+	local.isGuard = 0
+	local.isMG = 0
+	local.isBlindfire = 0
+	local.isCoverKill = 0
+	local.isDowned = 0
+	local.isGuardian = 0
 
 	if( local.victim.fact != NIL && local.victim.fact != NULL ){
 		// headshot: location 0/1/2 = head/helmet/neck (dbno.scr classification precedent)
 		if( local.victim.fact.location != NIL && local.victim.fact.location >= 0 && local.victim.fact.location <= 2 ){
-			local.b = int( 5 * local.factor )
-			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Headshot"; local.killPaid = 1 }
+			local.isHeadshot = 1
 		}
 		// [user 07-08] WALLBANG: the killing round reached the victim THROUGH a solid (engine sets
-		// coop_wallbang in weaputils.cpp BulletAttack). Same value as a headshot.
-		if( local.victim.coop_wallbang == 1 ){
-			local.b = int( 5 * local.factor )
-			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Wallbang"; local.killPaid = 1 }
-		}
+		// coop_wallbang in weaputils.cpp BulletAttack).
+		if( local.victim.coop_wallbang == 1 ){ local.isWallbang = 1 }
 		// melee / bash
-		if( local.victim.fact.meansofdeath == 26 ){
-			local.b = int( 5 * local.factor )		// [user 07-09] 20 -> 5 (a melee kill isn't worth that much)
-			if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Melee Kill"; local.killPaid = 1 }
-		}
+		if( local.victim.fact.meansofdeath == 26 ){ local.isMelee = 1 }
 		// savior (a): the AI was actively engaging a DIFFERENT player when it died
 		if( local.victim.fact.enemyAtPain != NIL && local.victim.fact.enemyAtPain != NULL ){
 			if( local.victim.fact.enemyAtPain != local.killer && local.victim.fact.enemyAtPain.classname == "Player" ){
-				local.b = int( 15 * local.factor )
-				if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Savior"; local.killPaid = 1 }
-				local.saviorPaid = 1
+				local.isSavior = 1
 			}
 		}
 	}
 
 	// long-range kill
-	if( vector_length( local.killer.origin - local.victim.origin ) > 2000 ){
-		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Long Shot"; local.killPaid = 1 }
-	}
+	if( vector_length( local.killer.origin - local.victim.origin ) > 2000 ){ local.isLongShot = 1 }
 
 	// class bonuses (tagged at spawn in officer.scr / paradrop counts as reinf)
-	if( local.victim.coop_xpClass == "reinf" ){
-		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Reinforcement"; local.killPaid = 1 }
-	}
-	if( local.victim.coop_xpClass == "guard" ){
-		local.b = int( 10 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Bodyguard"; local.killPaid = 1 }
+	if( local.victim.coop_xpClass == "reinf" ){ local.isReinf = 1 }
+	if( local.victim.coop_xpClass == "guard" ){ local.isGuard = 1 }
+
+	// [user 08-07] MG Gunner: reuses aihandler.scr's own turret-machinegunner classification
+	// (type_attack/idle/disguise/grenade all "machinegunner" + self.turret) rather than a new tag.
+	// Static classification fields, unaffected by the victim already being dead here.
+	if( local.victim waitthread coop_mod/aihandler.scr::isMachineGunner ){
+		local.isMG = 1
 	}
 
-	// [235/307] cover-system kills: blindfire +5, killing FROM cover +5. Blindfire wins; never both.
+	// [235/307] cover-system kills: blindfire OR killing FROM cover, never both.
 	// "From cover" = the take-cover peek pose (coop_incover) OR standing at a deployed sandbag.
 	local.nearCover = 0
 	if( local.killer.coop_incover == 1 ){ local.nearCover = 1 }
 	else { local.nearCover = waitthread xp_nearDeployedCover local.killer }
-	if( local.killer.coop_bf_t != NIL && (level.time - local.killer.coop_bf_t) < 0.75 ){
-		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Blindfire"; local.killPaid = 1 }
-	} else if( local.nearCover == 1 ){
-		local.b = int( 5 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Cover Kill"; local.killPaid = 1 }
-	}
+	if( local.killer.coop_bf_t != NIL && (level.time - local.killer.coop_bf_t) < 0.75 ){ local.isBlindfire = 1 }
+	else if( local.nearCover == 1 ){ local.isCoverKill = 1 }
 
 	// fighting from the ground: killer is DBNO
-	if( local.killer.flags["coop_dbno_active"] == 1 ){
-		local.b = int( 15 * local.factor )
-		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Downed Fight"; local.killPaid = 1 }
-	}
+	if( local.killer.flags["coop_dbno_active"] == 1 ){ local.isDowned = 1 }
 
-	// savior (b): guarding a downed teammate - only if (a) did not already pay
-	if( local.saviorPaid != 1 ){
+	// savior (b): guarding a downed teammate - only checked if (a) didn't already qualify
+	if( local.isSavior != 1 ){
 		local.i = 1
 		while( local.i <= $player.size ){
 			local.p = $player[local.i]
 			if( local.p != NULL && local.p != local.killer && local.p.flags["coop_dbno_active"] == 1 ){
 				if( vector_length( local.p.origin - local.victim.origin ) < 512 ){
-					local.b = int( 15 * local.factor )
-					if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Guardian"; local.killPaid = 1 }
+					local.isGuardian = 1
 					break
 				}
 			}
@@ -663,8 +656,46 @@ xp_ai_killed local.victim local.killer:{
 		}
 	}
 
-	// [user 07-08] BASE kill: pays ONLY when nothing special above fired (a plain kill = +2). Headshot,
-	// wallbang, reinforcement, savior, etc. already paid + set killPaid, so the base kill never stacks on top.
+	// pay exactly one - highest value / most specific first
+	if( local.isSavior == 1 ){
+		local.b = int( 15 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Savior"; local.killPaid = 1 }
+	} else if( local.isGuardian == 1 ){
+		local.b = int( 15 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Guardian"; local.killPaid = 1 }
+	} else if( local.isGuard == 1 ){
+		local.b = int( 10 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Bodyguard"; local.killPaid = 1 }
+	} else if( local.isHeadshot == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Headshot"; local.killPaid = 1 }
+	} else if( local.isWallbang == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Wallbang"; local.killPaid = 1 }
+	} else if( local.isMelee == 1 ){
+		local.b = int( 5 * local.factor )		// [user 07-09] 20 -> 5 (a melee kill isn't worth that much)
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Melee Kill"; local.killPaid = 1 }
+	} else if( local.isLongShot == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Long Shot"; local.killPaid = 1 }
+	} else if( local.isReinf == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Reinforcement"; local.killPaid = 1 }
+	} else if( local.isMG == 1 ){
+		local.b = int( 5 * local.factor )		// [user 08-07] new
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "MG Gunner"; local.killPaid = 1 }
+	} else if( local.isBlindfire == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Blindfire"; local.killPaid = 1 }
+	} else if( local.isCoverKill == 1 ){
+		local.b = int( 5 * local.factor )
+		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Cover Kill"; local.killPaid = 1 }
+	} else if( local.isDowned == 1 ){
+		local.b = int( 5 * local.factor )		// [user 08-07] 15 -> 5
+		if( local.b > 0 ){ thread xp_award local.killer local.b "valor" "Downed Fight"; local.killPaid = 1 }
+	}
+
+	// [user 07-08] BASE kill: pays ONLY when nothing special above fired (a plain kill = +3).
 	if( local.killPaid != 1 ){
 		local.b = int( 3 * local.factor )		// [307] plain kill 2 -> 3 (with the softer cap, a normal kill now reliably pays 3, not the old capped 1)
 		if( local.b > 0 ){ thread xp_award local.killer local.b "kills" "Kill" }
@@ -707,7 +738,7 @@ xp_officer_killed local.officer:{
 	}
 
 	if( local.killer != NULL ){
-		thread xp_award local.killer 75 "valor" "Officer Down"		// [user 07-10] 150 -> 75
+		thread xp_award local.killer 50 "valor" "Officer Down"		// [user 08-07] 75 -> 50
 		// denied the heal retreat ("stop him before he heals!" paid off)
 		if( level.coop_xp_heal_pending == 1 ){
 			thread xp_award local.killer 25 "valor" "Heal Denied"
@@ -720,7 +751,7 @@ xp_officer_killed local.officer:{
 	while( local.i <= $player.size ){
 		local.p = $player[local.i]
 		if( local.p != NULL && local.p != local.killer && local.p.flags["coop_isActive"] == 1 ){
-			thread xp_award local.p 50 "kills" "Officer Assist"
+			thread xp_award local.p 25 "kills" "Officer Assist"		// [user 08-07] 50 -> 25
 		}
 		local.i++
 	}
@@ -728,20 +759,49 @@ xp_officer_killed local.officer:{
 
 
 //=========================================================================
-// [303] HZM XP - a drivable vehicle (tank/halftrack/armored car) was destroyed by a player.
-// Threaded per kill from challenges.scr::coop_vehKill_monitor. Team award (individual
-// attribution isn't tracked for vehicle kills).
+// [user 08-07] a player shot out an enemy searchlight. Threaded from global/spotlight.scr and
+// global/searchlight.scr - both trigger-touch damage systems already resolve parm.other, the
+// same attribution pattern global/turret.scr and global/ai.scr already trust.
 //=========================================================================
-xp_vehicle_killed:{
+xp_searchlightDisabled local.player:{
 	if( level.coop_xp_enabled != 1 ){ end }
-	local.i = 1
-	while( local.i <= $player.size ){
-		local.p = $player[local.i]
-		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
-			thread xp_award local.p 40 "kills" "Vehicle Destroyed"
-		}
-		local.i++
-	}
+	if( local.player == NULL ){ end }
+	thread xp_award local.player 5 "kills" "Searchlight Disabled"
+}end
+
+
+//=========================================================================
+// [303] HZM XP - a drivable vehicle (tank/halftrack/armored car) was destroyed by a player.
+// Threaded per kill from challenges.scr::coop_vehKill_monitor.
+// [user 08-07] was team-wide (every active player got it, no individual attribution) - now
+// attributed to whoever actually dealt the kill (vehicle.cpp now hands the attacker through).
+// If attribution genuinely failed to resolve, nobody is awarded rather than falling back to
+// the old team-wide behavior.
+//=========================================================================
+xp_vehicle_killed local.killer:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.killer == NULL ){ end }
+	thread xp_award local.killer 10 "kills" "Vehicle Destroyed"
+}end
+
+
+//=========================================================================
+// [user 08-07] +5 per enemy killed by a player-called air strike. self = the dead actor,
+// called from aihandler.scr::addKillToPlayer for deaths NOT already attributed to a Player
+// (radiusdamage - what the bomb blast uses - always attributes to `world` at the engine
+// level, so this can never double-pay through the normal xp_ai_killed path; mutually
+// exclusive by construction, not by a flag).
+// Window: 20s covers the ~11s VO+flight lead-in plus the ~1.2s bomb stick and its aftermath,
+// with margin. Radius: 1200 covers the bomb stick's spread (offsets up to 450u either way
+// along the run) plus the 900u blast radius itself, with margin.
+//=========================================================================
+xp_airstrike_kill local.victim:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.victim == NULL ){ end }
+	if( level.coop_airstrike_caller == NULL || level.coop_airstrike_caller == NIL ){ end }
+	if( level.coop_airstrike_time == NIL || (level.time - level.coop_airstrike_time) > 20 ){ end }
+	if( vector_length( local.victim.origin - level.coop_airstrike_pos ) > 1200 ){ end }
+	thread xp_award level.coop_airstrike_caller 5 "kills" "Air Strike Kill"
 }end
 
 

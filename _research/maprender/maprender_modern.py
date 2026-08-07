@@ -20,7 +20,7 @@ Geometry extraction is identical to satellite.py and its hard-won offsets:
 """
 import struct, sys, os, io, zipfile, glob, time, math, re
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from scipy.ndimage import (distance_transform_edt, gaussian_filter, binary_dilation,
                            label as cc_label)
 
@@ -405,13 +405,28 @@ rngv = np.random.default_rng(4242)
 ANG = np.linspace(0, 2*math.pi, 33)
 
 def stamp(mask, spacing, rmin, rmax, hmin, hmax, pal_dark, pal_light, lobe, dome, seedbase):
-    """Place objects on a jittered lattice wherever mask allows, one local window each."""
+    """Place objects on a jittered lattice wherever mask allows, one local window each.
+
+    The lattice alone reads as synthetic: even jitter within each cell still yields near-uniform
+    global coverage, and real vegetation doesn't work that way - it clumps where conditions favor
+    it and leaves real gaps elsewhere. CLUMP (a low-frequency field, two octaves blended per-species
+    via seedbase so trees/bushes/boulders don't all cluster identically) modulates each cell's
+    SURVIVAL PROBABILITY, not just its jitter - dense patches keep nearly every candidate, thin
+    patches drop most of them, so the result reads as an actual landscape rather than a grid.
+    """
     placed = 0
     step = max(int(spacing), 3)
+    clump = np.clip(0.55 * oc[26] + 0.45 * (0.6 * noise(70 * SS, 500 + seedbase)
+                                             + 0.4 * noise(140 * SS, 600 + seedbase)), 0, 1)
     for gy in range(0, H, step):
         for gx in range(0, W, step):
             jy = gy + int(rngv.integers(0, step)); jx = gx + int(rngv.integers(0, step))
             if jy >= H or jx >= W or not mask[jy, jx]:
+                continue
+            # survival probability from the clump field: 0.12 in the thinnest patches (never a
+            # perfectly hard edge) up to ~1.0 in the densest - so clearings are real, not just gaps
+            # between two otherwise-identical trees.
+            if rngv.random() > 0.12 + 0.88 * clump[jy, jx]:
                 continue
             r = float(rngv.uniform(rmin, rmax))
             y0, y1 = max(int(jy - r) - 1, 0), min(int(jy + r) + 2, H)
@@ -727,6 +742,10 @@ def W2I(wx, wy): return ((wx - ox) * sc, (oy - wy) * sc)
 CHINA = (188, 44, 36, 240)
 PHONETIC = ["ABLE", "BAKER", "CHARLIE", "DOG", "EASY", "FOX", "GEORGE", "HOW",
             "ITEM", "JIG", "KING", "LOVE", "MIKE", "NAN", "OBOE", "PETER"]
+# Per-mark label override - a list of exact strings (index-aligned to holds, in file order).
+# None (default) keeps the "POINT <PHONETIC>" order-of-battle labelling. Set to override, e.g.
+# a single non-route mark like a named target ("OFFICER") that shouldn't read as a checkpoint.
+MARK_LABELS = None
 
 # Single-stroke hand-printed alphabet: each glyph is a list of polylines in a 0..1 box (y down).
 # A font - even warped - keeps its even stroke weight and perfect repeats, which is exactly what
@@ -847,8 +866,11 @@ for i, h in enumerate(holds, 1):
     num = str(i)
     dr.text((hx + R*0.72 + 3*S, hy - R*0.86 + 3*S), num, font=fn, fill=(46, 10, 8, 150))
     dr.text((hx + R*0.72, hy - R*0.86), num, font=fn, fill=CHINA)
-    lbl = PHONETIC[(i - 1) % len(PHONETIC)]
-    tw = hand_text(dr, f"POINT {lbl}", hx, hy + R + 46*S, 62*S, CHINA)
+    if MARK_LABELS is not None and (i - 1) < len(MARK_LABELS):
+        label_text = MARK_LABELS[i - 1]
+    else:
+        label_text = f"POINT {PHONETIC[(i - 1) % len(PHONETIC)]}"
+    tw = hand_text(dr, label_text, hx, hy + R + 46*S, 62*S, CHINA)
     # leader tick from the circle up to the writing
     dr.line([(hx, hy + R), (hx, hy + R + 16*S)], fill=CHINA, width=max(int(3*S), 1))
 
@@ -856,7 +878,16 @@ for i, h in enumerate(holds, 1):
 MAPNAME = "MONTE BATTAGLIA"
 pad = int(44 * S)
 t1, t2 = STEN(int(74*S)), TYPE(int(30*S))
-dr.rectangle([pad-int(18*S), pad-int(14*S), pad+int(1000*S), pad+int(190*S)], fill=(18, 16, 12, 96))
+# A crisp translucent rectangle behind the title reads as a software UI panel, not a shadow on a
+# photograph - real underexposure/vignetting has no straight edges. Blur a rough rectangle into a
+# soft-edged pool of shade instead, composited as one layer so it never shows a hard boundary.
+vig = Image.new("L", (OUTW, OUTH), 0)
+vdr = ImageDraw.Draw(vig)
+vdr.rectangle([pad-int(6*S), pad+int(4*S), pad+int(920*S), pad+int(170*S)], fill=150)
+vig = vig.filter(ImageFilter.GaussianBlur(int(30*S)))
+shade = Image.new("RGB", (OUTW, OUTH), (14, 12, 9))
+img_rgba = Image.composite(shade, img.convert("RGB"), vig)
+img.paste(img_rgba)
 dr.text((pad, pad), MAPNAME, font=t1, fill=(246, 242, 230, 245))
 dr.text((pad+int(3*S), pad+int(86*S)), "OPERATION  —  HOLDOUT", font=t2, fill=(238, 232, 214, 225))
 dr.text((pad+int(3*S), pad+int(126*S)),

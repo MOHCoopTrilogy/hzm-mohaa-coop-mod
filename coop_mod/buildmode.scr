@@ -245,6 +245,17 @@ coop_build_doCmd local.player local.cmd:{
 	//rebound all 16 numpad keys and so silently destroyed build mode's bindings (and vice versa,
 	//whichever cfg was exec'd last won). Routing it through this existing bus means ONE keymap,
 	//one cfg, and no collision - which is exactly what this modeswap hook was built for.
+	//[user 08-07] SPAWN MARKER. Handled BEFORE the submode branches so it works in object, sound or
+	//fog mode alike. Exists because capturing spawn points via `viewpos` + qconsole.log is not
+	//reliable: logfile is CVAR_TEMP and the engine silently sets it to 0 if the file cannot be
+	//opened (common.c:301 "Opening qconsole.log failed!" - e.g. a dedicated-server instance already
+	//holds it), which is exactly how a session of m3l1b spawn coords was lost. This writes straight
+	//to disk through the same fs_write_content path build/sound/blueprint saves already use, so the
+	//marks survive even if the console never logs a thing.
+	if( local.cmd == "spawnmark" ){
+		waitthread coop_build_spawnMark local.player
+		end
+	}
 	if( local.cmd == "modeswap" ){
 		if( level.coop_build_mode == "sound" ){
 			level.coop_build_mode = "fog"
@@ -904,4 +915,35 @@ coop_build_hud local.player:{
 	}
 	ihuddraw_alpha  local.player 61 0
 	ihuddraw_string local.player 61 ""
+}end
+
+//=========================================================================
+//[user 08-07] Append the caller's current position + facing to a per-map file, and emit the two
+//lines you would actually paste into coop_mod/spawnlocations.scr. Rewrites the whole file each
+//press (same pattern as coop_build_save) so an interrupted session still leaves a valid file.
+//  -> %APPDATA%/openmohaa/maintt/coop_mod/save/spawnmarks_<map>.dat
+//Trigger:  set coop_build_cmd spawnmark      (bound to P in coop_mod/cfg/buildmode.cfg)
+//=========================================================================
+coop_build_spawnMark local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	if( level.coop_spawnMarkN == NIL ){ level.coop_spawnMarkN = 0; level.coop_spawnMarkTxt = "" }
+
+	local.n = level.coop_spawnMarkN + 1
+	level.coop_spawnMarkN = local.n
+
+	local.o = local.player.origin
+	local.a = local.player.angles
+	//round the yaw to whole degrees - spawn angles never need sub-degree precision
+	local.yaw = int( local.a[1] )
+
+	local.vec = "( " + int(local.o[0]) + " " + int(local.o[1]) + " " + int(local.o[2]) + " )"
+	local.line = "	level.flags[\"coop_spawn" + local.n + "origin\"] = " + local.vec + "\n"
+	local.line = local.line + "	level.flags[\"coop_spawn" + local.n + "angles\"] = ( 0 " + local.yaw + " 0 )" + "\n"
+
+	level.coop_spawnMarkTxt = level.coop_spawnMarkTxt + local.line
+	fs_write_content ( "coop_mod/save/spawnmarks_" + level.coop_mapname + ".dat" ) ( level.coop_spawnMarkTxt )
+
+	local.player iprint ( "SPAWN " + local.n + " marked  " + local.vec + "  yaw " + local.yaw ) 1
+	println( "^~^~^ COOP_SPAWNMARK " + local.n + " " + local.vec + " yaw " + local.yaw )
 }end

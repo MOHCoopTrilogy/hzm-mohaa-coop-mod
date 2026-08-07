@@ -1,0 +1,208 @@
+// [401] HZM MEDALS & BADGES - campaign-wide meta-achievements, one per Service Record category plus
+// a capstone. Deliberately NOT a parallel progress-tracking system: each medal is fully DERIVED from
+// challenges.scr's own already-persisted state (every chal_def in a category done = that category's
+// medal). No new stat bumps, no new progress hooks - medal_checkAll just counts coop_chalD_<cid> flags
+// challenges.scr already maintains. This mirrors chal_init/chal_ensure's identity + persistence
+// pattern (coop_mod/challenges.scr:1-19) rather than inventing a new one.
+//
+// Identity/Persistence: reuses self.flags["coop_chal_id"] (challenges.scr already resolves it via XP
+//              identity before medal_checkAll can find anything to check). Earned set stored as a
+//              "|"-delimited list of medal ids, same shape as coop_chal_unlocks: session cvar
+//              coop_medals_<id> (survives map transitions) + file coop_mod/save/medals_<id>.dat
+//              (survives server restarts).
+// Per-player:  self.flags["coop_medalSet"] (the "|"-delimited string) + self.flags["coop_medalG_<mid>"]
+//              (1 = earned, fast membership check).
+// Notify:      reuses challenges.scr's own toast queue (chal_notify) - "MEDAL EARNED: <name>", no new
+//              HUD plumbing.
+// Cvar gate:   coop_medals (default 1).
+
+//=========================================================================
+// Init - threaded from main.scr::main right after chal_init, so level.coop_chal_cat[] already
+// exists. No waits -> completes in the init frame, same guarantee chal_init makes.
+//=========================================================================
+medal_init:{
+	if( level.coop_medal_init == 1 ){ end }
+	level.coop_medal_init = 1
+
+	level.coop_medal_enabled = 1
+	if( getcvar "coop_medals" == "" ){ setcvar "coop_medals" "1" }
+	if( getcvar "coop_medals" == "0" ){ level.coop_medal_enabled = 0 }
+
+	level.coop_medal_count = 0
+
+	//[user 08-07] one medal per Service Record category (challenges.scr's real chal_def "cat"
+	//values: axis/campaign/combat/discovery/fireteam/pistols/rifles/smgs/snipers/support_weapons/
+	//vehicles), named after a real WW2 US decoration or qualification badge where a sensible fit
+	//exists. "all" is a synthetic 12th category checked against the WHOLE roster, not one cat.
+	waitthread medal_def "med_rifles"    "rifles"          "Rifle Expert Badge"        "Complete every Rifles challenge"
+	waitthread medal_def "med_snipers"   "snipers"         "Distinguished Marksman Badge" "Complete every Marksman challenge"
+	waitthread medal_def "med_smgs"      "smgs"            "Combat Infantryman Badge"  "Complete every Submachine Gun challenge"
+	waitthread medal_def "med_pistols"   "pistols"         "Pistol Expert Badge"       "Complete every Sidearm challenge"
+	waitthread medal_def "med_support"   "support_weapons" "Machine Gunner's Badge"    "Complete every Support Weapons challenge"
+	waitthread medal_def "med_vehicles"  "vehicles"        "Tank Destroyer Badge"      "Complete every Armor & Vehicles challenge"
+	waitthread medal_def "med_combat"    "combat"          "Bronze Star Medal"         "Complete every Combat challenge"
+	waitthread medal_def "med_fireteam"  "fireteam"        "Silver Star Medal"         "Complete every Fireteam challenge"
+	waitthread medal_def "med_campaign"  "campaign"        "Distinguished Service Cross" "Complete every Campaign challenge"
+	waitthread medal_def "med_discovery" "discovery"       "Legion of Merit"           "Complete every Stealth & Feats challenge"
+	waitthread medal_def "med_axis"      "axis"            "Combat Action Medal"       "Complete every Axis Forces challenge"
+	waitthread medal_def "med_all"       "all"             "Medal of Honor"            "Complete every challenge in the Service Record"
+}end
+
+//=========================================================================
+// Append one medal definition.
+//=========================================================================
+medal_def local.id local.cat local.name local.desc:{
+	local.i = level.coop_medal_count
+	level.coop_medal_id[local.i]   = local.id
+	level.coop_medal_cat[local.i]  = local.cat
+	level.coop_medal_name[local.i] = local.name
+	level.coop_medal_desc[local.i] = local.desc
+	level.coop_medal_idx[local.id] = local.i
+	level.coop_medal_count = local.i + 1
+}end
+
+//=========================================================================
+// Load this player's earned-medal set. Called from chal_ensure's tail (challenges.scr) once
+// coop_chal_id is resolved, so medals share the same identity/session-vs-file precedence.
+//=========================================================================
+medal_load local.player:{
+	if( level.coop_medal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_id"] == NIL ){ end }
+	if( local.player.flags["coop_medal_loaded"] == 1 ){ end }
+	local.id = local.player.flags["coop_chal_id"]
+
+	local.data = getcvar( "coop_medals_" + local.id )
+	if( local.data == "" ){
+		local.data = fs_read_content ( "coop_mod/save/medals_" + local.id + ".dat" )
+	}
+	local.player.flags["coop_medalSet"] = ""
+	if( local.data != NIL && local.data != "" ){
+		local.player.flags["coop_medalSet"] = local.data
+		local.i = 0
+		local.n = level.coop_medal_count
+		while( local.i < local.n ){
+			local.mid = level.coop_medal_id[local.i]
+			if( waitthread coop_mod/main.scr::containsText ( "|" + local.data + "|" ) ( "|" + local.mid + "|" ) 0 ){
+				local.player.flags["coop_medalG_" + local.mid] = 1
+			}
+			local.i++
+		}
+	}
+	local.player.flags["coop_medal_loaded"] = 1
+	waitthread medal_ui_export local.player
+}end
+
+//=========================================================================
+// Persist one player's earned-medal set (session cvar + file). Mirrors chal_save_player exactly.
+//=========================================================================
+medal_save_player local.player:{
+	if( level.coop_medal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_id"] == NIL ){ end }
+	local.out = local.player.flags["coop_medalSet"]
+	if( local.out == NIL ){ local.out = "" }
+	local.id = local.player.flags["coop_chal_id"]
+	setcvar ( "coop_medals_" + local.id ) local.out
+	fs_write_content ( "coop_mod/save/medals_" + local.id + ".dat" ) local.out
+}end
+
+//=========================================================================
+// The check entry point. Threaded from challenges.scr::chal_grant right after any challenge
+// completes - the only moment a category's completion state can change. Cheap: iterates the
+// (small, one-time-built) challenge table once per call, no per-frame cost.
+//=========================================================================
+medal_checkAll local.player:{
+	if( level.coop_medal_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_chal_id"] == NIL ){ end }
+	if( local.player.flags["coop_medal_loaded"] != 1 ){ waitthread medal_load local.player }
+	if( local.player == NULL ){ end }
+
+	local.mi = 0
+	local.mn = level.coop_medal_count
+	local.allTotal = 0
+	local.allDone  = 0
+	while( local.mi < local.mn ){
+		local.mid = level.coop_medal_id[local.mi]
+		local.cat = level.coop_medal_cat[local.mi]
+		if( local.cat != "all" && local.player.flags["coop_medalG_" + local.mid] != 1 ){
+			local.tot  = 0
+			local.done = 0
+			local.ci = 0
+			while( local.ci < level.coop_chal_count ){
+				if( level.coop_chal_cat[local.ci] == local.cat ){
+					local.tot++
+					if( local.player.flags["coop_chalD_" + level.coop_chal_id[local.ci]] == 1 ){ local.done++ }
+				}
+				local.ci++
+			}
+			if( local.tot > 0 && local.done >= local.tot ){
+				waitthread medal_grant local.player local.mid
+			}
+		}
+		local.mi++
+	}
+
+	// "all" capstone: every challenge in the whole roster done, independent of the per-category
+	// tally above (a player could in principle finish the last few challenges of two different
+	// categories in the same completion, so this is its own pass rather than "all 11 granted").
+	if( local.player.flags["coop_medalG_med_all"] != 1 ){
+		local.allTotal = level.coop_chal_count
+		local.ci = 0
+		while( local.ci < level.coop_chal_count ){
+			if( local.player.flags["coop_chalD_" + level.coop_chal_id[local.ci]] == 1 ){ local.allDone++ }
+			local.ci++
+		}
+		if( local.allTotal > 0 && local.allDone >= local.allTotal ){
+			waitthread medal_grant local.player "med_all"
+		}
+	}
+}end
+
+//=========================================================================
+// Grant one medal: dedup, record, persist, toast (reuses challenges.scr's queue), push UI state.
+//=========================================================================
+medal_grant local.player local.mid:{
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_medalG_" + local.mid] == 1 ){ end }		//already earned
+	local.idx = level.coop_medal_idx[local.mid]
+	if( local.idx == NIL ){ end }
+
+	local.player.flags["coop_medalG_" + local.mid] = 1
+	local.set = local.player.flags["coop_medalSet"]
+	if( local.set == NIL || local.set == "" ){ local.set = local.mid }
+	else { local.set = local.set + "|" + local.mid }
+	local.player.flags["coop_medalSet"] = local.set
+
+	waitthread medal_save_player local.player
+
+	local.name = level.coop_medal_name[local.idx]
+	thread coop_mod/challenges.scr::chal_notify local.player ( "MEDAL EARNED: " + local.name )
+
+	waitthread medal_ui_export local.player
+}end
+
+//=========================================================================
+// Publish this player's earned set to the Service Record MEDALS page: TWO archived cvars per
+// medal - coop_uiM<idx> (1 = earned) and coop_uiML<idx> (1 = LOCKED, its exact inverse) - because
+// this UI's enabledcvar only shows a widget when the cvar is truthy, so the lock-scrim overlay
+// needs its own "is it locked" cvar rather than negating coop_uiM<idx> in the .urc. Same shape as
+// chal_ui_export's coop_uiB<i>/coop_uiN<i> bridge (challenges.scr:770-776).
+//=========================================================================
+medal_ui_export local.player:{
+	if( local.player == NULL ){ end }
+	local.i = 0
+	local.n = level.coop_medal_count
+	while( local.i < local.n && local.player != NULL ){
+		local.mid = level.coop_medal_id[local.i]
+		local.on = 0
+		if( local.player.flags["coop_medalG_" + local.mid] == 1 ){ local.on = 1 }
+		local.player stufftext ( "seta coop_uiM" + local.i + " " + local.on )
+		local.locked = 1
+		if( local.on == 1 ){ local.locked = 0 }
+		local.player stufftext ( "seta coop_uiML" + local.i + " " + local.locked )
+		local.i++
+		if( ( local.i % 4 ) == 0 ){ waitframe }		//pace, same reasoning as chal_ui_export
+	}
+}end

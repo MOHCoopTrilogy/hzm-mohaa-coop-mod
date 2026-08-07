@@ -164,7 +164,9 @@ coop_fog_monitor:{
 
 	setcvar "coop_fog_cmd" ""
 	thread coop_fog_hud local.player
-	local.player iprint "FOG MODE armed - numpad. KP_INS saves this map." 1
+	//[user 08-07] said KP_INS - that is the NIGHT PRESET. KP_ENTER is save. See the HUD-string
+	//comment below; this line told the same lie and is the message the user actually acted on.
+	local.player iprint "FOG MODE armed - numpad. KP_ENTER saves this map." 1
 
 	while( getcvar( "coop_fog" ) == "1" ){
 		local.cmd = getcvar( "coop_fog_cmd" )
@@ -366,24 +368,21 @@ coop_fog_split local.txt:{
 //=========================================================================
 coop_fog_mapName:{
 //=========================================================================
-	local.s = level.script
-	local.n = local.s.size
-	local.start = 0
-	local.i = 0
-	while( local.i < local.n ){
-		if( local.s[local.i] == "/" ){ local.start = local.i + 1 }
-		local.i++
-	}
-	local.out = ""
-	local.i = local.start
-	while( local.i < local.n ){
-		local.c = local.s[local.i]
-		if( local.c == "." ){
-			local.i = local.n
-		} else {
-			local.out += local.c
-			local.i++
-		}
+	//[user 08-07] was a bespoke parse of level.script, and it was the reason SAVE silently did
+	//nothing: main.scr:100 shows level.script can legitimately be NIL (the framework back-fills
+	//it from level.coop_mapname), and `local.s.size` on NIL THROWS - which aborts this thread and
+	//therefore coop_fog_saveProfile before it ever reaches fs_write_content. No file, no error,
+	//no clue. It also returned the SCRIPT FILE's casing ("M1L3c" from maps/M1L3c.scr), so even a
+	//successful write produced fog_M1L3c.dat while the shipped profiles are lowercase - a second,
+	//independent break on the LOAD side, since pk3 entry lookup is not case-folded the way the
+	//Windows filesystem is.
+	//level.coop_mapname is the framework's canonical, always-set, lowercase map name and is what
+	//EVERY other save subsystem already uses (buildmode.scr's coop_build_file, buildmode_sounds'
+	//coop_build_sndfile - which is exactly why snd_m1l3c.dat wrote correctly while fog never did).
+	local.out = level.coop_mapname
+	if( local.out == NIL || local.out == "" ){
+		//last-resort fallback so a fog profile is never written to "fog_.dat"
+		local.out = "unknown"
 	}
 }end local.out
 
@@ -450,7 +449,14 @@ coop_fog_hud local.player:{
 			ihuddraw_color local.player 94 0.6 0.9 0.6
 			ihuddraw_alpha local.player 94 1
 			ihuddraw_font local.player 94 "facfont-20"
-			ihuddraw_string local.player 94 "KP_INS save   KP_DEL reset   KP_ENTER night   KP_5 mist"
+			//[user 08-07] these labels were WRONG IN EVERY POSITION and cost the user a whole fog
+			//tuning session: they read "KP_INS save / KP_DEL reset / KP_ENTER night / KP_5 mist",
+			//but coop_fog_mapKey (buildmode.scr) maps place->save, reset->reset, solid->night,
+			//undo->mist, i.e. KP_ENTER=save, KP_5=reset, KP_INS=night, KP_DEL=mist. Pressing KP_INS
+			//to "save" therefore applied the NIGHT PRESET over the tuned values and wrote nothing.
+			//Fog is reachable ONLY as a build-mode submode (coop_mod/cfg/fogmode.cfg deliberately
+			//binds nothing), so the build-mode map is the only one that can ever apply here.
+			ihuddraw_string local.player 94 "KP_ENTER save   KP_5 reset   KP_INS night   KP_DEL mist"
 		}
 		wait 0.15
 	}

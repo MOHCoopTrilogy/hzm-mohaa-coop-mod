@@ -123,7 +123,60 @@ helmet_initList:{
 	level.coop_helmetName[34] = "Lieutenant"
 	level.coop_helmetTik[34]  = "models/coop_helmets/coop_helmet_ltnt.tik"
 
-	level.coop_helmetCount = 34
+	//[user 08-07] bug-1534 (Part 2 PROTOTYPE): first EXACT-FIT piece extracted from the exhaustive
+	//pak-audit findings above (german_Wehrmacht_GasTrooper.tik's own gasmask.skd - single-weighted
+	//to "Bip01 Head", the same golden pattern as the other 34 pieces). Built + skx.py-validated
+	//this session; NOT yet in-game verified - see the Part 2 report for the recipe + caveats.
+	level.coop_helmetName[35] = "Gas Mask"
+	level.coop_helmetTik[35]  = "models/coop_helmets/coop_helmet_gasmask.tik"
+
+	//[user 08-07] bug-1540 - 12 more EXACT-FIT pieces from the same pak audit. Two things were new
+	//this pass. (1) The CHAINED case is solved: brit_tankberet's source is single-weighted to a bone
+	//two JT_POSROT gear bones deep off "Bip01 Head", and those bones' rest transforms live only in
+	//animation channels - but NO player animation carries a "helmet"/"beret_and_goggles" channel
+	//(checked against all 3798 models/human/animation/*.skc), and the engine returns a ZERO quat for
+	//a missing channel, whose matrix is the IDENTITY. So the chain collapses at runtime and the raw
+	//offsets already ARE head-bone-local: transplant verbatim, exactly like the single-weighted case.
+	//(2) Decoding SKC v14 needed a Python port of the engine's Huffman msg_t - v14 "processed" anims
+	//are a compressed bitstream, not a plain struct. Both are recorded in the bug-1540 entry.
+	//All 12 round-tripped through _research/assetaudit/skx.py with 0 warnings. NOT in-game verified.
+	level.coop_helmetName[36] = "Tanker Beret + Goggles"
+	level.coop_helmetTik[36]  = "models/coop_helmets/coop_helmet_brit_tankberet.tik"
+
+	level.coop_helmetName[37] = "US Gas Mask"
+	level.coop_helmetTik[37]  = "models/coop_helmets/coop_helmet_us_gasmask.tik"
+
+	level.coop_helmetName[38] = "Eyeglasses"
+	level.coop_helmetTik[38]  = "models/coop_helmets/coop_helmet_eyeglasses.tik"
+
+	level.coop_helmetName[39] = "Aviator Glasses"
+	level.coop_helmetTik[39]  = "models/coop_helmets/coop_helmet_avglasses.tik"
+
+	level.coop_helmetName[40] = "German Crusher Cap"
+	level.coop_helmetTik[40]  = "models/coop_helmets/coop_helmet_ger_crusher.tik"
+
+	level.coop_helmetName[41] = "SS Officer Hat"
+	level.coop_helmetTik[41]  = "models/coop_helmets/coop_helmet_ss_officerhat.tik"
+
+	level.coop_helmetName[42] = "SS Field Cap"
+	level.coop_helmetTik[42]  = "models/coop_helmets/coop_helmet_ss_mutze.tik"
+
+	level.coop_helmetName[43] = "Wool Cap"
+	level.coop_helmetTik[43]  = "models/coop_helmets/coop_helmet_woolcap.tik"
+
+	level.coop_helmetName[44] = "Para Helmet + Mask"
+	level.coop_helmetTik[44]  = "models/coop_helmets/coop_helmet_brit_paramask.tik"
+
+	level.coop_helmetName[45] = "Brit Mk2 Helmet"
+	level.coop_helmetTik[45]  = "models/coop_helmets/coop_helmet_brit_mk2.tik"
+
+	level.coop_helmetName[46] = "Brit Officer Cap"
+	level.coop_helmetTik[46]  = "models/coop_helmets/coop_helmet_brit_offcap2.tik"
+
+	level.coop_helmetName[47] = "Splinter Camo Helmet"
+	level.coop_helmetTik[47]  = "models/coop_helmets/coop_helmet_ger_splinter.tik"
+
+	level.coop_helmetCount = 47
 }end
 
 //-------------------------------------------------------------------------
@@ -159,11 +212,50 @@ helmet_apply local.player:{
 		if( local.player.model != NIL ){ println local.player.model }
 	}
 
-	//UNTOUCHED default players: nothing to do. Skip all surface/attach work (and the harmless
-	//"group not found" warnings) so a player who never uses the switcher is a true no-op every spawn.
-	if( local.idx == 1 && local.player.flags["coop_helmetTouched"] != 1 ){
-		if( local.hdbg ){ println( "^~^~^ HELMET exit=default_untouched" ) }
-		end
+	//[user 08-07] bug-1545 - the old "UNTOUCHED default players: end here" fast path is GONE. It was
+	//correct while "Standard Issue" meant "leave the baked helmet alone"; now the armory bodies are
+	//HATLESS at source, so even a player who never opened the switcher needs (a) the swap onto their
+	//skin's *_nohat twin and (b) the Standard Issue piece attached, or they spawn bare-headed.
+
+	waitthread armory_skin_build
+
+	//[user 08-07] bug-1545 - BODY NORMALIZE. Every armory skin ships a models/player/<skin>_nohat.tik
+	//twin with the head-covering geometry deleted from the TIKI. Whatever dressed this player (engine
+	//InitModel off dm_playermodel, a disguise restore, the armory), put them on the hatless twin here -
+	//this is the single choke point every spawn and every skin change passes through. `model` also
+	//resets surfaces + attachments, so it MUST happen before the surface/attach work below.
+	//local.legacy stays 1 whenever the body might still carry baked headgear (a disguise uniform, a
+	//non-roster model, or the frame in which we just issued the swap); the old nodraw whitelist below
+	//is kept purely as the belt-and-braces for exactly that case - it is no longer the mechanism.
+	local.cur = waitthread coop_mod/itemhandler.scr::getPlayerUniform local.player
+	local.base = level.coop_skinBase[local.cur]
+	local.legacy = 1
+	if( local.base == NIL ){
+		if( level.coop_skinStdHelmet[local.cur] != NIL ){
+			local.base = local.cur		//still wearing the ORIGINAL hatted roster tik
+			local.player model ( "models/player/" + local.cur + "_nohat.tik" )
+			//same rule as the entry waitframe above and as bug-1361's re-hat: let the engine
+			//finish rebuilding the tiki before touching surfaces / attaching to a tag.
+			waitframe
+			if( local.player == NULL ){ end }
+		}
+	}
+	else{
+		local.legacy = 0			//already on the *_nohat twin - nothing baked left to hide
+	}
+	if( local.hdbg ){
+		println "^~^~^ HELMET cur="
+		println local.cur
+		println "^~^~^ HELMET legacy="
+		println local.legacy
+	}
+
+	//the Standard Issue piece for THIS skin: the same mesh + the same shader the body used to carry,
+	//so index 1 still looks exactly like the untouched original. "" = the skin was already bare-headed.
+	local.std = ""
+	if( local.base != NIL ){
+		local.std = level.coop_skinStdHelmet[local.base]
+		if( local.std == NIL ){ local.std = "" }
 	}
 
 	local.tik = level.coop_helmetTik[local.idx]
@@ -178,6 +270,13 @@ helmet_apply local.player:{
 	local.player.flags["coop_helmetEnt"] = NULL
 
 	if( local.tik == "std" ){
+	//[user 08-07] bug-1545 - this whole un-hide list is now the BELT-AND-BRACES path, not the
+	//mechanism. It only runs while the body might still carry baked headgear (local.legacy) -
+	//a disguise uniform (m2l2 waffen-SS officer, e1l4 italian), a non-roster model, or the frame
+	//the *_nohat swap above was issued in. On a normalised hatless body every one of these
+	//surfaces is simply absent and the engine no-ops with a "group not found" warning
+	//(entity.cpp:4214), so skipping it saves ~35 pointless commands per spawn.
+	if( local.legacy == 1 ){
 		//show the model's own issued helmet - the default, untouched look
 		local.player surface us_helmet "-nodraw"
 		local.player surface us_helmet_inside "-nodraw"
@@ -192,12 +291,85 @@ helmet_apply local.player:{
 		local.player surface BritTankHat "-nodraw"
 		local.player surface woolcap "-nodraw"
 		local.player surface offcap2 "-nodraw"
+		//[user 08-07] whole-roster audit: allied_Tanker.tik's helmet and allied_british_paratroops_
+		//helmet.tik's mask are unique surface names, safe as a blanket nodraw like the ones above.
+		local.player surface lambert8 "-nodraw"
+		local.player surface britparamask "-nodraw"
+		//[user 08-07] allied_british_tank_corporal.tik (retail, not git-tracked - only visible by
+		//scanning the mounted paks directly, not this repo) wears a beret+goggles piece under yet
+		//two more surface names. Verified unique across all 416 player tiks found across every
+		//mounted pak (base game + every addon pak), safe as a blanket nodraw.
+		local.player surface beret "-nodraw"
+		local.player surface goggles "-nodraw"
+		//[user 08-07] bug-1533 - EXHAUSTIVE pak audit: every prior pass only scanned this repo's own
+		//models/player/ folder. A Python zipfile sweep of every mounted pak (main/mainta/maintt base
+		//retail + all maintt zzzz* auto-updater addons) found 416 distinct models/player/*.tik (225
+		//excl. _fps arms-only variants) - the TRUE live roster, ~3x what git tracks. These 12 surfaces
+		//are real head coverings verified either unique, or (where reused by several skins) ALWAYS
+		//headgear on every one of them - no torso/lining collision found anywhere in the corpus - so
+		//all are safe as a blanket nodraw:
+		//  al_us_mask/al_us_maskhead = allied_us_mask.tik's own gas mask (ARMORY skin, reachable today)
+		//  ax_ital_infhat = sc_ax_ital_inf.tik's cap (e1l4's DISGUISE uniform - reachable today)
+		//  officerhat = german_waffenss_officer.tik + 7 other German officer skins (default disguise
+		//    uniform on m2l2a/m2l2b - reachable today; distinct from the already-covered "officer_hat")
+		//  camocover/crusher/ssncocap/officercap/german_beret/helmet/gasmask/ax_ital_volhat = Axis-only
+		//    skins not currently reachable by a player, added defensively for future disguise/roster growth
+		local.player surface al_us_mask "-nodraw"
+		local.player surface al_us_maskhead "-nodraw"
+		local.player surface ax_ital_infhat "-nodraw"
+		local.player surface ax_ital_volhat "-nodraw"
+		local.player surface camocover "-nodraw"
+		local.player surface crusher "-nodraw"
+		local.player surface gasmask "-nodraw"
+		local.player surface german_beret "-nodraw"
+		local.player surface helmet "-nodraw"
+		local.player surface officercap "-nodraw"
+		local.player surface officerhat "-nodraw"
+		local.player surface ssncocap "-nodraw"
+		//[user 08-07] bug-1533 - "hat" PROMOTED from the model-gated block below to a blanket: the
+		//same audit checked every one of its 15 uses across the full corpus (allied_russian_seaman.tik
+		//- an ARMORY skin, reachable today - plus 14 Axis skins) and every single one is a genuine
+		//hat/cap surface, never a torso/lining reuse like "inside" below. The prior comment here
+		//claiming only allied_Norwegian_resistance.tik used "hat" for headgear was only true of the
+		//git-tracked subset it was checked against.
+		local.player surface hat "-nodraw"
+		//[user 08-07] bug-1540 - EYEWEAR. The two glasses meshes are the only surfaces the new
+		//pieces added that the bug-1533 sweep had not already covered. Each of these four names
+		//resolves to exactly ONE skd across all 2030 player/human tiks in every mounted pak
+		//(frames/glass -> models/gear/eyeglass.skd, worn by 66 skins incl. german_Elite_Gestapo,
+		//german_Feldgendarmerie and german_Scientist; Af_P_Glasses/Af_P_Lens -> models/equipment/
+		//usgear/af_p_glasses.skd, allied_wheathers.tik) - no reuse anywhere, safe as a blanket.
+		local.player surface frames "-nodraw"
+		local.player surface glass "-nodraw"
+		local.player surface Af_P_Glasses "-nodraw"
+		local.player surface Af_P_Lens "-nodraw"
+		//"outside"/"inside" are NOT safe as a blanket toggle - claus.tik, allied_1st_manon.tik,
+		//allied_Manon.tik, allied_SAS.tik, allied_Commanding_Officer.tik and allied_british_general.tik
+		//all reuse "inside" for an unrelated TUNIC LINING surface; nodrawing it there would strip
+		//their torso geometry. Only allied_infantry.tik uses outside/inside for its own 2-piece
+		//helmet, so gate on the worn model.
+		if( local.player.model == "models/player/allied_infantry.tik" ){
+			local.player surface outside "-nodraw"
+			local.player surface inside "-nodraw"
+		}
+	}
+		//[user 08-07] bug-1545 - and THIS is what "Standard Issue" actually is now: the piece that
+		//reproduces the headgear the *_nohat body no longer carries (same mesh, same shader), so the
+		//default look is byte-for-byte the original. "" = a genuinely bare-headed skin, or a
+		//disguise/non-roster model that still wears its own baked hat (un-hidden just above).
+		if( local.std != "" ){
+			if( local.hdbg ){ println( "^~^~^ HELMET std attach=" + local.std ) }
+			local.player attachmodel local.std "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
+		}
 		end
 	}
 
 	//every other option hides the baked helmet(s). us_helmet_inside / bob_helmet_camo only exist
 	//on the airborne skins (three stacked helmet surfaces); on all other models the engine simply
 	//warns "group not found" and no-ops - harmless (entity.cpp:4214).
+	//[user 08-07] bug-1545 - same belt-and-braces gate as the "std" branch: on a normalised
+	//*_nohat body there is nothing baked left to hide, so this whole list is dead weight.
+	if( local.legacy == 1 ){
 	local.player surface us_helmet "+nodraw"
 	local.player surface us_helmet_inside "+nodraw"
 	local.player surface bob_helmet_camo "+nodraw"
@@ -211,6 +383,41 @@ helmet_apply local.player:{
 	local.player surface BritTankHat "+nodraw"
 	local.player surface woolcap "+nodraw"
 	local.player surface offcap2 "+nodraw"
+	//[user 08-07] see the "std" branch above for why these two are a safe blanket and
+	//outside/inside are gated on the worn model instead.
+	local.player surface lambert8 "+nodraw"
+	local.player surface britparamask "+nodraw"
+	local.player surface beret "+nodraw"
+	local.player surface goggles "+nodraw"
+	//[user 08-07] bug-1533 - EXHAUSTIVE pak audit (see "std" branch above for the full rationale):
+	//12 new blanket surfaces + "hat" promoted from a model-gate to a blanket.
+	local.player surface al_us_mask "+nodraw"
+	//[user 08-07] bug-1545 - "al_us_maskhead" DELIBERATELY DROPPED from this hide list. bug-1533
+	//added it next to al_us_mask, but the two are NOT both headgear: AL_US_MaskHead.skd carries the
+	//gas mask AND the FACE under it (shader AL_US_MaskHead -> textures/models/human/faces/
+	//AL_US_MaskHead.tga), so hiding it left allied_us_mask.tik headless under any chosen helmet.
+	//The hatless twin keeps the face and bakes only the mask off with a TIKI `flags nodraw`.
+	local.player surface ax_ital_infhat "+nodraw"
+	local.player surface ax_ital_volhat "+nodraw"
+	local.player surface camocover "+nodraw"
+	local.player surface crusher "+nodraw"
+	local.player surface gasmask "+nodraw"
+	local.player surface german_beret "+nodraw"
+	local.player surface helmet "+nodraw"
+	local.player surface officercap "+nodraw"
+	local.player surface officerhat "+nodraw"
+	local.player surface ssncocap "+nodraw"
+	local.player surface hat "+nodraw"
+	//[user 08-07] bug-1540 - eyewear; see the "std" branch above for why these four are a safe blanket.
+	local.player surface frames "+nodraw"
+	local.player surface glass "+nodraw"
+	local.player surface Af_P_Glasses "+nodraw"
+	local.player surface Af_P_Lens "+nodraw"
+	if( local.player.model == "models/player/allied_infantry.tik" ){
+		local.player surface outside "+nodraw"
+		local.player surface inside "+nodraw"
+	}
+	}
 
 	if( local.tik == "none" ){
 		if( local.hdbg ){ println( "^~^~^ HELMET exit=none_bareheaded idx=" + local.idx ) }
@@ -242,9 +449,25 @@ helmet_applyMannequin local.player:{
 	if( local.idx == NIL ){ local.idx = 1 }
 	local.tik = level.coop_helmetTik[local.idx]
 
+	//[user 08-07] bug-1545 - resolve THIS player's Standard Issue piece (see helmet_apply). The armory
+	//3D preview is a UI charRender widget with no surface control at all, which is half the reason the
+	//bodies went hatless at source: the preview can only ever show body + attached piece, so the piece
+	//has to carry the headgear. coop_loHelm feeds modelattachcvar in ui/coop_loadout.urc.
+	waitthread armory_skin_build
+	local.cur = waitthread coop_mod/itemhandler.scr::getPlayerUniform local.player
+	local.base = level.coop_skinBase[local.cur]
+	if( local.base == NIL ){
+		if( level.coop_skinStdHelmet[local.cur] != NIL ){ local.base = local.cur }
+	}
+	local.std = ""
+	if( local.base != NIL ){
+		local.std = level.coop_skinStdHelmet[local.base]
+		if( local.std == NIL ){ local.std = "" }
+	}
+
 	//armory preview tile cvar (client-side; the loadout menu's HELMET tile renders it)
 	local.prev = local.tik
-	if( local.prev == "std" ){ local.prev = "models/coop_helmets/coop_helmet_plain.tik" }
+	if( local.prev == "std" ){ local.prev = local.std }
 	if( local.prev == "none" ){ local.prev = "" }
 	//[user 07-18] bug-773: an EMPTY value cannot ride a raw `set` push - "set coop_loHelm " arrives
 	//as a 2-arg set, and Cvar_Set_f with argc==2 PRINTS the cvar instead of setting it (seen live:
@@ -261,12 +484,22 @@ helmet_applyMannequin local.player:{
 	//NIL == NULL is FALSE, so the old NULL-only guard fell through and every command below
 	//errored "applied to NIL" (qconsole 07-20, armory used from an m/t/e map). Test both.
 	if( local.man == NIL || local.man == NULL ){ end }
+	//[user 08-07] bug-1545 - put the mannequin on the hatless twin too, so the lobby body matches the
+	//live spawn exactly (a model swap also wipes its attachments, hence before the attach work below).
+	local.mcur = waitthread coop_mod/itemhandler.scr::getPlayerUniform local.man
+	if( level.coop_skinBase[local.mcur] == NIL && level.coop_skinStdHelmet[local.mcur] != NIL ){
+		local.man model ( "models/player/" + local.mcur + "_nohat.tik" )
+	}
 	local.man removeattachedmodel "Bip01 Head"
+	//[user 08-07] bug-1533 - this list had drifted out of sync with helmet_apply above (missing both
+	//bug-1359's community-skin surfaces and the exhaustive pak-audit surfaces below); the lobby
+	//mannequin wears the same skin a live player will, so it needs the identical nodraw set or the
+	//preview shows a baked-in helmet the real spawn won't. See helmet_apply's "std" branch for the
+	//full per-surface rationale/sourcing - kept byte-identical here, just local.man instead of local.player.
 	if( local.tik == "std" ){
 		local.man surface us_helmet "-nodraw"
 		local.man surface us_helmet_inside "-nodraw"
 		local.man surface bob_helmet_camo "-nodraw"
-		//[user 2026-08-04] bug-1359 - community skins carry their OWN helmet under different surface names; without these the chosen headgear renders ON TOP of the model's own.
 		local.man surface helmet_mk2a "-nodraw"
 		local.man surface britberet "-nodraw"
 		local.man surface brit_beret "-nodraw"
@@ -276,12 +509,41 @@ helmet_applyMannequin local.player:{
 		local.man surface BritTankHat "-nodraw"
 		local.man surface woolcap "-nodraw"
 		local.man surface offcap2 "-nodraw"
+		local.man surface lambert8 "-nodraw"
+		local.man surface britparamask "-nodraw"
+		local.man surface beret "-nodraw"
+		local.man surface goggles "-nodraw"
+		local.man surface al_us_mask "-nodraw"
+		local.man surface al_us_maskhead "-nodraw"
+		local.man surface ax_ital_infhat "-nodraw"
+		local.man surface ax_ital_volhat "-nodraw"
+		local.man surface camocover "-nodraw"
+		local.man surface crusher "-nodraw"
+		local.man surface gasmask "-nodraw"
+		local.man surface german_beret "-nodraw"
+		local.man surface helmet "-nodraw"
+		local.man surface officercap "-nodraw"
+		local.man surface officerhat "-nodraw"
+		local.man surface ssncocap "-nodraw"
+		local.man surface hat "-nodraw"
+		//[user 08-07] bug-1540 - eyewear; see helmet_apply's "std" branch for the corpus check.
+		local.man surface frames "-nodraw"
+		local.man surface glass "-nodraw"
+		local.man surface Af_P_Glasses "-nodraw"
+		local.man surface Af_P_Lens "-nodraw"
+		if( local.man.model == "models/player/allied_infantry.tik" ){
+			local.man surface outside "-nodraw"
+			local.man surface inside "-nodraw"
+		}
+		//[user 08-07] bug-1545 - Standard Issue = the piece that reproduces the removed headgear.
+		if( local.std != "" ){
+			local.man attachmodel local.std "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
+		}
 		end
 	}
 	local.man surface us_helmet "+nodraw"
 	local.man surface us_helmet_inside "+nodraw"
 	local.man surface bob_helmet_camo "+nodraw"
-	//[user 2026-08-04] bug-1359 - community skins carry their OWN helmet under different surface names; without these the chosen headgear renders ON TOP of the model's own.
 	local.man surface helmet_mk2a "+nodraw"
 	local.man surface britberet "+nodraw"
 	local.man surface brit_beret "+nodraw"
@@ -291,6 +553,33 @@ helmet_applyMannequin local.player:{
 	local.man surface BritTankHat "+nodraw"
 	local.man surface woolcap "+nodraw"
 	local.man surface offcap2 "+nodraw"
+	local.man surface lambert8 "+nodraw"
+	local.man surface britparamask "+nodraw"
+	local.man surface beret "+nodraw"
+	local.man surface goggles "+nodraw"
+	local.man surface al_us_mask "+nodraw"
+	//[user 08-07] bug-1545 - "al_us_maskhead" dropped here too; it is the FACE under the gas mask,
+	//not headgear. See helmet_apply's matching comment.
+	local.man surface ax_ital_infhat "+nodraw"
+	local.man surface ax_ital_volhat "+nodraw"
+	local.man surface camocover "+nodraw"
+	local.man surface crusher "+nodraw"
+	local.man surface gasmask "+nodraw"
+	local.man surface german_beret "+nodraw"
+	local.man surface helmet "+nodraw"
+	local.man surface officercap "+nodraw"
+	local.man surface officerhat "+nodraw"
+	local.man surface ssncocap "+nodraw"
+	local.man surface hat "+nodraw"
+	//[user 08-07] bug-1540 - eyewear; see helmet_apply's "std" branch for the corpus check.
+	local.man surface frames "+nodraw"
+	local.man surface glass "+nodraw"
+	local.man surface Af_P_Glasses "+nodraw"
+	local.man surface Af_P_Lens "+nodraw"
+	if( local.man.model == "models/player/allied_infantry.tik" ){
+		local.man surface outside "+nodraw"
+		local.man surface inside "+nodraw"
+	}
 	if( local.tik == "none" ){ end }
 	local.man attachmodel local.tik "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
 }end
@@ -644,6 +933,304 @@ level.coop_armorySkins[89] = "american_1st_rangers_engineer"
 	level.coop_armorySkins[119] = "allied_sniper"
 	level.coop_armorySkins[120] = "allied_british_general"
 	level.coop_armorySkins[121] = "allied_medic"
+	//[user 08-07] trilogy-skin rollout: named campaign NPCs given their own armory likeness,
+	//see docs/OPEN.md / skin_survey_final for the ranked candidate list this was sourced from.
+	level.coop_armorySkins[122] = "ramsey"
+	level.coop_armorySkins[123] = "mcmartin"
+	level.coop_armorySkins[124] = "johnson_e2l1"
+	level.coop_armorySkins[125] = "cappy_sh"
+	level.coop_armorySkins[126] = "hildebrandt"
+	level.coop_armorySkins[127] = "captain_ike"
+	level.coop_armorySkins[128] = "wilson_sh"
+	level.coop_armorySkins[129] = "claus"
+	level.coop_armorySkins[130] = "burton"
+	level.coop_armorySkins[131] = "gobbs"
+	level.coop_armorySkins[132] = "hammon"
+	level.coop_armorySkins[133] = "glenn"
+	level.coop_armorySkins[134] = "campbell"
+	level.coop_armorySkins[135] = "whittaker"
+
+	//[user 08-07] bug-1545 HATLESS BODIES - GENERATED, do not hand-edit (scratchpad/nohat_build.py).
+	//Every armory skin now ships a models/player/<skin>_nohat.tik twin with the head-covering
+	//skelmodel/surface lines deleted at source, so a chosen helmet is the ONLY thing on the head
+	//(the old runtime nodraw whitelist could never cover a skin nobody had looked at yet, and the
+	//armory 3D preview - a UI charRender widget - has no surface control at all).
+	//  coop_skinBase["<skin>_nohat"]  = the base roster name, so a worn hatless body is still
+	//                                   recognised as its roster skin by the unlock/heal checks.
+	//  coop_skinStdHelmet["<skin>"]   = the coop_helmets piece that reproduces the headgear that
+	//                                   was removed - THIS is what "Standard Issue" now attaches,
+	//                                   so the default look of every skin is unchanged. Empty
+	//                                   string = the skin was already bare-headed.
+	level.coop_skinBase["allied_101st_captain_nohat"] = "allied_101st_captain"
+	level.coop_skinStdHelmet["allied_101st_captain"] = "models/coop_helmets/coop_std_us_helmet_captain_snw.tik"
+	level.coop_skinBase["allied_101st_infantry_nohat"] = "allied_101st_infantry"
+	level.coop_skinStdHelmet["allied_101st_infantry"] = "models/coop_helmets/coop_std_us_pfc_snow_helmet1.tik"
+	level.coop_skinBase["allied_101st_scout_nohat"] = "allied_101st_scout"
+	level.coop_skinStdHelmet["allied_101st_scout"] = "models/coop_helmets/coop_std_us_pfc_snow_helmet1.tik"
+	level.coop_skinBase["allied_501st_pir_scout_nohat"] = "allied_501st_pir_scout"
+	level.coop_skinStdHelmet["allied_501st_pir_scout"] = "models/coop_helmets/coop_std_us_pt_helmet3.tik"
+	level.coop_skinBase["allied_501st_pir_soldier_nohat"] = "allied_501st_pir_soldier"
+	level.coop_skinStdHelmet["allied_501st_pir_soldier"] = "models/coop_helmets/coop_std_us_pt_helmet1.tik"
+	level.coop_skinBase["allied_airborne_nohat"] = "allied_airborne"
+	level.coop_skinStdHelmet["allied_airborne"] = "models/coop_helmets/coop_std_dday_camo_hel.tik"
+	level.coop_skinBase["allied_airborne_101st_1_nohat"] = "allied_airborne_101st_1"
+	level.coop_skinStdHelmet["allied_airborne_101st_1"] = "models/coop_helmets/coop_std_dday_camo_hel.tik"
+	level.coop_skinBase["allied_airborne_101st_2_nohat"] = "allied_airborne_101st_2"
+	level.coop_skinStdHelmet["allied_airborne_101st_2"] = "models/coop_helmets/coop_std_dday_camo_hel.tik"
+	level.coop_skinBase["allied_airborne_101st_sgt_nohat"] = "allied_airborne_101st_sgt"
+	level.coop_skinStdHelmet["allied_airborne_101st_sgt"] = "models/coop_helmets/coop_std_air_helm.tik"
+	level.coop_skinBase["allied_airborne_82nd_1_nohat"] = "allied_airborne_82nd_1"
+	level.coop_skinStdHelmet["allied_airborne_82nd_1"] = "models/coop_helmets/coop_std_dday_camo_hel.tik"
+	level.coop_skinBase["allied_airborne_82nd_2_nohat"] = "allied_airborne_82nd_2"
+	level.coop_skinStdHelmet["allied_airborne_82nd_2"] = "models/coop_helmets/coop_std_helmet_inside_bob.tik"
+	level.coop_skinBase["allied_airborne_82nd_3_nohat"] = "allied_airborne_82nd_3"
+	level.coop_skinStdHelmet["allied_airborne_82nd_3"] = "models/coop_helmets/coop_std_helmet_inside_bob_2.tik"
+	level.coop_skinBase["allied_airborne_82nd_sgt_nohat"] = "allied_airborne_82nd_sgt"
+	level.coop_skinStdHelmet["allied_airborne_82nd_sgt"] = "models/coop_helmets/coop_std_blank_web.tik"
+	level.coop_skinBase["allied_british_6th_airborne_captain_nohat"] = "allied_british_6th_airborne_captain"
+	level.coop_skinStdHelmet["allied_british_6th_airborne_captain"] = "models/coop_helmets/coop_helmet_brit_beret.tik"
+	level.coop_skinBase["allied_british_6th_airborne_paratrooper_nohat"] = "allied_british_6th_airborne_paratrooper"
+	level.coop_skinStdHelmet["allied_british_6th_airborne_paratrooper"] = "models/coop_helmets/coop_helmet_uk_helmet.tik"
+	level.coop_skinBase["allied_british_cmd_nohat"] = "allied_british_cmd"
+	level.coop_skinStdHelmet["allied_british_cmd"] = "models/coop_helmets/coop_helmet_brit_cmdhat.tik"
+	level.coop_skinBase["allied_british_tank_nohat"] = "allied_british_tank"
+	level.coop_skinStdHelmet["allied_british_tank"] = "models/coop_helmets/coop_helmet_brit_tankhat.tik"
+	level.coop_skinBase["allied_british_tank_corporal_nohat"] = "allied_british_tank_corporal"
+	level.coop_skinStdHelmet["allied_british_tank_corporal"] = "models/coop_helmets/coop_helmet_brit_tankberet.tik"
+	level.coop_skinBase["allied_manon_nohat"] = "allied_manon"
+	level.coop_skinStdHelmet["allied_manon"] = ""
+	level.coop_skinBase["allied_norwegian_resistance_nohat"] = "allied_norwegian_resistance"
+	level.coop_skinStdHelmet["allied_norwegian_resistance"] = "models/coop_helmets/coop_helmet_woolcap.tik"
+	level.coop_skinBase["allied_pilot_nohat"] = "allied_pilot"
+	level.coop_skinStdHelmet["allied_pilot"] = "models/coop_helmets/coop_std_pilot_hat.tik"
+	level.coop_skinBase["allied_russian_corporal_nohat"] = "allied_russian_corporal"
+	level.coop_skinStdHelmet["allied_russian_corporal"] = "models/coop_helmets/coop_std_soviet_corporal_helmet.tik"
+	level.coop_skinBase["allied_russian_crazy_boris_nohat"] = "allied_russian_crazy_boris"
+	level.coop_skinStdHelmet["allied_russian_crazy_boris"] = ""
+	level.coop_skinBase["allied_russian_recon_scout_nohat"] = "allied_russian_recon_scout"
+	level.coop_skinStdHelmet["allied_russian_recon_scout"] = ""
+	level.coop_skinBase["allied_russian_recon_soldier_nohat"] = "allied_russian_recon_soldier"
+	level.coop_skinStdHelmet["allied_russian_recon_soldier"] = ""
+	level.coop_skinBase["allied_russian_seaman_nohat"] = "allied_russian_seaman"
+	level.coop_skinStdHelmet["allied_russian_seaman"] = "models/coop_helmets/coop_helmet_soviet_hat.tik"
+	level.coop_skinBase["allied_sas_nohat"] = "allied_sas"
+	level.coop_skinStdHelmet["allied_sas"] = ""
+	level.coop_skinBase["allied_tanker_nohat"] = "allied_tanker"
+	level.coop_skinStdHelmet["allied_tanker"] = "models/coop_helmets/coop_std_tanker_helmet.tik"
+	level.coop_skinBase["allied_tanker2_nohat"] = "allied_tanker2"
+	level.coop_skinStdHelmet["allied_tanker2"] = "models/coop_helmets/coop_std_tankhelm_sgt_net.tik"
+	level.coop_skinBase["allied_technician_nohat"] = "allied_technician"
+	level.coop_skinStdHelmet["allied_technician"] = "models/coop_helmets/coop_std_us_helmet_private.tik"
+	level.coop_skinBase["allied_us_mask_nohat"] = "allied_us_mask"
+	level.coop_skinStdHelmet["allied_us_mask"] = "models/coop_helmets/coop_std_al_us_mask.tik"
+	level.coop_skinBase["allied_us_tank_nohat"] = "allied_us_tank"
+	level.coop_skinStdHelmet["allied_us_tank"] = "models/coop_helmets/coop_helmet_us_tankhat.tik"
+	level.coop_skinBase["allied_wheathers_nohat"] = "allied_wheathers"
+	level.coop_skinStdHelmet["allied_wheathers"] = "models/coop_helmets/coop_std_sc_al_us_inf_helm.tik"
+	level.coop_skinBase["american_army_nohat"] = "american_army"
+	level.coop_skinStdHelmet["american_army"] = "models/coop_helmets/coop_std_ushelmet.tik"
+	level.coop_skinBase["american_army2_nohat"] = "american_army2"
+	level.coop_skinStdHelmet["american_army2"] = "models/coop_helmets/coop_std_ushelmet.tik"
+	level.coop_skinBase["american_army3_nohat"] = "american_army3"
+	level.coop_skinStdHelmet["american_army3"] = "models/coop_helmets/coop_std_ushelmet.tik"
+	level.coop_skinBase["american_army_29id_nohat"] = "american_army_29id"
+	level.coop_skinStdHelmet["american_army_29id"] = "models/coop_helmets/coop_std_us_helmet_29th_net.tik"
+	level.coop_skinBase["american_army_29id_bar_nohat"] = "american_army_29id_bar"
+	level.coop_skinStdHelmet["american_army_29id_bar"] = "models/coop_helmets/coop_std_us_helmet_29th_net.tik"
+	level.coop_skinBase["american_army_29id_radioman_nohat"] = "american_army_29id_radioman"
+	level.coop_skinStdHelmet["american_army_29id_radioman"] = "models/coop_helmets/coop_std_us_helmet_29th.tik"
+	level.coop_skinBase["american_army_29id_sgt_nohat"] = "american_army_29id_sgt"
+	level.coop_skinStdHelmet["american_army_29id_sgt"] = "models/coop_helmets/coop_std_us_helmet_29th.tik"
+	level.coop_skinBase["american_army_bar_nohat"] = "american_army_bar"
+	level.coop_skinStdHelmet["american_army_bar"] = "models/coop_helmets/coop_std_ushelmet_net.tik"
+	level.coop_skinBase["american_army_captain_nohat"] = "american_army_captain"
+	level.coop_skinStdHelmet["american_army_captain"] = "models/coop_helmets/coop_std_blank_capt.tik"
+	level.coop_skinBase["american_army_hbt_nohat"] = "american_army_hbt"
+	level.coop_skinStdHelmet["american_army_hbt"] = "models/coop_helmets/coop_std_blank_web.tik"
+	level.coop_skinBase["american_army_lieutenant_nohat"] = "american_army_lieutenant"
+	level.coop_skinStdHelmet["american_army_lieutenant"] = "models/coop_helmets/coop_std_blank_lt.tik"
+	level.coop_skinBase["american_army_m43_nohat"] = "american_army_m43"
+	level.coop_skinStdHelmet["american_army_m43"] = "models/coop_helmets/coop_std_blank_web.tik"
+	level.coop_skinBase["american_army_major_nohat"] = "american_army_major"
+	level.coop_skinStdHelmet["american_army_major"] = "models/coop_helmets/coop_std_ushelmet_major.tik"
+	level.coop_skinBase["american_army_medic_nohat"] = "american_army_medic"
+	level.coop_skinStdHelmet["american_army_medic"] = "models/coop_helmets/coop_std_us_helmet_medic.tik"
+	level.coop_skinBase["american_army_sergeant_nohat"] = "american_army_sergeant"
+	level.coop_skinStdHelmet["american_army_sergeant"] = "models/coop_helmets/coop_std_blank_sgt.tik"
+	level.coop_skinBase["american_assault_engineer_nohat"] = "american_assault_engineer"
+	level.coop_skinStdHelmet["american_assault_engineer"] = "models/coop_helmets/coop_std_us_helmet_engineer01.tik"
+	level.coop_skinBase["american_assault_engineer2_nohat"] = "american_assault_engineer2"
+	level.coop_skinStdHelmet["american_assault_engineer2"] = "models/coop_helmets/coop_std_us_helmet_engineer01.tik"
+	level.coop_skinBase["american_major_nohat"] = "american_major"
+	level.coop_skinStdHelmet["american_major"] = "models/coop_helmets/coop_std_ushelmet_major.tik"
+	level.coop_skinBase["american_navy_beach_radioman_nohat"] = "american_navy_beach_radioman"
+	level.coop_skinStdHelmet["american_navy_beach_radioman"] = "models/coop_helmets/coop_std_us_helmet_engineer02.tik"
+	level.coop_skinBase["american_ranger_nohat"] = "american_ranger"
+	level.coop_skinStdHelmet["american_ranger"] = "models/coop_helmets/coop_std_us_helmet_private_net.tik"
+	level.coop_skinBase["american_ranger2_nohat"] = "american_ranger2"
+	level.coop_skinStdHelmet["american_ranger2"] = "models/coop_helmets/coop_std_2ndranger_sgt.tik"
+	level.coop_skinBase["american_ranger3_hbt_nohat"] = "american_ranger3_hbt"
+	level.coop_skinStdHelmet["american_ranger3_hbt"] = "models/coop_helmets/coop_std_us_helmet_private_net.tik"
+	level.coop_skinBase["american_ranger_assault_nohat"] = "american_ranger_assault"
+	level.coop_skinStdHelmet["american_ranger_assault"] = "models/coop_helmets/coop_std_us_helmet_private_net.tik"
+	level.coop_skinBase["american_ranger_assault_captain_nohat"] = "american_ranger_assault_captain"
+	level.coop_skinStdHelmet["american_ranger_assault_captain"] = "models/coop_helmets/coop_std_2ndranger_cpt.tik"
+	level.coop_skinBase["american_ranger_assault_sergeant_nohat"] = "american_ranger_assault_sergeant"
+	level.coop_skinStdHelmet["american_ranger_assault_sergeant"] = "models/coop_helmets/coop_std_2ndranger_sgt.tik"
+	level.coop_skinBase["american_ranger_lieutenant_nohat"] = "american_ranger_lieutenant"
+	level.coop_skinStdHelmet["american_ranger_lieutenant"] = "models/coop_helmets/coop_std_ranger_lt_web.tik"
+	level.coop_skinBase["american_ranger_medic_nohat"] = "american_ranger_medic"
+	level.coop_skinStdHelmet["american_ranger_medic"] = "models/coop_helmets/coop_std_ranger_helmet_medic.tik"
+	level.coop_skinBase["american_ranger_sergeant_nohat"] = "american_ranger_sergeant"
+	level.coop_skinStdHelmet["american_ranger_sergeant"] = "models/coop_helmets/coop_std_2ndranger_sgt.tik"
+	level.coop_skinBase["american_ranger_winter_nohat"] = "american_ranger_winter"
+	level.coop_skinStdHelmet["american_ranger_winter"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_ranger_winter_m41_nohat"] = "american_ranger_winter_m41"
+	level.coop_skinStdHelmet["american_ranger_winter_m41"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_ranger_winter_m43_nohat"] = "american_ranger_winter_m43"
+	level.coop_skinStdHelmet["american_ranger_winter_m43"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_ranger_winter_m43_lt_nohat"] = "american_ranger_winter_m43_lt"
+	level.coop_skinStdHelmet["american_ranger_winter_m43_lt"] = "models/coop_helmets/coop_std_helmet_rgr_lt_winter.tik"
+	level.coop_skinBase["american_ranger_winter_sgt_nohat"] = "american_ranger_winter_sgt"
+	level.coop_skinStdHelmet["american_ranger_winter_sgt"] = "models/coop_helmets/coop_std_helmet_rgr_sgt_winter.tik"
+	level.coop_skinBase["american_winter_m41_nohat"] = "american_winter_m41"
+	level.coop_skinStdHelmet["american_winter_m41"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_winter_m43_nohat"] = "american_winter_m43"
+	level.coop_skinStdHelmet["american_winter_m43"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_winter_sgt_nohat"] = "american_winter_sgt"
+	level.coop_skinStdHelmet["american_winter_sgt"] = "models/coop_helmets/coop_std_helmet_rgr_winter.tik"
+	level.coop_skinBase["american_winter_specengineer_nohat"] = "american_winter_specengineer"
+	level.coop_skinStdHelmet["american_winter_specengineer"] = "models/coop_helmets/coop_std_helmet_engineer_winter.tik"
+	level.coop_skinBase["rifleman_nohat"] = "rifleman"
+	level.coop_skinStdHelmet["rifleman"] = "models/coop_helmets/coop_std_34th_sniper.tik"
+	level.coop_skinBase["riflemannohelm_nohat"] = "riflemannohelm"
+	level.coop_skinStdHelmet["riflemannohelm"] = ""
+	level.coop_skinBase["submachine_gunner_nohat"] = "submachine_gunner"
+	level.coop_skinStdHelmet["submachine_gunner"] = "models/coop_helmets/coop_std_34th_sergeant.tik"
+	level.coop_skinBase["submachine_gunnernohelm_nohat"] = "submachine_gunnernohelm"
+	level.coop_skinStdHelmet["submachine_gunnernohelm"] = ""
+	level.coop_skinBase["support_gunner_nohat"] = "support_gunner"
+	level.coop_skinStdHelmet["support_gunner"] = "models/coop_helmets/coop_std_34th_helmet.tik"
+	level.coop_skinBase["support_gunnernohelm_nohat"] = "support_gunnernohelm"
+	level.coop_skinStdHelmet["support_gunnernohelm"] = ""
+	level.coop_skinBase["allied_Airborne_101E_Col_Sink_nohat"] = "allied_Airborne_101E_Col_Sink"
+	level.coop_skinStdHelmet["allied_Airborne_101E_Col_Sink"] = "models/coop_helmets/coop_std_col_helmet.tik"
+	level.coop_skinBase["allied_Airborne_101E_Lt_Speirs_nohat"] = "allied_Airborne_101E_Lt_Speirs"
+	level.coop_skinStdHelmet["allied_Airborne_101E_Lt_Speirs"] = "models/coop_helmets/coop_std_ba_lt_helmet.tik"
+	level.coop_skinBase["allied_Airborne_101E_Corp_Liebgott_nohat"] = "allied_Airborne_101E_Corp_Liebgott"
+	level.coop_skinStdHelmet["allied_Airborne_101E_Corp_Liebgott"] = "models/coop_helmets/coop_std_ba_pvt_helmet.tik"
+	level.coop_skinBase["allied_British_Officer_nohat"] = "allied_British_Officer"
+	level.coop_skinStdHelmet["allied_British_Officer"] = "models/coop_helmets/coop_helmet_brit_offcap2.tik"
+	level.coop_skinBase["Allied_British_rifleman_nohat"] = "Allied_British_rifleman"
+	level.coop_skinStdHelmet["Allied_British_rifleman"] = "models/coop_helmets/coop_helmet_brit_mk2.tik"
+	level.coop_skinBase["allied_british_paratroops_nohat"] = "allied_british_paratroops"
+	level.coop_skinStdHelmet["allied_british_paratroops"] = "models/coop_helmets/coop_std_britberet6abs.tik"
+	level.coop_skinBase["allied_british_paratroops_helmet_nohat"] = "allied_british_paratroops_helmet"
+	level.coop_skinStdHelmet["allied_british_paratroops_helmet"] = "models/coop_helmets/coop_helmet_brit_paramask.tik"
+	level.coop_skinBase["allied_british_paratroops_officer_nohat"] = "allied_british_paratroops_officer"
+	level.coop_skinStdHelmet["allied_british_paratroops_officer"] = "models/coop_helmets/coop_std_britberet6abscan.tik"
+	level.coop_skinBase["allied_british_polish_para_nohat"] = "allied_british_polish_para"
+	level.coop_skinStdHelmet["allied_british_polish_para"] = "models/coop_helmets/coop_std_polberet6abs.tik"
+	level.coop_skinBase["Allied_British_1_snow_helmet1_nohat"] = "Allied_British_1_snow_helmet1"
+	level.coop_skinStdHelmet["Allied_British_1_snow_helmet1"] = "models/coop_helmets/coop_std_britmk3snow.tik"
+	level.coop_skinBase["Allied_British_1_snow_RADIO_nohat"] = "Allied_British_1_snow_RADIO"
+	level.coop_skinStdHelmet["Allied_British_1_snow_RADIO"] = "models/coop_helmets/coop_std_britmk3snow.tik"
+	level.coop_skinBase["allied_capt_recon_nohat"] = "allied_capt_recon"
+	level.coop_skinStdHelmet["allied_capt_recon"] = "models/coop_helmets/coop_std_recon_helm.tik"
+	level.coop_skinBase["american_1st_rangers_engineer_nohat"] = "american_1st_rangers_engineer"
+	level.coop_skinStdHelmet["american_1st_rangers_engineer"] = "models/coop_helmets/coop_std_1st_rangers_helmet_engineer.tik"
+	level.coop_skinBase["american_1st_rangers_lieutenant_nohat"] = "american_1st_rangers_lieutenant"
+	level.coop_skinStdHelmet["american_1st_rangers_lieutenant"] = "models/coop_helmets/coop_std_1st_rangers_helmet_ltnt.tik"
+	level.coop_skinBase["american_1st_rangers_sergeant_nohat"] = "american_1st_rangers_sergeant"
+	level.coop_skinStdHelmet["american_1st_rangers_sergeant"] = "models/coop_helmets/coop_std_1st_rangers_helmet_sergeant.tik"
+	level.coop_skinBase["american_1st_rangers_private_nohat"] = "american_1st_rangers_private"
+	level.coop_skinStdHelmet["american_1st_rangers_private"] = "models/coop_helmets/coop_std_1st_rangers_helmet.tik"
+	level.coop_skinBase["american_1st_rangers_captain_nohat"] = "american_1st_rangers_captain"
+	level.coop_skinStdHelmet["american_1st_rangers_captain"] = "models/coop_helmets/coop_std_1st_rangers_helmet_captain.tik"
+	level.coop_skinBase["american_1st_rangers_medic_nohat"] = "american_1st_rangers_medic"
+	level.coop_skinStdHelmet["american_1st_rangers_medic"] = "models/coop_helmets/coop_std_1st_rangers_helmet_medic.tik"
+	level.coop_skinBase["american_28th_private_nohat"] = "american_28th_private"
+	level.coop_skinStdHelmet["american_28th_private"] = "models/coop_helmets/coop_std_wtf_helmet.tik"
+	level.coop_skinBase["34th_Infantery_Division_private_nohat"] = "34th_Infantery_Division_private"
+	level.coop_skinStdHelmet["34th_Infantery_Division_private"] = "models/coop_helmets/coop_std_34th_helmet.tik"
+	level.coop_skinBase["34th_Infantery_Division_radio_nohat"] = "34th_Infantery_Division_radio"
+	level.coop_skinStdHelmet["34th_Infantery_Division_radio"] = "models/coop_helmets/coop_std_34th_helmet.tik"
+	level.coop_skinBase["34th_Infantery_Division_sergeant_nohat"] = "34th_Infantery_Division_sergeant"
+	level.coop_skinStdHelmet["34th_Infantery_Division_sergeant"] = "models/coop_helmets/coop_std_34th_sergeant.tik"
+	level.coop_skinBase["34th_Infantery_Division_sniper_nohat"] = "34th_Infantery_Division_sniper"
+	level.coop_skinStdHelmet["34th_Infantery_Division_sniper"] = "models/coop_helmets/coop_std_34th_sniper.tik"
+	level.coop_skinBase["american_8thUrbanRangerSniper_nohat"] = "american_8thUrbanRangerSniper"
+	level.coop_skinStdHelmet["american_8thUrbanRangerSniper"] = "models/coop_helmets/coop_std_us_helmet_cam8ushelm.tik"
+	level.coop_skinBase["american_8thUrbanRanger_nohat"] = "american_8thUrbanRanger"
+	level.coop_skinStdHelmet["american_8thUrbanRanger"] = "models/coop_helmets/coop_std_us_helmet_cam8ushelm.tik"
+	level.coop_skinBase["american_8thUrbanRangerBar_nohat"] = "american_8thUrbanRangerBar"
+	level.coop_skinStdHelmet["american_8thUrbanRangerBar"] = "models/coop_helmets/coop_std_us_helmet_cam8ushelm.tik"
+	level.coop_skinBase["american_8thUrbanRangeradio_nohat"] = "american_8thUrbanRangeradio"
+	level.coop_skinStdHelmet["american_8thUrbanRangeradio"] = "models/coop_helmets/coop_std_us_helmet_cam8ushelm.tik"
+	level.coop_skinBase["american_8thUrbanRangerMG_nohat"] = "american_8thUrbanRangerMG"
+	level.coop_skinStdHelmet["american_8thUrbanRangerMG"] = "models/coop_helmets/coop_std_us_helmet_cam8ushelm.tik"
+	level.coop_skinBase["allied_82ndair_nohat"] = "allied_82ndair"
+	level.coop_skinStdHelmet["allied_82ndair"] = "models/coop_helmets/coop_std_e2_helmet.tik"
+	level.coop_skinBase["allied_airborne_elite_nohat"] = "allied_airborne_elite"
+	level.coop_skinStdHelmet["allied_airborne_elite"] = "models/coop_helmets/coop_std_ae_helmet.tik"
+	level.coop_skinBase["american_sniper_nohat"] = "american_sniper"
+	level.coop_skinStdHelmet["american_sniper"] = "models/coop_helmets/coop_std_blank_sniper.tik"
+	level.coop_skinBase["american_omaha_ranger_nohat"] = "american_omaha_ranger"
+	level.coop_skinStdHelmet["american_omaha_ranger"] = "models/coop_helmets/coop_std_omaha_ranger_helmet.tik"
+	level.coop_skinBase["allied_17thAirb_soldierbloody_nohat"] = "allied_17thAirb_soldierbloody"
+	level.coop_skinStdHelmet["allied_17thAirb_soldierbloody"] = "models/coop_helmets/coop_std_17thairb_helmet_shots.tik"
+	level.coop_skinBase["allied_1st_manon_nohat"] = "allied_1st_manon"
+	level.coop_skinStdHelmet["allied_1st_manon"] = ""
+	level.coop_skinBase["allied_1st_sniper_nohat"] = "allied_1st_sniper"
+	level.coop_skinStdHelmet["allied_1st_sniper"] = ""
+	level.coop_skinBase["allied_Commanding_Officer_nohat"] = "allied_Commanding_Officer"
+	level.coop_skinStdHelmet["allied_Commanding_Officer"] = "models/coop_helmets/coop_std_co_hat1.tik"
+	level.coop_skinBase["allied_big_red_one_nohat"] = "allied_big_red_one"
+	level.coop_skinStdHelmet["allied_big_red_one"] = "models/coop_helmets/coop_std_blank_web.tik"
+	level.coop_skinBase["allied_infantry_nohat"] = "allied_infantry"
+	level.coop_skinStdHelmet["allied_infantry"] = "models/coop_helmets/coop_std_infantry_helmet.tik"
+	level.coop_skinBase["allied_russian_Pvt_nohat"] = "allied_russian_Pvt"
+	level.coop_skinStdHelmet["allied_russian_Pvt"] = "models/coop_helmets/coop_std_soviet_private_hat.tik"
+	level.coop_skinBase["allied_332nd_Fighter_Pilot_nohat"] = "allied_332nd_Fighter_Pilot"
+	level.coop_skinStdHelmet["allied_332nd_Fighter_Pilot"] = ""
+	level.coop_skinBase["allied_camo_108thMGST_nohat"] = "allied_camo_108thMGST"
+	level.coop_skinStdHelmet["allied_camo_108thMGST"] = "models/coop_helmets/coop_std_demo_beret.tik"
+	level.coop_skinBase["american_medic_nohat"] = "american_medic"
+	level.coop_skinStdHelmet["american_medic"] = "models/coop_helmets/coop_std_medic_helmet.tik"
+	level.coop_skinBase["allied_sniper_nohat"] = "allied_sniper"
+	level.coop_skinStdHelmet["allied_sniper"] = "models/coop_helmets/coop_std_snipers_us_helmet_captain.tik"
+	level.coop_skinBase["allied_british_general_nohat"] = "allied_british_general"
+	level.coop_skinStdHelmet["allied_british_general"] = "models/coop_helmets/coop_std_brit_general_hat.tik"
+	level.coop_skinBase["allied_medic_nohat"] = "allied_medic"
+	level.coop_skinStdHelmet["allied_medic"] = "models/coop_helmets/coop_std_am_helmet.tik"
+	level.coop_skinBase["ramsey_nohat"] = "ramsey"
+	level.coop_skinStdHelmet["ramsey"] = "models/coop_helmets/coop_std_us_helmet_captain.tik"
+	level.coop_skinBase["mcmartin_nohat"] = "mcmartin"
+	level.coop_skinStdHelmet["mcmartin"] = "models/coop_helmets/coop_std_sc_al_us_inf_helm_2.tik"
+	level.coop_skinBase["johnson_e2l1_nohat"] = "johnson_e2l1"
+	level.coop_skinStdHelmet["johnson_e2l1"] = "models/coop_helmets/coop_std_sc_al_us_inf_helm_2.tik"
+	level.coop_skinBase["cappy_sh_nohat"] = "cappy_sh"
+	level.coop_skinStdHelmet["cappy_sh"] = "models/coop_helmets/coop_helmet_brit_beret.tik"
+	level.coop_skinBase["hildebrandt_nohat"] = "hildebrandt"
+	level.coop_skinStdHelmet["hildebrandt"] = "models/coop_helmets/coop_std_officer2_hat.tik"
+	level.coop_skinBase["captain_ike_nohat"] = "captain_ike"
+	level.coop_skinStdHelmet["captain_ike"] = "models/coop_helmets/coop_std_us_helmet_captain_snw.tik"
+	level.coop_skinBase["wilson_sh_nohat"] = "wilson_sh"
+	level.coop_skinStdHelmet["wilson_sh"] = "models/coop_helmets/coop_helmet_brit_beret.tik"
+	level.coop_skinBase["claus_nohat"] = "claus"
+	level.coop_skinStdHelmet["claus"] = ""
+	level.coop_skinBase["burton_nohat"] = "burton"
+	level.coop_skinStdHelmet["burton"] = "models/coop_helmets/coop_std_sc_al_us_inf_helm_2.tik"
+	level.coop_skinBase["gobbs_nohat"] = "gobbs"
+	level.coop_skinStdHelmet["gobbs"] = "models/coop_helmets/coop_std_sc_al_us_inf_helm_2.tik"
+	level.coop_skinBase["hammon_nohat"] = "hammon"
+	level.coop_skinStdHelmet["hammon"] = "models/coop_helmets/coop_std_us_helmet_ltnt.tik"
+	level.coop_skinBase["glenn_nohat"] = "glenn"
+	level.coop_skinStdHelmet["glenn"] = "models/coop_helmets/coop_std_us_helmet_medic.tik"
+	level.coop_skinBase["campbell_nohat"] = "campbell"
+	level.coop_skinStdHelmet["campbell"] = "models/coop_helmets/coop_std_us_helmet_engineer01.tik"
+	level.coop_skinBase["whittaker_nohat"] = "whittaker"
+	level.coop_skinStdHelmet["whittaker"] = "models/coop_helmets/coop_std_us_helmet_medic.tik"
 }end
 
 //-------------------------------------------------------------------------
@@ -656,6 +1243,12 @@ armory_skin_isValid local.skin:{
 	if( local.skin == NIL ){ end 0 }
 	if( local.skin == "" ){ end 0 }
 	waitthread armory_skin_build
+	//[user 08-07] bug-1545 - the worn body is now models/player/<skin>_nohat.tik, so the name
+	//getPlayerUniform hands back for a live player is the _nohat form. Accept both spellings:
+	//coop_skinBase is keyed on the hatless name, coop_skinStdHelmet on the base name, and both
+	//are generated from the same roster - a straight dict hit also skips the O(n) scan below.
+	if( level.coop_skinBase[local.skin] != NIL ){ end 1 }
+	if( level.coop_skinStdHelmet[local.skin] != NIL ){ end 1 }
 	local.n = level.coop_armorySkins.size
 	for( local.i = 1; local.i <= local.n; local.i++ ){
 		if( level.coop_armorySkins[local.i] == local.skin ){ end 1 }
@@ -721,7 +1314,11 @@ armory_skin_applyIdx local.player local.idx:{
 	local.player.flags["coop_armorySkinIdx"] = local.idx
 
 	local.skin = level.coop_armorySkins[local.idx]
-	local.player model ( "models/player/" + local.skin + ".tik" )
+	//[user 08-07] bug-1545 - wear the HATLESS twin (models/player/<skin>_nohat.tik); the baked
+	//headgear is gone from the TIKI, and helmet_apply re-attaches it as the Standard Issue piece.
+	//dm_playermodel / coop_loSkin / the unlock token below deliberately keep the BASE name - they
+	//are the skin's IDENTITY (challenge gating, heal, persistence), not a model path.
+	local.player model ( "models/player/" + local.skin + "_nohat.tik" )
 	//[user 2026-08-04] bug-1361 - the model swap wipes the surface nodraws, so the model's own
 	//helmet reappears under the attached headgear. Re-apply on every skin change.
 	thread helmet_apply local.player
@@ -735,12 +1332,12 @@ armory_skin_applyIdx local.player local.idx:{
 	//[user 07-17] in the LOBBY the visible body is the MANNEQUIN (the player entity is hidden) - mirror
 	//the new skin onto it so the armory SKIN buttons visibly work there too (bug: buttons changed nothing).
 	if( local.player.flags["coop_lobbyMannequin"] != NIL && local.player.flags["coop_lobbyMannequin"] != NULL ){
-		local.player.flags["coop_lobbyMannequin"] model ( "models/player/" + local.skin + ".tik" )
+		local.player.flags["coop_lobbyMannequin"] model ( "models/player/" + local.skin + "_nohat.tik" )
 		thread helmet_applyMannequin local.player	//[user 07-17] re-model wiped attachments - re-hat the mannequin
 	}
 	//[user 07-16] update the armory OPERATOR render (coop_loChar) so the menu preview reflects the
 	//new skin live while the loadout menu is open, not just the world player.
-	local.player stufftext ( "set coop_loChar models/player/" + local.skin + ".tik" )
+	local.player stufftext ( "set coop_loChar models/player/" + local.skin + "_nohat.tik" )
 	local.player iprint ( "Skin: " + local.skin )
 	//re-apply the helmet choice on top of the new model (InitModel wiped attachments)
 	thread helmet_apply local.player
@@ -875,6 +1472,22 @@ cosmetic_gatedBuild:{
 	//helmets earned via challenges.scr rewards + xp.scr rank grants.
 	level.coop_cosmeticGated = 1   //non-NIL marker so the guard above trips on re-entry
 	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_29th.tik"] = 1
+	//[user 08-07] the 13 pieces added 08-07 (gas mask + the 12 from the pak audit). Without these
+	//they stayed FREE - cosmetic_isUnlocked only gates a token that is in this set, so an ungated
+	//piece is wearable by everyone regardless of the challenge reward now pointing at it.
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_gasmask.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_tankberet.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_us_gasmask.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_eyeglasses.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_avglasses.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_crusher.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ss_officerhat.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ss_mutze.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_woolcap.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_paramask.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_mk2.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_offcap2.tik"] = 1
+	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_ger_splinter.tik"] = 1
 	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_29thnet.tik"] = 1
 	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_beret.tik"] = 1
 	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_brit_cmdhat.tik"] = 1
@@ -1022,6 +1635,20 @@ cosmetic_gatedBuild:{
 	level.coop_cosmeticGatedTok["models/player/allied_sniper.tik"] = 1
 	level.coop_cosmeticGatedTok["models/player/allied_british_general.tik"] = 1
 	level.coop_cosmeticGatedTok["models/player/allied_medic.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/ramsey.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/mcmartin.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/johnson_e2l1.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/cappy_sh.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/hildebrandt.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/captain_ike.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/wilson_sh.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/claus.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/burton.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/gobbs.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/hammon.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/glenn.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/campbell.tik"] = 1
+	level.coop_cosmeticGatedTok["models/player/whittaker.tik"] = 1
 }end
 
 //-------------------------------------------------------------------------
