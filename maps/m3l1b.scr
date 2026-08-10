@@ -74,6 +74,9 @@ main:{
 	waitthread global/objectives.scr::add_objectives 4 2 "Meet up at the rendevous point" $rendevous_point.origin
 	*/
 
+	//[user 2026-08-09] this add fires at raw spawn, BEFORE any player is on the server, so
+	//the New Objective toast goes to nobody. Announce it once somebody exists (m2l2a recipe).
+	if( level.gametype != 0 ){ thread coop_objToastStart }
 	waitthread global/objectives.scr::add_objectives 1 2 "Clear out the bunker." $mg42_bunker_2_gunner
 	waitthread global/objectives.scr::current_objectives 1
 
@@ -217,6 +220,17 @@ $weh_sol_retreat_3.interval = 0
 //*** mg42 gunners
 $mg42_middle1_gunner  exec global/disable_ai.scr
 $mg42_middle2_gunner  exec global/disable_ai.scr
+
+//[user 08-07] challenge "Look, I Washed For Supper" - these five bolt when the player reaches the
+// bunker MG (seq_mg42_retreat) and then delete themselves 2s after reaching cover. Tagging them
+// here rather than in that sequence so killing them BEFORE they run also counts. The tag is only
+// ever read by challenges.scr::chal_ai_killed, which never runs for a despawn.
+level.coop_washed_kills = 0
+if( $weh_nco_retreat_1   != NULL ){ $weh_nco_retreat_1.coop_washedTag   = 1 }
+if( $weh_sol_retreat_2   != NULL ){ $weh_sol_retreat_2.coop_washedTag   = 1 }
+if( $weh_sol_retreat_3   != NULL ){ $weh_sol_retreat_3.coop_washedTag   = 1 }
+if( $mg42_middle1_gunner != NULL ){ $mg42_middle1_gunner.coop_washedTag = 1 }
+if( $mg42_middle2_gunner != NULL ){ $mg42_middle2_gunner.coop_washedTag = 1 }
 
 $mg42_bunker_1_gunner thread mg42_bunker_1_gunner_pain
 $mg42_bunker_2_gunner thread mg42_bunker_2_gunner_pain
@@ -1013,10 +1027,20 @@ $door_floor_hatch1 move
 wait .75
 $weh_sol_bunker_middle_1 exec global/stand.scr
 
-/*
+//[user 08-08] RESTORED: he kicks the hatch open instead of it swinging by itself. Retail shipped
+//this commented out; War Chest Restored restores the same beat ("Fixed sequence of german kick
+//opening the hatch", m3l1b section of its changelog).
+//Uses grenade_kick_SCRIPTED, not grenade_kick. They share one .skc, but grenade_kick carries a
+//frame-4 "detachgrenade" server event and Actor::Grenade_EventDetach returns immediately unless
+//m_pGrenade is set - that field holds an ENEMY grenade this actor has caught to boot back
+//(AI_GREN_KICK). With nothing held it is a no-op, so the event buys nothing here and only risks
+//flinging a live grenade if he happens to be mid-catch. The _scripted variant is event-free and
+//the tik comments it "used for a plain kick" - which is exactly what this is.
 wait .4
-$weh_sol_bunker_middle_1 anim grenade_kick
-*/
+if (isalive $weh_sol_bunker_middle_1)
+{
+	$weh_sol_bunker_middle_1 anim grenade_kick_scripted
+}
 
 wait 1.5
 
@@ -1030,6 +1054,21 @@ end
 
 // guys talking at radio
 //=========================================================================
+//[user 08-08] Is this conversation still worth continuing? WCR: "Fixed some of german soldiers'
+//conversations continuing while alerted or partner is dead." Retail guarded SOME lines here with a
+//bare `thinkstate == idle` and left the opening line and both radio segments unguarded - so the
+//bunker kept calmly discussing the machineguns over the corpses of the men having the discussion.
+//`thinkstate == idle` also does not cover DEAD: a killed actor is not idle, but a REMOVED one is
+//NULL and comparing .thinkstate on it is not a check at all. Both speakers must be present, alive
+//and unalerted, or the scene is over.
+coop_bunkerConvOk local.a local.b:
+	if( local.a == NULL || local.b == NULL ){ end 0 }
+	if( !isalive local.a || !isalive local.b ){ end 0 }
+	if( local.a.thinkstate != idle ){ end 0 }
+	if( local.b.thinkstate != idle ){ end 0 }
+	end 1
+end
+
 seq_bunker_middle_radio:{
 //=========================================================================
 	//[200] Smithy - fix them detecting players under floor
@@ -1038,7 +1077,12 @@ seq_bunker_middle_radio:{
 	$weh_sol_bunker_middle_4 ai_on
 	$weh_sol_bunker_middle_5 ai_on
 
-	$weh_sol_bunker_middle_2 say den_scripted_M3L1_08d  //get word to the captain......
+	//COOP: players can be shooting into this room before the scene starts.
+	//[user 08-08] Guard the LINE, not the thread. The tail of this label is the RELEASE - the
+	//runto that hands the NCO and the officer back to normal AI. Ending the thread here skipped
+	//it and left the officer standing at the radio, unresponsive and dying on his feet.
+	local.convOk = waitthread coop_bunkerConvOk $weh_sol_bunker_middle_2 $weh_off_bunker_middle_1
+	if( local.convOk ){ $weh_sol_bunker_middle_2 say den_scripted_M3L1_08d } //get word to the captain......
 	wait .5
 
 	$weh_sol_bunker_middle_2 exec global/runto.scr $weh_sol_bunker_middle_2_path1
@@ -1050,24 +1094,32 @@ seq_bunker_middle_radio:{
 	$weh_off_bunker_middle_1 exec global/enable_ai.scr
 
 	//$bunker_radio playsound den_scripted_M3L1_11d wait     //wiederstandnesten 72, we're under heavy... //[200] Smithy - need func to replace playsound rather than sounddone
-	$bunker_radio thread coop_mod/replace.scr::playsound_wait "den_scripted_M3L1_11d" //[200] Smithy - makes sounddone below work
-	$bunker_radio waittill sounddone //[200] Smithy - sounddone needs to be left untouched
+	//[user 08-08] Guard the LINE, not the thread. The tail of this label is the RELEASE - the
+	//runto that hands the NCO and the officer back to normal AI. Ending the thread here skipped
+	//it and left the officer standing at the radio, unresponsive and dying on his feet.
+	local.convOk = waitthread coop_bunkerConvOk $weh_sol_bunker_middle_2 $weh_off_bunker_middle_1
+	if( local.convOk ){ $bunker_radio thread coop_mod/replace.scr::playsound_wait "den_scripted_M3L1_11d" } //[200] Smithy - makes sounddone below work
+	if( local.convOk ){ $bunker_radio waittill sounddone } //[200] Smithy - sounddone needs to be left untouched
 
 	//*** enable the NCO's AI
 	$weh_sol_bunker_middle_2 exec global/disable_ai.scr //[200] Smithy - reset ai
 	$weh_sol_bunker_middle_2 exec global/enable_ai.scr
 
-	if ($weh_off_bunker_middle_1.thinkstate == idle){
+	if ($weh_off_bunker_middle_1 != NULL && isalive $weh_off_bunker_middle_1 && $weh_off_bunker_middle_1.thinkstate == idle){
 		$weh_off_bunker_middle_1 say den_scripted_M3L1_12b  //what are you talking about....
 		$weh_off_bunker_middle_1 waittill saydone //[200] chrissstrahl //[200] Smithy - re-enabled as it appears 'saydone' works
 	}
 	wait 0.1
 
 	//$bunker_radio playsound den_scripted_M3L1_13d wait    //the machineguns are overheating...... //[200] Smithy
-	$bunker_radio thread coop_mod/replace.scr::playsound_wait "den_scripted_M3L1_13d" 				//[200] Smithy - makes sounddone below work
-	$bunker_radio waittill sounddone
+	//[user 08-08] Guard the LINE, not the thread. The tail of this label is the RELEASE - the
+	//runto that hands the NCO and the officer back to normal AI. Ending the thread here skipped
+	//it and left the officer standing at the radio, unresponsive and dying on his feet.
+	local.convOk = waitthread coop_bunkerConvOk $weh_sol_bunker_middle_2 $weh_off_bunker_middle_1
+	if( local.convOk ){ $bunker_radio thread coop_mod/replace.scr::playsound_wait "den_scripted_M3L1_13d" } //[200] Smithy - makes sounddone below work
+	if( local.convOk ){ $bunker_radio waittill sounddone }
 
-	if ($weh_sol_bunker_middle_2.thinkstate == idle){
+	if ($weh_sol_bunker_middle_2 != NULL && isalive $weh_sol_bunker_middle_2 && $weh_sol_bunker_middle_2.thinkstate == idle){
 		$weh_sol_bunker_middle_2 say den_scripted_M3L1_14d  //I need to speak to the lieutenant colonel.....
 		$weh_sol_bunker_middle_2 waittill saydone //[200] chrissstrahl //[200] Smithy - re-enabled as it appears 'saydone' works
 	}
@@ -1078,10 +1130,12 @@ seq_bunker_middle_radio:{
 	$weh_sol_bunker_middle_2 exec global/runto.scr local.player		//chrissstrahl - coop mod
 	wait .75
 	//[200] chrissstrahl fixed bad scripr reference
+	if( isalive $weh_off_bunker_middle_1 ){
 	local.player = exec coop_mod/replace.scr::player_closestTo $weh_off_bunker_middle_1	//chrissstrahl - coop mod
 
-	$weh_off_bunker_middle_1 exec global/runto.scr local.player		//chrissstrahl - coop mod
-	if ($weh_off_bunker_middle_1.thinkstate == idle){
+		$weh_off_bunker_middle_1 exec global/runto.scr local.player		//chrissstrahl - coop mod
+	}
+	if ($weh_off_bunker_middle_1 != NULL && isalive $weh_off_bunker_middle_1 && $weh_off_bunker_middle_1.thinkstate == idle){
 		$weh_off_bunker_middle_1 say den_scripted_M3L1_06b  //don't let them get to the gunnery deck....
 	}
 }end
@@ -1536,10 +1590,40 @@ end
 //*********************************************
 // starting bunker door on lower level guy death
 //*********************************************
+//[user 08-08] Shared wake for the back room, called from BOTH front germans' death threads.
+//Latched: in coop two players can drop lower_1 and lower_2 in the same instant, and running this
+//twice would re-trigger and re-issue attackplayer on actors already engaged.
+coop_wakeLowerBack:
+
+if( level.coop_lowerBackWoke == 1 ){ end }
+level.coop_lowerBackWoke = 1
+
+//*** wake up the guys in the next room
+if( $weh_sol_bunker_lower_4 != NULL ){
+	$weh_sol_bunker_lower_4 exec global/enable_ai.scr
+	trigger $weh_sol_bunker_lower_4
+}
+if( $weh_sol_bunker_lower_5 != NULL ){
+	$weh_sol_bunker_lower_5 exec global/enable_ai.scr
+	trigger $weh_sol_bunker_lower_5
+}
+
+wait 2
+if( isalive $weh_sol_bunker_lower_4 ){ $weh_sol_bunker_lower_4 attackplayer }
+if( isalive $weh_sol_bunker_lower_5 ){ $weh_sol_bunker_lower_5 attackplayer }
+
+end
+
 weh_sol_bunker_lower_1_death:
 
 local.self waittill death
 
+//[user 08-08] EITHER front german now wakes the back room. WCR: "Fixed two germans in the back
+//not responding until one of two germans in the front are killed." Retail hung the wake-up
+//solely on weh_sol_bunker_lower_2's death, so killing lower_1 first left lower_4 and lower_5
+//asleep in the next room until the player walked in on them.
+thread coop_wakeLowerBack
+
 wait .75
 if (level.bunker_lower_alert != 1)
 {
@@ -1556,17 +1640,7 @@ weh_sol_bunker_lower_2_death:
 
 local.self waittill death
 
-//*** wake up the guys in the next room
-
-$weh_sol_bunker_lower_4 exec global/enable_ai.scr
-$weh_sol_bunker_lower_5 exec global/enable_ai.scr
-
-trigger $weh_sol_bunker_lower_4
-trigger $weh_sol_bunker_lower_5
-
-wait 2
-$weh_sol_bunker_lower_4 attackplayer
-$weh_sol_bunker_lower_5 attackplayer
+thread coop_wakeLowerBack
 
 end
 
@@ -2076,6 +2150,33 @@ coop_flak88_objective:
 	thread coop_flak88_watch $88mm_explosive2 $88mm_weapon2
 
 	//*** the guns fire on the beach until knocked out; a few defenders hold the emplacements
+	//[user 2026-08-07] MODEL SWAP - this is what finally gets a real animated shot.
+	//Both guns are declared "classname turretweapon_german_88mmflakturret" in the BSP, the SAME
+	//class m3l2 uses for its firing flak - the designer just pointed them at 15cmcannon.tik, whose
+	//animations block holds nothing but "idle". No script can animate a shot that is not in the
+	//model. flak88turret.tik carries fire_scripted (88turret_fire.skc) with `first sound
+	//flak_snd_fire` as a frame command, so the recoil and the report both come from the anim -
+	//exactly how retail m3l2::flak88_thinker does it (`local.gun_name anim fire_scripted`).
+	//Swapping the mesh does NOT re-run the tik init, so these stay class Animate: the bomb-plant
+	//wiring, triggers and destroyed-model swap are all untouched. Only the mesh and its anims change.
+	//It also makes the map self-consistent - the objective text, entity class, trigger names and
+	//explosion FX (fx_flak88_explosion.tik) already all say FLAK 88; only the model disagreed.
+	if( $88mm_weapon1 != NULL ){ $88mm_weapon1 model "models/statweapons/flak88turret.tik" }
+	if( $88mm_weapon2 != NULL ){ $88mm_weapon2 model "models/statweapons/flak88turret.tik" }
+	//match the wreck to the gun - the BSP sets $destroyed_model to 15cmcannon_d, which would leave
+	//a 15cm cannon wreck sitting where a flak 88 just blew up.
+	//[user 2026-08-07] Aim baked from live tuning (coop_flakYaw/Pitch, since removed):
+	//  near gun  base 45  + 220 = 265 yaw, -20 pitch
+	//  far gun   base 135 + 160 = 295 yaw, -20 pitch
+	//Negative pitch is UP in MOHAA, so both barrels sit 20 degrees elevated - they are AA guns
+	//shelling out over the beach, not levelled at it. Spaced vector literals: a bare "(-20 ..."
+	//with no space is a parse killer, the spaced form is what every shipped script uses.
+	if( $88mm_weapon1 != NULL ){ $88mm_weapon1.angles = ( -20 265 0 ) }
+	if( $88mm_weapon2 != NULL ){ $88mm_weapon2.angles = ( -20 295 0 ) }
+	if( $88mm_weapon1 != NULL ){ $88mm_weapon1.destroyed_model = "statweapons//flak88_d.tik" }
+	if( $88mm_weapon2 != NULL ){ $88mm_weapon2.destroyed_model = "statweapons//flak88_d.tik" }
+	waitframe
+
 	thread coop_flak88_fire $88mm_weapon1
 	thread coop_flak88_fire $88mm_weapon2
 	thread coop_flak88_defenders
@@ -2083,6 +2184,8 @@ coop_flak88_objective:
 	//Hooking it to coop_flak88_complete meant the rear was empty for the whole fight and only
 	//populated once the guns were already down, which is backwards for "defend the rear area".
 	thread coop_rear_defenders
+	thread coop_ally_push
+	thread coop_rear_headcount
 
 end
 
@@ -2137,21 +2240,20 @@ coop_flak88_fire local.gun:
 
 	if (local.gun == NULL){ end }
 
-	//[user 2026-08-07] REWRITTEN. $88mm_weapon1/2 are class **Animate**, not TurretGun - the live log
-	//is unambiguous: "Failed execution of command 'startFiring' for class 'Animate'", and the same for
-	//stopFiring and setAimTarget. So the whole turret API is unavailable here, and the original
-	//startFiring pair had never done anything; my first fix (spawn an aim target, mirroring M3L3) was
-	//wrong for the same reason and just added a third failing command.
-	//What DOES work is the model's own animation. flak88turret.tik declares fire_scripted =
-	//88turret_fire.skc, and that anim carries the frame command `first sound flak_snd_fire`, so
-	//playing it gives the recoil AND the report from one call - no turret, no aim target, no
-	//projectile. Pair it with the alias maps-spec fix (bug-1548) or it animates silently.
+	//[user 2026-08-07] The gun now wears flak88turret.tik (swapped in coop_flak88_objective), so
+	//fire_scripted exists and this is the retail recipe verbatim. The anim carries its own
+	//`first sound flak_snd_fire` frame command, so no separate playsound is needed - and that alias
+	//only resolves here because m3l1b was added to its maps spec (bug-1548).
+	//Earlier attempts and why they failed, so nobody re-treads them:
+	//  startFiring/setAimTarget -> Script Error, class Animate has no turret API.
+	//  anim fire_scripted on 15cmcannon.tik -> silent no-op, that model has only "idle".
+	//  spawn cannonsmoke.tik -> NIL, the tik declares no server classname.
+	//  explosion_bombwall.tik as a stand-in muzzle blast -> spawned fine, looked wrong.
 	while (local.gun.coop_fireStop != 1)
 	{
 		local.gun anim fire_scripted
 
-		//shake anyone standing near the gun as it goes off. NOT `$player.origin` - $player is an
-		//ARRAY in coop and dereferencing it directly throws once a second player connects.
+		//shake anyone close as it goes off. NOT $player.origin - $player is an array in coop.
 		local.near = exec coop_mod/replace.scr::player_closestTo local.gun
 		if (local.near != NULL)
 		{
@@ -2161,10 +2263,9 @@ coop_flak88_fire local.gun:
 			}
 		}
 
-		wait 2
-		if (local.gun == NULL){ end }
-		if (local.gun.coop_fireStop != 1){ local.gun anim idle }
-		wait 4
+		//retail m3l2 paces its flak on a randomised beat rather than a metronome
+		local.gap = 4 + (randomint 4)
+		wait local.gap
 	}
 
 end
@@ -2209,14 +2310,20 @@ end
 //===========================================================================
 coop_flak88_complete:
 
-	iprintlnbold "Both FLAK 88 emplacements destroyed - fall back to the exit!"
-
+	iprintlnbold "Both FLAK 88 emplacements destroyed - clear the backline!"
 
 	waitthread global/objectives.scr::add_objectives 3 3
-	waitthread global/objectives.scr::add_objectives 4 2 "Exit the bunker." $end_level_trigger.origin
+	//[user 2026-08-07] The mission now ends on CLEARING the rear, not on walking back to the
+	//bunker. Marker points at the garrison rather than the exit trigger.
+	waitthread global/objectives.scr::add_objectives 4 2 "Clear the backline of enemies." ( 1047 95 320 )
 	waitthread global/objectives.scr::current_objectives 4
 
-	$end_level_trigger triggerable
+
+	//[user 2026-08-07] The exit trigger is NOT armed here any more. Leaving it live meant walking
+	//out of the bunker ended the mission and skipped the backline objective entirely - which is
+	//exactly what happened on the first playtest. Hard-lock protection moved to coop_rear_stallwatch
+	//below, which can only arm the exit after the kill count has genuinely stopped moving.
+	thread coop_rear_stallwatch
 
 end
 
@@ -2234,6 +2341,9 @@ coop_rear_defenders:
 
 	if (level.coop_rearDefenders == 1){ end }
 	level.coop_rearDefenders = 1
+	level.coop_rear_total = 0
+	level.coop_rear_alive = 0
+	level.coop_rear_shown = -1
 
 	waitthread coop_rear_spawn ( 391 365 320 ) 298 0
 	wait 0.3
@@ -2296,6 +2406,23 @@ coop_rear_defenders:
 	waitthread coop_rear_spawn ( -370 568 320 ) 281 0
 	wait 0.3
 
+	//[user 2026-08-07] Third capture pass. Same corrections as the first two: z drops by
+	//DEFAULT_VIEWHEIGHT (82) because viewpos reports the eye, and these yaws had wrapped several
+	//full turns (1319, 1299, 1111) so they are normalised into 0..360.
+
+	waitthread coop_rear_spawn ( 2250 -554 390 ) 239 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 1999 -663 428 ) 219 1
+	wait 0.3
+	waitthread coop_rear_spawn ( -957 -1031 250 ) 31 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 2397 18 383 ) 239 0
+	wait 0.3
+	waitthread coop_rear_spawn ( 2685 -53 383 ) 258 1
+	wait 0.3
+	waitthread coop_rear_spawn ( 2076 -425 255 ) 266 0
+	wait 0.3
+
 end
 
 //===========================================================================
@@ -2320,6 +2447,17 @@ coop_rear_spawn local.pos local.yaw local.nco:
 	local.sol.origin = local.pos
 	local.sol.angles = ( 0 local.yaw 0 )
 	local.sol exec global/enable_ai.scr
+
+	//[user 2026-08-07] Register the ACTOR, not a tally. The previous death-counter compared
+	//coop_rear_dead against a total that only grew on a successful spawn, so anything that failed
+	//to spawn, landed in geometry or fell out of the world moved the two numbers together - and the
+	//mission completed the instant the guns died with the backline untouched (log 17:17:41: the
+	//"clear the backline" and "backline cleared" lines landed in the SAME second).
+	//coop_rear_headcount polls this list instead, so only an actor that is genuinely gone counts.
+	level.coop_rear_total = level.coop_rear_total + 1
+	level.coop_rear_actor[level.coop_rear_total] = local.sol
+	local.sol.coop_spawnPt = local.pos
+	local.sol thread coop_navprobe "AXIS"
 
 end
 
@@ -2600,5 +2738,430 @@ coop_rear_props:
 	local.m solid
 	local.m setsize ( -13.818 -216.194 -0.000 ) ( 10.451 220.492 37.548 )
 
+	//[user 08-07] MANNED MG42 NEST, baked from the build-mode session. This is the one capture
+	//block that is not scenery: it spawns a live Wehrmacht gunner on a real TurretGun.
+	//The position is the THIRD placement - the session shows place/undo three times
+	//(2033,1193,591 -> 2218,1115,599 -> 2244,1129,613 -> 2251,1204,618) and the capture file
+	//agrees with the log on the last one, which is why that is the coordinate used.
+	//He is NOT registered in level.coop_rear_actor[], so he deliberately does not count toward
+	//"Clear the backline of enemies" - he sits at y 1204, well outside the backline the objective
+	//covers (that garrison spans y -1750..685). Leaving him uncounted keeps the objective from
+	//becoming uncompletable if he is somewhere the squad never goes.
+	thread coop_mod/bunker.scr::mg_nest_manned ( 2251.467 1204.234 618.164 ) 262 1.000
+
 end
 
+//===========================================================================
+// [user 2026-08-07] One rear defender's death. When the last of them drops, the mission ends -
+// "Clear the backline of enemies" replaced the old walk-back-to-the-bunker objective.
+// Counted rather than scanned: the total is incremented as each actor is spawned, so it stays
+// correct if the garrison list is ever added to.
+//===========================================================================
+// [user 2026-08-07] LIVE HEADCOUNT. Polls the actors we actually spawned and completes only when
+// none are left standing. Also republishes the objective text with the remaining count, the same
+// way the retail document hunt on m2l1 does ("[N remaining]") - so the state is visible instead of
+// something the player has to take on trust.
+// Requires BOTH: the FLAK 88s destroyed AND the backline down. Order does not matter.
+//===========================================================================
+coop_rear_headcount:
+
+	while (level.coop_rear_done != 1)
+	{
+		wait 2
+
+		local.alive = 0
+		local.i = 1
+		while (local.i <= level.coop_rear_total)
+		{
+			local.a = level.coop_rear_actor[local.i]
+			if (local.a != NULL)
+			{
+				if (isAlive local.a){ local.alive = local.alive + 1 }
+			}
+			local.i = local.i + 1
+		}
+		level.coop_rear_alive = local.alive
+
+		//only meaningful once the guns are down and the objective is actually showing
+		if (level.coop_flak88_destroyed >= 2)
+		{
+			if (local.alive > 0)
+			{
+				if (local.alive != level.coop_rear_shown)
+				{
+					level.coop_rear_shown = local.alive
+					waitthread global/objectives.scr::add_objectives 4 2 ("Clear the backline of enemies [" + local.alive + " remaining]")
+				}
+			}
+			else
+			{
+				thread coop_rear_cleared
+				end
+			}
+		}
+	}
+
+end
+
+//===========================================================================
+// Backline cleared -> objective complete -> mission over.
+//===========================================================================
+coop_rear_cleared:
+
+	if (level.coop_rear_done == 1){ end }
+	level.coop_rear_done = 1
+
+	iprintlnbold "Backline cleared - the beach exit is secure!"
+	waitthread global/objectives.scr::add_objectives 4 3
+	waitthread global/objectives.scr::current_objectives 0
+
+	wait 3
+
+	//[user 2026-08-07] Mirror end_level_thread exactly. Finishing on the backline objective is now
+	//the normal way out of this map, so it has to award the same medal and play the same fade the
+	//old exit-trigger path did - otherwise clearing the map silently costs the player g_medal5.
+	//[user 2026-08-07] POOPHEAD ENDING challenge. The retail script tags this map's shipped
+	//ending "TEMP TEMP TEMP POOPHEAD ENDING" (m3l1b.scr:838, dev placeholder) - the intended
+	//ending was the full gun-emplacement chain, all four objectives commented out at the top of
+	//the file and their entities cut from the BSP. Reaching THIS ending means finishing it the
+	//way they meant to, so it awards the challenge. Only granted on this path, never on the
+	//exit-trigger failsafe.
+	local.pi = 1
+	while( local.pi <= $player.size )
+	{
+		local.pp = $player[local.pi]
+		if( local.pp != NULL )
+		{
+			waitthread coop_mod/challenges.scr::chal_bump local.pp "cc_poophead_ending" 1
+		}
+		local.pi = local.pi + 1
+	}
+
+	fadeout 5 0 0 0 1
+	setcvar "g_medal5" "1"
+
+	exec global/missioncomplete.scr m3l2
+
+end
+
+//===========================================================================
+// [user 2026-08-07] Anti-hard-lock watchdog for the backline objective.
+// If an actor ends up stuck in geometry, unreachable or otherwise unkillable, the mission could
+// never end. Rather than leave the exit permanently open (which let the player finish by simply
+// walking out), the exit is armed ONLY once the kill count has not moved for a long stretch with
+// enemies still alive. It cannot be reached by playing normally, and it deliberately does NOT
+// award the POOPHEAD ENDING challenge - the backline was not actually cleared.
+//===========================================================================
+coop_rear_stallwatch:
+
+	local.last = -1
+	local.idle = 0
+
+	while (level.coop_rear_done != 1)
+	{
+		wait 10
+
+		if (level.coop_rear_done == 1){ end }
+
+		if (level.coop_rear_alive == local.last)
+		{
+			local.idle = local.idle + 10
+		}
+		else
+		{
+			local.idle = 0
+			local.last = level.coop_rear_alive
+		}
+
+		//3 minutes with not a single further kill = something is unreachable
+		if (local.idle >= 180)
+		{
+			iprintlnbold "Remaining enemies have gone to ground - fall back to the bunker exit."
+			waitthread global/objectives.scr::add_objectives 4 2 "Exit the bunker." $end_level_trigger.origin
+			waitthread global/objectives.scr::current_objectives 4
+			$end_level_trigger triggerable
+			end
+		}
+	}
+
+end
+
+
+//===========================================================================
+// [user 2026-08-07] Allied push on the FAR flak.
+// Rangers with mixed US weapons who work their way to $88mm_weapon2 and hold that ground. They are
+// tracked in their OWN list and are NOT registered in level.coop_rear_actor, so they can never
+// count toward "Clear the backline of enemies" - that objective stays purely a measure of the axis
+// garrison. Given a much deeper HP pool than the axis so they survive the walk and are still
+// standing when the players arrive.
+// Models and weapon strings are the ones this map already uses for its beach scene (see the
+// switch above), so nothing new has to be precached.
+//===========================================================================
+coop_ally_push:
+
+	if (level.coop_allyPush == 1){ end }
+	level.coop_allyPush = 1
+	level.coop_ally_total = 0
+
+	waitthread coop_ally_spawn ( -1239 -1560 248 ) 359 0
+	wait 0.3
+	waitthread coop_ally_spawn ( -1158 -1566 250 ) 359 1
+	wait 0.3
+	waitthread coop_ally_spawn ( -1054 -1555 250 ) 359 2
+	wait 0.3
+	//[user 08-07] MEDIC, moved 48 units off ( -943 -1528 250 ). That point was the ONE dead probe
+	//out of 44 after maps/m3l1b.pth went in - "NAVPROBE DEAD ALLY moved 0" - and being the medic,
+	//a stuck one meant nobody got patched up on the whole rear push. It also produced 14 of the 59
+	//"Path not found" lines by itself: unable to move at all, it failed every patrol target its AI
+	//picked, including one deep in the far bunker that has no interior to stand in.
+	//This replacement is a node captured on foot AND >96 units clear of every other ally spawn, so
+	//it neither lands in the same isolated pocket nor stacks him on a squadmate.
+	waitthread coop_ally_spawn ( -918 -1569 248 ) 89 5
+	wait 0.3
+	waitthread coop_ally_spawn ( -949 -1464 250 ) 88 3
+	wait 0.3
+	waitthread coop_ally_spawn ( -946 -1361 250 ) 88 0
+	wait 0.3
+	waitthread coop_ally_spawn ( -942 -1240 250 ) 88 1
+	wait 0.3
+	waitthread coop_ally_spawn ( 2140 -489 255 ) 178 2
+	wait 0.3
+	waitthread coop_ally_spawn ( 2314 -18 383 ) 178 0
+	wait 0.3
+	waitthread coop_ally_spawn ( 2621 -117 383 ) 178 5
+	wait 0.3
+	waitthread coop_ally_spawn ( 2176 54 384 ) 178 4
+	wait 0.3
+
+end
+
+//===========================================================================
+// One ranger. kind: 0 private+garand, 1 private+BAR, 2 sergeant+garand, 3 lieutenant+thompson,
+// 4 captain+thompson, 5 medic+garand.
+// All five are the Omaha beach-scene models this map already spawns, and each tik pulls a
+// random head/face from us_old_heads.tik, so no two are identical even at the same kind.
+// [user 2026-08-07] kind 4 IS the officer who opens m3l2 - confirmed against a screenshot: the
+// captain bar on the helmet, the Thompson and the assault vest all match dday_ranger_captain
+// (surface armband shader av_ltnt_cap on the allied_ranger_soldier/assaultvest body). Exactly one
+// of him spawns, at the last capture point.
+//===========================================================================
+coop_ally_spawn local.pos local.yaw local.kind:
+
+	local.model = "models/human/dday_ranger_private"
+	local.gun   = "m1 garand"
+	if (local.kind == 1){ local.model = "models/human/dday_ranger_private";    local.gun = "bar" }
+	if (local.kind == 2){ local.model = "models/human/dday_ranger_sergeant";   local.gun = "m1 garand" }
+	if (local.kind == 3){ local.model = "models/human/dday_ranger_lieutenant"; local.gun = "thompson" }
+	if (local.kind == 4){ local.model = "models/human/dday_ranger_captain";    local.gun = "thompson" }
+	if (local.kind == 5){ local.model = "models/human/dday_ranger_medic";      local.gun = "m1 garand" }
+
+	local.n = level.coop_ally_total + 1
+	local.tn = "coop_ally" + local.n
+	spawn local.model targetname local.tn gun local.gun
+	local.sol = $(local.tn)
+	if (local.sol == NULL){ end }
+
+	local.sol exec global/disable_ai.scr
+	local.sol.origin = local.pos
+	local.sol.angles = ( 0 local.yaw 0 )
+	local.sol.team = "american"
+	//Deeper pool than the axis garrison (which runs on stock actor health) so they survive the
+	//advance and are still fighting when the squad reaches them.
+	//[user 08-07] Was a flat 400, set while the rear nav graph was still dead and the rangers just
+	//stood where they spawned trading shots. Now that maps/m3l1b.pth covers the rear area they
+	//actually cross it - into the open, toward two flak positions held by 33 defenders - and 400
+	//did not survive the walk. Tunable so it can be dialled without a rebuild; the leaders carry
+	//more because losing them strands the push.
+	local.hp = float( getcvar "coop_allyHealth" )
+	if( local.hp <= 0 ){ local.hp = 1500 }
+	if( local.kind == 2 || local.kind == 3 ){ local.hp = local.hp * 1.5 }
+	local.sol.health = local.hp
+	local.sol dontdropweapons
+
+	//[user 2026-08-07] The captain is INVINCIBLE. He opens the next mission, so losing him here
+	//would be a continuity break the player cannot undo and cannot see coming. `nodamage` is the
+	//scripted-god path this project already uses (buildmode.scr, bt_playerTank.scr) - the "god"
+	//console command is cheat-gated, the event is not. He still fights; he just cannot be killed,
+	//by the axis garrison or by a stray round from the squad.
+	if (local.kind == 4)
+	{
+		local.sol nodamage
+	}
+	local.sol exec global/enable_ai.scr
+
+	level.coop_ally_total = local.n
+	level.coop_ally_actor[local.n] = local.sol
+	local.sol.coop_spawnPt = local.pos
+	local.sol thread coop_navprobe "ALLY"
+
+	//[user 2026-08-07] Medics run the existing medic brain instead of the advance: it already
+	//prioritises reviving a DOWNED teammate, then patches up whoever is most hurt, kneeling and
+	//going invulnerable while he works (coop_mod/paradrop.scr::coop_paradrop_medic). Reusing it
+	//rather than writing a second one - it is proven and it handles the DBNO case properly.
+	if (local.kind == 5)
+	{
+		thread coop_mod/paradrop.scr::coop_paradrop_medic local.sol
+	}
+	else
+	{
+		local.sol thread coop_ally_advance
+	}
+
+end
+
+
+//===========================================================================
+// [user 2026-08-07] Push each ranger to the far gun and keep pushing.
+// Two bugs fixed here at once:
+//  1. The destination was $88mm_weapon2.origin (-1046 -153 450) - the gun sits on a raised
+//     emplacement with no AI path to it, so every runto failed outright with
+//     "Path not found in Actor::MoveToPatrolCurrentNode" and nobody moved a step. The target is
+//     now ( -871 -464 328 ), one of the points captured ON FOOT for the axis garrison, so it is
+//     walkable by construction - 356 units from the gun, which is close enough to fight over it.
+//  2. runto was issued ONCE at spawn. An actor that stops to engage never resumes, which is
+//     exactly the "they just stand there and shoot" behaviour. This re-issues whenever he has
+//     stalled, the same forceactivate + re-runto pattern coop_mod/officer.scr uses to get the
+//     officer back to his radio through a firefight.
+//===========================================================================
+coop_ally_advance:
+
+	//[user 2026-08-07] Which gun they head for depends on which side they started.
+	//The eastern group (positive X, the staircase) could never reach the FAR gun - the log showed
+	//"Path not found" for every one of them - and the reason is a door between the two halves of
+	//the rear: a closed door breaks the AI link even though a player can open it and walk through.
+	//They now push the NEAR gun instead, which is on their side of it.
+	//Both destinations are points captured on foot, and both are ~300 units off their gun:
+	//  near  88mm_weapon1 (2496 -363) -> ( 2250 -554 390 ), 311 units
+	//  far   88mm_weapon2 (-1046 -153) -> ( -871 -464 328 ), 356 units
+	//[user 08-07] The far-gun group now pushes right up onto the emplacement. The old point was
+	//captured before the rear had nav coverage, so it was chosen for "somewhere they can stand"
+	//rather than "close to the gun": 356 units out and 122 BELOW the gun's z 450, i.e. at the foot
+	//of the rise instead of on it. maps/m3l1b.pth now covers the emplacement itself, so this is a
+	//node walked on top of it - 99 units from 88mm_weapon2 ( -1046 -153 450 ), on the southern side
+	//they actually approach from.
+	local.dest = ( -1055 -251 440 )
+	//[user 08-07] The far-gun group closes much tighter than the near one - 96-296 units off a
+	//destination that is itself 99 off the gun, so they end up fighting from ON the emplacement
+	//rather than somewhere in the postcode. Still a RANGE, not a fixed point, so they spread out
+	//instead of stacking. Set BEFORE the branch below so the near group can override it; the
+	//original code assigned stop AFTER the branch, which would have handed both groups one value.
+	local.stop = randomint 200
+	local.stop = local.stop + 96
+	//[user 2026-08-07] All four eastern spawns MOVED. The staircase they were captured on is
+	//navmesh-isolated: from there the log showed "Path not found" to the far gun AND to the near
+	//gun, and the medic among them could not reach a player either. A player can walk those stairs;
+	//the actor nav does not cover them, which is the same player-walkable != AI-reachable trap that
+	//caught the gun emplacement and the patrol points. They now start ~64 units off axis garrison
+	//points near the NEAR gun - ground where actors provably spawn and path every run.
+	if (self.origin[0] > 0)
+	{
+		local.dest = ( 2250 -554 390 )
+		local.stop = randomint 500
+		local.stop = local.stop + 300
+	}
+	local.prev = self.origin
+	//[user 2026-08-07] They do not need to reach the gun, just hold that ground - so each man
+	//stops at his OWN distance (300-800) rather than everyone converging on one spot and stacking
+	//up. The result is a squad spread across the area around the emplacement instead of a clump.
+
+	while (isAlive self)
+	{
+		wait 3
+		if (!isAlive self){ end }
+
+		//close enough - hold this ground and let him fight from here
+		if (vector_length(self.origin - local.dest) < local.stop){ break }
+
+		//stalled (pinned, engaged, or the order was dropped) - shove him along again
+		if (vector_length(self.origin - local.prev) < 48)
+		{
+			self forceactivate
+			self runto local.dest
+		}
+		local.prev = self.origin
+	}
+
+	thread coop_ally_hold
+
+end
+
+
+//===========================================================================
+// [user 2026-08-07] Holding behaviour once a ranger reaches the emplacement ground.
+// Standing frozen on the spot looks dead, so between fights they stand properly (global/stand.scr,
+// which is what retail global/patrol.scr uses for its idle beats) and stroll between three points.
+// The three are all points captured ON FOOT for the axis garrison, so they are pathable by
+// construction - the whole reason the original advance failed was aiming at a spot with no AI path
+// to it, and inventing fresh waypoints here would risk exactly that again.
+// No `waittill movedone`: an unreachable destination would hang the thread forever. A plain timed
+// wait cannot, and if he never arrives he simply picks another point next cycle.
+// Combat always wins over this - the actor drops it to engage and returns when things are quiet.
+//===========================================================================
+coop_ally_hold:
+
+	while (isAlive self)
+	{
+		self exec global/stand.scr
+		wait 8
+		local.extra = randomint 10
+		wait local.extra
+		if (!isAlive self){ end }
+
+		//[user 2026-08-07] The patrol WALK is gone. Once they reached the hold ground the log filled
+		//with "Path not found ... to (-1007 280 384)" and "(-861 297 384)": those two points are not
+		//AI-connected to where the squad ends up, even though a player can walk to all three. Being
+		//captured on foot proves a PLAYER can reach a spot, not that the actor navmesh links them -
+		//a distinction I got wrong twice now. Rather than guess at a third set of waypoints, they
+		//hold position and idle properly, which is what global/stand.scr above gives them.
+	}
+
+end
+
+
+//===========================================================================
+// [user 2026-08-07] NAV PROBE - which spawn points can an ACTOR actually use?
+// Half the 44 points on this map are unusable and I have now guessed wrong about which three
+// times, because a point a PLAYER can walk to is not necessarily on the actor navmesh. This stops
+// the guessing: every spawned actor is told to walk a short distance, and 6 seconds later we
+// record whether he moved. Anything that never moved is either off-mesh ("couldn't find start
+// node") or walled into a pocket - either way the point is dead and must be replaced.
+// One line per point, machine-readable, so a single playthrough yields the definitive list:
+//   ^~^~^ NAVPROBE OK   AXIS ( x y z ) moved N
+//   ^~^~^ NAVPROBE DEAD ALLY ( x y z ) moved 0
+// Grep the log for "NAVPROBE DEAD" and every bad coordinate is named.
+//===========================================================================
+coop_navprobe local.tag:
+
+	local.start = self.origin
+
+	//nudge him somewhere close - the DISTANCE does not matter, only whether he can move at all
+	local.dest = local.start
+	local.dest = local.dest + ( 96 96 0 )
+	self forceactivate
+	self runto local.dest
+
+	wait 6
+	if (!self){ end }
+
+	local.moved = int( vector_length( self.origin - local.start ) )
+	local.pt = self.coop_spawnPt
+	local.txt = local.tag + " ( " + int(local.pt[0]) + " " + int(local.pt[1]) + " " + int(local.pt[2]) + " ) moved " + local.moved
+	if (local.moved < 8)
+	{
+		println( "^~^~^ NAVPROBE DEAD " + local.txt )
+	}
+	else
+	{
+		println( "^~^~^ NAVPROBE OK   " + local.txt )
+	}
+
+end
+
+//=========================================================================
+// [user 2026-08-09] announce the first objective once someone is there to see it (m2l2a recipe).
+//=========================================================================
+coop_objToastStart:
+	waitthread coop_mod/replace.scr::waitForPlayer
+	wait 2
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 1 "Clear out the bunker."
+end

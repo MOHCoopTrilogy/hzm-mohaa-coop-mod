@@ -304,3 +304,505 @@ bunker_tower local.origin local.yaw local.mult:{
 	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "bunker_tower"		//[agent 07-21] BLUEPRINT registry: removable as a unit
 	println( "^~^~^ BUNKER tower: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " mult " + local.mult )
 }end
+
+//=========================================================================
+// [user 08-07] MANNED MG42 NEST - reproduces the emplacement m3l1b already ships, measured from
+// the BSP entity block rather than guessed. All six real nests on that map agree:
+//
+//   nest              gunner->gun forward   gun above gunner's feet
+//   mg42_middle1              +62                   +40
+//   mg42_middle2              +68                   +52
+//   mg42_bunker_1             +72                   +62
+//   mg42_bunker_2             +68                   +62
+//   mg42_farbunker_1          +66                   +62
+//   mg42_farbunker_2          +66                   +62
+//
+// Lateral offset is ~0 in every case and gunner and gun always carry the SAME yaw. The height is
+// not the gun floating - at mg42_middle1 the surrounding info_pathnodes sit at z 400, the same as
+// the gun, while the gunner is at 360: the map digs the gunner into a pit behind a parapet. On
+// flat build-mode ground the equivalent is to raise the gun instead, which is what fwd/up below do.
+//
+// Three things have to be exactly right or this degrades into scenery:
+//   * the gun must be a real TurretGun. "turretweapon_german_mg42" in the BSP is NOT an engine
+//     class - it resolves through the tik's own "classname TurretGun" server block - so spawning
+//     models/statweapons/mg42_gun.tik directly is equivalent. Actor::EventSetTurret rejects
+//     anything that is not a TurretGun subclass and leaves the actor standing there gunless;
+//   * ALL FOUR type_* fields must be "machinegunner" (STRING_MACHINEGUNNER in actor.cpp's
+//     m_csThinkNames). The BSP sets idle, attack, disguise AND grenade - setting only idle and
+//     attack lets him drop off the gun the moment something makes him think about a grenade;
+//   * .turret takes the ENTITY. The event is declared "s" but EventSetTurret reads it with
+//     GetListener, so handing it a targetname string is a silent no-op.
+// TurretGun::TurretGun sets m_bPlayerUsable = true by default (weapturret.cpp:418), so a player
+// can mount the gun once the gunner is dead without any extra key.
+// Offsets are cvar-tunable (coop_mgnestFwd / coop_mgnestUp) so the nest can be trimmed in-game.
+//=========================================================================
+mg_nest_manned local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.base = waitthread groundz local.origin
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+
+	// measured means across the six m3l1b nests: forward 67, up 57. The outdoor pair (middle1/2)
+	// sits lower at 40-52, so default to the outdoor figure - this is an outdoor sandbag nest.
+	local.fwdOff = float( getcvar "coop_mgnestFwd" )
+	if( local.fwdOff <= 0 ){ local.fwdOff = 66 }
+	local.upOff = float( getcvar "coop_mgnestUp" )
+	if( local.upOff <= 0 ){ local.upOff = 44 }
+
+	local.bn = 0
+
+	// ---- sandbag semicircle ----
+	// No shipped map builds an MG nest out of sandbag MODELS - every real one is BSP brushwork -
+	// so there is no in-game offset to copy for the wall. It is centred on the anchor and the gun
+	// is placed relative to the GUNNER, exactly as the BSP does, not relative to the bags.
+	local.wp = local.origin
+	local.wp[2] = local.base
+	local.wall = waitthread piece "models/static/sandbag_large_semicircle.tik" local.wp local.yaw local.mult
+	if( local.wall != NULL ){
+		local.wall droptofloor
+		local.bm[local.bn] = local.wall
+		local.bn++
+	}
+	waitframe
+
+	// Sandbags go solid BEFORE the gun and gunner exist: solidify calls setsize on every entry,
+	// which would clamp the turret's and the actor's bounds to the sandbag wall's.
+	waitthread solidify local.bm local.bn
+
+	// ---- the gunner stands on the anchor; the gun goes in front of and above him ----
+	local.sp = local.origin
+	//[user 08-08] coop_mgnestGunnerUp raises the GUNNER off the ground. Distinct from
+	//coop_mgnestUp, which raises the GUN relative to his feet - raising that one only makes him
+	//look like he is sinking into the floor. Use this when the emplacement sits on a step or
+	//parapet and he should stand ON it. Negative values dig him in. Scales with build scale.
+	local.gUp = float( getcvar "coop_mgnestGunnerUp" )
+	local.sp[2] = local.base + ( local.gUp * local.mult )
+
+	local.gp = local.origin + (vector_scale local.fwd (local.fwdOff * local.mult))
+	local.gp[2] = local.base + (local.upOff * local.mult)
+	//[user 08-08] The turret and gunner need TARGETNAMES in the "<turret>" / "<turret>_gunner"
+	//convention, because global/mg42_active.scr::mg42 binds them with
+	//   self.gunner = $(self.targetname + "_gunner")
+	//and that script is what actually makes an AI nest open fire.
+	if( level.coop_mgnestN == NIL ){ level.coop_mgnestN = 0 }
+	level.coop_mgnestN = level.coop_mgnestN + 1
+	local.tn = "coop_mgnest" + level.coop_mgnestN
+
+	local.gun = spawn "models/statweapons/mg42_gun.tik" targetname local.tn
+	if( local.gun != NULL ){
+		local.gun.origin = local.gp
+		local.gun.angles = ( 0 local.yaw 0 )
+
+		//[user 08-07] Widen the engagement cone. Think_MachineGunner_TurretGun holds the gun only
+		//while a player is inside it (TurretGun::AI_CanTarget); step outside and, with a confirmed
+		//enemy, it calls BecomeTurretGuy() and he abandons a perfectly good MG to fight on foot.
+		//Stock is +-45 pitch (weapturret.cpp ctor) and the BSP's own nests are TIGHTER still
+		//("pitchcaps" "-15 10 0"). That is fine in retail because a bunker MG is always approached
+		//through the arc it covers - a nest you can drop anywhere gets walked up on from any angle,
+		//and standing close to an elevated one puts you well below the cap.
+		//NOTE: build the negative via subtraction. A bare negative inside a vector literal is one
+		//of this project's parse killers and silently kills the WHOLE file.
+		local.pc = float( getcvar "coop_mgnestPitch" )
+		if( local.pc <= 0 ){ local.pc = 60 }
+		local.pcNeg = 0 - local.pc
+		local.gun pitchCaps ( local.pcNeg local.pc 0 )
+		//Also set the SCRIPT field. mg42_active.scr does `if (self.pitchcaps == NIL){ self.pitchcaps
+		//= ( -15 15 0) }` and then applies it - so leaving this NIL would let it stomp our cone back
+		//down to 15 degrees the moment the nest is threaded below.
+		local.gun.pitchcaps = ( local.pcNeg local.pc 0 )
+
+		//[user 08-08] AIM CENTRE. This is why he fired off to one side at nothing.
+		//TurretGun captures m_fStartYaw = angles[1] when the turret is PLACED (weapturret.cpp:548),
+		//which happens on spawn - before the line above sets .angles. So the gun modelled a facing
+		//of 262 while the AI computed every aim as an offset from a start yaw of 0, throwing its
+		//whole firing arc ~262 degrees off. maxYawOffset is 180 so the ARC never rejected anything;
+		//only the CENTRE was wrong, which is why he happily fired, just not at anybody.
+		local.gun startyaw local.yaw
+
+		local.bm[local.bn] = local.gun
+		local.bn++
+	}
+
+	// german_wehrmact_grenadier with gun "MG42" - the exact model and weapon every BSP nest uses.
+	local.sol = spawn "models/human/german_wehrmact_grenadier.tik" gun "MG42" targetname ( local.tn + "_gunner" )
+	if( local.sol != NULL ){
+		local.sol exec global/disable_ai.scr
+		local.sol.origin = local.sp
+		local.sol.angles = ( 0 local.yaw 0 )
+		if( local.gun != NULL ){ local.sol.turret = local.gun }
+		local.sol.type_idle = "machinegunner"
+		local.sol.type_attack = "machinegunner"
+		local.sol.type_disguise = "machinegunner"
+		local.sol.type_grenade = "machinegunner"
+		// rest of the BSP block for the outdoor nests
+		local.sol.accuracy = 20
+		local.sol.sound_awareness = 100
+		local.sol.noticescale = 100
+		local.sol.fixedleash = 0
+		local.sol.enemysharerange = 0
+		local.sol.ammo_grenade = 0
+		local.sol.gren_awareness = 10
+		local.sol exec global/enable_ai.scr
+		local.bm[local.bn] = local.sol
+		local.bn++
+	}
+
+	//[user 08-08] THIS is what makes him shoot. A mounted gunner holds the gun but the turret only
+	//fires when something drives it: weapturret.cpp AI_ThinkActive gates on owner->m_Enemy, and the
+	//"startfiring" that kicks it off comes from global/mg42_active.scr - the driver every scripted
+	//nest in the game uses (45 invocations across the m/t/e maps, e.g.
+	//  $mg42_farbunker_1 thread global/mg42_active.scr::mg42 10000  in m3l1b).
+	//Without it he mounted, tracked and never pulled the trigger. It also owns the reload cycle,
+	//so this fixes the "nest gunners never reload" gap in the same stroke.
+	//Threaded on the GUN (self must be the turret) and only once both ends exist, since the script
+	//resolves the gunner by targetname on entry.
+	if( local.gun != NULL && local.sol != NULL ){
+		local.gun thread global/mg42_active.scr::mg42 4000
+	}
+
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "mg_nest_manned"
+	println( "^~^~^ BUNKER mg_nest_manned: " + local.bn + " pieces at " + local.origin + " yaw " + local.yaw + " fwd " + local.fwdOff + " up " + local.upOff )
+}end
+
+//=========================================================================
+// [user 08-08] PLACEABLE FLAK 88 that actually shoots at players.
+//
+// This does NOT use the mounted-gunner recipe. Flak guns are not TurretGun and no AI think mans
+// one - the crewed-looking flak in the Breakthrough maps is scenery: those actors carry
+// type_attack "turret", which is THINK_TURRET, the ordinary hold-your-post think every rifleman
+// has. It is not a mounted-gun think and they never fire the gun.
+//
+// The working pattern is m3l2's, and every part of it is verified:
+//   * the model must be statweapons/flak88turret.tik - classname VehicleTurretGun, and the ONLY
+//     flak model carrying a fire_scripted animation. P_flak88.tik and P_aagun_base.tik are
+//     FixedTurret with nothing but idle, which is why an earlier attempt on m3l1b produced a gun
+//     that aimed convincingly and never fired.
+//     [user 08-08] That stays true for SCRIPTED fire and is why this label uses flak88turret.tik.
+//     It does NOT mean those two models are useless: a FixedTurret is a VEHICLE the player mans,
+//     which is what aagun_emplacement / flak88_manned below are for. Different job, different model.
+//   * setAimTarget points the barrel; `anim fire_scripted` is the muzzle blast;
+//   * the SHELL is scripted - after a flight delay the impact is computed near the target with
+//     scatter and detonated. The script is the weapon.
+//
+// COOP: m3l2 re-acquires its target only when the old one goes NULL, so it locks onto whoever was
+// nearest at map load and keeps shelling near them. This re-picks the closest LIVING player every
+// shot, so it threatens the whole squad instead of one man.
+//
+// NAMING: the entity must stay on a coop_ name. global/turret.scr auto-runs on every map
+// (auto.scr) and scans literal $flak88 / $mg42 / $nebel arrays - a stock name gets hijacked.
+//=========================================================================
+flak_emplacement local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.base = waitthread groundz local.origin
+
+	if( level.coop_flakN == NIL ){ level.coop_flakN = 0 }
+	level.coop_flakN = level.coop_flakN + 1
+	local.tn = "coop_flak" + level.coop_flakN
+
+	//[user 08-08] CARRIAGE. This used to spawn the turret ALONE, sitting at ground level - a barrel
+	//assembly with nothing under it, which is what made it read as "not the flak from the campaign".
+	//flak88turret.tik is only the upper half; retail always pairs it with flak88base.tik and both
+	//maps that use it precache the two together. The +56 is measured from the retail BSP, where both
+	//pairs on m1l2a sit at exactly that delta (turret z -264 over base z -320, twice).
+	local.bp = local.origin
+	local.bp[2] = local.base
+	local.carriage = spawn "models/statweapons/flak88base.tik" targetname ( local.tn + "_base" )
+	if( local.carriage != NULL ){
+		local.carriage.origin = local.bp
+		local.carriage.angles = ( 0 local.yaw 0 )
+		if( local.mult != 1.0 ){ local.carriage scale local.mult }
+		local.carriage solid
+	}
+
+	local.gp = local.origin
+	local.gp[2] = local.base + ( 56 * local.mult )
+	local.gun = spawn "models/statweapons/flak88turret.tik" targetname local.tn
+	if( local.gun == NULL ){ end }
+	local.gun.origin = local.gp
+	local.gun.angles = ( 0 local.yaw 0 )
+	local.gun scale local.mult
+	local.gun solid
+
+	local.bn = 0
+	local.bm[local.bn] = local.gun
+	local.bn++
+	if( local.carriage != NULL ){
+		local.bm[local.bn] = local.carriage
+		local.bn++
+	}
+	waitthread coop_mod/blueprint.scr::bs_register local.bm local.bn 0 "flak_emplacement"
+	local.gun thread coop_flakThink
+	//[user 08-08] same crewman as the mannable guns. This one has no seat (VehicleTurretGun,
+	//and retail sets setPlayerUsable 0 on its BSP twins), so there is no takeover to yield to.
+	waitthread coop_aa_crew local.gun "flak88_driver" local.yaw local.mult
+	println( "^~^~^ BUNKER flak_emplacement: " + local.tn + " at " + local.origin + " yaw " + local.yaw )
+}end
+
+//=========================================================================
+// Per-gun firing loop. self is the GUN.
+//=========================================================================
+coop_flakThink:{
+//=========================================================================
+	local.gunorigin = self.origin
+
+	while( 1 ){
+		if( self == NULL ){ end }
+
+		local.wait = float( getcvar "coop_flakInterval" )
+		if( local.wait < 1 ){ local.wait = 6 }
+		wait local.wait
+		if( self == NULL ){ end }
+
+		//closest LIVING player, re-picked every shot
+		local.target = exec coop_mod/replace.scr::player_closestTo self
+		if( local.target == NULL ){ continue }
+		if( !isalive local.target ){ continue }
+
+		self setAimTarget local.target
+		self anim fire_scripted
+
+		//[user 08-08] shell flight extracted to coop_flakShell so the crewed AA guns fire the same
+		//round from the same code - behaviour here is unchanged.
+		waitthread coop_flakShell local.gunorigin local.target
+	}
+}end
+
+removeFlakFx:{
+	wait 3
+	if( self != NULL ){ self remove }
+}end
+
+//=========================================================================
+// [user 08-08] The scripted AA round, shared by flak_emplacement and the crewed/mannable guns.
+// The gun does not really shoot anything - the SCRIPT is the weapon (see flak_emplacement).
+// Impact is computed AFTER the flight delay, so a moving player can outrun the round.
+//=========================================================================
+coop_flakShell local.gunorigin local.target:{
+//=========================================================================
+	wait ( 0.7 + ( ( randomint 6 ) * .1 ) )
+	if( local.target == NULL || !isalive local.target ){ end }
+
+	local.range = float( getcvar "coop_flakScatter" )
+	if( local.range < 1 ){ local.range = 160 }
+
+	local.vec = vector_normalize ( local.gunorigin - local.target.origin )
+	local.a = vector_scale local.vec 48
+	local.a = local.a + local.target.origin + ( 0 0 32 )
+	for( local.i = 0; local.i < 2; local.i++ ){
+		local.off = randomint local.range
+		if( ( randomint 2 ) == 1 ){ local.a[local.i] = local.a[local.i] + local.off }
+		else{ local.a[local.i] = local.a[local.i] - local.off }
+	}
+
+	local.fx = spawn script_model
+	local.fx model "models/animate/fx_explosion_mine.tik"
+	local.fx.origin = local.a
+	local.fx anim start
+	radiusdamage local.a 300 220
+	local.fx thread removeFlakFx
+}end
+
+
+//=========================================================================
+// [user 08-08] MANNABLE AA emplacements - the guns from the Breakthrough campaign (e2l1, the
+// glider drop): $aagun1/3/5 are the Flakvierling quad-20mm, $aagun2/4/6 the Flak 88. Both are a
+// different thing from flak_emplacement above: that one is a script-fired VehicleTurretGun with no
+// seat, these two are FixedTurret (: VehicleTank : Vehicle) and a PLAYER climbs on.
+//
+// Why one spawn is enough: each base TIKI carries `spawnturret 0 "statweapons/P_*_cannon.tik"` in
+// its own init/server block, so the cannon is attached and its slot opened by the TIKI at spawn.
+// That is the reason these are safe to place at runtime at all - the tank-turret work established
+// that a later `$ent model` swap never re-runs OpenSlotsByModel, and this path never needs it.
+//
+// Nothing has to be done to make them usable: m_bPlayerUsable defaults TRUE in both turret
+// constructors (vehicleturret.cpp:228, weapturret.cpp:418). e2l1's extra wiring exists to RESTRICT
+// them (`self lock`, `setPlayerUsable 0` on the m1l2a pair), never to enable them.
+//
+// The origin is the gun's FOOT - both bases setsize from z 0 up ("-55 -55 0" / "-80 -80 0") and the
+// retail e2l1 entities are single-entity, scale 1.0 - so ground level is correct, no z offset like
+// the two-piece 88 above needs.
+//
+// Models live in mainta/pak1.pk3. That mounts under com_target_game 2 (BT mounts main+mainta+
+// maintt), so these work on the AA and SH maps too, not just the BT ones.
+//
+// NAMING: coop_ prefix is mandatory - global/turret.scr auto-runs on every map and scans literal
+// $flak88 / $mg42 / $nebel arrays, so a stock name gets hijacked out from under us.
+//=========================================================================
+aagun_emplacement local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.base = waitthread groundz local.origin
+
+	if( level.coop_aagunN == NIL ){ level.coop_aagunN = 0 }
+	level.coop_aagunN = level.coop_aagunN + 1
+	local.tn = "coop_aagun" + level.coop_aagunN
+
+	local.gp = local.origin
+	local.gp[2] = local.base
+	local.gun = spawn "models/statweapons/P_aagun_base.tik" targetname local.tn
+	if( local.gun == NULL ){ end }
+	local.gun.origin = local.gp
+	local.gun.angles = ( 0 local.yaw 0 )
+	if( local.mult != 1.0 ){ local.gun scale local.mult }
+
+	local.bm[0] = local.gun
+	waitthread coop_mod/blueprint.scr::bs_register local.bm 1 0 "aagun_emplacement"
+	local.gun thread coop_aaThink "aagun_driver" "fire_1" local.yaw local.mult
+	println( "^~^~^ BUNKER aagun_emplacement: " + local.tn + " at " + local.origin + " yaw " + local.yaw )
+}end
+
+//=========================================================================
+// Same recipe, the 88. Kept as its own label rather than one parameterised helper on purpose: the
+// `spawn` model argument is a literal at both sites, which is how every other builder in this file
+// writes it, and shared anchors in this subsystem have burned us before (bug-1421).
+//=========================================================================
+flak88_manned local.origin local.yaw local.mult:{
+//=========================================================================
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+	local.base = waitthread groundz local.origin
+
+	if( level.coop_flak88mN == NIL ){ level.coop_flak88mN = 0 }
+	level.coop_flak88mN = level.coop_flak88mN + 1
+	local.tn = "coop_flak88m" + level.coop_flak88mN
+
+	local.gp = local.origin
+	local.gp[2] = local.base
+	local.gun = spawn "models/statweapons/P_flak88.tik" targetname local.tn
+	if( local.gun == NULL ){ end }
+	local.gun.origin = local.gp
+	local.gun.angles = ( 0 local.yaw 0 )
+	if( local.mult != 1.0 ){ local.gun scale local.mult }
+
+	local.bm[0] = local.gun
+	waitthread coop_mod/blueprint.scr::bs_register local.bm 1 0 "flak88_manned"
+	local.gun thread coop_aaThink "flak88_driver" "fire" local.yaw local.mult
+	println( "^~^~^ BUNKER flak88_manned: " + local.tn + " at " + local.origin + " yaw " + local.yaw )
+}end
+
+//=========================================================================
+// [user 08-08] AA CREW - the animated gunner on a placed AA emplacement.
+//
+// This is THEATRE, and deliberately so. There is no mounted-gun think for a flak: only
+// machinegunner mounts a TurretGun, and the crewed-looking flak in the Breakthrough maps is
+// scenery (those actors carry type_attack "turret" = THINK_TURRET, the ordinary hold-your-post
+// think - they never fire the gun). Retail solves it the same way we do here: e2l1 FlakGunSetup
+// disable_ai's the crew, poses them, and lets the SCRIPT do the aiming and firing.
+//
+// The pose comes from models/player/base/anims_shared.txt, which every human model shares, so
+// this needs no per-model animation check: "flak88_driver" for the 88, "aagun_driver" for the
+// Flakvierling. Those are the engine's own names for "manning this gun".
+//
+// Placement is cvar-tuned rather than guessed, exactly like the MG42 nest (coop_mgnestFwd/Up):
+// coop_aaCrewFwd / coop_aaCrewSide / coop_aaCrewUp, all scaling with build scale.
+//=========================================================================
+coop_aa_crew local.gun local.pose local.yaw local.mult:{
+//=========================================================================
+	if( local.gun == NULL ){ end }
+	if( local.mult == NIL || local.mult <= 0 ){ local.mult = 1.0 }
+
+	local.fa = ( 0 0 0 )
+	local.fa[1] = local.yaw
+	local.fwd = angles_toforward local.fa
+	local.side = angles_toleft local.fa
+
+	local.f = float( getcvar "coop_aaCrewFwd" )
+	local.s = float( getcvar "coop_aaCrewSide" )
+	local.u = float( getcvar "coop_aaCrewUp" )
+	//seeded nowhere, so an unset cvar reads "" -> 0. These are the starting guesses, not defaults
+	//anyone tuned - nudge them live and bake the winners (same workflow as the helmet fit-tuner).
+	if( local.f == 0 ){ local.f = 20 }
+	if( local.u == 0 ){ local.u = 8 }
+
+	local.cp = local.gun.origin
+	local.cp = local.cp + (vector_scale local.fwd (local.f * local.mult))
+	local.cp = local.cp + (vector_scale local.side (local.s * local.mult))
+	local.cp[2] = local.cp[2] + ( local.u * local.mult )
+
+	//coop_ targetname is mandatory: global/turret.scr auto-runs on every map and scans literal
+	//$mg42 / $flak88 / $nebel arrays, and a stock name gets hijacked out from under us.
+	if( level.coop_aaCrewN == NIL ){ level.coop_aaCrewN = 0 }
+	level.coop_aaCrewN = level.coop_aaCrewN + 1
+	local.crew = spawn "models/human/german_wehrmact_soldier.tik" targetname ( "coop_aacrew" + level.coop_aaCrewN )
+	if( local.crew == NULL ){ end }
+	local.crew.origin = local.cp
+	local.crew.angles = ( 0 local.yaw 0 )
+	if( local.mult != 1.0 ){ local.crew scale local.mult }
+
+	//he is furniture, not a combatant: no AI, no physics, no collision to shove the player around.
+	local.crew exec global/disable_ai.scr
+	local.crew physics_off
+	local.crew notsolid
+	local.crew anim local.pose
+
+	local.gun.coop_crew = local.crew
+	println( "^~^~^ BUNKER aa_crew " + local.pose + " at " + local.cp )
+}end
+
+//=========================================================================
+// [user 08-08] Per-gun AA firing loop for the MANNABLE emplacements. self is the BASE (a
+// FixedTurret); the thing that actually shoots is its cannon, which the base TIKI spawned into
+// turret slot 0 via `spawnturret`. QueryTurretSlotEntity is how you get hold of it - retail does
+// exactly this at e2l1 aaguns.scr FlakGunSetup ("self.turret = self QueryTurretSlotEntity 0"),
+// which matters because a runtime-spawned cannon has no BSP targetname to reference.
+//
+// YIELDS TO THE PLAYER. The moment someone mounts the gun the cannon has an owner, so the loop
+// stops firing and the crewman is removed - otherwise the script would be fighting the player for
+// the same barrel. Both come back when they get off.
+//=========================================================================
+coop_aaThink local.pose local.fireanim local.yaw local.mult:{
+//=========================================================================
+	if( self == NULL ){ end }
+	local.gun = self
+	local.cannon = local.gun QueryTurretSlotEntity 0
+
+	//m_fStartYaw is captured when the turret is PLACED, before script sets .angles - so the AI
+	//centre is wrong unless it is re-stated here.
+	local.gun startyaw local.yaw
+
+	waitthread coop_aa_crew local.gun local.pose local.yaw local.mult
+
+	local.manned = 0
+	while( 1 ){
+		if( local.gun == NULL ){ end }
+
+		local.wait = float( getcvar "coop_flakInterval" )
+		if( local.wait < 1 ){ local.wait = 6 }
+		wait local.wait
+		if( local.gun == NULL ){ end }
+
+		//is a player on it? the cannon takes an owner when mounted. NIL and NULL both mean "free".
+		local.own = NIL
+		if( local.cannon != NIL && local.cannon != NULL ){ local.own = local.cannon.owner }
+		if( local.own != NIL && local.own != NULL ){
+			if( local.manned == 0 ){
+				local.manned = 1
+				if( local.gun.coop_crew != NIL && local.gun.coop_crew != NULL ){
+					local.gun.coop_crew delete
+					local.gun.coop_crew = NULL
+				}
+			}
+			continue
+		}
+		if( local.manned == 1 ){
+			local.manned = 0
+			waitthread coop_aa_crew local.gun local.pose local.yaw local.mult
+			continue
+		}
+
+		local.target = exec coop_mod/replace.scr::player_closestTo local.gun
+		if( local.target == NULL ){ continue }
+		if( !isAlive local.target ){ continue }
+
+		if( local.cannon != NIL && local.cannon != NULL ){
+			local.cannon setAimTarget local.target
+			//the cannon carries its own fire animation, and the two guns do not agree on the name:
+			//P_flak88_cannon has "fire", P_aagun_cannon has "fire_1".."fire_4" (verified in the
+			//shipped tiks) - so the caller passes it in rather than this label guessing.
+			local.cannon anim local.fireanim
+		}
+		thread coop_flakShell local.gun.origin local.target
+	}
+}end

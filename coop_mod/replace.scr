@@ -269,6 +269,23 @@ if(level.cMTE_coop_replace){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println
 	local.playerReturn = NULL
 
 	local.playerReturn = exec coop_mod/replace.scr::player_anyValid
+	//[user 2026-08-10] PROBE - see bug-1665. This label returned NULL on 90/90 blueprint resolves
+	//while an identical inline scan in the caller read the same players fine. officer/aisquad call
+	//it every tick, so a genuine NULL with live players present is far bigger than one pickup.
+	//Report ONLY that anomaly, rate-limited, behind the debug cvar.
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		if( local.playerReturn == NULL && $player.size > 0 ){
+			if( level.coop_pctNext == NIL ){ level.coop_pctNext = 0 }
+			if( level.time > level.coop_pctNext ){
+				level.coop_pctNext = level.time + 2
+				local.po = 0
+				if( local.object != NULL && local.object != NIL ){ local.po = 1 }
+				local.pr = 0
+				if( local.origin != NIL ){ local.pr = 1 }
+				println( "^~^~^ PCT NULL psize=" + $player.size + " objOk=" + local.po + " originSet=" + local.pr )
+			}
+		}
+	}
 }end local.playerReturn
 
 //=========================================================================
@@ -2992,3 +3009,27 @@ coop_trackTankTarget:{
 		wait 0.5
 	}
 }end
+
+//=========================================================================================
+// [user 08-08] Is a scripted conversation still worth continuing?
+// Retail map scripts run German/Allied dialogue scenes that keep going after the speakers are
+// dead or already fighting - a sweep of all 121 map scripts found 148 sites with no guard at all.
+// A correct check is three things, in order: the entity is not NULL, it is alive, and it is idle.
+// `thinkstate == idle` alone is NOT enough: a killed actor is not idle, but a REMOVED one is NULL
+// and reading .thinkstate off NULL is not a check at all.
+//
+// HOW TO USE IT MATTERS. If the conversation label ENDS with a release - a runto or enable_ai that
+// hands the actors back to normal AI - you must NOT abort the thread, or they are stranded frozen
+// and die on their feet with no death animation (m3l1b's radio officer). In that case take the
+// result into a local and wrap each line: local.convOk = waitthread ...; if( local.convOk ){ say }
+// Only abort outright on a dead-end label that nothing waits on.
+//
+// Pass the same actor twice if the scene has a single speaker.
+//=========================================================================================
+convOk local.a local.b:
+	if( local.a == NULL || local.b == NULL ){ end 0 }
+	if( !isalive local.a || !isalive local.b ){ end 0 }
+	if( local.a.thinkstate != idle ){ end 0 }
+	if( local.b.thinkstate != idle ){ end 0 }
+	end 1
+end

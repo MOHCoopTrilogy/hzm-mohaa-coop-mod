@@ -1,0 +1,618 @@
+//=========================================================================
+// HZM coop - STAGED U-BOAT DEATH
+//
+// [user 2026-08-08] m2l2b's visible U-boat is WORLDSPAWN brushwork (verified against the full
+// 95-entity brush list in m2l2b.bsp - the only brush entities are the bridge and the gate).
+// Worldspawn is one indivisible baked model, so that boat cannot be hidden, moved or removed. The
+// way around it is not to touch it: stage the death in the EMPTY neighbouring pen and frame it from
+// a camera that never has the original in shot (confirmed in play - the original stays out of frame).
+//
+// THE MOTION IS SCRIPTED, NOT ANIMATED. There is no sinking animation in the game files: uboot.skc
+// is a 2.5 KB idle and d_front/d_back.skc are 192-byte static poses. Nothing needs modelling - a
+// script_model's origin and angles are stepped every tick, which is how this mod moves script
+// models everywhere. `moveto` is NOT usable: it silently no-ops on script_model (TRAPS T1).
+//
+// TWO HULL PARTS. The first live run showed the upper hull floating with nothing beneath it - the
+// staged pen has no water surface to hide the gap the way the real pen does. lowerhull rides the
+// identical transform rather than swapping to the whole-boat model, because the top placement was
+// matched by eye against the real boat and swapping models risks moving it.
+//
+// FX RIDE THE HULL. Fires are re-positioned every tick from the hull origin plus a forward-vector
+// offset, so they stay on the boat as she goes down instead of hanging where she used to be.
+// Offsets come from angles_toforward, NOT from raw X: she lies at yaw 273, so an X offset would
+// walk across her beam instead of along her length.
+//
+// USAGE:
+//   thread coop_mod/subsink.scr::coop_sub_stage ( x y z ) <yaw> "<model>" <scale>
+//   thread coop_mod/subsink.scr::coop_sub_sink
+//=========================================================================
+
+//=========================================================================
+// Place her, floating and whole.
+//=========================================================================
+coop_sub_stage local.pos local.yaw local.model local.scale:{
+	if( level.coop_subStaged != NIL ){ end }		//once only
+
+	local.ang = ( 0 0 0 )
+	local.ang[1] = local.yaw
+
+	if( local.model == NIL || local.model == "" ){ local.model = "models/static/upperhull3.tik" }
+	if( local.scale == NIL || local.scale <= 0 ){ local.scale = 1.0 }
+
+	local.m = spawn script_model
+	local.m model local.model
+	local.m.origin = local.pos
+	local.m.angles = local.ang
+	local.m scale local.scale
+	local.m notsolid
+
+	local.lo = spawn script_model
+	local.lo model "models/static/lowerhull.tik"
+	local.lo.origin = local.pos
+	local.lo.angles = local.ang
+	local.lo scale local.scale
+	local.lo notsolid
+
+	level.coop_subStaged   = local.m
+	level.coop_subStagedLo = local.lo
+	level.coop_subBaseOrg  = local.pos
+	level.coop_subBaseAng  = local.ang
+	println( "^~^~^ SUBSINK staged at " + local.pos + " yaw " + local.yaw )
+}end
+
+
+//=========================================================================
+// [user 2026-08-09] THE SORTIE v4 - DEAD STRAIGHT. Every steering scheme (waypoint pursuit,
+// turn-in radius, constant-curvature arc) still read as "a turn" to the user; the note is now
+// "get rid of the turn altogether, just have it go straight out to sea". So: heading computed
+// ONCE - the bearing from her staged position to the final waypoint - and she holds it the
+// whole crossing. She rides dead level. The intermediate marker is ignored entirely.
+// SHE NEVER STOPS: on arrival, CruiseDone fires the director (death cam + charges) while a
+// decaying drift keeps her creeping through the detonation, updating coop_subBaseOrg live so
+// the sink inherits where she ACTUALLY is.
+// Cvars: coop_subCruiseSpeed u/s (170), coop_subYawFlip (180), coop_subCruiseZoff (0),
+//        coop_subInsertLen s (6, shared with the finale director).
+//=========================================================================
+coop_sub_cruise:{
+	level.coop_subApproach = 0
+	level.coop_subCruiseDone = 0
+	local.m = level.coop_subStaged
+	if( local.m == NIL || local.m == NULL ){
+		println "^~^~^ SUBSINK cruise: no staged boat"
+		level.coop_subCruiseDone = 1
+		end
+	}
+	if( level.coop_subWpN == NIL || level.coop_subWpN < 2 ){
+		println "^~^~^ SUBSINK cruise: no waypoints"
+		level.coop_subCruiseDone = 1
+		end
+	}
+
+	local.spd = float( getcvar "coop_subCruiseSpeed" )
+	if( local.spd <= 0 ){ local.spd = 170 }
+	if( getcvar "coop_subYawFlip" == "" ){ local.flip = 180 }
+	else{ local.flip = float( getcvar "coop_subYawFlip" ) }
+	local.zoff = float( getcvar "coop_subCruiseZoff" )
+	local.insert = float( getcvar "coop_subInsertLen" )
+	if( local.insert <= 0 ){ local.insert = 6 }
+
+	local.pos = local.m.origin
+	local.step = local.spd * 0.05
+	local.tgt = level.coop_subWpO[level.coop_subWpN] + ( ( 0 0 1 ) * local.zoff )
+	//heading: computed ONCE, held forever
+	local.d = local.tgt - local.pos
+	local.d[2] = 0
+	local.want = vector_toangles local.d
+	local.yaw = local.want[1]
+	local.fwd = angles_toforward ( 0 local.yaw 0 )
+	local.disp = ( 0 ( local.yaw + local.flip ) 0 )
+	local.m.angles = local.disp
+	if( level.coop_subStagedLo != NIL && level.coop_subStagedLo != NULL ){
+		level.coop_subStagedLo.angles = local.disp
+	}
+	local.wake = 0
+	local.eng = 0
+	local.engOn = 0
+	local.m playsound coop_sub_start
+
+	local.going = 1
+	while( local.going == 1 && local.m != NULL ){
+		local.d = local.tgt - local.pos
+		local.d[2] = 0
+		local.hd = vector_length local.d
+		if( local.hd <= ( local.step * 2 ) ){ local.going = 0 }
+		else{
+			if( level.coop_subApproach != 1 && local.hd <= ( local.spd * local.insert ) ){
+				level.coop_subApproach = 1
+			}
+			local.pos = local.pos + ( local.fwd * local.step )
+			local.m.origin = local.pos
+			if( level.coop_subStagedLo != NIL && level.coop_subStagedLo != NULL ){
+				level.coop_subStagedLo.origin = local.pos
+			}
+			if( level.coop_subLook != NIL && level.coop_subLook != NULL ){
+				level.coop_subLook.origin = local.pos
+			}
+			//the diesels settle into the underway loop once the start bark has played out
+			if( local.engOn == 0 ){
+				local.eng = local.eng + 0.05
+				if( local.eng >= 2.5 ){
+					local.engOn = 1
+					local.m loopsound coop_sub_moving 1.0
+				}
+			}
+			//bow wake - a burst every ~1.5s out at the stem
+			local.wake = local.wake + 0.05
+			if( local.wake >= 1.5 ){
+				local.wake = 0
+				waitthread coop_sub_fx "models/animate/fx_water_spray.tik" ( local.pos + ( local.fwd * 1900 ) )
+			}
+			wait 0.05
+		}
+	}
+
+	//arrival: fire the director NOW, then die drifting - way on until the blast
+	level.coop_subBaseOrg = local.pos
+	level.coop_subBaseAng = local.disp
+	println( "^~^~^ SUBSINK cruise complete at " + local.pos )
+	level.coop_subCruiseDone = 1
+	local.t = 0
+	while( local.t < 4.5 && local.m != NULL ){
+		local.sp = local.step * ( 1 - ( local.t / 4.5 ) )
+		local.pos = local.pos + ( local.fwd * local.sp )
+		local.m.origin = local.pos
+		if( level.coop_subStagedLo != NIL && level.coop_subStagedLo != NULL ){
+			level.coop_subStagedLo.origin = local.pos
+		}
+		if( level.coop_subLook != NIL && level.coop_subLook != NULL ){
+			level.coop_subLook.origin = local.pos
+		}
+		level.coop_subBaseOrg = local.pos
+		local.t = local.t + 0.05
+		wait 0.05
+	}
+	if( local.m != NULL ){ local.m stoploopsound }
+}end
+
+
+
+
+//=========================================================================
+// Kill her. Four movements: the death blow, the burning, the descent, the plunge.
+// Live-tunable so the shot can be dialled without a rebuild:
+//   coop_subSinkDepth  travel down          (default 760)
+//   coop_subSinkStern  origin drop per degree of pitch, keeps the stern out of the
+//                      ceiling (default 14)
+//   coop_subSinkTime   descent seconds      (default 14)
+//   coop_subSinkPitch  final bow-down tilt  (default 34)
+//   coop_subSinkRoll   final roll           (default 12)
+//=========================================================================
+coop_sub_sink:{
+	local.m = level.coop_subStaged
+	if( local.m == NIL || local.m == NULL ){
+		println "^~^~^ SUBSINK no staged boat - call coop_sub_stage first"
+		end
+	}
+	if( level.coop_subSinking == 1 ){ end }
+	level.coop_subSinking = 1
+
+	local.depth = float( getcvar "coop_subSinkDepth" )
+	if( local.depth <= 0 ){ local.depth = 1050 }	//[user 2026-08-09] 760 left the raised stern dry at the end
+	local.dur = float( getcvar "coop_subSinkTime" )
+	if( local.dur <= 0 ){ local.dur = 28 }	//[user 2026-08-09] the sink is the show now - twice as slow
+	local.maxPitch = float( getcvar "coop_subSinkPitch" )
+	if( local.maxPitch == 0 ){ local.maxPitch = 34 }
+	local.maxRoll = float( getcvar "coop_subSinkRoll" )
+	if( local.maxRoll == 0 ){ local.maxRoll = 12 }
+	//units of origin drop per degree of pitch, to keep the stern down. ~half-length/57.3.
+	local.sternC = float( getcvar "coop_subSinkStern" )
+	if( local.sternC <= 0 ){ local.sternC = 20 }	//[user 2026-08-09] pull the pitched-up stern deeper too
+
+	local.org0 = level.coop_subBaseOrg
+	local.ang0 = level.coop_subBaseAng
+	local.fwd = angles_toforward local.ang0
+	//[user 2026-08-09] Lateral axis, so water bursts can be thrown out to port and starboard rather
+	//than only along her keel line. Every water effect before this sat on the centreline.
+	local.lft = angles_toleft local.ang0
+
+	//=================================================================
+	// I. THE DEATH BLOW - charges walk her length, bow to stern
+	//=================================================================
+	//[user 2026-08-09] the sea ERUPTS with her - a ring of water hurled up all around the hull
+	//the moment the first charge fires, not just the along-the-keel columns
+	thread coop_sub_splashRing local.org0
+	local.i = -2
+	while( local.i <= 2 ){
+		local.p = local.org0 + ( local.fwd * ( local.i * 380 ) )
+		waitthread coop_sub_fx "models/animate/fx_explosion_tank.tik" local.p
+		waitthread coop_sub_snd explode_sub local.p
+		local.i = local.i + 1
+		wait 0.3
+	}
+
+	//the big one, amidships
+	waitthread coop_sub_fx "models/animate/explosion_conflagration.tik" ( local.org0 + ( 0 0 60 ) )
+	waitthread coop_sub_fx "models/emitters/fireball_matrix.tik" ( local.org0 + ( 0 0 90 ) )
+	exec global/earthquake.scr 1.2 2 0 0
+	wait 0.35
+	waitthread coop_sub_fx "models/animate/explosion_bridge.tik" ( local.org0 + ( local.fwd * 260 ) )
+	waitthread coop_sub_snd explode_sub local.org0
+
+	//[user 2026-08-09] WATER COLUMNS AROUND HER WHILE SHE IS STILL ON THE SURFACE.
+	//Every water burst used to live in phase III and was positioned at the SINKING origin, so the
+	//only water effects the player ever saw were chasing the hull DOWN once she was already under -
+	//which is the one place a plume cannot read. These are pinned to the waterline and thrown out
+	//to alternating sides, which is what sells a boat being blown apart in the water rather than
+	//one quietly descending. Alternating sides keeps this to one effect per step: these are
+	//short-life entities but the pool is not free (see the 2048 entity work).
+	local.i = -2
+	local.sd = 1
+	while( local.i <= 2 ){
+		local.wp = local.org0 + ( local.fwd * ( local.i * 300 ) ) + ( local.lft * ( local.sd * 240 ) )
+		waitthread coop_sub_fx "models/animate/fx_explosion_tank.tik" local.wp
+		waitthread coop_sub_snd explode_water local.wp
+		waitthread coop_sub_fx "models/animate/fx_water_spray.tik" ( local.wp + ( local.lft * ( local.sd * 90 ) ) )
+		local.sd = 0 - local.sd
+		local.i = local.i + 1
+		wait 0.18
+	}
+
+	//=================================================================
+	// II. SHE BURNS - fires pinned along the hull, riding her down
+	//=================================================================
+	//[user 2026-08-09] RE-READ THE BASE **BEFORE** PHASE II, not after: the dying drift moved her
+	//while the charges walked, and the fires, walkway burn and OIL SPREAD all launch from org0 -
+	//with the stale capture the oil burned up to ~350u BEHIND her death spot, which is why the
+	//user never noticed it. Descent (phase III) uses the same refreshed base.
+	local.org0 = level.coop_subBaseOrg
+	local.ang0 = level.coop_subBaseAng
+	local.fwd = angles_toforward local.ang0
+	local.nf = 0
+	local.i = -2
+	while( local.i <= 2 ){
+		local.f = spawn script_model model "models/animate/inferno_nosmoke.tik"
+		local.f.origin = local.org0 + ( local.fwd * ( local.i * 340 ) )
+		local.f anim start
+		local.nf = local.nf + 1
+		level.coop_subFire[local.nf] = local.f
+		level.coop_subFireOff[local.nf] = local.i * 340
+		local.i = local.i + 1
+	}
+	//[user 2026-08-08] fire runs the SIDE WALKWAYS and burning oil spreads across the water.
+	//Both are threaded, not inline: they run on their own clocks alongside the descent so the
+	//fire creeps outward while she is already going down.
+	thread coop_sub_walkwayFire local.org0 local.ang0
+	thread coop_sub_oilSpread local.org0 local.ang0
+	//[user 2026-08-09] and the slick itself - small puddles first, one giant sheet by the time
+	//she is under
+	thread coop_sub_oilPool local.org0
+
+	local.smk = spawn script_model model "models/emitters/ddaysmoke.tik"
+	local.smk.origin = local.org0 + ( 0 0 40 )
+	local.smk anim start
+	level.coop_subSmoke = local.smk
+
+	wait 1.2
+
+	//=================================================================
+	// III. THE DESCENT
+	//=================================================================
+	local.t = 0
+	local.spray = 0
+	local.boom = 0
+	local.side = 0
+
+	while( local.t < local.dur && local.m != NULL ){
+		local.fr = local.t / local.dur			//0..1 progress
+
+		//ACCELERATING. fr*fr, not fr: a hull going down starts slow and gathers pace as it floods.
+		//A constant rate reads as an elevator.
+		local.drop = local.depth * local.fr * local.fr
+
+		//bow-down builds EARLY - she noses over before she really starts falling
+		local.pf = local.fr * 2
+		if( local.pf > 1 ){ local.pf = 1 }
+		local.pitch = local.maxPitch * local.pf
+
+		//roll arrives LATE - the list only shows once she is well over
+		local.rf = ( local.fr - 0.4 ) * 1.667
+		if( local.rf < 0 ){ local.rf = 0 }
+		if( local.rf > 1 ){ local.rf = 1 }
+		local.roll = local.maxRoll * local.rf
+
+		//[user 2026-08-08] STERN COMPENSATION. Pitch rotates about the ORIGIN, which is amidships,
+		//so every degree of bow-down lifts the stern by roughly half-length * sin(pitch) - at 34 on
+		//a ~2200u hull that is ~600u of stern going UP, straight into the pen ceiling. Sinking the
+		//origin by the same amount keeps the stern at or below where she started, which also reads
+		//better: she noses under rather than see-sawing. Linear in pitch (no trig in morlang, and
+		//the small-angle error is under 10% out to 40 degrees).
+		local.comp = local.pitch * local.sternC
+		local.o = local.org0
+		local.o[2] = local.org0[2] - local.drop - local.comp
+		local.a = local.ang0
+		local.a[0] = local.ang0[0] + local.pitch
+		local.a[2] = local.ang0[2] + local.roll
+
+		local.m.origin = local.o
+		local.m.angles = local.a
+		if( level.coop_subStagedLo != NIL && level.coop_subStagedLo != NULL ){
+			level.coop_subStagedLo.origin = local.o
+			level.coop_subStagedLo.angles = local.a
+		}
+
+		//fires ride her down, still spaced along the hull
+		local.k = 1
+		while( local.k <= local.nf ){
+			if( level.coop_subFire[local.k] != NIL && level.coop_subFire[local.k] != NULL ){
+				level.coop_subFire[local.k].origin = local.o + ( local.fwd * level.coop_subFireOff[local.k] )
+			}
+			local.k = local.k + 1
+		}
+		if( level.coop_subSmoke != NIL && level.coop_subSmoke != NULL ){
+			level.coop_subSmoke.origin = local.o + ( 0 0 40 )
+		}
+
+		//SPRAY at the waterline - bursts walking her length, not a constant emitter. Foam where hull
+		//meets water is what reads as sinking rather than descending. Held at the ORIGINAL z, since
+		//that is where the surface is: the hull moves, the water does not.
+		local.spray = local.spray + 0.05
+		if( local.spray >= 0.3 && local.fr < 0.92 ){
+			local.spray = 0
+			local.side = local.side + 1
+			if( local.side > 4 ){ local.side = 0 }
+			local.sp = local.org0 + ( local.fwd * ( ( local.side * 340 ) - 680 ) )
+			waitthread coop_sub_fx "models/animate/fx_water_spray.tik" local.sp
+		}
+
+		//SECONDARY DETONATIONS - she is still coming apart. [user 2026-08-09] Two changes.
+		//(1) CADENCE: they come fast while she is still on the surface and thin out as she goes
+		//under. It was a flat 1.4s across the whole descent, which put most of them late.
+		//(2) PLACEMENT: pinned back up to the ORIGINAL waterline with a lateral throw, instead of
+		//riding the hull origin downwards. The hull moves; the sea does not.
+		local.boom = local.boom + 0.05
+		local.boomGap = 0.45 + ( local.fr * 1.6 )
+		if( local.boom >= local.boomGap && local.fr < 0.85 ){
+			local.boom = 0
+			local.bp = local.o + ( local.fwd * ( ( randomint 1400 ) - 700 ) ) + ( local.lft * ( ( randomint 560 ) - 280 ) )
+			local.bp = local.bp + ( ( 0 0 1 ) * ( local.org0[2] - local.o[2] ) )
+			waitthread coop_sub_fx "models/animate/fx_explosion_tank.tik" local.bp
+			waitthread coop_sub_snd explode_water local.bp
+		}
+
+		local.t = local.t + 0.05
+		wait 0.05
+	}
+
+	//=================================================================
+	// IV. GONE - the sea closes over her
+	//=================================================================
+	local.i = -1
+	while( local.i <= 1 ){
+		waitthread coop_sub_fx "models/animate/fx_mortar_water.tik" ( local.org0 + ( local.fwd * ( local.i * 420 ) ) )
+		local.i = local.i + 1
+	}
+	waitthread coop_sub_fx "models/animate/fx_water_spray.tik" local.org0
+	waitthread coop_sub_snd explode_water local.org0
+
+	//[user 2026-08-08] she vanished in mid-air before: the loop ended and the model was deleted
+	//the same instant. Hold her at full depth so the water closes over her first - 2.5s now, the
+	//stern was still breaking the surface at deletion with 1.5 ([user 2026-08-09]).
+	wait 2.5
+
+	println "^~^~^ SUBSINK gone"
+	if( local.m != NULL ){ local.m delete }
+	if( level.coop_subStagedLo != NIL && level.coop_subStagedLo != NULL ){ level.coop_subStagedLo delete }
+	local.k = 1
+	while( local.k <= local.nf ){
+		if( level.coop_subFire[local.k] != NIL && level.coop_subFire[local.k] != NULL ){
+			level.coop_subFire[local.k] delete
+		}
+		local.k = local.k + 1
+	}
+	if( level.coop_subSmoke != NIL && level.coop_subSmoke != NULL ){ level.coop_subSmoke delete }
+	level.coop_subSmoke    = NIL
+	level.coop_subStagedLo = NIL
+	level.coop_subStaged   = NIL
+}end
+
+
+//=========================================================================
+// One fire-and-forget effect at a point. Culled a few seconds later: a 20-second sequence throwing
+// this many emitters must not leak into the entity pool (entity_pool_2048 territory).
+//=========================================================================
+coop_sub_fx local.model local.pos:{
+	local.e = spawn script_model model local.model
+	local.e.origin = local.pos
+	local.e anim start
+	local.e thread coop_sub_fxCull
+}end
+
+//=========================================================================
+// [user 2026-08-09] THE GROWING SLICK. Three oil-slick planes (models/fx/coop_oilslick.tik -
+// the retail waterPlane mesh wearing our blob shader) spawn as SMALL puddles around the death
+// spot when she starts coming apart, then scale up continuously through the 28s descent until
+// the center sheet is ~3,000u across - a giant slick where a U-boat used to be. Pinned to the
+// water surface; coop_subOilZ tunes the height live if it z-fights or floats (default -698).
+//=========================================================================
+coop_sub_oilPool local.org:{
+	local.z = float( getcvar "coop_subOilZ" )
+	if( local.z == 0 ){ local.z = 0 - 698 }
+	local.c = spawn script_model model "models/fx/coop_oilslick.tik"
+	if( local.c == NULL ){ end }
+	local.c.origin = ( local.org[0] local.org[1] local.z )
+	local.c notsolid
+	local.c scale 0.4
+	local.s2 = spawn script_model model "models/fx/coop_oilslick.tik"
+	local.s2.origin = ( ( local.org[0] + 420 ) ( local.org[1] + 260 ) local.z )
+	local.s2 notsolid
+	local.s2 scale 0.25
+	local.s3 = spawn script_model model "models/fx/coop_oilslick.tik"
+	local.s3.origin = ( ( local.org[0] - 380 ) ( local.org[1] - 300 ) local.z )
+	local.s3 notsolid
+	local.s3 scale 0.25
+	//[user 2026-08-09] THE SLICK CATCHES. As the pool spreads, fires ignite ON it - one new burn
+	//point every ~2.2s at a random spot inside the current slick radius, up to 14. They are NEVER
+	//deleted: the burning slick outlives the boat, the descent and the fade - it is the last thing
+	//the scene shows.
+	local.k = 0.4
+	local.ft = 0
+	local.nf = 0
+	while( local.k < 12 ){
+		local.k = local.k + 0.019
+		if( local.c != NULL ){ local.c scale local.k }
+		if( local.s2 != NULL ){ local.s2 scale ( local.k * 0.55 ) }
+		if( local.s3 != NULL ){ local.s3 scale ( local.k * 0.45 ) }
+		local.ft = local.ft + 0.05
+		if( local.ft >= 2.2 && local.nf < 14 ){
+			local.ft = 0
+			local.nf = local.nf + 1
+			local.r = local.k * 90
+			local.fx = ( randomint ( local.r * 2 ) ) - local.r
+			local.fy = ( randomint ( local.r * 2 ) ) - local.r
+			local.fire = spawn script_model model "models/animate/adam-hallfire2.tik"
+			if( local.fire != NULL ){
+				local.fire.origin = ( ( local.org[0] + local.fx ) ( local.org[1] + local.fy ) ( local.z + 12 ) )
+				local.fire notsolid
+				local.fire scale 1.5
+				local.fire anim start
+			}
+		}
+		wait 0.05
+	}
+	//the slick outlives everything - it is what is LEFT. Deleted only by the map ending.
+}end
+
+//=========================================================================
+// [user 2026-08-09] DETONATION RING - 12 water bursts flung up in a circle around the hull,
+// staggered so the sea reads as erupting rather than twelve simultaneous stamps. Radii vary
+// with the index so the ring is ragged, alternating the big mortar plume with sheet spray.
+//=========================================================================
+coop_sub_splashRing local.org:{
+	local.i = 0
+	while( local.i < 12 ){
+		local.ang = local.i * 30
+		local.rad = 300 + ( ( local.i % 3 ) * 130 )
+		local.dir = angles_toforward ( 0 local.ang 0 )
+		local.sp = local.org + ( local.dir * local.rad )
+		if( ( local.i % 2 ) == 0 ){
+			waitthread coop_sub_fx "models/animate/fx_mortar_water.tik" local.sp
+		}else{
+			waitthread coop_sub_fx "models/animate/fx_water_spray.tik" local.sp
+		}
+		local.i = local.i + 1
+		wait 0.08
+	}
+}end
+
+//=========================================================================
+// A sound at a point. Needs a carrier entity - playsound is an entity command, and a dummy at the
+// blast point is what gives the report its falloff from the camera.
+//=========================================================================
+coop_sub_snd local.alias local.pos:{
+	local.e = spawn script_model model "fx/dummy.tik"
+	local.e.origin = local.pos
+	local.e playsound local.alias
+	local.e thread coop_sub_fxCull
+}end
+
+coop_sub_fxCull:{
+	wait 5
+	if( self != NULL ){ self delete }
+}end
+
+//=========================================================================
+// [user 2026-08-08] FIRE ALONG THE SIDE WALKWAYS. Spreads OUTWARD from amidships rather than
+// lighting all at once - fire that appears everywhere simultaneously reads as a switch, fire that
+// creeps reads as fire. Lateral offset uses angles_toleft: she lies at yaw 273, so a raw Y offset
+// would put the walkways across her bow instead of down her flanks.
+//=========================================================================
+coop_sub_walkwayFire local.org local.ang:{
+	local.fwd  = angles_toforward local.ang
+	local.left = angles_toleft local.ang
+	local.beam = 46			//half-beam at the deck edge, where a walkway would run
+
+	local.step = 0
+	while( local.step <= 4 && level.coop_subStaged != NIL ){
+		local.d = local.step * 260
+		//port and starboard, fore and aft of amidships - four new fires per step
+		local.s = -1
+		while( local.s <= 1 ){
+			if( local.s != 0 ){
+				local.pA = local.org + ( local.fwd * local.d ) + ( local.left * ( local.beam * local.s ) )
+				local.pB = local.org - ( local.fwd * local.d ) + ( local.left * ( local.beam * local.s ) )
+				//inferno_nosmoke, not firegood: firegood is scale 0.20 with scalemax 0.40 - a campfire,
+				//invisible at this range. inferno has scalerate 3.00 and actually roars.
+				waitthread coop_sub_fx "models/animate/inferno_nosmoke.tik" ( local.pA + ( 0 0 22 ) )
+				waitthread coop_sub_fx "models/animate/inferno_nosmoke.tik" ( local.pB + ( 0 0 22 ) )
+			}
+			local.s = local.s + 1
+		}
+		local.step = local.step + 1
+		wait 0.7
+	}
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] BURNING OIL ON THE WATER. Slicks surface first and catch a beat later, which
+// is the order it happens in - oil has to reach the surface before it can light. They stay at the
+// ORIGINAL z for the whole sequence: the water surface does not move, only the hull does, so a
+// slick that followed the boat down would look like it was being dragged under.
+//=========================================================================
+coop_sub_oilSpread local.org local.ang:{
+	local.fwd  = angles_toforward local.ang
+	local.left = angles_toleft local.ang
+
+	//Bounded on purpose. Each ring is 4 slicks + 4 fires, so 4 rings is 32 entities on top of the
+	//sequence FX - comfortable against the 2048 pool, but not open-ended.
+	local.ring = 1
+	while( local.ring <= 6 ){
+		local.spread = local.ring * 210
+		local.q = 0
+		while( local.q <= 5 ){
+			local.fo = ( randomint 600 ) - 300
+			local.lo = ( randomint 200 ) - 100
+			local.p = local.org
+			if( local.q == 0 ){ local.p = local.org + ( local.fwd * ( local.spread + local.fo ) ) + ( local.left * local.lo ) }
+			if( local.q == 1 ){ local.p = local.org - ( local.fwd * ( local.spread + local.fo ) ) + ( local.left * local.lo ) }
+			if( local.q == 2 ){ local.p = local.org + ( local.left * ( local.spread + local.lo ) ) + ( local.fwd * local.fo ) }
+			if( local.q == 3 ){ local.p = local.org - ( local.left * ( local.spread + local.lo ) ) + ( local.fwd * local.fo ) }
+			local.p[2] = local.org[2]		//pinned to the surface
+			//[user 2026-08-08] barrel_oil_long was invisible from the camera - it is a barrel LEAK
+			//effect, a thin dribble meant to be seen from a metre away, not a slick read across 2500
+			//units. At this range the FIRE is the only thing that carries, so the slick is now just a
+			//marker entity and the burn does the work.
+			local.slick = spawn script_model model "fx/dummy.tik"
+			local.slick.origin = local.p
+			local.slick notsolid
+			local.slick thread coop_sub_oilIgnite
+			local.q = local.q + 1
+		}
+		local.ring = local.ring + 1
+		wait 0.8
+	}
+}end
+
+
+// self = an oil slick. It surfaces, then catches.
+//=========================================================================
+coop_sub_oilIgnite:{
+	wait 1.4
+	if( self == NULL ){ end }
+	//[user 2026-08-08] adam-hallfire2, after two wrong picks. The emitters matter more than the
+	//scale multiplier here: firefill is a small interior flame, and fireandsmoke is mostly SMOKE
+	//(life 7.0, scalerate 0.60) so it billows instead of burning. adam-hallfire2 throws
+	//gren_explosion/air_explosion sprites at velocity 220-250 with life 3-4s and particle scale up
+	//to 2.0 - built for a burning hall, and the only thing in the set that reads as fire across
+	//2500 units of harbour.
+	local.f = spawn script_model model "models/animate/adam-hallfire2.tik"
+	local.f.origin = self.origin + ( 0 0 14 )
+	local.f scale 1.6
+	local.f anim start
+	//the burning water outlives the boat - she goes under, the fire on the surface does not.
+	//[user 2026-08-09] 34s now: the descent is 28s and the old 16 had the oil dying mid-sink,
+	//another reason it went unnoticed. It burns through the whole descent and into the fade.
+	wait 34
+	if( local.f != NULL ){ local.f delete }
+	if( self != NULL ){ self delete }
+}end

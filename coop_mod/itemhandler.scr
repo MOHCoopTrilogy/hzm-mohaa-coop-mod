@@ -707,6 +707,40 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	thread deletePreviousInvWeapons
 	group.player takeall
 
+	//[user 2026-08-09] STEALTH RESPAWN PAPERS - must sit ABOVE the coop_noWeapon early-exit
+	//below: during a stealth window (m2l2a papers-only route) that exit ends this thread, so the
+	//papers re-give that used to live further down never ran for a mid-stealth respawner or late
+	//joiner - marked as having papers while holding none (research 04 correction 2). Runs after
+	//the takeall above so the give survives it. Gated on the stealth flags, which are NIL on
+	//every other map (e1l3 sets coop_noWeapon but never coop_startUnarmed), so the cost
+	//elsewhere is one false test. level.coop_itemPapers is papers2-aware (givePapersFlagToAll
+	//overwrites it at the level-2 pickup) and is only non-NIL after a pickup, by which point
+	//global/items.scr has set level.papers in the same cooperative frame.
+	if( level.coop_noWeapon && level.coop_startUnarmed == 1 ){
+		//[user 2026-08-09] Keep the spawn disguise-give alive under the early-exit below - it is
+		//what grants the ENGINE latch (has_disguise via the changeGameType window in giveDisguise),
+		//and before the map-load arming it ran for every pre-pickup spawn because coop_noWeapon was
+		//still NIL until the uniform pickup. Without it the unarmed walk to the papers would play
+		//without engine teammate-sensing, and a mid-stealth respawner's fresh body would depend on
+		//weaponstate transitions alone (research 04 gap 2). Empty hands are safe here:
+		//deactivatePlayerWeapon and activatePlayerWeapon both no-op when no Weapon is active.
+		if (level.coop_enableDisguises && !group.player.is_disguised){
+			waitthread giveDisguiseOnSpawn group.player
+		}
+		if( level.coop_itemPapers != NIL && level.coop_itemPapers != "" ){
+			if( level.papers >= 1 && isAlive group.player && group.player.dmteam != "spectator" ){
+				group.player item level.coop_itemPapers
+				//givePapersFlag = the pickup recipe: sets coop_hasPapers + starts coop_papersAnytime
+				//(guarded one instance per player), so a late joiner can also show papers at will.
+				thread givePapersFlag group.player
+				if( level.coop_forcePapersEquip ){
+					//equip path - papers IN HAND (main.scr waits two frames, then uses the item)
+					group.player thread coop_mod/main.scr::forcePapersInHand
+				}
+			}
+		}
+	}
+
 	//if no weapons are allowed
 	if (level.coop_noWeapon){ end }	
 	
@@ -734,6 +768,11 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	if (level.coop_itemPapers && !group.player.flags["coop_hasPapers"]){
 		thread givePapersFlag group.player
 	}
+	//[user 2026-08-09] The papers-ITEM re-give that lived here was unreachable on the one map it
+	//was written for: the coop_noWeapon early-exit above ends this thread during a stealth window
+	//(research 04 correction 2). It now sits at the top of this label, above that exit. Outside a
+	//stealth window the re-give is covered by main.scr::itemGetAll on every spawn - the papers
+	//route through replace.scr::item (global/items.scr) into level.coop_playerItemN.
 
 	//either give them a default loadout or give them their old one
 	//[user 07-16] ARMORY PICKS ARE AUTHORITATIVE: coop_retainInventory (default ON) re-gave the
@@ -746,6 +785,13 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
 		local.useDefault = game.true
 	}
+	//[user 2026-08-08] The stealth start does NOT belong here. It was written as a takeall in this
+	//branch, which strips ITEMS as well as weapons and so wiped the uniform (bug-1604). e1l3 already
+	//solves this properly with level.coop_noWeapon - checked at every grant site in this file
+	//(the spawn-loadout early-exit above, the auto-raise fallback, coop_backfillPrimaries,
+	//coop_giveSidearmPick) so the loadout is never granted in the first place, nothing is ever
+	//taken away, and the disguise survives. m2l2a now sets that flag instead. The project rule is to
+	//find the working recipe and copy it; inventing a parallel one cost three broken symptoms.
 	thread giveWeaponLoadout local.useDefault
 }end
 
@@ -1106,6 +1152,288 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		$player[local.i].flags["coop_isDisguised"] 	= game.false //remove isDisguised too...
 	}
 	waitthread coop_mod/main.scr::changeGameType 2 game.ms
+
+	//[user 2026-08-08] COVER BLOWN -> ARM EVERYONE. On a map running the stealth start
+	//(level.coop_startUnarmed), losing the disguise is the moment the mission stops being a stealth
+	//mission, so the loadout the player picked in the armory arrives right then. Hooked HERE because
+	//takeAllDisguises is the single choke point for "the disguise is gone for good" - it is called
+	//from global/alarm_system.scr:666, global/items.scr:477 and e1l4's ship scripts alike, so one
+	//hook covers every way a cover gets blown rather than one per map.
+	thread coop_armOnBlown
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] ONE PASS COVERS THE SQUAD. Called from anim/disguise_accept.scr when a guard
+// accepts a player`s papers. Retail clears the papers prompt on self.enemy alone - the one man who
+// showed them - which is correct for single player and wrong for four: the other three would each
+// have to be interrogated in turn by the same guard, and any of them could fail it.
+//
+// type_disguise "none" is what actually retires him: it is the same value m2l2a uses to mark a
+// guard who does not challenge anyone (m2l2a.scr:194-196), so he stays in place and in character,
+// he just stops asking. Per-guard, so every OTHER checkpoint still has to be talked past.
+//=========================================================================
+coop_paperPassAll local.guard:{
+	if( local.guard == NULL || local.guard == NIL ){ end }
+	if( local.guard.coop_paperPass == 1 ){ end }
+	local.guard.coop_paperPass = 1
+
+	//[user 2026-08-10] bug-1631 FREEZE ARM DELETED (master plan v2 Step 1, commit A1).
+	//This line was `local.guard type_disguise "none"`. The SETTHINK probe caught it firing 50ms
+	//into the guard's ACCEPT state (oldthink=11 SENTRY -> newthink=14 NONE, curstate=6 DISGUISE):
+	//swapping the disguise think out from under a live disguise state tears down the sentry think
+	//mid-animation, and THINK_DISGUISE_NONE installs no Begin/ThinkState functions, so nothing
+	//ever drives that actor again. He freezes in the "my mistake, sorry" pose for the rest of the
+	//map. Every recorded freeze has "PAPERS guard satisfied" immediately before it.
+	//It bought nothing: State_Disguise_Accept (actor_disguise_common.cpp:159-167) already does
+	//SetThinkState(IDLE) + SetThink(THINKSTATE_DISGUISE, THINK_DISGUISE_SALUTE) permanently, so an
+	//accepting sentry is demoted to a saluter by the engine itself. Deletion, not deferral: all
+	//three deferral designs polled `thinkstate`, which reports the TOP think level and therefore
+	//lies while a disguise think is merely suspended by pain or grenade - they would have
+	//recreated the freeze by a new route.
+	//NOTE for Phase C Step 21: the coop_paperPass latch above is permanent and cleared nowhere.
+	//Under D1 (recoverable alarm) that is DELIBERATE - a guard who already accepted the squad's
+	//papers stays satisfied across an alarm cycle. Do not add a clear without deciding it.
+
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
+			local.p.flags["coop_clickablePapersEnabled"] = game.false
+		}
+		local.i = local.i + 1
+	}
+	println "^~^~^ PAPERS guard satisfied - whole squad waved through"
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] SHOW PAPERS ON DEMAND. enableClickablePapers only runs while a guard is
+// actively interrogating you (its sole caller is anim/disguise_papers.scr), so outside that window
+// nothing listened for the button - and on m2l2a the guards run disguise_SALUTE, so it never fired
+// there at all. This is the same primaryfire-while-unarmed test, but running for as long as you
+// hold papers, so you can present them whenever you like as well as when asked.
+//
+// Unarmed is the gate, which is what keeps it from fighting anything else: with a weapon out,
+// primary fire shoots. NULL *and* NIL, because a player who never had a weapon has never had the
+// flag assigned (bug-1603).
+// One guarded instance per player.
+//=========================================================================
+coop_papersAnytime local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_papersAnyRun"] == 1 ){ end }
+	local.player.flags["coop_papersAnyRun"] = 1
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		if( level.coop_itemPapers == NIL ){ break }
+		if( local.player.flags["coop_hasPapers"] == 1 && isAlive local.player ){
+			local.aw = local.player.flags["coop_activeWeapon"]
+			if( local.player.primaryfireheld && ( local.aw == NULL || local.aw == NIL ) ){
+				local.player use level.coop_itemPapers
+				//hold them up for a beat, and swallow the press so one tap is one presentation
+				wait 2
+				while( local.player != NULL && local.player.primaryfireheld ){ waitframe }
+			}
+		}
+		waitframe
+	}
+	if( local.player != NULL ){ local.player.flags["coop_papersAnyRun"] = NIL }
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] bug-1605. Strip the weapons a player is ALREADY carrying when the disguise is
+// put on mid-level. coop_noWeapon only stops weapons being GRANTED on a future spawn - it does
+// nothing about the rifle already in your hands, so you could simply scroll back to it and pull a
+// gun in full uniform.
+//
+// e1l3 solves this by naming the models (FinalEscape.scr:711-719), which works there because the
+// loadout is fixed. It is useless on m2l2a, where the armory can hand out any of 69 guns. Taking
+// by CLASS covers every one of them - the nine classes isWeaponClass recognises are the whole set.
+// Items are untouched, so the uniform and papers survive (that was bug-1604).
+//=========================================================================
+coop_stealthStripWeapons:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
+			//[user 2026-08-08] bug-1607. WAITTHREAD, not thread. These were fired asynchronously and
+			//the setIsDisguised below raced them - it could run while a weapon was still in hand,
+			//which clears the disguise flag again. Entity-waitthread with ONE argument is the proven
+			//form in this codebase (entity-thread with TWO arguments is what broke the blueprints).
+			//
+			//And each class is drained in a LOOP: getWeaponOfClassFromPlayer returns the FIRST match,
+			//so one call removes ONE weapon of that class. A player carrying two rifles kept one -
+			//which is exactly the "two weapons still in my slots" the user saw. Four passes covers
+			//any realistic loadout; the calls are harmless once the class is empty.
+			local.pass = 1
+			while( local.pass <= 4 ){
+				local.p waitthread takePlayerWeapon "pistol"
+				local.p waitthread takePlayerWeapon "heavy"
+				local.p waitthread takePlayerWeapon "mg"
+				local.p waitthread takePlayerWeapon "shotgun"
+				local.p waitthread takePlayerWeapon "rifle"
+				local.p waitthread takePlayerWeapon "smg"
+				local.p waitthread takePlayerWeapon "landmine"
+				local.p waitthread takePlayerWeapon "grenade"
+				local.p waitthread takePlayerWeapon "agrenade"
+				local.pass = local.pass + 1
+			}
+			local.p.flags["coop_activeWeapon"] = NULL
+
+			//AFTER the strip, never before - coop_isDisguised is the only flag AI detection reads
+			//(aihandler.scr::canseeUndisguisedPlayers) and it is otherwise only ever set as a side
+			//effect of a holster transition, which removing a weapon is not. forceState because it is
+			//gated on coop_hasDisguise, which may not be set yet at pickup time.
+			waitthread setIsDisguised local.p game.true game.true
+			local.p thread coop_stealthHoldDisguise local.p
+			//[user 2026-08-08] FULL state, not just the one flag. isDisguised reads 1 and the guards
+			//still attack, so the aggro is arriving by some path other than canseeUndisguisedPlayers -
+			//most likely the ENGINE side (has_disguise), which is a different field from the mod flag
+			//and can only be set inside a changeGameType 0 window.
+			//ONE LINE. A continuation line beginning with a binary operator is a T1 parse killer and
+			//kills the WHOLE file - linecheck.py caught it before this shipped.
+			println( "^~^~^ STEALTH " + local.p.netname + " isDisguised=" + local.p.flags["coop_isDisguised"] + " hasDisguise=" + local.p.flags["coop_hasDisguise"] + " engine_has=" + local.p.has_disguise + " engine_is=" + local.p.is_disguised + " enableDisg=" + level.coop_enableDisguises + " alarm=" + level.alarm )
+		}
+		local.i = local.i + 1
+	}
+	println "^~^~^ STEALTH weapons stripped (items kept)"
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] bug-1604. self = a player spawned unarmed by the stealth start. The moment
+// they take a hit, the pretence is over - arm everyone. Watches HEALTH rather than a damage
+// event because a scripted or explosive hit does not always route through one, and this must
+// never miss: being unarmed in a fight you cannot leave is unwinnable.
+//=========================================================================
+//=========================================================================
+// [user 2026-08-08] HOLD THE DISGUISE. Every fix so far has set the state correctly at one moment
+// and then something later cleared it - weapon-state transitions, respawns, engine re-evaluation.
+// Rather than chase each clearer, this re-asserts it while the stealth route is active and the
+// player is carrying no weapon. Cheap (2 Hz) and it cannot fight anything legitimate: the moment
+// coop_startUnarmed is cleared - which coop_armOnBlown does the instant the cover breaks - it
+// stops and never touches the flags again.
+//=========================================================================
+coop_stealthHoldDisguise local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_holdDisgRun"] == 1 ){ end }
+	local.player.flags["coop_holdDisgRun"] = 1
+	local.sw = 0
+	while( local.player != NULL && level.coop_startUnarmed == 1 ){
+		//[user 2026-08-09] Same inventory-item rule as weaponstate.scr. This watchdog only re-asserted
+		//a cleared disguise when the hands were EMPTY - but on the papers-only route the hands are
+		//never empty, so the one safety net that should have caught the flip was disabled by exactly
+		//the condition it needed to cover.
+		local.hw = local.player.flags["coop_activeWeapon"]
+		if( isAlive local.player && ( local.hw == NULL || local.hw.classname != "Weapon" ) ){
+			if( local.player.flags["coop_isDisguised"] != game.true ){
+				waitthread setIsDisguised local.player game.true game.true
+				println "^~^~^ STEALTH re-asserted a cleared disguise"
+			}
+		}
+		//[user 2026-08-09] ENGINE-FLAG WATCH. Everything the probes have called "disguised" so far is
+		//the MOD flag coop_isDisguised - but setIsDisguised only ever writes that, and the engine AI
+		//reads m_bIsDisguised (actorenemy.cpp:164, PassesTransitionConditions_Attack), which script
+		//cannot set at all (is_disguised is EV_GETTER only). It is refreshed solely inside a
+		//changeGameType 0 window. So mod_is can read 1 while eng_is is 0 and the AI attacks anyway.
+		//Also counting actors ALREADY in attack thinkstate: the engine gates ENTERING attack, it does
+		//not pacify an actor that is already there, which would look identical from outside.
+		local.sw = local.sw + 1
+		if( local.sw >= 4 && getcvar( "coop_aggroDebug" ) == "1" ){
+			local.sw = 0
+			local.natk = 0
+			local.garr = level.coop_actorArray["german"]
+			for( local.gi = 1; local.gi <= local.garr.size; local.gi++ ){
+				if( local.garr[local.gi] == NULL ){ continue }
+				if( local.garr[local.gi].thinkstate == "attack" ){ local.natk = local.natk + 1 }
+			}
+			//[user 2026-08-09] THINKSTATE CENSUS. The papers guard flip-flops between his normal
+			//animation and "suspicious". Disguise and Curious transitions read the SAME two inputs
+			//with opposite signs (EnemyIsDisguised + IsEnemyConfirmed) and re-evaluate every 200ms, so
+			//a flickering confirmation oscillates him instead of letting the papers sequence run.
+			//Count who is in which state so the flapping is measurable rather than eyeballed.
+			local.ndis = 0
+			local.ncur = 0
+			local.nidl = 0
+			for( local.gi = 1; local.gi <= local.garr.size; local.gi++ ){
+				if( local.garr[local.gi] == NULL ){ continue }
+				local.ts = local.garr[local.gi].thinkstate
+				if( local.ts == "disguise" ){ local.ndis = local.ndis + 1 }
+				if( local.ts == "curious" ){ local.ncur = local.ncur + 1 }
+				if( local.ts == "idle" ){ local.nidl = local.nidl + 1 }
+			}
+			//[user 2026-08-09] WHO is attacking? The census counts attackers but the papers-checker
+			//oscillation diagnosis needs their identity - officers vs scientists vs someone else.
+			if( local.natk > 0 ){
+				local.who = ""
+				local.nw = 0
+				for( local.gi = 1; local.gi <= local.garr.size; local.gi++ ){
+					if( local.garr[local.gi] == NULL ){ continue }
+					if( local.garr[local.gi].thinkstate != "attack" ){ continue }
+					if( local.nw >= 6 ){ continue }
+					local.nw = local.nw + 1
+					local.tn = local.garr[local.gi].targetname
+					if( local.tn == NIL || local.tn == NULL ){ local.tn = "?" }
+					local.who = local.who + " " + local.tn + "#" + local.garr[local.gi].entnum
+				}
+				println( "^~^~^ STEALTHWHO" + local.who )
+			}
+			println( "^~^~^ STEALTHWATCH eng_is=" + local.player.is_disguised + " eng_has=" + local.player.has_disguise + " mod_is=" + local.player.flags["coop_isDisguised"] + " attackers=" + local.natk + " of=" + local.garr.size + " disguise=" + local.ndis + " curious=" + local.ncur + " idle=" + local.nidl + " alarm=" + level.alarm )
+		}
+		wait 0.5
+	}
+	if( local.player != NULL ){ local.player.flags["coop_holdDisgRun"] = NIL }
+}end
+
+
+coop_stealthArmOnHurt:{
+	if( self == NULL ){ end }
+	local.hp = self.health
+	while( self != NULL && level.coop_startUnarmed == 1 ){
+		if( isAlive self && self.health < local.hp ){
+			println "^~^~^ STEALTH player hurt while unarmed - arming everyone"
+			thread coop_armOnBlown
+			end
+		}
+		if( self != NULL ){ local.hp = self.health }
+		wait 0.2
+	}
+}end
+
+
+//=========================================================================
+// [user 2026-08-08] Give every active player their loadout because the cover just broke, and clear
+// the stealth-start flag so later spawns arm normally.
+//=========================================================================
+coop_armOnBlown:{
+	if( level.coop_startUnarmed != 1 ){ end }
+	level.coop_startUnarmed = 0
+	//clear BOTH halves of the papers-only lockout before re-arming, or coop_noWeapon makes
+	//giveWeaponLoadout early-exit and the kit never arrives - which is exactly the "spotted with no
+	//weapons" case that made the mission unwinnable.
+	level.coop_noWeapon = game.false
+	level.coop_forcePapersEquip = game.false
+
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 && isAlive local.p ){
+			group.player = local.p
+			local.useDefault = game.true
+			if( local.p.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
+				local.useDefault = game.true
+			}
+			waitthread giveWeaponLoadout local.useDefault
+			//[user 2026-08-08] TAKE THE PAPERS OUT OF THEIR HANDS. Clearing coop_forcePapersEquip only
+			//stops them being re-drawn on the NEXT spawn - the item is still the active in-hand
+			//"weapon" right now, so drawing a rifle left the papers rendering attached to it. Raise a
+			//real weapon explicitly, which displaces them.
+			wait game.ms
+			local.p thread activatePlayerWeapon
+			local.p iprint "Cover blown - weapons free!" 1
+		}
+	}
+	println "^~^~^ STEALTH cover blown, loadouts issued"
 }end
 
 
@@ -2207,6 +2535,8 @@ givePapersFlag local.player:{
 //=========================================================================
 if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/givePapersFlag->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	local.player.flags["coop_hasPapers"] = game.true
+	//[user 2026-08-08] and let them present the papers whenever they like, not only when asked
+	thread coop_papersAnytime local.player
 }end
 
 //flags players that they have the papers. also stores papers in level var
@@ -2232,6 +2562,9 @@ enableClickablePapers local.guard local.player:{
 //=========================================================================
 if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/enableClickablePapers->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	if (!local.player.flags["coop_hasPapers"]){ end }
+	//[user 2026-08-08] NOTE: this label is threaded from anim/disguise_papers.scr ONLY - i.e. while a
+	//guard is actively asking. coop_mod/main.scr::forcePapersInHand is the other half and is what
+	//lets you hold them the rest of the time; see level.coop_forcePapersEquip.
 
 	if (!local.player.flags["coop_clickPapersHint"]){
 		local.player.flags["coop_clickPapersHint"] = game.true
@@ -2240,7 +2573,10 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 
 	local.player.flags["coop_clickablePapersEnabled"] = game.true
 	while (isAlive local.player && local.player.flags["coop_clickablePapersEnabled"] && isAlive local.guard){
-		if (local.player.primaryfireheld && local.player.flags["coop_activeWeapon"] == NULL){
+		//[user 2026-08-08] NIL *and* NULL. "No weapon in hand" can be either: NULL when a weapon was
+		//holstered, NIL when the player never had one at all (the stealth start). Testing only NULL
+		//made papers unusable for an unarmed player. This is the documented NIL != NULL guard.
+		if (local.player.primaryfireheld && (local.player.flags["coop_activeWeapon"] == NULL || local.player.flags["coop_activeWeapon"] == NIL)){
 			local.player use level.coop_itemPapers
 			/*
 			wait game.ms

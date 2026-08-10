@@ -1,0 +1,373 @@
+//=========================================================================
+// HZM coop - HIDDEN BLUEPRINT COLLECTIBLES
+//
+// [user 2026-08-08] Hidden pickups placed by hand in build mode across the trilogy. Finding one
+// counts toward a running total; every 5 found awards a random unlock at the debrief screen, with
+// higher totals drawing from higher tiers. An item unlocked this way is unlocked OUTRIGHT - it does
+// not also need its rank or its challenge.
+//
+// THEY ARE HIDDEN. No overhead marker, no spin, no glow. The models the user places are "pulse"
+// variants that flash on their own, which is a close-range tell and is all the help intended.
+// An earlier version added a rotating "+coopboss" star; that defeated the entire feature.
+//
+// SPAWNED PER PLAYER. A blueprint has to vanish for the finder ALONE - everyone else must still be
+// able to find it. One entity cannot be visible to some clients and not others, so each blueprint
+// spawns one copy per player, bound to that client with svflags "+singleclient". Picking up removes
+// only that player's copy. Cost is players x blueprints entities per map (16 x 4 = 64 at most,
+// against a 2048 pool), which is why the copies are spawned per connected player rather than
+// per player slot.
+//
+// ANGLES ARE PRESERVED IN FULL. Many placements are pitched flat against a desk or a crate; an
+// earlier version passed yaw only and stood them all upright.
+//
+// NAMING. "blueprint" was already taken TWICE before this file: coop_mod/blueprint.scr is the
+// build-mode STRUCTURE TEMPLATE system (bp_save / bp_place), and level.blueprints is m6l1c's StG44
+// objective. Everything here is coop_bp_* to keep the three apart. The player-facing word is still
+// "blueprint".
+//
+// PERSISTENCE rides on the challenge system: a pickup bumps the "blueprint" stat, so the per-player
+// flag store, its save, the progress toast and the Service Record row all come free.
+//=========================================================================
+
+//=========================================================================
+// Register one blueprint. Called from a baked map script:
+//   thread coop_mod/collectible.scr::coop_bp_place ( x y z ) ( p y r ) "<model>" <scale>
+// Registers a SPEC; the per-player copies are spawned by the manager below.
+//=========================================================================
+coop_bp_place local.pos local.ang local.model local.scale:{
+	if( local.model == NIL || local.model == "" ){ end }
+	if( local.scale == NIL || local.scale <= 0 ){ local.scale = 1.0 }
+
+	if( level.coop_bp_count == NIL ){ level.coop_bp_count = 0 }
+	local.n = level.coop_bp_count + 1
+	level.coop_bp_count = local.n
+
+	level.coop_bp_pos[local.n]   = local.pos
+	level.coop_bp_ang[local.n]   = local.ang
+	level.coop_bp_model[local.n] = local.model
+	level.coop_bp_scale[local.n] = local.scale
+
+	println( "^~^~^ BP registered " + local.n + " " + local.model + " at " + local.pos )
+	thread coop_bp_manager
+}end
+
+
+//=========================================================================
+// One manager per map. Gives every active player a copy of every blueprint they have not already
+// found, and keeps up with players who join later.
+//=========================================================================
+coop_bp_manager:{
+	if( level.coop_bp_managerOn == 1 ){ end }
+	level.coop_bp_managerOn = 1
+
+	//let every coop_bp_place in the baked block register before spawning anything
+	waitframe
+	waitframe
+
+	while( 1 ){
+		//[user 2026-08-10] MANAGER PROBE. This run registered 3 blueprints and then spawned ZERO
+		//copies, where the run 6 minutes earlier had live think loops. Print exactly what this loop
+		//decides on, every 3s: the player count, the registered count, and per player the entnum,
+		//the active flag, the already-found flag and whether the ent slot is occupied. Sanitise
+		//every value - concatenating a NIL is what turned an earlier probe into 675 Script Errors.
+		if( getcvar( "coop_aggroDebug" ) == "1" ){
+			if( level.coop_bpmNext == NIL ){ level.coop_bpmNext = 0 }
+			if( level.time > level.coop_bpmNext ){
+				level.coop_bpmNext = level.time + 3
+				local.cnt = level.coop_bp_count
+				if( local.cnt == NIL ){ local.cnt = -1 }
+				local.mn = level.coop_mapname
+				if( local.mn == NIL ){ local.mn = "NIL" }
+				local.dbg = "^~^~^ BPMGR psize=" + $player.size + " count=" + local.cnt + " map=" + local.mn
+				local.z = 1
+				while( local.z <= $player.size ){
+					local.zp = $player[local.z]
+					if( local.zp != NULL ){
+						local.za = local.zp.flags["coop_isActive"]
+						if( local.za == NIL ){ local.za = -1 }
+						local.ze = local.zp.entnum
+						local.zf = local.zp.flags["coop_bpF_" + local.mn + "_1"]
+						if( local.zf == NIL ){ local.zf = 0 }
+						local.zs = 0
+						if( level.coop_bp_ent[1][local.ze] != NIL && level.coop_bp_ent[1][local.ze] != NULL ){ local.zs = 1 }
+						local.dbg = local.dbg + " [e" + local.ze + " act=" + local.za + " found1=" + local.zf + " slot1=" + local.zs + "]"
+					}
+					local.z++
+				}
+				println local.dbg
+			}
+		}
+		local.p = 1
+		while( local.p <= $player.size ){
+			local.player = $player[local.p]
+			if( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+				local.e = local.player.entnum
+				//[user 2026-08-10] "once a blueprint has been acquired on a map, it shouldnt re-appear for that
+				//player - it belongs in a running collection". The found flags are RUNTIME player flags, so before
+				//this they reset on every rejoin or map reload: the copy came back re-armed, which would also let
+				//the challenge counter be farmed. Load the persisted set once per player; the already-found branch
+				//below then simply never spawns a copy for it. Identity is the SAME id XP and challenges use, so a
+				//player carries one collection across all three systems.
+				if( local.player.flags["coop_bpLoaded"] != 1 ){
+					local.player.flags["coop_bpLoaded"] = 1
+					local.bpid = local.player.flags["coop_xp_id"]
+					if( local.bpid == NIL || local.bpid == "" ){ local.bpid = local.player.coop_guid }
+					if( local.bpid == NIL || local.bpid == "" ){ local.bpid = "n_" + local.player.netname }
+					local.player.flags["coop_bpId"] = local.bpid
+					local.txt = fs_read_content ( "coop_mod/save/bpfound_" + local.bpid + ".dat" )
+					if( local.txt != NIL && local.txt != "" ){
+						local.rows = waitthread coop_mod/strings.scr::split_string local.txt "|"
+						local.r = 1
+						while( local.r <= local.rows.size ){
+							local.rk = local.rows[local.r]
+							if( local.rk != NIL && local.rk != "" ){ local.player.flags["coop_bpF_" + local.rk] = 1 }
+							local.r++
+						}
+						println( "^~^~^ BP RESTORED id=" + local.bpid + " rows=" + local.rows.size )
+					}
+				}
+				local.n = 1
+				while( local.n <= level.coop_bp_count ){
+					local.key = "coop_bpF_" + level.coop_mapname + "_" + local.n
+					//already found by THIS player: no copy, and remove one if it lingers
+					if( local.player.flags[local.key] == 1 ){
+						if( level.coop_bp_ent[local.n][local.e] != NIL && level.coop_bp_ent[local.n][local.e] != NULL ){
+							level.coop_bp_ent[local.n][local.e] delete
+							level.coop_bp_ent[local.n][local.e] = NIL
+						}
+					}else{
+						if( level.coop_bp_ent[local.n][local.e] == NIL || level.coop_bp_ent[local.n][local.e] == NULL ){
+							waitthread coop_bp_spawnFor local.player local.n
+						}
+					}
+					local.n++
+				}
+			}
+			local.p++
+		}
+		wait 1
+	}
+}end
+
+
+//=========================================================================
+// Spawn one player's private copy of blueprint <n>.
+//=========================================================================
+coop_bp_spawnFor local.player local.n:{
+	if( local.player == NULL ){ end }
+	local.e = local.player.entnum
+
+	local.m = spawn script_model
+	local.m model level.coop_bp_model[local.n]
+	local.m.origin = level.coop_bp_pos[local.n]
+	local.m.angles = level.coop_bp_ang[local.n]
+	local.m scale level.coop_bp_scale[local.n]
+	local.m notsolid
+	//visible to this client ONLY - that is what lets it vanish for the finder alone
+	//[user 2026-08-08] svflags is declared "SSSSSS" (six STRINGS) in entity.cpp:906 while
+	//Entity::SVFlags calls GetEntity() on parameter 2 - so passing a player here may throw. A
+	//script error SKIPS the statement rather than killing the thread, which means the worst case
+	//is a collectible everyone can see rather than a broken pickup. Deliberately AFTER the think
+	//thread is set up so nothing downstream depends on it.
+	local.m svflags "+singleclient" local.player
+
+	local.m.coop_bpIndex = local.n
+	local.m.coop_bpOwner = local.player
+	level.coop_bp_ent[local.n][local.e] = local.m
+	println( "^~^~^ BP spawned " + local.n + " for entnum " + local.e + " at " + local.m.origin )
+
+	//[user 2026-08-08] PLAIN thread, and the entity passed as a PARAMETER. This was
+	//`local.m thread coop_bp_think local.player local.n` - an ENTITY thread with TWO
+	//arguments, a form with no precedent anywhere in the mod (every entity-thread call in
+	//coop_mod/ and global/ passes at most one). The parameters did not bind, local.n came
+	//through NIL, and the guard on the first line ended the thread before it ever looped -
+	//which is why "BP spawned" appeared but "BP think started" never did.
+	//[user 2026-08-09] bug-1624: pass the ENTNUM, not the player entity - a NUMBER binds as a
+	//thread parameter (local.n proved it every run), the PLAYER ENTITY does not (owner-guard
+	//fired NIL on three instrumented playtests). The think loop resolves the player fresh from
+	//$player each tick, which also self-heals across death/respawn (same slot = same entnum).
+	//[user 2026-08-09] bug-1632: the MODEL entity hit the same param-binding failure documented
+	//above for the player - "think started" printed, then the local.ent guard ended the thread one
+	//line later, so the loop never ran once. Entities ride LEVEL ARRAYS reliably (the
+	//level.coop_itemPapers precedent); only NUMBERS cross the thread boundary. Key is index+owner
+	//because every player gets their own copy of every blueprint.
+	local.bk = local.n + "_" + local.e
+	level.coop_bpEnt[local.bk] = local.m
+	//[user 2026-08-09] and the OWNER too - the entnum comparison in the think loop failed even
+	//with both sides printing 0 and an int() coercion applied. Level-array entity refs are the
+	//one proven carrier here (coop_bpEnt reads back every tick), so carry the player the same way
+	//and compare NOTHING.
+	level.coop_bpOwner[local.bk] = local.player
+	thread coop_bp_think local.e local.n
+}end
+
+
+//=========================================================================
+// Proximity pickup. Only ever tests its own owner - the copy belongs to one player.
+//=========================================================================
+//[user 2026-08-08] Owner and index arrive as THREAD PARAMETERS, not as custom entity fields.
+//The diagnostic run showed "BP registered" and "BP spawned" but never a single "BP PICKUP":
+//registration and spawning were fine, proximity never fired. Reading them back off the model
+//(self.coop_bpOwner) returned nothing usable, so the NIL guard ended this thread on its first
+//line and the loop never ran at all. A number survived on the entity; an ENTITY REFERENCE in a
+//custom field did not. Parameters are not subject to that.
+coop_bp_think local.ownerNum local.n:{
+	println( "^~^~^ BP think started n=" + local.n )
+	if( local.n == NIL ){ end }
+	if( local.ownerNum == NIL ){ end }
+	//[user 2026-08-09] bug-1352 family: the owner entnum arrives as a STRING (parsed from the build
+	//.dat) and Morpheus will not equate "0" with numeric 0 - OWNER-MISS showed want=0 p1=0 forever.
+	local.ownerNum = int( local.ownerNum )
+	local.bk = local.n + "_" + local.ownerNum
+	local.looped = 0
+	local.spin = 0
+	local.ownd = 0
+	local.nearNext = 0
+	local.key = "coop_bpF_" + level.coop_mapname + "_" + local.n
+	local.hinted = 0
+	//[user 2026-08-10] NIL != NULL, and this loop learned it the hard way: a pickup sets the
+	//taken copy's slot to NIL, and NIL passes a bare != NULL test, so the OTHER copy's thread
+	//sailed on with local.ent = none and threw 123 iterations x 4 statements of Script Error.
+	//Guard with BOTH, every time (docs/TRAPS.md T5).
+	while( level.coop_bpEnt[local.bk] != NULL && level.coop_bpEnt[local.bk] != NIL ){
+		local.ent = level.coop_bpEnt[local.bk]
+		if( local.ent == NULL || local.ent == NIL ){ end }
+		if( local.looped != 1 ){ local.looped = 1; println( "^~^~^ BP LOOP live n=" + local.n ) }
+		//[user 2026-08-10] A10 - OWNERSHIP MATCHING REMOVED ENTIRELY.
+		//A9 measured that the inline scan reads both players correctly and STILL matched neither: 96
+		//OWNER-MISS samples in which the probe twelve lines below printed e0/e1 and want=0/1 out of the
+		//same loop shape, same tick. So the thing that fails is the string EQUALITY test - not the data,
+		//not the filter, not the thread boundary, all three of which are now ruled out by measurement.
+		//Rather than instrument one comparison for an eleventh round: delete the need for it. A proximity
+		//pickup does not need to know whose copy it is. Scan players by DISTANCE, grant to the nearest one
+		//who has not already found this blueprint, and delete that player's own copy by BUILDING its key
+		//from their entnum. String keys provably work here - level.coop_bpEnt[bk] reads back every tick,
+		//which is exactly what entOk=1 proved 96 times; only string equality never has.
+		//No end after granting: the copy deleted may not be ours, and the while condition already exits
+		//this thread when it is. The manager reaps any copy whose owner now has the found-flag set.
+		local.best = NULL
+		local.bestd = 99999
+		local.q = 1
+		while( local.q <= $player.size ){
+			local.qp = $player[local.q]
+			if( local.qp != NULL ){
+				if( local.qp.health > 0 && local.qp.flags[local.key] != 1 ){
+					local.dq = vector_length( local.qp.origin - local.ent.origin )
+					if( local.dq < local.bestd ){
+						local.bestd = local.dq
+						local.best = local.qp
+					}
+				}
+			}
+			local.q++
+		}
+		if( local.best == NULL ){
+			wait 0.5
+			continue
+		}
+		if( local.bestd < 300 && level.time > local.nearNext ){
+			local.nearNext = level.time + 5
+			println( "^~^~^ BP NEAR n=" + local.n + " d=" + local.bestd )
+			//deliberately a SEPARATE statement: if .useheld is not a real property the concat throws and
+			//skips ONLY this line, leaving the distance reading intact (a Script Error skips the statement,
+			//not the thread). useheld has never once been reached before, so it is still unproven.
+			local.uh = local.best.useheld
+			if( local.uh == NIL ){ local.uh = -1 }
+			println( "^~^~^ BP USE n=" + local.n + " use=" + local.uh )
+		}
+		//96, not 64: the blueprint sits on a desk/crate while the player origin is at their FEET
+		if( local.bestd < 96 ){
+			if( local.hinted != 1 ){
+				local.hinted = 1
+				local.best iprint "Press USE to take the blueprint" 1
+				println( "^~^~^ BP INRANGE " + local.n + " dist " + local.bestd )
+			}
+			if( local.best.useheld == 1 ){
+				println( "^~^~^ BP PICKUP " + local.n + " dist " + local.bestd )
+				waitthread coop_bp_collect local.best local.key local.n
+				//delete the copy belonging to whoever just took it - key BUILT, never compared
+				local.gk = local.n + "_" + local.best.entnum
+				local.ge = level.coop_bpEnt[local.gk]
+				level.coop_bpEnt[local.gk] = NIL
+				if( local.ge != NULL ){ local.ge delete }
+			}
+		}else{
+			local.hinted = 0
+		}
+		wait 0.1
+	}
+}end
+
+
+//=========================================================================
+// One player picked one up. Per-player, NOT team-wide: everyone has to find it themselves, which
+// is what makes hiding them worth doing.
+//=========================================================================
+coop_bp_collect local.player local.key local.n:{
+	if( local.player == NULL ){ end }
+	local.player.flags[local.key] = 1
+
+	if( local.player.flags["coop_bpTotal"] == NIL ){ local.player.flags["coop_bpTotal"] = 0 }
+	local.t = local.player.flags["coop_bpTotal"] + 1
+	local.player.flags["coop_bpTotal"] = local.t
+
+	//The challenge system owns persistence, the progress toast and the Service Record row.
+	thread coop_mod/challenges.scr::chal_bump local.player "blueprint" 1
+
+	local.player playsound coop_bp_pickup
+
+	//[user 2026-08-10] "make it the same DBNO Text ... Blueprint x / x Found", x/x being THIS
+	//map. Slot 141: must be >= 100 or the engine fade multiplies its alpha away for a calm
+	//player (cg_drawtools.cpp:648-656) - the exact bug that hid the revive HUD at 21-26.
+	//141-149 is the only free block: 135-140 is the revive channel, 150+ is challenges.
+	local.mn = level.coop_mapname
+	if( local.mn == NIL ){ local.mn = "" }
+	local.tot = level.coop_bp_count
+	if( local.tot == NIL ){ local.tot = 0 }
+	local.got = 0
+	local.i = 1
+	while( local.i <= local.tot ){
+		if( local.player.flags["coop_bpF_" + local.mn + "_" + local.i] == 1 ){ local.got = local.got + 1 }
+		local.i++
+	}
+	ihuddraw_virtualsize local.player 141 1
+	ihuddraw_align       local.player 141 center center
+	ihuddraw_font        local.player 141 "verdana-12"
+	ihuddraw_color       local.player 141 1 1 1
+	ihuddraw_rect        local.player 141 0 -58 0 0
+	ihuddraw_string      local.player 141 ( "Blueprint " + local.got + " / " + local.tot + " Found" )
+	ihuddraw_alpha       local.player 141 1
+	//clear on an ENTITY thread with ZERO args: self binds reliably where an entity PARAMETER
+	//does not (bugs 1624/1632/1665), and this must not block the caller - the copy is deleted
+	//immediately after coop_bp_collect returns.
+	local.player thread coop_bp_hudClear
+
+	//persist immediately. Safe on the pickup frame: this is a rare event, and the measured server
+	//frame graph stayed flat at worst=26ms straight through a pickup with the challenge write in it.
+	local.bpid = local.player.flags["coop_bpId"]
+	if( local.bpid != NIL && local.bpid != "" && local.n != NIL ){
+		local.pf = "coop_mod/save/bpfound_" + local.bpid + ".dat"
+		local.cur = fs_read_content ( local.pf )
+		if( local.cur == NIL ){ local.cur = "" }
+		fs_write_content ( local.pf ) ( local.cur + local.mn + "_" + local.n + "|" )
+	}
+
+	//Unlocks are granted at the DEBRIEF, not here - one per 5 found. Banked so the debrief has
+	//something to show, and so finding three in one map is not three popups mid-firefight.
+	if( ( local.t / 5 ) == int( local.t / 5 ) ){
+		if( local.player.flags["coop_bpPending"] == NIL ){ local.player.flags["coop_bpPending"] = 0 }
+		local.player.flags["coop_bpPending"] = local.player.flags["coop_bpPending"] + 1
+		local.player iprint "Blueprint set complete - report to debrief" 1
+	}
+}end
+
+
+//=========================================================================
+// Clear the blueprint acknowledgement. Entity thread - self IS the player.
+//=========================================================================
+coop_bp_hudClear:{
+	wait 3
+	if( self == NULL || self == NIL ){ end }
+	ihuddraw_alpha  self 141 0
+	ihuddraw_string self 141 ""
+}end

@@ -4,6 +4,26 @@ main:
 	setcvar "g_mission" "2"
 
 	waitthread coop_mod/main.scr::main         //HZM coop - start coop mod extensions (first frame, before prespawn)
+
+	//[user 08-08] AMBIENT BARRAGE - shelling in the background for this mission. The system is
+	//coop_mod/ambience.scr::coop_ambience_barrage; it is script-driven, so there is nothing to place
+	//in build mode. Deliberately HARMLESS - it does no radiusdamage at all, so it can never produce
+	//a death you could not avoid; it is pressure and atmosphere only.
+	//Tuned WIDE for this map: 900-2500 units reads as "somewhere over there" rather than shells
+	//walking over your own position (the 400-1400 default is danger-close by design).
+	level.coop_barrage = 1
+	level.coop_barrageMin = 900
+	level.coop_barrageMax = 2500
+	level.coop_barrageGap = 5
+
+	//[user 08-08] state the holdout up front. The whole mission is "do not let them through" and
+	//nothing ever said so - the only feedback was the retreat voice lines after it was already lost.
+	//Threaded so it can wait for players before pushing (obj.scr writes to the coop HUD per player).
+	thread coop_line_objective_start
+	//[user 08-08] ally DBNO here too. No squad-wipe FAIL on this map - but every ally lost is a
+	//gun off the line, and the line is exactly what you lose the mission by losing. They use the
+	//ARRAY squad shape (level.friendly[1..level.friendlys]), which ally_squad_init now handles.
+	thread coop_mod/allysquad.scr::ally_squad_init
 	level.coop_weatherTheme = "snow"		//HZM coop - dynamic weather: Bastogne winter (Battle of the Bulge)
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
 	level.coop_hasCallback["coop_playerJustSpawned"] = 1
@@ -657,7 +677,7 @@ drive_path local.path local.speed local.remove:
 end
 
 panzercrossedtheline:
-	level.axiswins = 1
+	waitthread coop_line_breached NULL 99 "a panzer"
 end
 
 bazookaguysspawn:
@@ -974,7 +994,7 @@ halftrack1victory:
 
 		$halftrack1victory waittill trigger
 		
-		level.axiswins = 1
+		waitthread coop_line_breached NULL 99 "a halftrack"
 	}
 end
 
@@ -1271,6 +1291,13 @@ death_check_american:
 		local.guy.anchored = 0
 
 		local.guy.gun = "Mauser KAR 98K"
+
+		//[user 08-08] REPLACEMENTS get the DBNO treatment too. ally_squad_init only manages the squad
+		//that exists at map start, and this label replaces every friendly who dies - so without this
+		//hook the system would quietly stop applying after the first casualty, which is exactly when it
+		//starts to matter. ally_watch carries its own exclusions (coop_noDbno, invulnerable actors) and
+		//its own once-per-ally limit, so this is safe to call on anyone.
+		local.guy thread coop_mod/allysquad.scr::ally_watch
 
 		wait 0.3
 		local.guy exec global/disable_ai.scr
@@ -2870,7 +2897,7 @@ g1pathd:
 					if ($enemy[local.i] istouching $trigger5)
 					{
 						$enemy[local.i].set = 99
-						level.axiswins = 1
+						waitthread coop_line_breached $enemy[local.i] 1 "the right"
 						$enemy[local.i] exec global/enable_ai.scr
 					}
 				}
@@ -2888,7 +2915,7 @@ g1pathd:
 					if ($enemy7[local.i] istouching $trigger5)
 					{
 						$enemy7[local.i].set = 99
-						level.axiswins = 1
+						waitthread coop_line_breached $enemy7[local.i] 1 "the right"
 						$enemy7[local.i] exec global/enable_ai.scr
 					}
 				}
@@ -2911,7 +2938,7 @@ g5pathd:
 					if ($enemy5[local.i] istouching $trigger8)
 					{
 						$enemy5[local.i].set = 99
-						level.axiswins = 1
+						waitthread coop_line_breached $enemy5[local.i] 1 "the left"
 						$enemy5[local.i] exec global/enable_ai.scr
 					}
 				}
@@ -3376,4 +3403,79 @@ coop_playerJustLeft:
 end
 
 coop_playerJustRespawned:
+end
+
+
+//===========================================================================
+// [user 08-08] LINE BREACH - grace instead of an instant loss.
+//
+// This map is a defensive holdout, and every breach site used to set level.axiswins = 1 directly:
+// ONE infantryman touching $trigger5 / $trigger8 ended the mission outright, with no count, no
+// timer and no warning until the retreat voice lines fired. A player who never saw him lost with
+// no idea why - and in coop that is worse than retail, because the mod scales enemy COUNTS up
+// while the line stays the same width.
+//
+// Now: each breach costs one of an allowance, the man who got through is MARKED with an overhead
+// icon and called out by side, and only exhausting the allowance loses the mission. Killing him
+// does not refund the leak - the line was still crossed - but you keep playing.
+//
+// Vehicles pass weight 99: a panzer or halftrack through the line is decisive on its own and ends
+// it immediately, which is the one case where the original instant-fail reads as fair.
+//===========================================================================
+coop_line_breached local.ent local.weight local.where:
+
+	if( level.axiswins == 1 ){ end }	//already lost - do not double-count
+
+	local.allow = int( getcvar "coop_leakAllow" )
+	if( local.allow < 1 ){ local.allow = 3 }
+	//more players means more enemies (the mod scales spawn counts), so the line gets proportionally
+	//harder to hold - widen the allowance with the squad rather than punishing bigger teams.
+	if( $player != NULL && $player.size > 1 ){ local.allow = local.allow + ( $player.size - 1 ) }
+
+	if( level.coop_leaks == NIL ){ level.coop_leaks = 0 }
+	level.coop_leaks = level.coop_leaks + local.weight
+
+	//mark him so he can actually be found and killed - same overhead icon the officer system uses
+	if( local.ent != NIL && local.ent != NULL ){
+		if( isAlive local.ent ){ local.ent rendereffects "+coopboss" }
+	}
+
+	if( level.coop_leaks >= local.allow ){
+		iprintlnbold "THE LINE IS BROKEN - fall back!"
+		level.axiswins = 1
+		println( "^~^~^ T2L3 LINE LOST leaks " + level.coop_leaks + "/" + local.allow )
+		end
+	}
+
+	local.left = local.allow - level.coop_leaks
+	iprintlnbold ( "THEY ARE THROUGH ON " + local.where + " - hunt him down! " + local.left + " more breaches and the line falls." )
+	println( "^~^~^ T2L3 LINE BREACH " + level.coop_leaks + "/" + local.allow + " at " + local.where )
+	waitthread coop_line_objective
+
+end
+
+//===========================================================================
+// The holdout objective, carrying the live breach tally in the same "[N remaining]" idiom the
+// rest of this map uses for the nebelwerfers.
+//===========================================================================
+coop_line_objective:
+
+	local.allow = int( getcvar "coop_leakAllow" )
+	if( local.allow < 1 ){ local.allow = 3 }
+	if( $player != NULL && $player.size > 1 ){ local.allow = local.allow + ( $player.size - 1 ) }
+	if( level.coop_leaks == NIL ){ level.coop_leaks = 0 }
+	local.left = local.allow - level.coop_leaks
+	if( local.left < 0 ){ local.left = 0 }
+
+	exec global/obj.scr 6 current ( "Hold the line - do not let them through [" + local.left + " breaches left]" ) $trigger5.origin
+
+end
+
+//===========================================================================
+coop_line_objective_start:
+
+	while( !$player ){ wait 1 }
+	wait 2
+	waitthread coop_line_objective
+
 end

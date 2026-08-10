@@ -16,6 +16,12 @@ main:{
 //=========================================================================
 	level.coop_aaMap = 1				//chrissstrahl - let global scripts know this is a AA level
 	waitthread coop_mod/main.scr::main 	//chrissstrahl - start coop mod extensions
+	thread coop_baked_0808
+	//[user 2026-08-08] STEALTH START. Spawn with NO weapons, overriding the armory loadout, so
+	//the U-boat pens are actually played as the disguise mission they were written as. Players
+	//still get the papers and the uniform; the picked kit is issued the instant the cover breaks
+	//(itemhandler.scr::takeAllDisguises -> coop_armOnBlown), which also clears this flag so any
+	//later spawn arms normally. Set BEFORE the first spawn, hence here rather than at prespawn.
 	level.coop_weatherTheme = "none"	//HZM coop - dynamic weather: U-boat pens interior (no precip)
 
 	level.coop_enableDisguises 	= game.true 	//[200] Smithy - mark this map as disguise enabled on load
@@ -23,6 +29,54 @@ main:{
 	
 	//chrissstrahl - setup stuff that is needed
 	if(level.gametype != 0){
+		//[user 2026-08-10] A4 (master plan v2 Step 4): the per-map scene-actor name list read by
+		//coop_mod/officer.scr::coop_isProtectedActor. Plain targetnames, assigned here rather than
+		//derived later, because A3 measured that the personality roll fires 23 SECONDS BEFORE
+		//alarm_system_setup and find_guy run - any derivation that depends on those would be empty
+		//at the only moment it matters. No wait: array assignment only, single-frame safe.
+		level.coop_sceneActorNames[1] = "suckyfatty"
+		level.coop_sceneActorNames[2] = "guy1"
+		level.coop_sceneActorNames[3] = "guy2"
+		level.coop_sceneActorNames[4] = "guy3"
+		level.coop_sceneActorNames[5] = "welderguy1"
+		level.coop_sceneActorNames[6] = "welderguy2"
+		level.coop_sceneActorNames[7] = "crateguy1"
+		level.coop_sceneActorNames[8] = "crateguy2"
+		level.coop_sceneActorNames[9] = "wrenchman1"
+		level.coop_sceneActorNames[10] = "sledgehammerguy"
+		level.coop_sceneActorNames[11] = "youallright"
+		level.coop_sceneActorNames[12] = "goatsbutt"
+		level.coop_sceneActorNames[13] = "sentry2dude"
+		level.coop_sceneActorNames[14] = "officer1"
+		level.coop_sceneActorNames[15] = "guythatlikesnorway"
+		level.coop_sceneActorNames[16] = "guythathatesnorway"
+		level.coop_sceneActorNames[17] = "whatsthesub"
+		level.coop_sceneActorNames[18] = "hushyhushy"
+		level.coop_sceneActorNames[19] = "stupid"
+		level.coop_sceneActorNames[20] = "jokey"
+		level.coop_sceneActorNames[21] = "loweralarmerguy"
+		//[user 2026-08-09] STEALTH FROM FIRST SPAWN (master plan D1). These flags used to arm at
+		//the uniform pickup inside likeynorway (strip-at-pickup), which left the whole walk to the
+		//papers armed and let a loadout grant race the strip (the bug-1604/1606/1607 ordering
+		//class). Set at map load, before any player can spawn, no weapon is ever granted at all:
+		//nothing to strip, nothing to race. itemhandler.scr::coop_armOnBlown clears all three and
+		//re-arms everyone the moment the cover breaks (naxos caught, alarm/takeAllDisguises).
+		if( getcvar "coop_stealthStart" == "1" ){
+			level.coop_noWeapon = game.true
+			level.coop_startUnarmed = 1
+			level.coop_forcePapersEquip = game.true
+		}
+		//[user 2026-08-09] QUIET NAXOS SABOTAGE - the stealth route is papers-only, so the Naxos
+		//must be killable without a shot. Hold USE at the device instead of the retail walk-in
+		//detonation. See coop_naxosSabotage below.
+		thread coop_naxosSabotage
+		//[user 2026-08-09] "When the officer sees that I am an american spy, he attacks, at that
+		//point i think we should get our guns back because we are technically blown."
+		thread coop_blownOnDamage
+		//[user 2026-08-09] same defect m2l2b had: every objective is added at load, BEFORE any
+		//player is on the server, so coop_obj_toast_all early-exits into the void and the map
+		//never shows a single New Objective card. Toast the current one once somebody exists.
+		thread coop_objToastStart
 		//chrissstrahl - add them now only in mp, to avoid the spam at start add them before players are on the server - sp see further below
 		waitthread global/objectives.scr::add_objectives 1 2 "Find a disguise." $suit.origin
 		waitthread global/objectives.scr::add_objectives 2 2 "Destroy the Naxos Prototype." $obj2.origin
@@ -232,6 +286,11 @@ end
 cardplayersdeath:
 	level.deadcardplayers = 0
 	self waittill death
+	//[user 2026-08-08] "Cut the Hand Short". Keyed on this death, NOT on level.deadcardplayers:
+	//only one cardplayersdeath thread is ever started (:135, $suckyfatty) and it zeroes the counter
+	//at the top of its own body, so that variable can never exceed 1. level.cardplayers, tested
+	//just below, is never assigned anywhere in the map and reads NIL.
+	thread coop_mod/challenges.scr::chal_team_bump "cc_card_sentry" 1
 	level.deadcardplayers++
 	if(level.cardplayers != 3)
 		$suckyfatty attackplayer
@@ -388,16 +447,28 @@ end
 objective1:
 	waitthread global/objectives.scr::add_objectives 1 3 "Find a disguise." $obj1.origin
 	waitthread global/objectives.scr::current_objectives 2
+	if( level.gametype != 0 ){ waitthread coop_mod/objectives.scr::coop_obj_toast_all 2 "Destroy the Naxos Prototype." }
 	
 end
 
 objective2:
 	$naxos waittill trigger
-	level.scienceinterupt = 2
-	thread ohnothenaxos1
+	//[user 2026-08-10] scienceinterupt 2 means "the prototype blew up - scientists, stop your
+	//routine". sciencetalk tests it after EVERY line and bails; depressed stops its table loop on
+	//any non-zero. In retail that is invisible because destroying the Naxos ALWAYS fires the
+	//scripted bust and the scientists go hostile anyway. Our QUIET sabotage removed the bust but
+	//kept the abort, so the talking scientist froze mid-conversation and never walked back to his
+	//table (measured: clipboard scene at 00:23:03, sabotage at 00:23:22, user reported him stuck).
+	//A sabotage nobody noticed must leave their routine untouched - that is the whole point of it.
+	if( level.coop_naxosQuiet != 1 ){ level.scienceinterupt = 2 }
+	//[user 2026-08-09] the scripted bust belongs to the LOUD path. A quiet sabotage completes the
+	//objective without it - being CAUGHT mid-sabotage fires ohnothenaxos1 from the hold loop
+	//instead, which is the retail bust doing exactly its job.
+	if( level.coop_naxosQuiet != 1 ){ thread ohnothenaxos1 }
 	thread blowupthenaxos
 	waitthread global/objectives.scr::add_objectives 2 3 "Destroy the Naxos Prototype." $obj2.origin
 	waitthread global/objectives.scr::current_objectives 3
+	if( level.gametype != 0 ){ waitthread coop_mod/objectives.scr::coop_obj_toast_all 3 "Enter the 2nd U-boat." }
 	thread norgirlsinpos
 //	level.youallright thread youok
 end
@@ -429,13 +500,158 @@ den_m2l2_242f  "Intruder!" maps "m dm obj"
 end
 */
 
+//=========================================================================
+// [user 2026-08-09] QUIET NAXOS SABOTAGE. Retail $naxos is a trigger_multiple - WALKING INTO the
+// volume detonates the prototype and fires the scripted bust, which is why this objective always
+// blew your cover. On the papers-only route the players have no weapons at all, so instead: the
+// touch trigger is disarmed and the device is sabotaged by HOLDING USE at it for coop_naxosHold
+// seconds (default 2.5, same useheld mechanic as the blueprint pickups). Completing the hold
+// swaps the model clean -> destroyed (retail's own $naxossmashed swap, minus the fireball) and
+// completes the objective through the retail flow (coop_naxosQuiet + trigger $naxos).
+// GETTING CAUGHT: while a player is actively holding, if any of the three scientists ($guy1-3,
+// the type_disguise "none" watchers) can SEE them, the retail bust ohnothenaxos1 fires - cover
+// broken exactly as scripted. Sabotage when they are not looking; that is the stealth beat.
+// SP is untouched (thread only starts in the coop branch; the touch trigger stays live there).
+//=========================================================================
+// [user 2026-08-09] CAUGHT SABOTAGING. The shipped stealth guard blocks ALL forced attacks
+// pre-alarm (coop_stealthNoAggro whole-window semantics), so the retail bust alone would land on
+// a closed gate and nothing would visibly happen. A genuine caught-in-the-act must END stealth:
+// lift the guard, arm everyone (coop_armOnBlown - the established cover-blown entry), THEN fire
+// the retail bust so the scientists react as scripted. Once only.
+//=========================================================================
+coop_naxosCaught:
+	if( level.coop_naxosCaughtOnce == 1 ){ end }
+	level.coop_naxosCaughtOnce = 1
+	iprintlnbold "You have been seen!"
+	setcvar "coop_stealthNoAggro" "0"
+	thread coop_mod/itemhandler.scr::coop_armOnBlown
+	thread ohnothenaxos1
+end
+
+//=========================================================================
+// [user 2026-08-09] announce the first objective once someone is there to see it (m2l2b recipe).
+//=========================================================================
+coop_objToastStart:
+	waitthread coop_mod/replace.scr::waitForPlayer
+	wait 2
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 1 "Find a disguise."
+end
+
+//=========================================================================
+coop_naxosSabotage:
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	waitframe
+	if( $naxos == NULL || $naxosnotsmashed == NULL ){ end }
+	//[user 2026-08-10] DO NOT set $naxos nottriggerable.
+	//$naxos is a trigger_multiple with spawnflags 128 = TRIGGER_DAMAGE (trigger.cpp:211, and the
+	//QUAKED flag order at :214). At spawn the engine does takedamage = DAMAGE_YES, contents
+	//CONTENTS_CLAYPIDGEON, solidtype SOLID_BBOX (trigger.cpp:285-289) - i.e. SHOOTING IT is the
+	//vanilla way this objective is completed. `nottriggerable` switched that off, so the retail
+	//solution silently stopped working and only our quiet hold-USE route remained. User: "shooting
+	//should work regardless" and "this is how vanilla handles this objective".
+	//Leaving it armed is safe for the stealth route: CLAYPIDGEON is shootable-but-not-blocking, so a
+	//player can WALK THROUGH the volume without firing it - only damage triggers it.
+	//The quiet path below still calls `$naxos triggerable` before its own `trigger` - now a harmless
+	//no-op, and worth keeping so the sequence stays correct if anything ever disarms it again.
+	local.pos = $naxosnotsmashed.origin
+	local.need = float( getcvar "coop_naxosHold" )
+	if( local.need <= 0 ){ local.need = 2.5 }
+	local.hold = 0
+	local.tick = 0
+	while( level.coop_naxosQuiet != 1 && $naxosnotsmashed != NULL ){
+		local.holding = 0
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( ( vector_length ( local.p.origin - local.pos ) ) > 128 ){
+				local.p.flags["coop_naxosHint"] = NIL
+				continue
+			}
+			if( local.p.flags["coop_naxosHint"] != 1 ){
+				local.p.flags["coop_naxosHint"] = 1
+				local.p iprint "Hold USE to sabotage the Naxos" 1
+			}
+			if( local.p.useheld == 1 ){
+				local.holding = 1
+				//caught in the act: a scientist with eyes on you = cover genuinely blown
+				if( isAlive $guy1 && ( $guy1 cansee local.p $guy1.fov $guy1.sight ) ){ thread coop_naxosCaught }
+				else if( isAlive $guy2 && ( $guy2 cansee local.p $guy2.fov $guy2.sight ) ){ thread coop_naxosCaught }
+				else if( isAlive $guy3 && ( $guy3 cansee local.p $guy3.fov $guy3.sight ) ){ thread coop_naxosCaught }
+				local.tick = local.tick + 0.1
+				if( local.tick >= 0.8 ){
+					local.tick = 0
+					local.p iprint "Sabotaging..." 1
+				}
+			}
+		}
+		if( local.holding == 1 ){ local.hold = local.hold + 0.1 }
+		else{ local.hold = 0 }
+		if( local.hold >= local.need ){
+			level.coop_naxosQuiet = 1
+			//[user 2026-08-09] RE-ARM BEFORE FIRING - playtest 16:54 proved the script `trigger`
+			//command respects nottriggerable, so firing into the disarmed trigger woke nothing:
+			//no model swap, no objective. The quiet flag is already set, so the woken objective2
+			//skips the bust; the touch window is a single frame and the flag wins regardless.
+			$naxos triggerable
+			trigger $naxos
+			iprintlnbold "Naxos sabotaged."
+			println "^~^~^ NAXOS quiet sabotage complete"
+		}
+		wait 0.1
+	}
+end
+
+//=========================================================================
+// [user 2026-08-09] BLOWN ON DAMAGE. Officers and the type_disguise "none" watchers see through
+// level-1 papers (retail rule) and genuinely attack. That is a legitimate bust - the players are
+// blown and should get their guns back. The signal is DAMAGE: a player losing health while a
+// german in attack thinkstate is within 1600u. Polling, not waittill damage - the player damage
+// path routes through ArmorDamage and the script unregister is not guaranteed there. The nearby-
+// attacker filter keeps fall damage from arming the team. Same recipe as coop_naxosCaught:
+// lift the stealth guard, then coop_armOnBlown (which clears coop_startUnarmed and re-arms).
+//=========================================================================
+coop_blownOnDamage:
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	while( level.coop_startUnarmed == 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ local.p.flags["coop_bodHp"] = NIL; continue }
+			local.hp = local.p.health
+			local.prev = local.p.flags["coop_bodHp"]
+			local.p.flags["coop_bodHp"] = local.hp
+			if( local.prev == NIL ){ continue }
+			if( local.hp >= ( local.prev - 1 ) ){ continue }
+			//took real damage - is a german actually on the attack nearby?
+			local.garr = level.coop_actorArray["german"]
+			for( local.gi = 1; local.gi <= local.garr.size; local.gi++ ){
+				local.g = local.garr[local.gi]
+				if( local.g == NULL ){ continue }
+				if( local.g.thinkstate != "attack" ){ continue }
+				if( ( vector_length ( local.g.origin - local.p.origin ) ) > 1600 ){ continue }
+				iprintlnbold "Your cover is blown!"
+				println "^~^~^ BLOWN by damage, arming players"
+				setcvar "coop_stealthNoAggro" "0"
+				thread coop_mod/itemhandler.scr::coop_armOnBlown
+				end
+			}
+		}
+		wait 0.25
+	}
+end
+
 blowupthenaxos:
 	$antenanotsmashed remove
 	$naxosnotsmashed remove
 	$naxossmashed show
 	$antenasmashed show
-	$exploderfire anim start
-	$naxos playsound explode_prototype
+	//[user 2026-08-09] quiet sabotage = the swap without the pyrotechnics. The whole point is
+	//that nothing announces it.
+	if( level.coop_naxosQuiet != 1 ){
+		$exploderfire anim start
+		$naxos playsound explode_prototype
+	}
 	wait 30
 end
 
@@ -651,6 +867,14 @@ likeynorway:
 	thread objective1
 	waitthread global/items.scr::add_item "papers_level1"
 	waitthread global/items.scr::add_item "uniform"
+	//[user 2026-08-09] STEALTH flags (coop_noWeapon / coop_startUnarmed / coop_forcePapersEquip)
+	//moved to map load (main, gametype != 0 branch): players spawn unarmed now, so there is no
+	//loadout here to strip and no grant to race (the bug-1604/1606/1607 class). The sweep stays
+	//as a defensive containment pass - it also force-sets the disguise state and starts the
+	//per-player hold-disguise watchdog, and it is a no-op on empty hands.
+	if( getcvar "coop_stealthStart" == "1" ){
+		waitthread coop_mod/itemhandler.scr::coop_stealthStripWeapons
+	}
 	$likeynorwaydoor unlock
 	wait .2
 	$likeynorwaydoor open level.guythathatesnorway
@@ -668,8 +892,20 @@ likeynorway:
 	waitthread likeynorwaytalk level.guythatlikesnorway den_m2l2_210r
 	level.peopletalking = 0
 	if (level.guythatlikesnorway.thinkstate == "idle" && level.guythathatesnorway.thinkstate == "idle"){ //[200] Smithy - fix stupid behaviour
-		level.guythatlikesnorway type_disguise "salute"
-		level.guythathatesnorway type_disguise "salute"
+		//[user 2026-08-09] COOP: leave them type_disguise "none".
+		//Retail flips these two to "salute" and immediately walks them to their patrol posts. In
+		//singleplayer they hold no enemy at that moment, so the walkto runs and they wander off. In
+		//coop the AI layer has them awake WITH the player as enemy, so the moment they are saluters
+		//PassesTransitionConditions_Disguise wins over the walkto: they stand up at the card table,
+		//salute, and never leave. That is the "one at the table stood up and is just standing there"
+		//report, and the engine confirms it - "Saluting guy...." printed twice, once per man, while
+		//their cardhand models failed to re-attach to tag_weapon_left.
+		//Keeping "none" in coop preserves the retail INTENT (they get up and walk to their posts)
+		//and only drops the salute, which is the part that traps them.
+		if( level.gametype == 0 ){
+			level.guythatlikesnorway type_disguise "salute"
+			level.guythathatesnorway type_disguise "salute"
+		}
 		level.guythatlikesnorway exec global/walkto.scr $guard1patrol1
 		level.guythathatesnorway exec global/walkto.scr $guard2patrol2
 	}
@@ -689,7 +925,27 @@ end
 waitForEnemy:{
 //=========================================================================
 	local.previousThread = parm.previousthread
-	while (isAlive self && (self.thinkstate == "idle" || self.thinkstate == "disguise")){
+	//[user 2026-08-08] bug-1609. This waited ONLY while the actor was idle, then attacked
+	//unconditionally - it never checked whether anyone was disguised. likeynorway threads this at
+	//:42 and then calls guygo at :44, which makes them WALK: thinkstate stops being "idle", the
+	//loop falls through, and both Germans open fire the instant they step into the locker room.
+	//They are type_disguise "none" here too, so "disguise" never held it either.
+	//
+	//In coop, keep waiting while every player is still disguised. The moment somebody draws a
+	//weapon canseeUndisguisedPlayers goes true, the loop exits and they attack - which is the
+	//behaviour this label was written for.
+	//WAITTHREAD, not thread. `thread` starts the label ASYNCHRONOUSLY and evaluates to a handle -
+	//not the return value - so !(thread ...) negated a truthy handle, the OR term never held, and
+	//this guard was a no-op. Everywhere in this codebase that wants a value back uses waitthread
+	//(if (waitthread isWeaponClass ...), if (waitthread ...containsText ...)).
+	local.seen = 0
+	while( isAlive self ){
+		if( level.gametype != 0 ){
+			local.seen = waitthread coop_mod/aihandler.scr::canseeUndisguisedPlayers
+			if( local.seen ){ break }
+		}else{
+			if( self.thinkstate != "idle" && self.thinkstate != "disguise" ){ break }
+		}
 		wait .25
 	}
 	if (isAlive self){
@@ -697,6 +953,7 @@ waitForEnemy:{
 		self turnto NULL
 		self walkto NULL
 		//self exec global/stand.scr
+		println "^~^~^ STEALTH waitForEnemy fired - a player is undisguised, attacking"
 		self attackplayer
 		self type_disguise "none"
 		if (local.previousThread){ local.previousThread end }
@@ -1120,6 +1377,25 @@ sciwalkto local.table:
 	self alarmthread ohnothenaxos1
 	self exec global/walkto.scr local.table
 	self waittill movedone
+	//[user 2026-08-10] RETURN TO THE SAME SPOT. walkto pathfinds to the nav node nearest $table, so
+	//where he ends up depends on which direction he approached from. The first trip (map setup,
+	//scientistidle) comes straight from his spawn; the trip AFTER talking to a player starts from
+	//wherever the player was standing, so he lands on a different node - visibly off his clipboard
+	//spot, which the user reported as "further away from the table... looks funky".
+	//Remember the first arrival and correct back to it on later ones. The correction is only applied
+	//within 160u, so it is a sub-stride nudge and never a visible teleport; beyond that we leave him
+	//where the pathfinder put him rather than yank him across the room.
+	if( level.gametype != 0 ){
+		if( level.coop_sciSpot == NIL ){
+			level.coop_sciSpot = self.origin
+			level.coop_sciAngles = self.angles
+		}else{
+			if( ( vector_length ( self.origin - level.coop_sciSpot ) ) < 160 ){
+				self.origin = level.coop_sciSpot
+				self.angles = level.coop_sciAngles
+			}
+		}
+	}
 	self exec global/turnto.scr $tablelook
 	self thread depressed
 end
@@ -1437,4 +1713,19 @@ end
 
 doorlocked:
 	self playsound door_metal_locked
+end
+
+//=========================================================================
+// [user 2026-08-08] BAKED build-mode placements. Source: coop_mod/save/build_m2l2a.dat
+// (below its SESSION START marker). Blueprints route through collectible.scr, which spawns
+// a private copy per player so one can vanish for its finder alone. Angles are the full
+// (pitch yaw roll) triple - several placements are pitched flat against a surface.
+//=========================================================================
+coop_baked_0808:
+	// blueprint  aerialphoto1.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -3872.801 -2000.974 -509.875 ) ( 0 316 0 ) "models/animate/aerialphoto1.tik" 1.0
+	// blueprint  it_p_anziomappuls.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -3318.375 -6875.335 -509.875 ) ( 0 247 0 ) "models/items/it_p_anziomappuls.tik" 0.700
+	// blueprint  documents_pulse.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -2305.842 -3427.912 -631.875 ) ( 0 247 0 ) "models/items/documents_pulse.tik" 0.700
 end

@@ -9,6 +9,7 @@ main:{
 	//level.coop_playerHasDisguise = 1		//chrissstrahl - 
 	level.coop_disableSpawnWarper = game.true	//chrissstrahl - disable respawning at where players spawned
 	waitthread coop_mod/main.scr::main 		//chrissstrahl - start coop mod extensions
+	thread coop_baked_0808
 	level.coop_weatherTheme = "none"		//HZM coop - dynamic weather: U-boat pens interior (no precip)
 
 	level.coop_enableDisguises = game.true //[200] Smithy - this map has disguises on load
@@ -16,8 +17,14 @@ main:{
 	//chrissstrahl - setup stuff that is needed
 	if(level.gametype != 0){
 		//chrissstrahl - add them now only in mp, to avoid the spam at start add them before players are on the server - sp see further below
-		waitthread global/objectives.scr::add_objectives 1 2 "Plant the bombs [2 left]." level.bombtoplant
-		waitthread global/objectives.scr::add_objectives 2 2 "Escape." $exit.origin
+		//[user 2026-08-08] LITERAL origin, not $enigma.origin. This block runs early in main:, before
+		//the BSP entities exist, so dereferencing $enigma threw - and a thrown statement is SKIPPED
+		//silently, which is why objective 1 never appeared at mission start. Coordinates are the
+		//entity`s own, read from the m2l2b BSP entity lump.
+		waitthread global/objectives.scr::add_objectives 1 2 "Decrypt the Enigma." ( 3598 -6829 39 )
+		waitthread global/objectives.scr::add_objectives 2 2 "Steal the Enigma contents." ( 3598 -6829 39 )
+		waitthread global/objectives.scr::add_objectives 3 2 "Plant the bombs [2 left]." level.bombtoplant
+		waitthread global/objectives.scr::add_objectives 4 2 "Escape." $exit.origin
 		waitthread global/objectives.scr::current_objectives 1
 		
 		spawn trigger_multiple targetname coop_exit setthread coop_exitthesub origin (5030 -6714 183)
@@ -26,12 +33,21 @@ main:{
 	exec global/loadout.scr maps/m2l2b.scr
 //[user 2026-08-06] bug-1462 - runtime-confirmed by the sweep detector (invalid waittill prespawn).
 waitthread coop_mod/replace.scr::waitTillPrespawn
+//[user 2026-08-08] dress the manifest prop as what it actually is. The BSP ships $enigma with
+//model animate/clipboard_pulse.tik - a placeholder - so the player picks up a glowing clipboard
+//and is told they stole an Enigma manifest. enigmaopen.tik is the real machine, open and working;
+//it snaps SHUT in enigmamedal when the contents are taken (user-inverted 2026-08-09). Done at
+//prespawn because the entity does not exist before it.
+thread coop_enigmaProp
 //	exec global/alarmlight.scr
 
 	exec global/ambient.scr m2l2b
 	level.subspawned1 = waitthread global/spawner.scr::spawner_create $subspawned1
 	level.subspawned2 = waitthread global/spawner.scr::spawner_create $subspawned2
-level waittill spawn
+//[user 2026-08-08] Same class as the bug-1462 prespawn fix at :34. Raw `level waittill spawn` is
+//SP-only - in MP it throws "invalid waittill spawn for 'Level'" (seen in the 23:35:42 playtest log),
+//and a thrown statement is SKIPPED, so the wait never happened and everything below ran early.
+waitthread coop_mod/replace.scr::waitTillSpawn
 	$world northyaw -90
 	level.skillz = getcvar(skill)
 	thread musicstuff
@@ -40,8 +56,14 @@ level waittill spawn
 	level.bombtoplant = $bombplanted
 	
 	if(level.gametype == 0){ //chrissstrahl - do now in sp, in mp we do it before any player is on server
-		waitthread global/objectives.scr::add_objectives 1 2 "Plant the bombs [2 left]." level.bombtoplant
-		waitthread global/objectives.scr::add_objectives 2 2 "Escape." $exit.origin
+		//[user 2026-08-08] LITERAL origin, not $enigma.origin. This block runs early in main:, before
+		//the BSP entities exist, so dereferencing $enigma threw - and a thrown statement is SKIPPED
+		//silently, which is why objective 1 never appeared at mission start. Coordinates are the
+		//entity`s own, read from the m2l2b BSP entity lump.
+		waitthread global/objectives.scr::add_objectives 1 2 "Decrypt the Enigma." ( 3598 -6829 39 )
+		waitthread global/objectives.scr::add_objectives 2 2 "Steal the Enigma contents." ( 3598 -6829 39 )
+		waitthread global/objectives.scr::add_objectives 3 2 "Plant the bombs [2 left]." level.bombtoplant
+		waitthread global/objectives.scr::add_objectives 4 2 "Escape." $exit.origin
 		waitthread global/objectives.scr::current_objectives 1
 	}
 	
@@ -224,6 +246,26 @@ end
 
 
 plantthebomb:
+	//[user 2026-08-09] bug-1620 - the charges cannot go in until the manifest is aboard, and the
+	//bug-1608 re-arm NEVER WORKED, for two independent reasons proven in the 11:05 playtest:
+	//(1) `$bombplant` is the bomb PROP (script_model) - the BSP trigger_useonce carries NO
+	//    targetname at all (map_entities/m2l2b_entities.txt), so `triggerable` re-armed the wrong
+	//    entity; and
+	//(2) it could not have worked anyway: TriggerUseOnce has count=1 and the engine REMOVES the
+	//    trigger when count hits 0 (trigger.cpp:565-577) regardless of what this thread decides.
+	//    No command can resurrect a removed entity.
+	//So on first refusal, spawn a PERSISTENT replacement trigger_use (count -1, never consumed)
+	//at the BSP trigger origin with the same setthread - the same inline-spawn recipe
+	//coop_exit uses at :30. The success path below removes it once the bomb is really planted.
+	if( level.coop_manifestTaken != 1 ){
+		iprintlnbold "Recover the Enigma manifest first."
+		if( level.coop_bombTrig1Respawn != 1 ){
+			level.coop_bombTrig1Respawn = 1
+			spawn trigger_use targetname "coop_bombtrig1" setthread plantthebomb origin ( 6558 -6822 54 )
+			$coop_bombtrig1 setsize ( -48 -48 -24 ) ( 48 48 48 )
+		}
+		end
+	}
 	if(level.bombPlanted1 != NIL){ end } //chrissstrahl - bugfix
 	level.bombPlanted1 = 1 //chrissstrahl - bugfix
 	
@@ -237,10 +279,23 @@ plantthebomb:
 		level.playerticking = 1
 	}
 	$bombplant remove
+	if( $coop_bombtrig1 != NULL ){ $coop_bombtrig1 remove }
 	local.theguy = waitthread global/spawner.scr::spawner_activate level.subspawned1
 end
 
 plantthebomb2:
+	//[user 2026-08-09] bug-1620 - same two-part failure as plantthebomb above: $bomb2plant is the
+	//prop, the real trigger_useonce is nameless, and the engine removes it after one use anyway.
+	//Same persistent-replacement recipe; BSP trigger origin 4135 -6671 46.
+	if( level.coop_manifestTaken != 1 ){
+		iprintlnbold "Recover the Enigma manifest first."
+		if( level.coop_bombTrig2Respawn != 1 ){
+			level.coop_bombTrig2Respawn = 1
+			spawn trigger_use targetname "coop_bombtrig2" setthread plantthebomb2 origin ( 4135 -6671 46 )
+			$coop_bombtrig2 setsize ( -48 -48 -24 ) ( 48 48 48 )
+		}
+		end
+	}
 	if(level.bombPlanted2 != NIL){ end } //chrissstrahl - bugfix
 	level.bombPlanted2 = 1 //chrissstrahl - bugfix
 	
@@ -254,6 +309,7 @@ plantthebomb2:
 		level.playerticking = 1
 	}
 	$bomb2plant remove
+	if( $coop_bombtrig2 != NULL ){ $coop_bombtrig2 remove }
 	local.theguy = waitthread global/spawner.scr::spawner_activate level.subspawned2
 
 end
@@ -261,8 +317,8 @@ bombcount:
 	level.bombcount++
 	if(level.bombcount == 1)
 	{
-      	waitthread global/objectives.scr::add_objectives 1 2 "Plant the bombs [1 left]." level.bombtoplant.origin
-     	waitthread global/objectives.scr::current_objectives 1
+      	waitthread global/objectives.scr::add_objectives 3 2 "Plant the bombs [1 left]." level.bombtoplant.origin
+     	waitthread global/objectives.scr::current_objectives 3
 		if(level.gametype == 0){//chrissstrahl - sp only
 			$player.has_disguise = 0
 		}
@@ -270,6 +326,20 @@ bombcount:
      	waitthread global/items.scr::remove_item "uniform"
      	wait 1
      	iprintlnbold "Your cover has been blown."
+		//[user 2026-08-08] coop_subEscape: long fuse - she does not blow while you are aboard.
+		//The mission becomes escape-then-watch. Verified safe: level.blownup is read nowhere else,
+		//the exit is opened by subtrap on bombcount==2 (not by the blast), and blowhshtuffup
+		//DESTROYS the bridge - skipping it leaves the way out intact rather than blocked.
+		if( getcvar "coop_subEscape" == "1" ){
+			//[user 2026-08-08] STOP THE TICK. $bombplanted loopsound bombtick starts at :237/:254 and
+			//is stopped ONLY inside blowhshtuffup - which this route skips, so it ticked forever.
+			$bombplanted stoploopsound
+			//[user 2026-08-08] NO print here. This block runs at bombcount == 1 - ONE bomb down, one
+			//still to plant - so "get off this boat" was both premature and a duplicate of what the
+			//objective list already says. The objectives are posted as they come now and are the only
+			//thing that should be telling the player what to do.
+			end
+		}
 		if(level.skillz == "0")
 		{
      		iprintlnbold "75 seconds to escape the sub"			
@@ -281,19 +351,31 @@ bombcount:
 	}
 	if(level.bombcount == 2)
 	{
+		//[user 2026-08-09] the dock garrison musters NOW - both charges set, klaxons going - so the
+		//fight is waiting when the players climb OUT of the boat. They are killed BEFORE the ship
+		//explodes (the gate counts them via countdeaths); the finale only plays after the docks are
+		//cleared and the endlevel gate is reached. Was wrongly hooked to the blast itself.
+		if( level.gametype != 0 ){ thread coop_exfilReinforce }
 		thread subtrap
 		thread objective1
 	}
 end
 
 objective1:
- 	waitthread global/objectives.scr::add_objectives 1 3 "Plant the bombs." level.bombtoplant.origin
-	waitthread global/objectives.scr::current_objectives 2
+ 	waitthread global/objectives.scr::add_objectives 3 3 "Plant the bombs." level.bombtoplant.origin
+	waitthread global/objectives.scr::current_objectives 4
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 4 "Escape the U-Boat."
 	waitthread global/items.scr::remove_item "explosives" nomessage
 
 end
 objective2:
-	waitthread global/objectives.scr::add_objectives 2 3 "Eliminate opposition and escape." $endlevel.origin
+	//[user 2026-08-08] TWO steps, not one. Objective 2 is the fight out of the boat; 3 is the
+	//exfil itself, raised only once 2 is done, so the last thing on screen is where to go rather
+	//than a single line covering both.
+	//[user 2026-08-08] close them out only - both were raised at the sub exit. Announcing a NEW
+	//objective here meant "New Objective: Exfiltrate" popped up after the boat had already gone.
+	waitthread global/objectives.scr::add_objectives 4 3 "Escape the U-Boat." $endlevel.origin
+	waitthread global/objectives.scr::add_objectives 5 3 "Eliminate the enemies and Exfiltrate." $endlevel.origin
 	exec global/missioncomplete.scr m2l2c 1
 
 end
@@ -341,6 +423,13 @@ blowhshtuffup:
 		$bridgebroken show
 		$bridgebroken solid
 		$bridgebroken thread breakbridge
+		//[user 2026-08-08] "Mit den Fischen schlafen" - the charges just went. Anyone still aboard
+		//dies to subkill's volumedamage, which is the point: the feat is letting the sea do it.
+		//Flag set BEFORE the award so the kill hook stops disqualifying from this moment on.
+		level.coop_m2l2b_blown = 1
+		if( level.coop_m2l2b_handKill != 1 ){
+			thread coop_mod/challenges.scr::chal_team_bump "cc_fischen" 1
+		}
 		thread subkill
 		
 		thread coop_resetPlayerSpawnsIfDead //[200] Smithy - reset spawns if players are dead at this point, stop players respawning in water/boat
@@ -441,11 +530,358 @@ endlevelthread:
 	if(level.gametype == 0){//chrissstrahl - only do this in sp, in mp we don't need that kind of precision to the spawn
 		game.m2l2position = $player.origin
 	}
+	//[user 2026-08-08] on the escape route the mission does not end at the exit - you watch her
+	//go first. coop_sub_finale calls objective2 itself once the boat is gone.
+	if( getcvar "coop_subEscape" == "1" ){
+		thread coop_sub_finale
+		end
+	}
 	thread objective2
 
 end
 
+//=========================================================================
+// [user 2026-08-08] THE FINALE. The boat you escaped is worldspawn brushwork and cannot be
+// moved, so the one that sinks is a staged upper hull in the EMPTY neighbouring pen, framed by
+// a camera that never has the original in shot. Both positions captured in-game.
+//=========================================================================
+coop_sub_finale:
+	if( level.coop_subFinale == 1 ){ end }
+	level.coop_subFinale = 1
+
+	//[user 2026-08-09] coop_subCruise 0 = the original static in-pen sink, kept whole as a fallback.
+	if( getcvar "coop_subCruise" == "0" ){
+		thread coop_sub_finale_pen
+		end
+	}
+
+	//[user 2026-08-09] THE SORTIE FINALE, three acts. She gets underway and sails the harbor along
+	//waypoints the user authored in-game with build mode (hull centers, headings, settle depths from
+	//build_m2l2b.dat), a blizzard builds over the water, the camera cuts to the ticking charge as
+	//she nears open water, and cuts back the instant the timer runs out. All timing is cvar-tunable
+	//live: coop_subCruiseSpeed / coop_subTurnRate / coop_subYawFlip / coop_subCruiseZoff /
+	//coop_subInsertLen / coop_subInsertFov / coop_subBlizzard.
+	//[user 2026-08-09] BLACK COVERS THE HANDOFF. The player standing at the endlevel gate could
+	//see the hull pop into existence and get under way in first person for a split second before
+	//the camera took over. Dip to black, do ALL the staging under it, and return with her already
+	//making way on camera.
+	fadeout 0.35 0 0 0 1
+	wait 0.45
+	//[user 2026-08-09] no crosshair on the picture - restored under the final fade
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] stufftext ( "ui_crosshair 0" ) }
+	}
+	level.coop_subWpN = 3
+	level.coop_subWpO[1] = ( -978.355 -2424.665 -774.379 )
+	level.coop_subWpO[2] = ( -562.874 1610.839 -765.100 )
+	level.coop_subWpO[3] = ( 472.854 5676.325 -831.875 )
+
+	//stage yaw is the DISPLAY yaw: travel bearing 89 + the model flip (the lowerhull renders
+	//backwards along its forward axis - user-observed). Same cvar logic as the cruise so the two
+	//can never disagree.
+	if( getcvar "coop_subYawFlip" == "" ){ local.flip = 180 }
+	else{ local.flip = float( getcvar "coop_subYawFlip" ) }
+	//[user 2026-08-09] she stages coop_subStartAdvance units (default 1000) already down her course
+	//- the full berth-to-kill drive read too long even at speed, and act 1 loses nothing: she is
+	//still ahead of and below the camera, already under way.
+	//[user 2026-08-09] v4: advance 2400 along the TRUE bearing to the kill point (79.845 deg,
+	//berth -> final marker), so the advanced start sits ON the straight course. Less time at sea,
+	//more time on the sinking - the user's cut.
+	if( getcvar "coop_subStartAdvance" == "" ){ local.adv = 2400 }
+	else{ local.adv = float( getcvar "coop_subStartAdvance" ) }
+	local.sfwd = angles_toforward ( 0 79.845 0 )
+	local.spos = ( -978.355 -2424.665 -774.379 ) + ( local.sfwd * local.adv )
+	waitthread coop_mod/subsink.scr::coop_sub_stage local.spos ( 79.845 + local.flip ) "models/static/upperhull3.tik" 1.0
+
+	//ACT 1 - the wide: a LOCKED-OFF camera, exactly as the user composed it (pos -1315 -1326 -293,
+	//yaw 68). The first cut tracked her with `watch` and the pan both broke the composition and
+	//swung into unbrushed map - the shot is MEANT to be static, with her entering from the side of
+	//frame and shrinking into the storm. The look marker sits ~4000u down the authored sight line
+	//and is NOT registered with the cruise, so nothing ever moves the aim.
+	//(bug-360: Camera ignores .origin= - place with movetopos, aim with watch at a marker.)
+	//[user 2026-08-09] composition v2 (their capture 11:56): perched just above her berth, looking
+	//due north straight down her course - she emerges beneath the camera and sails away into the
+	//storm. Locked off; the aim point sits 4000u down the yaw-92 sight line, tilted to the water.
+	local.look = spawn script_origin targetname "coop_subLook"
+	local.look.origin = ( -1131 1631 -650 )
+	local.cam = spawn Camera targetname "coop_subCam"
+	local.cam movetopos ( -991 -2367 -225 )
+	local.cam watch local.look 0
+	local.cam fov 80
+
+	thread coop_sub_blizzard
+	//[user 2026-08-09] SHE IS ALREADY UNDER WAY WHEN WE CUT. The cruise starts BEFORE the camera:
+	//she visibly waited for the director before moving, which was jarring. By the time the cut
+	//lands she has ~1.2s of way on and the start bark is already rolling.
+	thread coop_mod/subsink.scr::coop_sub_cruise
+	//[user 2026-08-09] THE BASE IS STILL SCREAMING BEHIND YOU. The bust that sent you running
+	//raised the alarm, and the cutscene should not pretend otherwise - a low siren bed runs
+	//under the whole scene (levelwide, so every player hears it wherever they stand).
+	local.sirens = spawn script_model model "fx/dummy.tik"
+	if( $player != NULL && $player[1] != NULL ){ local.sirens.origin = $player[1].origin }
+	local.sirens notsolid
+	local.sirens loopsound m2l2_alarm2 0.55 "levelwide"	//[user 2026-08-09] the MISSION'S alarm (Mec_Alarm_03, the pen klaxon) - coop_snd_siren was an air-raid siren the map never uses
+	level.coop_subSirens = local.sirens
+	wait 1.2
+	local.cam cut
+	cuecamera local.cam
+	fadein 1.0 0 0 0 1
+	//[user 2026-08-09] one long mournful blast as she clears the pen - U-boats carried a
+	//compressed-air signal horn for exactly this, and in a blizzard it is the sound of the scene.
+	wait 2.5
+	if( level.coop_subStaged != NIL && level.coop_subStaged != NULL ){ level.coop_subStaged playsound coop_sub_horn }
+	//belt and braces: the hull playsound was inaudible in two runs - the report recipe (play on
+	//each player) is the proven delivery, so the horn rides both.
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] playsound coop_sub_horn }
+	}
+
+
+	//ACT 2 - the insert: when she is coop_subInsertLen seconds from the final point, cut to the
+	//charge and push in slowly while it ticks. The tick is played on dummies AT EACH PLAYER because
+	//audio renders at the player, not the camera - the bomb itself is thousands of units from their
+	//ears and would be silent.
+	while( level.coop_subApproach != 1 && level.coop_subCruiseDone != 1 ){ wait 0.1 }
+	if( level.coop_subCruiseDone != 1 && level.bombPlanted1 != NIL ){
+		local.blook = spawn script_origin targetname "coop_subBombLook"
+		local.blook.origin = ( 6558 -6821 39 )
+		local.cam2 = spawn Camera targetname "coop_subCam2"
+		local.cam2 movetopos ( 6530 -6794 48 )
+		local.cam2 watch local.blook 0
+		local.cam2 fov 70
+		local.cam2 cut
+		cuecamera local.cam2
+		//[user 2026-08-09] AUDIO POV v2: her diesels fill the closeup. The per-player-dummy version
+		//was inaudible in play; the LEVELWIDE loop recipe (proven by the wind and siren beds) is not.
+		local.engnear = spawn script_model model "fx/dummy.tik"
+		if( $player != NULL && $player[1] != NULL ){ local.engnear.origin = $player[1].origin }
+		local.engnear notsolid
+		local.engnear loopsound coop_sub_moving 1.2 "levelwide"
+		level.coop_subEngNearW = local.engnear
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( $player[local.i] != NULL ){
+				local.td = spawn script_model model "fx/dummy.tik"
+				local.td.origin = $player[local.i].origin
+				local.td notsolid
+				local.td loopsound bombtick
+				level.coop_subTick[local.i] = local.td
+			}
+		}
+		//the push-in: a slow fov tighten across the whole insert, ended by the cruise arriving
+		local.insert = float( getcvar "coop_subInsertLen" )
+		if( local.insert <= 0 ){ local.insert = 6 }
+		local.ffov = float( getcvar "coop_subInsertFov" )
+		//[user 2026-08-09] 30 pushed in too close in the first playtest - 45 frames the charge
+		//with a little air around it.
+		if( local.ffov <= 0 ){ local.ffov = 45 }
+		local.f = 70
+		while( level.coop_subCruiseDone != 1 && local.f > local.ffov ){
+			local.f = local.f - ( ( 70 - local.ffov ) * ( 0.1 / local.insert ) )
+			local.cam2 fov local.f 0
+			wait 0.1
+		}
+		while( level.coop_subCruiseDone != 1 ){ wait 0.1 }
+		//ACT 3 - cut back EXACTLY as the timer runs out; the death blow starts on this frame
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( level.coop_subTick[local.i] != NIL && level.coop_subTick[local.i] != NULL ){
+				level.coop_subTick[local.i] delete
+				level.coop_subTick[local.i] = NIL
+			}
+		}
+		if( local.cam2 != NULL ){ local.cam2 delete }
+		if( local.blook != NULL ){ local.blook delete }
+	}else{
+		while( level.coop_subCruiseDone != 1 ){ wait 0.1 }
+	}
+
+	//ACT 3 - THE DEATH CAM (user capture 11:57): across the water southeast of the kill point,
+	//cutting in the frame the charges fire. Close enough that the columns and burning oil actually
+	//read, unlike the 7,000u wide. fov 42 punches the last of the distance out.
+	//SCENE-SCOPED FOG: the shot looks toward unbrushed map edges, so the farplane closes to 6000
+	//with a snow-grey tint for THIS SHOT ONLY - saved first, restored under the fade where the
+	//swap is invisible. (weather.scr stores its own copy in level.farplane; we deliberately use
+	//separate vars and restore AFTER it, last writer wins under black.)
+	level.coop_subFpSave = $world.farplane
+	level.coop_subFpColSave = $world.farplane_color
+	$world farplane 6000
+	//vector literal REQUIRED - three bare floats threw "Cannot cast float to vector" (12:07 run)
+	$world farplane_color ( 0.72 0.75 0.80 )
+	local.dlook = spawn script_origin targetname "coop_subDeathLook"
+	local.dlook.origin = ( 473 5676 -700 )
+	local.cam3 = spawn Camera targetname "coop_subCam3"
+	//[user 2026-08-09] pulled from 4400u to ~2600u along the same sight line - the scene fog made
+	//her hard to read at the original distance. Lens opened 42 -> 50 to compensate.
+	local.cam3 movetopos ( 2703 3523 -440 )	//[user 2026-08-09] eased back ~500u - 2600 was a touch tight
+	local.cam3 watch local.dlook 0
+	local.cam3 fov 50
+	//kill the closeup engine bed with the picture
+	if( level.coop_subEngNearW != NIL && level.coop_subEngNearW != NULL ){ level.coop_subEngNearW delete }
+	//[user 2026-08-09] and the base alarm drops to a distant murmur - we are miles out now
+	if( level.coop_subSirens != NIL && level.coop_subSirens != NULL ){ level.coop_subSirens delete }
+	local.sirens2 = spawn script_model model "fx/dummy.tik"
+	if( $player != NULL && $player[1] != NULL ){ local.sirens2.origin = $player[1].origin }
+	local.sirens2 notsolid
+	local.sirens2 loopsound m2l2_alarm2 0.18 "levelwide"
+	level.coop_subSirens = local.sirens2
+	//[user 2026-08-09] the last scene is a WHITEOUT - the storm surges as we cut to her death
+	level.rain_density = 16
+	local.cam3 cut
+	cuecamera local.cam3
+
+	thread coop_sub_report
+	thread coop_mod/subsink.scr::coop_sub_sink
+
+	wait 44	//[user 2026-08-09] sink is 28s now - linger on her going down
+	//[user 2026-08-08] "The Way it Was" - awarded after the sink completes, not at the exit.
+	thread coop_mod/challenges.scr::chal_team_bump "cc_way_it_was" 1
+	fadeout 2.5 0 0 0 1
+	wait 3
+	//give the crosshair back under black (both finale paths end here)
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] stufftext ( "ui_crosshair 1" ) }
+	}
+	if( level.coop_subWind != NIL && level.coop_subWind != NULL ){ level.coop_subWind delete }
+	if( level.coop_subSirens != NIL && level.coop_subSirens != NULL ){ level.coop_subSirens delete }
+	//restore the shot fog under black
+	if( level.coop_subFpSave != NIL ){
+		$world farplane level.coop_subFpSave
+		$world farplane_color level.coop_subFpColSave
+	}
+	if( local.cam != NULL ){ local.cam delete }
+	if( local.cam3 != NULL ){ local.cam3 delete }
+	if( local.dlook != NULL ){ local.dlook delete }
+	if( local.look != NULL ){ local.look delete }
+	thread objective2
+end
+
+//[user 2026-08-09] the report reaches the players EARS: audio renders at the PLAYER, not the
+//camera, and she dies ~10,000u from the dock - without this the whole blast is mute. Delayed as
+//if crossing the harbor.
+coop_sub_report:
+	wait 1.2
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] playsound explode_sub }
+	}
+	wait 2.4
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] playsound explode_water }
+	}
+end
+
+//[user 2026-08-09] BLIZZARD OVER THE HARBOR. m2l2b declares weather theme "none" (the pens are
+//interior), so the native SP snow system was never started on this map - the finale owns it
+//outright. Seed the snow look, hand off to the native renderer, and build 1 -> 2 -> 3 as she
+//sails: the renderer smooths every step, so light snow thickens into a whiteout as she reaches
+//open water. coop_amb_wind rides levelwide (the ambience recipe) as the storm bed.
+coop_sub_blizzard:
+	if( getcvar "coop_subBlizzard" == "0" ){ end }
+	//[user 2026-08-09] v3 - WHY THERE WAS NEVER SNOW: precipitation only falls inside func_rain
+	//BRUSH VOLUMES, and m2l2b (an interior pens map) ships none - density 10 with no volume is
+	//still zero flakes (cg_nature.cpp emits per-entity from inlineDrawModel bounds). So the finale
+	//spawns its own: func_rain is a registered spawnable class, and inline brush model *66
+	//(1032x1008x1048, centered on its own origin - parsed from the BSP models lump) is borrowed as
+	//the volume. ET_RAIN never draws the brush geometry, only flakes. A 3x3 grid is laid around
+	//each cutscene camera - snow renders within ~1800u of the VIEW, and during the cutscene the
+	//view IS the camera, so nowhere else needs coverage.
+	waitthread coop_mod/weather.scr::coop_weather_snowLook
+	//[user 2026-08-09] v3.1 - NO SNOW INDOORS. The blind 3x3 around cam1 reached back over the
+	//covered pen (the camera perch itself is under the roof), and rain volumes ignore world
+	//geometry - flakes fell inside. Act-1 boxes now sit ONLY over the open water AHEAD of the
+	//camera (a 2-wide x 3-deep strip up the channel, nothing behind the mouth). The death-cam
+	//grid is genuinely open water and keeps its 3x3.
+	local.gy = 0
+	while( local.gy <= 2 ){
+		local.gx = 0
+		while( local.gx <= 1 ){
+			local.r = spawn func_rain
+			local.r model "*66"
+			local.r.origin = ( ( 0 - 1400 + ( local.gx * 1000 ) ) ( ( 0 - 600 ) + ( local.gy * 1000 ) ) ( 0 - 150 ) )
+			local.gx = local.gx + 1
+		}
+		local.gy = local.gy + 1
+	}
+	local.gx = 0 - 1
+	while( local.gx <= 1 ){
+		local.gy = 0 - 1
+		while( local.gy <= 1 ){
+			local.r2 = spawn func_rain
+			local.r2 model "*66"
+			local.r2.origin = ( ( 3650 + ( local.gx * 1000 ) ) ( 2609 + ( local.gy * 1000 ) ) ( 0 - 350 ) )
+			local.gy = local.gy + 1
+		}
+		local.gx = local.gx + 1
+	}
+	local.w = spawn script_model model "fx/dummy.tik"
+	if( $player != NULL && $player[1] != NULL ){ local.w.origin = $player[1].origin }
+	local.w notsolid
+	local.w loopsound coop_amb_wind 0.6 "levelwide"
+	level.coop_subWind = local.w
+	//[user 2026-08-09] "doesnt last long" - the slow build meant the storm only read as a storm
+	//near the end of act 1. It now opens at 5 and is a full 10 within ~8s of the first frame.
+	local.dd = 5
+	level.rain_density = local.dd
+	while( local.dd < 10 ){
+		local.dd = local.dd + 0.1
+		level.rain_density = local.dd
+		wait 0.15
+	}
+	println( "^~^~^ BLIZZ density=" + level.rain_density )
+end
+
+
+
+
+coop_sub_finale_pen:
+	if( level.coop_subFinale == 1 ){ end }
+	level.coop_subFinale = 1
+
+	waitthread coop_mod/subsink.scr::coop_sub_stage ( -984.657 -3905.494 -590.479 ) 273 "models/static/upperhull3.tik" 0.8
+
+	//A Camera IGNORES .origin= and .angles= (bug-360, same no-op class as moveto on a
+	//script_model): it must be placed with movetopos and aimed with watch at a marker.
+	local.look = spawn script_origin targetname "coop_subLook"
+	local.look.origin = ( -984.657 -3905.494 -590.479 )
+	local.cam = spawn Camera targetname "coop_subCam"
+	local.cam movetopos ( -1420 -6421 -135 )
+	local.cam watch local.look 0
+	local.cam fov 80
+	local.cam cut
+	cuecamera local.cam
+
+	wait 2
+
+	//sound first: at ~2500 units the delay between flash and report is what sells the distance
+	local.snd = spawn script_model model "fx/dummy.tik"
+	local.snd.origin = ( -984.657 -3905.494 -590.479 )
+	local.snd playsound explode_sub
+	exec global/earthquake.scr .5 1 0 0
+	thread coop_mod/subsink.scr::coop_sub_sink
+
+	wait 22
+	//[user 2026-08-08] FADE OUT, do not hand the camera back. Cutting from a burning wreck to the
+	//player standing on a dock is the sort of whiplash that undoes the whole shot - and the mission
+	//ends here anyway, so there is nothing to come back TO. Fade first, THEN release the camera, or
+	//the hand-back is visible during the fade.
+	//[user 2026-08-08] "The Way it Was" - awarded HERE, after the sink completes, not at the exit:
+	//the feat is having watched her go, and a player who somehow skipped the sequence should not
+	//get it.
+	thread coop_mod/challenges.scr::chal_team_bump "cc_way_it_was" 1
+	fadeout 2.5 0 0 0 1
+	wait 3
+	//give the crosshair back under black (both finale paths end here)
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ $player[local.i] stufftext ( "ui_crosshair 1" ) }
+	}
+	if( local.snd != NULL ){ local.snd delete }
+	if( local.cam != NULL ){ local.cam delete }
+	if( local.look != NULL ){ local.look delete }
+	thread objective2
+end
+
 officerdead:
+	//[user 2026-08-08] the SECOND route into the blast - killing the officer detonates too.
+	//Gated with the timer, or she still goes up under you on the escape route.
+	if( getcvar "coop_subEscape" == "1" ){ wait 5 ; end }
 	thread blowhshtuffup
 	wait 5
 end
@@ -587,14 +1023,87 @@ end
 
 enigmamedal:
 	$enigmatrig waittill trigger
+	//[user 2026-08-08] THE DECRYPT. The prop sits as a CLOSED Enigma machine (dressed at prespawn by
+	//coop_enigmaProp); using it runs a timed decrypt with the machine typing throughout, and only
+	//then does it open and give up its contents.
+	//
+	//Retail had this as a one-frame grab - a pulsing clipboard that vanished on touch, with the
+	//swap to enigmaopen.tik commented out. Every asset ships unused: enigmaopen.skd,
+	//enigmaclosed.skd, static variants, .map sources, a 786 KB texture and a 262 KB enigmatext.tga
+	//for the rotor lettering.
+	if( level.coop_enigmaBusy == 1 ){ end }
+	level.coop_enigmaBusy = 1
+
+	local.secs = int( getcvar "coop_enigmaDecrypt" )
+	if( local.secs <= 0 ){ local.secs = 10 }
+
+	iprintlnbold "Decrypting Enigma traffic..."
+	exec coop_mod/replace.scr::stopwatch local.secs
+	thread coop_enigmaTyping local.secs
+
+	wait local.secs
+
+	//the case snaps shut - the contents are yours, the machine stays on the shelf
+	$enigma.model = "animate/enigmaclosed.tik"
+	$enigma anim idle
+	$enigma rendereffects "-coopboss"
+	$enigma playsound pickup_papers
+	waitthread global/objectives.scr::add_objectives 1 3 "Decrypt the Enigma." ( 3598 -6829 39 )
+	waitthread global/objectives.scr::current_objectives 2
+	//[user 2026-08-08] EXPLICIT TOAST. This map adds every objective at map start (retail does it
+	//"before players are on the server" to avoid spam), so the only thing that changes later is
+	//which one is CURRENT - and current_objectives announces nothing. add_objectives is what fires
+	//the New Objective card, and it already fired for all of them into an empty server.
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 2 "Steal the Enigma contents."
+	wait 1.5
+
 	setcvar g_medal4 "1"
-//	$enigma.model = "animate/enigmaopen.tik"
-//	wait 1
-	$enigma hide
-	//$player playsound pickup_papers	//chrissstrahl
-	$enigma playsound pickup_papers		//chrissstrahl - coop compatible
+	//[user 2026-08-09] no hide any more - the shut case stays as set dressing, which is the whole
+	//point of ending closed. The glow is already off (-coopboss above), so it reads as done.
 	iprintlnbold "Manifest stolen"
+	//a real objective now, and it GATES the charges - no sense blowing the boat before you have
+	//what you came aboard for.
+	level.coop_manifestTaken = 1
+	waitthread global/objectives.scr::add_objectives 2 3 "Steal the Enigma contents." ( 3598 -6829 39 )
+	waitthread global/objectives.scr::current_objectives 3
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 3 "Plant the bombs."
+	//[user 2026-08-08] bug-1596 group A - was defined in v1.2.1 and never bumped.
+	thread coop_mod/challenges.scr::chal_team_bump "obj_the_manifest" 1
 end
+
+
+//=========================================================================
+// [user 2026-08-08] The machine working. Uses the mod's OWN typewriter samples - six key variants
+// plus a carriage return, built from MOHAA's objective-text typing assets and already tuned to
+// sound like a typist rather than a metronome (bug-1357: a fixed gap on one sample reads as a
+// machine). Played on the ENTITY, not locally, so it has a position in the room and you have to be
+// at the desk to hear it working.
+//=========================================================================
+coop_enigmaTyping local.secs:{
+	local.t = 0
+	while( local.t < local.secs && $enigma != NULL ){
+		local.k = randomint( 6 ) + 1
+		if( local.k == 1 ){ $enigma playsound coop_type_key1 }
+		else if( local.k == 2 ){ $enigma playsound coop_type_key2 }
+		else if( local.k == 3 ){ $enigma playsound coop_type_key3 }
+		else if( local.k == 4 ){ $enigma playsound coop_type_key4 }
+		else if( local.k == 5 ){ $enigma playsound coop_type_key5 }
+		else { $enigma playsound coop_type_key6 }
+
+		//uneven gaps, with an occasional hesitation - the same shape chal_typewriter uses
+		local.g = 0.09 + ( randomint 9 ) * 0.012
+		if( randomint 7 == 0 ){ local.g = local.g + 0.22 }
+		local.t = local.t + local.g
+		wait local.g
+
+		//carriage return every so often, for the line breaks
+		if( randomint 14 == 0 && $enigma != NULL ){
+			$enigma playsound coop_type_return
+			local.t = local.t + 0.35
+			wait 0.35
+		}
+	}
+}end
 
 exitthesub:
 	$exit waittill trigger
@@ -631,7 +1140,7 @@ exitthesub:
 		fadein 2 0 0 0 1
 	}
 	
-	waitthread global/objectives.scr::add_objectives 2 2 "Eliminate opposition and escape." $endlevel.origin	
+	waitthread global/objectives.scr::add_objectives 4 2 "Escape the U-Boat." $endlevel.origin	
 	thread attacknowthing
 end
 
@@ -646,6 +1155,17 @@ coop_updateSpawn:{
 //=========================================================================
 coop_exitthesub:{
 //=========================================================================
+	//[user 2026-08-08] EXFILTRATE is raised HERE - the moment you are off the boat - not in
+	//objective2. objective2 runs at the very END of coop_sub_finale, after the sink and the fade,
+	//so it announced a brand-new objective seconds before mission complete. Guarded so four
+	//players climbing out do not each re-announce it.
+	if( level.coop_exfilObj != 1 ){
+		level.coop_exfilObj = 1
+		waitthread global/objectives.scr::add_objectives 4 3 "Escape the U-Boat." $endlevel.origin
+		waitthread global/objectives.scr::add_objectives 5 2 "Eliminate the enemies and Exfiltrate." $endlevel.origin
+		waitthread global/objectives.scr::current_objectives 5
+		waitthread coop_mod/objectives.scr::coop_obj_toast_all 5 "Eliminate the enemies and Exfiltrate."
+	}
 	parm.other unattachfromladder
 	parm.other.origin = $haxtteleportlocation1.origin
 	thread coop_mod/main.scr::playerMakeSolidAsap (waitexec coop_mod/main.scr::getPlayerId parm.other)
@@ -654,3 +1174,286 @@ coop_exitthesub:{
 
 
 
+
+//=========================================================================
+// [user 2026-08-08] BAKED build-mode placements. Source: coop_mod/save/build_m2l2b.dat
+// (below its SESSION START marker). Blueprints route through collectible.scr, which spawns
+// a private copy per player so one can vanish for its finder alone. Angles are the full
+// (pitch yaw roll) triple - several placements are pitched flat against a surface.
+//=========================================================================
+
+//=========================================================================
+// [user 2026-08-09] EXFIL REINFORCEMENTS. The post-blast fight was too tame: 14 extra defenders
+// pour onto the docks when the charges go, at positions the user dropped in-game (viewpos eye
+// height, -82 to the floor, droptofloor for the remainder). Models are the map's OWN roster
+// (kreigsmarine bulk + wehrmact soldiers + one officer). Every one is threaded into
+// countdeaths, so the EXIT GATE counts them: the "eliminate the remaining enemies" objective
+// now genuinely requires clearing the docks before the gate opens. Staggered spawns - a
+// same-frame spawn/model burst is the T9 race.
+//=========================================================================
+coop_exfilReinforce:
+	if( level.coop_exfilSpawned == 1 ){ end }
+	level.coop_exfilSpawned = 1
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -1673 -4968 -511 )
+		local.e.angles = ( 0 -270 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -1665 -3697 -511 )
+		local.e.angles = ( 0 -270 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_wehrmact_soldier.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -1665 -2527 -511 )
+		local.e.angles = ( 0 -270 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2293 -2516 -627 )
+		local.e.angles = ( 0 -96 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2331 -2866 -627 )
+		local.e.angles = ( 0 -96 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_wehrmact_soldier.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2321 -5480 -613 )
+		local.e.angles = ( 0 -87 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2254 -5068 -627 )
+		local.e.angles = ( 0 93 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_wehrmact_officer.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2672 -2236 -511 )
+		local.e.angles = ( 0 -82 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2168 -6904 -511 )
+		local.e.angles = ( 0 79 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2347 -6394 -511 )
+		local.e.angles = ( 0 79 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_wehrmact_soldier.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -1845 -6893 -511 )
+		local.e.angles = ( 0 105 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2268 -4658 -627 )
+		local.e.angles = ( 0 92 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -1691 -1761 -511 )
+		local.e.angles = ( 0 256 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	local.e = spawn models/human/german_kreigsmarine.tik
+	if( local.e != NULL ){
+		local.e.origin = ( -2617 -6845 -512 )
+		local.e.angles = ( 0 84 0 )
+		local.e droptofloor
+		local.e german
+		local.e thread countdeaths
+		local.e forceactivate
+		local.e attackplayer
+	}
+	wait 0.15
+	println( "^~^~^ EXFIL reinforcements up: 14 threaded into the gate count" )
+end
+
+coop_baked_0808:
+	//[user 2026-08-09] exfil cover - 5 crates placed in-game with build mode (build_m2l2b.dat),
+	//stacked on the dock where the post-blast fight happens.
+	//[user 2026-08-09] two 50-health kits at the sub-exit landing (user viewpos drops) - patch up
+	//as you come off the boat, before the dock fight. officer.scr:3579 medkit recipe.
+	//[user 2026-08-09] spawn HIGH and settle: -460 was fractionally under the walkway surface, so
+	//droptofloor fell through to the water and the kits were never seen. From +80 above the eye
+	//line they drop cleanly onto whatever the real floor is - and the probe prints where.
+	local.hk = spawn "models/items/item_50_healthbox.tik"
+	if( local.hk != NULL ){
+		local.hk.origin = ( -2302 -3790 -330 )
+		local.hk droptofloor
+		local.hk show
+		local.hk triggerable
+		println( "^~^~^ HEALTHKIT 1 at " + local.hk.origin )
+	}
+	local.hk = spawn "models/items/item_50_healthbox.tik"
+	if( local.hk != NULL ){
+		local.hk.origin = ( -2271 -3883 -330 )
+		local.hk droptofloor
+		local.hk show
+		local.hk triggerable
+		println( "^~^~^ HEALTHKIT 2 at " + local.hk.origin )
+	}
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -2089.490 -6473.609 -511.875 )
+	local.m.angles = ( 0 65 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -2000.992 -6505.186 -511.875 )
+	local.m.angles = ( 0 86 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -2034.972 -6489.574 -468.568 )
+	local.m.angles = ( 0 86 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1928.717 -6668.433 -515.875 )
+	local.m.angles = ( 0 44 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -2277.814 -6448.937 -515.875 )
+	local.m.angles = ( 0 94 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// blueprint  aerialphoto1.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( 4503.244 -6785.491 0.125 ) ( 0 0 0 ) "models/animate/aerialphoto1.tik" 1.0
+	// blueprint  naxosplans1.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( 5334.125 -6807.066 81.281 ) ( 90 0 0 ) "models/items/naxosplans1.tik" 0.700
+	// blueprint  naxosplans3.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -2416.232 -3880.932 -629.875 ) ( 90 0 0 ) "models/items/naxosplans3.tik" 0.400
+end
+
+
+coop_enigmaProp:
+	waitframe
+	if( $enigma == NULL ){ end }
+	//[user 2026-08-09] START OPEN, END CLOSED (user-inverted): she sits open and working on the
+	//shelf, types through the decrypt, and the case snaps shut when the contents are taken.
+	$enigma.model = "animate/enigmaopen.tik"
+	//[user 2026-08-08] SCALE + GLOW. The model renders correctly but is an accurate real-world
+	//Enigma - about 40x31x18 units, briefcase-sized - and unlit in a dark U-boat, so it reads as
+	//nothing at all. clipboard_pulse was visible only because its shader self-illuminates.
+	//2.2x makes it a piece of set dressing you can actually pick out; the glow is what tells you
+	//it is interactive, which is the job the pulse model used to do.
+	//[user 2026-08-09] SMALLER - 2.2 read as oversized in play. coop_enigmaScale tunes it live
+	//(set + re-enter the map), same pattern as coop_enigmaYaw below.
+	local.scl = float( getcvar "coop_enigmaScale" )
+	if( local.scl <= 0 ){ local.scl = 1.4 }
+	$enigma scale local.scl
+	$enigma rendereffects "+coopboss"
+	//[user 2026-08-08] START THE ANIMATION. enigmaclosed.tik declares `classname animate` and ships
+	//an idle .skc, and the BSP entity carried a testanim key - an animate model swapped in at
+	//runtime sits on frame nothing until its anim is started, which renders as an invisible
+	//entity. The log confirmed it was being SUBMITTED (SKELDRAW rc=141) while nothing appeared on
+	//screen, which is exactly that shape.
+	//[user 2026-08-09] FACING. The BSP entity ships `angle 270` - it faces -Y - and the machine
+	//opened away from the player, who comes down the boat from the +X end (spawn is 5056 -6704,
+	//the machine 3598 -6829). Flipped 180 to face back up the corridor. Exposed as a cvar because
+	//the right yaw is something you can only judge standing in front of it: set coop_enigmaYaw and
+	//re-enter the map rather than rebuilding to try each number. 0 is not selectable - use 360.
+	local.yaw = float( getcvar "coop_enigmaYaw" )
+	if( local.yaw == 0 ){ local.yaw = 90 }
+	$enigma.angles = ( 0 local.yaw 0 )
+	$enigma anim idle
+	$enigma show
+	println( "^~^~^ ENIGMA prop at " + $enigma.origin + " model " + $enigma.model )
+
+	//[user 2026-08-08] ANNOUNCE THE FIRST OBJECTIVE ONCE SOMEONE IS THERE TO SEE IT. This map
+	//posts every objective early in main: - the retail comment says "add them before players are
+	//on the server" to avoid start-of-map spam - so coop_obj_toast_all early-exits on
+	//$player.size < 1 and the "New Objective" card is shown to nobody. Every other coop map
+	//assigns objectives as it goes, which is why it only misbehaves here.
+	waitthread coop_mod/replace.scr::waitForPlayer
+	wait 2
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 1 "Decrypt the Enigma."
+end

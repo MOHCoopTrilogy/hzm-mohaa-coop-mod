@@ -14,6 +14,12 @@ exec global/auto.scr
 
 level waittill prespawn
 
+//*** HZM COOP - BAKED BUILD-MODE STRUCTURES
+
+	//[user 08-08] threaded from prespawn, not from main: mg_nest_manned ground-traces and spawns a
+	//live actor, so the world has to be up first.
+	thread coop_build_structs
+
 // Fade-in stuff.
 
 	exec coop_mod/replace.scr::physics_off // HZM coop - lock down all players (was $player physics_off)
@@ -93,6 +99,9 @@ waitthread coop_mod/replace.scr::waitForPlayer // HZM coop - coop-safe spawn gat
 // Run the thread that will end the mission if all your squadmates die
 
 	thread check_squad_death
+	thread coop_squad_watch	//[user 08-08] announce each squadmate lost, so the fail rule is visible
+	thread coop_mod/allysquad.scr::ally_squad_init	//[user 08-08] scaled health + downed-not-dead
+	thread coop_squad_objective	//[user 08-08] state the wipe rule as a visible objective
 
 // Initialize Nebelwerfers (tweak their pitch arc length)
 
@@ -888,6 +897,9 @@ scene12_yardfight:
 
 	spawn models/human/german_winter_Artillery-Crew "targetname" ("outhouse_dude") "type_attack" "cover"
 	$outhouse_dude thread spawned_enemy_start $outhouse_spawner.target
+	//[user 2026-08-08] bug-1596 group A - defined in v1.2.1, never bumped.
+	//"Close Encounters of the Turd Kind" - the one German who never made it off the latrine.
+	$outhouse_dude thread coop_outhouseDudeWatch
 
 	// Set the AI properties
 
@@ -954,7 +966,17 @@ toilet_flush:
 	goto toilet_flush
 end
 
+coop_outhouseDudeWatch:
+	//[user 2026-08-08] bug-1596 group A - defined in v1.2.1, never bumped.
+	self waittill death
+	thread coop_mod/challenges.scr::chal_team_bump "evt_turd_kind" 1
+end
+
 toilet_easteregg:
+	//[user 2026-08-08] "Latrine Duty". Hooked HERE and not on level.toiletcounter: that counter is
+	//reset to 0 a few lines below and the trigger is removed, so counting it could never be stable.
+	//Reaching this label at all means six flushes happened.
+	thread coop_mod/challenges.scr::chal_team_bump "evt_six_flushes" 1
 	//dprintln "FLUSH!"
 	local.ent = spawn EffectEntity "model" $easteregg.spawnmodel
 	local.ent.origin = $easteregg.origin
@@ -1685,6 +1707,10 @@ tigertank1_thread:
 
 	$tigertank1 thread gags/t2l1_tank_mgsoldier.scr::mgsoldier_spawn
 	thread coop_tank1DeathWatch		// HZM coop - FAILSAFE: obj3 counts even if tank 1 dies to the bombing run
+	//[user 2026-08-09] retail gap: obj 3 never gets a status-2 site anywhere (hidden at
+	//load :69, straight to complete :1823), so it is never announced. Toast only -
+	//deliberately NO status flip, the retail objective flow is left untouched.
+	if( level.gametype != 0 ){ waitthread coop_mod/objectives.scr::coop_obj_toast_all 3 "Use Sticky Bomb to Destroy Tank" }
 end
 
 //-------------------------------------------------------------------------
@@ -1917,6 +1943,81 @@ end
 // check_squad_death - waits until all your teammates are dead to end the scene
 //
 
+//===========================================================================
+// [user 08-08] SQUAD WATCH. The mission fails when level.friendly1/2/3 are all dead
+// (check_squad_death below) - a retail rule that gave the player NO feedback until it was
+// already lost ("I kept failing the mission and I have no idea why"). Announce each loss with
+// the count still standing, the same way m3l1b republishes "[N remaining]", so the squad reads
+// as something you are responsible for keeping alive rather than a hidden fail timer.
+//===========================================================================
+//===========================================================================
+// [user 08-08] "Keep the squad alive" as a REAL objective, not a side one. The wipe rule loses
+// the mission outright (check_squad_death), so listing it as optional would have been a lie -
+// it goes on the map's own objective channel as slot 6 (1-5 are the nebelwerfers, halftrack,
+// two tanks and the supply truck). Carries a live count in the map's own "[N remaining]" idiom,
+// republished by coop_squad_watch_one as each squadmate is lost.
+//===========================================================================
+coop_squad_objective:
+
+	while( !$player ){ wait 1 }
+	wait 2
+	waitthread coop_squad_obj_refresh
+
+end
+
+//===========================================================================
+// Republish objective 6 with the number of squadmates still standing.
+//===========================================================================
+coop_squad_obj_refresh:
+
+	local.left = 0
+	local.org = ( 0 0 0 )
+	if( level.friendly1 != NIL && level.friendly1 != NULL ){ if( isAlive level.friendly1 ){ local.left++; local.org = level.friendly1.origin } }
+	if( level.friendly2 != NIL && level.friendly2 != NULL ){ if( isAlive level.friendly2 ){ local.left++; local.org = level.friendly2.origin } }
+	if( level.friendly3 != NIL && level.friendly3 != NULL ){ if( isAlive level.friendly3 ){ local.left++; local.org = level.friendly3.origin } }
+
+	if( local.left > 0 ){
+		exec global/obj.scr 6 current ( "Keep the squad alive at all costs [" + local.left + " remaining]" ) local.org
+	}
+
+end
+
+coop_squad_watch:
+
+	local.f[1] = level.friendly1
+	local.f[2] = level.friendly2
+	local.f[3] = level.friendly3
+	local.n[1] = "Your first squadmate"
+	local.n[2] = "Your second squadmate"
+	local.n[3] = "Your last squadmate"
+
+	local.i = 1
+	while( local.i <= 3 ){
+		if( local.f[local.i] != NIL && local.f[local.i] != NULL ){
+			local.f[local.i] thread coop_squad_watch_one local.n[local.i]
+		}
+		local.i++
+	}
+
+end
+
+//===========================================================================
+coop_squad_watch_one local.who:
+
+	self waittill death
+
+	local.left = 0
+	if( level.friendly1 != NIL && level.friendly1 != NULL ){ if( isAlive level.friendly1 ){ local.left++ } }
+	if( level.friendly2 != NIL && level.friendly2 != NULL ){ if( isAlive level.friendly2 ){ local.left++ } }
+	if( level.friendly3 != NIL && level.friendly3 != NULL ){ if( isAlive level.friendly3 ){ local.left++ } }
+
+	if( local.left > 0 ){
+		iprintlnbold ( local.who + " is down - " + local.left + " left. Lose them all and the mission fails." )
+		thread coop_squad_obj_refresh
+	}
+
+end
+
 check_squad_death:
 
 	wait 1
@@ -1931,7 +2032,7 @@ check_squad_death:
 	{
 		end
 	}
-	iprintln "Your squad has been wiped out. You failed the mission."
+	iprintlnbold "Your squad has been wiped out. You failed the mission."	//[user 08-08] was iprintln - too quiet for a mission-ending event
 	wait 3
 	exec coop_mod/replace.scr::missionfailed // HZM coop - respawn-aware mission fail (maptest-safe)
 
@@ -2238,4 +2339,34 @@ coop_playerJustLeft:
 end
 
 coop_playerJustRespawned:
+end
+
+
+//===========================================================================
+// [user 08-08] MANNED MG42 NEST, baked from the 08-08 build-mode session
+// (coop_mod/save/build_t2l1.dat, four STRUCTURE placements). Build mode is a CAPTURE tool, not a
+// persistence layer: nothing reads that .dat at runtime, so the placement is gone on the next map
+// load until it is baked in here. Sandbag semicircle + a real TurretGun with a machinegunner-think
+// gunner ("<turret>" / "<turret>_gunner" targetname pair, which is what global/mg42_active.scr
+// binds against). Registered in no objective count, so it cannot make a mission gate uncompletable.
+//
+// YAW NORMALISED: the capture file records -34. A bare negative as a command ARGUMENT is the one
+// shape this project has never had a working precedent for (the parse-killer family is bug-1069,
+// and every previous bake used a positive yaw), and yaw is modular - so -34 is written as its
+// identical positive equivalent 326 and the question never arises.
+//===========================================================================
+coop_build_structs:
+
+	// coop_build STRUCTURE #1 mg_nest_manned
+	thread coop_mod/bunker.scr::mg_nest_manned ( -244.743 -4958.686 597.480 ) 326 1.000
+
+	// coop_build STRUCTURE #2 mg_nest_manned
+	thread coop_mod/bunker.scr::mg_nest_manned ( 270.704 -1605.905 859.572 ) 281 1.000
+
+	// coop_build STRUCTURE #3 mg_nest_manned
+	thread coop_mod/bunker.scr::mg_nest_manned ( -3808.012 631.257 1368.307 ) 326 1.000
+
+	// coop_build STRUCTURE #4 mg_nest_manned
+	thread coop_mod/bunker.scr::mg_nest_manned ( 2297.545 5630.397 2194.175 ) 206 1.000
+
 end

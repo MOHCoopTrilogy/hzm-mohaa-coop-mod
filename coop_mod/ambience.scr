@@ -46,6 +46,7 @@ coop_ambience_init:{
 	thread coop_ambience_combat_monitor
 	thread coop_ambience_bed local.bed
 	thread coop_ambience_sweetener
+	thread coop_ambience_barrage
 	println ( "^~^~^ AMBIENCE coop bed=" + local.bed )
 }end
 
@@ -242,4 +243,84 @@ coop_ambience_sweetener:{
 		wait 6
 		if( local.snd != NULL ){ local.snd remove }
 	}
+}end
+
+//=========================================================================
+// [user 08-08] INCOMING BARRAGE - shells landing AROUND the squad. Distinct from the sweetener
+// above, which is a distant rumble at 2000-4000 units with no impact: this one lands close enough
+// to see and hear, with a whistle-in and a real ground burst.
+//
+// DELIBERATELY HARMLESS (user call, 08-08). It does no radiusdamage at all - it is pressure and
+// atmosphere, not a damage source, so it can never produce an unfair death or a death the player
+// could not have avoided. If it should ever bite, that is a one-line addition here, not a redesign.
+//
+// OFF unless asked for: coop_ambBarrage 1, or level.coop_barrage = 1 from a map that wants it.
+// Knobs (all seeded nowhere, so the fallbacks below are the real defaults):
+//   coop_ambBarrageGap   seconds between shells, randomised +/- half again   (default 5)
+//   coop_ambBarrageMin   closest a shell may land, in units                  (default 400)
+//   coop_ambBarrageMax   furthest                                            (default 1400)
+//=========================================================================
+coop_ambience_barrage:{
+	while( 1 ){
+		//[user 08-08] per-MAP overrides take precedence over the cvars, so a mission can dial in its
+		//own feel (a distant background rumble vs shells walking over your position) without a player
+		//having to set anything, and without one map's taste leaking into every other map.
+		local.gap = float( getcvar "coop_ambBarrageGap" )
+		if( level.coop_barrageGap != NIL && level.coop_barrageGap > 0 ){ local.gap = level.coop_barrageGap }
+		if( local.gap < 1 ){ local.gap = 5 }
+		wait ( local.gap + randomfloat( local.gap ) )
+
+		local.on = 0
+		if( getcvar( "coop_ambBarrage" ) == "1" ){ local.on = 1 }
+		if( level.coop_barrage == 1 ){ local.on = 1 }
+		if( local.on == 0 ){ continue }
+		if( $player == NULL || $player.size < 1 ){ continue }
+
+		local.p = $player[ ( randomint $player.size ) + 1 ]
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+
+		local.mn = float( getcvar "coop_ambBarrageMin" )
+		if( level.coop_barrageMin != NIL && level.coop_barrageMin > 0 ){ local.mn = level.coop_barrageMin }
+		if( local.mn < 1 ){ local.mn = 400 }
+		local.mx = float( getcvar "coop_ambBarrageMax" )
+		if( level.coop_barrageMax != NIL && level.coop_barrageMax > 0 ){ local.mx = level.coop_barrageMax }
+		if( local.mx <= local.mn ){ local.mx = local.mn + 1000 }
+
+		//random bearing + distance in the band. Built by ADDITION of a randomised offset rather than
+		//a negative literal inside the vector - a bare negative in a vector literal is a parse killer.
+		local.span = local.mx - local.mn
+		local.dx = local.mn + ( randomint local.span )
+		local.dy = local.mn + ( randomint local.span )
+		if( ( randomint 2 ) == 1 ){ local.dx = 0 - local.dx }
+		if( ( randomint 2 ) == 1 ){ local.dy = 0 - local.dy }
+
+		local.pos = local.p.origin
+		local.pos[0] = local.pos[0] + local.dx
+		local.pos[1] = local.pos[1] + local.dy
+		//put it on the floor, or the burst hangs in the air at player height
+		local.pos[2] = waitthread coop_mod/bunker.scr::groundz local.pos
+
+		//whistle first, then the burst - the lead-in is what sells it as incoming
+		local.snd = spawn script_origin
+		local.snd.origin = local.pos
+		local.snd playsound ( "coop_amb_artillery" + ( ( randomint 4 ) + 1 ) )
+		wait ( 0.6 + randomfloat( 0.5 ) )
+
+		local.fx = spawn script_model
+		local.fx model "models/animate/fx_explosion_mine.tik"
+		local.fx.origin = local.pos
+		local.fx anim start
+		thread coop_barrage_cleanup local.fx local.snd
+	}
+}end
+
+//=========================================================================
+// Retire one barrage shell's fx + sound origin. Separate thread so the loop above keeps its
+// cadence instead of blocking for the lifetime of every burst.
+//=========================================================================
+coop_barrage_cleanup local.fx local.snd:{
+	wait 3
+	if( local.fx != NIL && local.fx != NULL ){ local.fx remove }
+	if( local.snd != NIL && local.snd != NULL ){ local.snd remove }
 }end

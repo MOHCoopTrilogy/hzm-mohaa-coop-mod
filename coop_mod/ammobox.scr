@@ -121,9 +121,14 @@ ammobox_hud_monitor local.player:{
 		wait 0.2
 	}
 
-	ihuddraw_alpha  local.player 45 0
-	ihuddraw_alpha  local.player 46 0
-	ihuddraw_string local.player 46 ""
+	//[user 2026-08-10] NULL guard: this teardown runs AFTER the display loop above, and that
+	//loop exits precisely BECAUSE the player went away (disconnect / spectate / map change).
+	//Measured in the 2-player test as "Script Error : Player entity is NULL for ihuddraw_*".
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 45 0
+		ihuddraw_alpha  local.player 46 0
+		ihuddraw_string local.player 46 ""
+	}
 }end
 
 
@@ -133,15 +138,21 @@ ammobox_hud_monitor local.player:{
 // A placed box can NEVER be picked back up (drop-only) - there is no owner special case. (slot 47)
 //=========================================================================
 ammobox_proximity_monitor local.player:{
+	//[user 2026-08-10] "[USE] Resupply ammo" moved 47 -> 148. The engine multiplies alpha by
+	//s_hudFadeAlpha for every slot BELOW 100 when the player is calm (cg_drawtools.cpp:651-653),
+	//and standing at a dropped crate IS calm - so the prompt faded out and the box looked inert to
+	//anyone who had not just dropped it. Identical to the cover-removal report. Slots 45 (icon) and
+	//46 (count) deliberately LEFT below 100: they are bottom-left chrome and fading them is the
+	//intended HUD behaviour. FIFTH instance of this trap - see _research/hud_slot_map.md.
 //=========================================================================
 	local.hintstate = 0	// 0 = none, 1 = "[USE] resupply", 2 = "depleted"
 
-	ihuddraw_virtualsize local.player 47 1
-	ihuddraw_align       local.player 47 center bottom
-	ihuddraw_font        local.player 47 "verdana-14"
-	ihuddraw_color       local.player 47 1 1 1
-	ihuddraw_rect        local.player 47 0 -36 0 0
-	ihuddraw_alpha       local.player 47 0
+	ihuddraw_virtualsize local.player 148 1
+	ihuddraw_align       local.player 148 center bottom
+	ihuddraw_font        local.player 148 "verdana-14"
+	ihuddraw_color       local.player 148 1 1 1
+	ihuddraw_rect        local.player 148 0 -36 0 0
+	ihuddraw_alpha       local.player 148 0
 
 	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
 		local.f = 0
@@ -183,8 +194,8 @@ ammobox_proximity_monitor local.player:{
 			if( local.n >= local.maxn ){
 				// this player has exhausted THIS box: deny. No pick-up path exists (drop-only).
 				if( local.hintstate != 2 ){
-					ihuddraw_string local.player 47 "Ammo box depleted (no resupplies left for you)"
-					ihuddraw_alpha  local.player 47 0.55
+					ihuddraw_string local.player 148 "Ammo box depleted (no resupplies left for you)"
+					ihuddraw_alpha  local.player 148 0.55
 					local.hintstate = 2
 				}
 				if( local.player.useheld == 1 ){
@@ -195,8 +206,8 @@ ammobox_proximity_monitor local.player:{
 				}
 			} else {
 				if( local.hintstate != 1 ){
-					ihuddraw_string local.player 47 "[USE] Resupply ammo"
-					ihuddraw_alpha  local.player 47 0.85
+					ihuddraw_string local.player 148 "[USE] Resupply ammo"
+					ihuddraw_alpha  local.player 148 0.85
 					local.hintstate = 1
 				}
 				if( local.player.useheld == 1 ){
@@ -210,21 +221,26 @@ ammobox_proximity_monitor local.player:{
 					local.oen = level.coop_ammobox_owner[local.nearslot]
 					if( local.oen != NIL && local.oen != local.player.entnum ){
 						if( level.coop_xp_boxpay == NIL ){ level.coop_xp_boxpay = 0 }
-						if( level.coop_xp_boxpay < 7 ){
-							local.bi = 1
-							while( local.bi <= $player.size ){
-								if( $player[local.bi] != NULL && $player[local.bi].entnum == local.oen ){
+						local.bi = 1
+						while( local.bi <= $player.size ){
+							if( $player[local.bi] != NULL && $player[local.bi].entnum == local.oen ){
+								//[user 2026-08-08] "Quartermaster" - every teammate resupply counts,
+								//deliberately OUTSIDE the coop_xp_boxpay < 7 cap below. That cap exists to
+								//stop XP farming from one box; the challenge is a lifetime career total, so
+								//capping it would make a 25-resupply goal unreachable on a busy map.
+								thread coop_mod/challenges.scr::chal_bump $player[local.bi] "ammoboxuse" 1
+								if( level.coop_xp_boxpay < 7 ){
 									level.coop_xp_boxpay = level.coop_xp_boxpay + 1
 									thread coop_mod/xp.scr::xp_award $player[local.bi] 10 "support"
-									break
 								}
-								local.bi++
+								break
 							}
+							local.bi++
 						}
 					}
 					if( local.n >= local.maxn ){
-						ihuddraw_string local.player 47 "Ammo box depleted (no resupplies left for you)"
-						ihuddraw_alpha  local.player 47 0.55
+						ihuddraw_string local.player 148 "Ammo box depleted (no resupplies left for you)"
+						ihuddraw_alpha  local.player 148 0.55
 						local.hintstate = 2
 					}
 					// consume the hold: ONE press = ONE refill (a held USE must not chain refills)
@@ -233,11 +249,16 @@ ammobox_proximity_monitor local.player:{
 			}
 		} else {
 			if( local.hintstate != 0 ){
-				ihuddraw_alpha local.player 47 0
+				ihuddraw_alpha local.player 148 0
 				local.hintstate = 0
 			}
 		}
 	}
 
-	ihuddraw_alpha local.player 47 0
+	//[user 2026-08-10] NULL guard: this teardown runs AFTER the display loop above, and that
+	//loop exits precisely BECAUSE the player went away (disconnect / spectate / map change).
+	//Measured in the 2-player test as "Script Error : Player entity is NULL for ihuddraw_*".
+	if( local.player != NULL ){
+		ihuddraw_alpha local.player 148 0
+	}
 }end

@@ -412,6 +412,22 @@ xp_ping_duck local.p:{
 
 //=========================================================================
 xp_award local.player local.amount local.reason local.label:{
+	//[user 2026-08-10] PROBE, first statement on purpose. The previous placement anchored on a line
+	//that occurs EARLIER in this file too, so replace(...,1) put it in a different label entirely and
+	//the resulting "0 entry lines" measured nothing. Anchor on the unique label line instead.
+	//Gated + scoped to reason==revive so the other ~13 award sites stay quiet.
+	if( local.reason == "revive" && getcvar( "coop_aggroDebug" ) == "1" ){
+		local.dOk = 0
+		local.dCls = "none"
+		if( local.player != NULL && local.player != NIL ){ local.dOk = 1; local.dCls = local.player.classname }
+		local.dAmt = local.amount
+		if( local.dAmt == NIL ){ local.dAmt = -1 }
+		local.dIni = level.coop_xp_init
+		if( local.dIni == NIL ){ local.dIni = -1 }
+		local.dEn = level.coop_xp_enabled
+		if( local.dEn == NIL ){ local.dEn = -1 }
+		println( "^~^~^ XPPROBE entry playerOk=" + local.dOk + " cls=" + local.dCls + " amt=" + local.dAmt + " init=" + local.dIni + " enabled=" + local.dEn )
+	}
 	if( level.coop_xp_init != 1 ){ waitthread xp_init }
 	if( level.coop_xp_enabled != 1 ){ end }
 	// guard BOTH NULL (freed entity) and NIL (unset var, e.g. an early DBNO team-revive when
@@ -427,6 +443,20 @@ xp_award local.player local.amount local.reason local.label:{
 	local.amount = int( local.amount * level.coop_xp_scale )
 	if( local.amount <= 0 ){ end }
 
+	//[user 2026-08-10] bug-1668 probe #3. Entry now proven reachable with playerOk=1 cls=Player
+	//amt=10 init=1 enabled=1, so the award dies BELOW that. This guard is the prime suspect and it
+	//ends the label silently. Report the two flags identify is supposed to set. NOT fixed blind:
+	//defaulting a NIL total to 0 could ZERO a real saved total if identify simply had not loaded
+	//yet, so measure first and choose the repair afterwards.
+	if( local.reason == "revive" && getcvar( "coop_aggroDebug" ) == "1" ){
+		local.dTot = local.player.flags["coop_xp_total"]
+		if( local.dTot == NIL ){ local.dTot = "NIL" }
+		local.dId = local.player.flags["coop_xp_id"]
+		if( local.dId == NIL ){ local.dId = "NIL" }
+		local.dMap = local.player.flags["coop_xp_map"]
+		if( local.dMap == NIL ){ local.dMap = "NIL" }
+		println( "^~^~^ XPPROBE totalcheck total=" + local.dTot + " id=" + local.dId + " map=" + local.dMap )
+	}
 	if( local.player.flags["coop_xp_total"] == NIL ){ end }
 
 	local.player.flags["coop_xp_total"] = local.player.flags["coop_xp_total"] + local.amount
@@ -476,6 +506,14 @@ xp_award local.player local.amount local.reason local.label:{
 // coop_xpKillPopup 0 disables (coop settings).
 //=========================================================================
 xp_micro_popup local.player local.amount local.reason local.label:{
+	//[user 2026-08-10] bug-1668 SOLVED, and it was never the award. Measured: xp_award runs to
+	//completion for a revive (probe: playerOk=1 amt=10 init=1 enabled=1 total=96) and the saved total
+	//really did go 96 -> 106. The XP was always granted; only this POPUP was invisible, because it
+	//drew on slots 73-75 and the engine fades every slot BELOW 100 by s_hudFadeAlpha when the player
+	//is calm (cg_drawtools.cpp:651-653). Reviving means standing still holding USE for ~5s, which is
+	//exactly "calm" - so the text rendered at alpha ~0. Kill XP popped fine only because shooting
+	//keeps the HUD awake. Moved to 142-144, the fade-exempt block (141 = blueprint ack).
+	//Same trap as the revive HUD at 21-26 earlier the same day - third sighting, see hud_slot_map.md.
 	if( local.player == NULL ){ end }
 	if( getcvar "coop_xpKillPopup" == "0" ){ end }
 	if( level.coop_xp_summaryActive == 1 ){ end }		// [fix] no crosshair micro-popups while the debrief card is up
@@ -491,12 +529,13 @@ xp_micro_popup local.player local.amount local.reason local.label:{
 	}
 
 	local.slot = 0
-	if( local.player.flags["coop_xp_mp73"] != 1 ){ local.slot = 73 }
-	else if( local.player.flags["coop_xp_mp74"] != 1 ){ local.slot = 74 }
-	else if( local.player.flags["coop_xp_mp75"] != 1 ){ local.slot = 75 }
+	if( local.player.flags["coop_xp_mp142"] != 1 ){ local.slot = 142 }
+	else if( local.player.flags["coop_xp_mp143"] != 1 ){ local.slot = 143 }
+	else if( local.player.flags["coop_xp_mp144"] != 1 ){ local.slot = 144 }
 	if( local.slot == 0 ){ end }
 	local.player.flags["coop_xp_mp" + local.slot] = 1
-	local.ly = 254 + ((local.slot - 73) * 13)
+	//[user 2026-08-10] bug-1668: slots moved 73-75 -> 142-144, so the row offset rebases too.
+	local.ly = 254 + ((local.slot - 142) * 13)
 
 	ihuddraw_virtualsize local.player local.slot 1
 	ihuddraw_align       local.player local.slot center top
@@ -633,7 +672,11 @@ xp_ai_killed local.victim local.killer:{
 	// [235/307] cover-system kills: blindfire OR killing FROM cover, never both.
 	// "From cover" = the take-cover peek pose (coop_incover) OR standing at a deployed sandbag.
 	local.nearCover = 0
-	if( local.killer.coop_incover == 1 ){ local.nearCover = 1 }
+	//[user 2026-08-07] Was `== 1`, which is the ONE value meaning NOT in cover. takecover.scr's
+	//own header defines coop_incover as 0 none / 1 requested-no-pose / 2 standing back-to-wall /
+	//3 crouched low cover, so the real poses (2, 3) never qualified and a cover kill always paid
+	//plain kill XP. >= 2 is the actual "in a validated cover pose" test.
+	if( local.killer.coop_incover >= 2 ){ local.nearCover = 1 }
 	else { local.nearCover = waitthread xp_nearDeployedCover local.killer }
 	if( local.killer.coop_bf_t != NIL && (level.time - local.killer.coop_bf_t) < 0.75 ){ local.isBlindfire = 1 }
 	else if( local.nearCover == 1 ){ local.isCoverKill = 1 }

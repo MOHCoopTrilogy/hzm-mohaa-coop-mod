@@ -1,0 +1,382 @@
+//=========================================================================
+// [user 08-08] ALLIED SQUAD SURVIVABILITY
+//
+// The problem this solves is structural, not a bug. Several retail missions fail when their
+// allied NPC squad is wiped (t2l1's check_squad_death is the one that surfaced it), and that
+// rule was balanced for ONE player's pace. This mod duplicates enemy spawns by player count,
+// so in coop the same three ~100hp NPCs face two to four times the opposition they were
+// authored against - they evaporate, and the mission fails with no warning and no counterplay.
+//
+// Two changes, deliberately paired:
+//   1. HEALTH SCALES with the player count, the same axis the enemy counts already scale on.
+//   2. DOWNED, NOT DEAD - at zero an ally drops instead of dying, and a player can pick them
+//      back up by standing over them. Left alone, they bleed out and die for real.
+//
+// The failure stays a failure: a DOWN ally is still isAlive, so the retail wipe check does not
+// fire while anyone is recoverable, and it fires normally once they have all actually died.
+// This is also what lets the blast shield come off - explosions can gib and bleed the squad
+// without deleting the mission, because being flattened is now survivable rather than terminal.
+//
+// TRAP (bug-1323): an entity sitting at health <= 0 that never ran its death is UNKILLABLE.
+// The downed state therefore parks them at 1hp, never at 0 - and deliberately leaves them
+// DAMAGEABLE, so a scripted death can never be absorbed and leave a script waiting forever.
+//=========================================================================
+
+//=========================================================================
+// Start the system for one map. Safe to call more than once.
+//=========================================================================
+ally_squad_init:{
+	if( level.coop_allySquadOn == 1 ){ end }
+	level.coop_allySquadOn = 1
+
+	if( level.gametype == 0 ){ end }		//single player keeps retail behaviour exactly
+
+	//the friendlies are created by global/friendly.scr::friendlygen, which is threaded around the
+	//same moment as this - so wait for them rather than reading NIL and silently doing nothing.
+	//Bounded: if a map has no friendly squad at all, give up instead of spinning forever.
+	local.tries = 0
+	while( ( level.friendly1 == NIL || level.friendly1 == NULL ) && ( level.friendlys == NIL || level.friendlys < 1 ) ){
+		wait 1
+		local.tries++
+		if( local.tries > 30 ){
+			println( "^~^~^ ALLYSQUAD no friendly squad on this map - nothing to manage" )
+			end
+		}
+	}
+
+	//[user 08-08] TWO squad shapes ship in the trilogy and they are not interchangeable:
+	//  - t2l1 and friends name them level.friendly1 / friendly2 / friendly3
+	//  - t2l3 and friends use an ARRAY, level.friendly[1..level.friendlys]
+	//Reading only the first shape is why this managed exactly zero allies on an array map - it found
+	//NIL three times and ended, silently, looking like it had run. Handle both.
+	local.n = 0
+
+	//shape A: the numbered trio
+	if( level.friendly1 != NIL && level.friendly1 != NULL ){ local.n++; local.f[local.n] = level.friendly1 }
+	if( level.friendly2 != NIL && level.friendly2 != NULL ){ local.n++; local.f[local.n] = level.friendly2 }
+	if( level.friendly3 != NIL && level.friendly3 != NULL ){ local.n++; local.f[local.n] = level.friendly3 }
+
+	//shape B: the array. level.friendlys is the authored count; guard it rather than trusting .size,
+	//because an empty morlang array reports -1 (see the mohaa script notes).
+	if( level.friendlys != NIL && level.friendlys > 0 ){
+		local.j = 1
+		while( local.j <= level.friendlys ){
+			if( level.friendly[local.j] != NIL && level.friendly[local.j] != NULL ){
+				//do not manage the same actor twice when a map populates BOTH shapes
+				local.dup = 0
+				local.k = 1
+				while( local.k <= local.n ){
+					if( local.f[local.k] == level.friendly[local.j] ){ local.dup = 1 }
+					local.k++
+				}
+				if( local.dup == 0 ){
+					local.n++
+					local.f[local.n] = level.friendly[local.j]
+				}
+			}
+			local.j++
+		}
+	}
+
+	if( local.n < 1 ){
+		println( "^~^~^ ALLYSQUAD found no allies in either shape - nothing to manage" )
+		end
+	}
+
+	local.i = 1
+	while( local.i <= local.n ){
+		if( local.f[local.i] != NIL && local.f[local.i] != NULL ){
+			waitthread ally_scale_health local.f[local.i]
+			local.f[local.i] thread ally_watch
+		}
+		local.i++
+	}
+	println( "^~^~^ ALLYSQUAD managing " + local.n + " allies" )
+}end
+
+//=========================================================================
+// Health scaled to the squad it is actually fighting. coop_allyHealthMult is the per-EXTRA
+// player multiplier, so solo play is untouched and a full team gets a proportionally tougher
+// escort rather than a set of instant casualties.
+//=========================================================================
+ally_scale_health local.ally:{
+	if( local.ally == NULL ){ end }
+	//same two exclusions as the watcher: never touch an actor a script is deliberately protecting.
+	//Scaling an invulnerable ally would multiply keepInvulnerable's 1000000 for no reason.
+	if( local.ally.coop_noDbno == 1 ){ end }
+	if( local.ally.health > 100000 ){ end }
+
+	local.n = 1
+	if( $player != NULL ){ local.n = $player.size }
+	if( local.n < 1 ){ local.n = 1 }
+
+	local.mult = float( getcvar "coop_allyHealthMult" )
+	if( local.mult <= 0 ){ local.mult = 0.75 }
+
+	local.base = local.ally.health
+	if( local.base == NIL || local.base < 1 ){ end }
+
+	local.scaled = local.base * ( 1 + ( local.mult * ( local.n - 1 ) ) )
+	//healthonly, NOT health: Entity::EventSetHealth also rewrites max_health, and several
+	//systems gate on health/max_health ratios (see the dbno.scr bug-1243 note).
+	local.ally.health = local.scaled
+	local.ally.coop_allyBase = local.scaled
+
+	println( "^~^~^ ALLYSQUAD scaled " + local.ally.targetname + " " + local.base + " -> " + local.scaled + " players " + local.n )
+}end
+
+//=========================================================================
+// Per-ally watcher. self is the ally.
+//=========================================================================
+ally_watch:{
+	if( self == NULL ){ end }
+
+	//[user 08-08] DO NOT MANAGE actors that are protected on purpose:
+	//  - coop_noDbno is the explicit opt-out a map sets on an integral character, or before a
+	//    SCRIPTED death that has to stand (a story kill must not be interceptable).
+	//  - absurd health is what the invulnerability helpers actually do - replace.scr::keepInvulnerable
+	//    parks health at 1000000 and re-floors it above 500000 (Major Grillo on m1l2a; t1l3 does the
+	//    same for its captain). Downing one of those would fight the script that is keeping it alive.
+	if( self.coop_noDbno == 1 ){ end }
+	if( self.health > 100000 ){ end }
+
+	self.coop_allyDown = 0
+
+	local.floor = float( getcvar "coop_allyDownAt" )
+	if( local.floor <= 0 ){ local.floor = 12 }
+
+	while( 1 ){
+		if( self == NULL ){ end }
+		if( !isAlive self ){ end }
+
+		if( self.coop_allyDown != 1 ){
+			if( self.health <= local.floor ){
+				waitthread ally_go_down self
+				if( self == NULL ){ end }
+			}
+		}
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Drop an ally into the downed state and start their bleed-out.
+//=========================================================================
+ally_go_down local.ally:{
+	if( local.ally == NULL ){ end }
+	if( local.ally.coop_allyDown == 1 ){ end }
+	if( local.ally.coop_noDbno == 1 ){ end }
+	if( local.ally.health > 100000 ){ end }		//intentionally invulnerable - leave it to the script holding it up
+
+	//[user 08-08] ONE second wind each, then it counts. A squadmate you have already picked up once
+	//dies for real the next time - so the rescue stays a genuine save rather than an infinite buffer,
+	//and a squad can still be ground down over a long fight.
+	if( local.ally.coop_allyDowns == NIL ){ local.ally.coop_allyDowns = 0 }
+	if( local.ally.coop_allyDowns >= 1 ){ end }
+	local.ally.coop_allyDowns = 1
+
+	local.ally.coop_allyDown = 1
+	//[user 2026-08-08] "Nobody Bled Out" compares this against level.coop_allyRevN at mission
+	//complete. Counted HERE rather than from coop_allyDowns so it stays a per-map tally - the flag
+	//on the ally is a lifetime once-only marker and would not reset across a map change.
+	if( level.coop_allyDownN == NIL ){ level.coop_allyDownN = 0 }
+	level.coop_allyDownN = level.coop_allyDownN + 1
+
+	//[user 08-08] DELIBERATELY STILL DAMAGEABLE. This started out as 1hp + `nodamage`, which was a
+	//soft-lock waiting to happen: Entity::Damage returns immediately when takedamage is DAMAGE_NO
+	//(entity.cpp:2725), so ANY scripted death aimed at a downed ally was silently absorbed - and if a
+	//player then revived them, the script waiting on that death hung forever. Leaving them damageable
+	//removes the entire class: a scripted kill, an explosion, or a stray round all land normally and
+	//the death event always fires. The cost is honest - a downed ally in the open will usually be
+	//finished off before you reach him, and that is the trade we chose over a hang.
+	//Still 1, never 0: an entity parked at <= 0 that never ran its death is UNKILLABLE (bug-1323).
+	local.ally.health = 1
+	local.ally exec global/disable_ai.scr
+
+	//[user 08-08] the PLAYER's DBNO animation, not a crouch. Both aliases live in
+	//models/player/base/anims_shared.txt - the SHARED human set - so an AI actor can play them
+	//exactly as a player does: coop_dbno_collapse is riflep_crawltofloor (the drop), coop_dbno_idle
+	//is t2l3's InjuredCycle (the ground writhe). Checked before use; a name that is not on the
+	//model would simply not animate, and the ally would stand there looking fine while downed.
+	//disable_ai above is what stops their own think from overriding these.
+	local.ally anim coop_dbno_collapse
+	local.ally thread ally_down_anim
+
+	//FINDABILITY, three ways, because a downed ally in a firefight is otherwise invisible:
+	//  1. the same spinning medkit + red glow a downed PLAYER gets (dbno.scr::dbno_marker_manager) -
+	//     reused verbatim so a downed ally reads identically to a downed teammate, no new visual
+	//     language to learn;
+	//  2. the cgame overhead star, drawn for any actor carrying the coopboss renderfx
+	//     (CG_ActorOverheadIcon, cg_modelanim.c:227 - a downed ally is still isAlive, and the icon
+	//     is skipped only for EF_DEAD). Quoted token: an unquoted +flag is a whole-file parse
+	//     killer (bug-533);
+	//  3. the announcement below.
+	local.ally rendereffects "+coopboss"
+	local.ally thread ally_down_marker
+	iprintlnbold ( "A squadmate is DOWN - look for the medkit marker and stand over them!" )
+	println( "^~^~^ ALLYSQUAD down " + local.ally.targetname )
+
+	//deliberately GENEROUS (user call): a downed ally should be a job you can finish, not a sprint.
+	local.bleed = float( getcvar "coop_allyBleedOut" )
+	if( local.bleed <= 0 ){ local.bleed = 120 }
+
+	local.t = 0
+	while( local.t < local.bleed ){
+		if( local.ally == NULL ){ end }
+		if( local.ally.coop_allyDown != 1 ){ end }		//revived by someone
+
+		//they can be finished off now that they stay damageable - stop managing a corpse
+		if( !isAlive local.ally ){
+			local.ally.coop_allyDown = 0
+			println( "^~^~^ ALLYSQUAD downed ally was finished off " + local.ally.targetname )
+			end
+		}
+
+		//[user 08-08] SCRIPTED-DEATH WATCHDOG - soft-lock guard.
+		//Belt-and-braces since the down state no longer uses `nodamage`. Entity::Kill sets health = 0
+		//and then calls Damage, and Damage returns early when health <= 0 (entity.cpp:2725) - so a
+		//`kill` can still leave an actor at zero having never run its death: bug-1323's unkillable
+		//entity, and a hang for anything doing `waittill death` on it.
+		//Zero health while downed can only mean something external zeroed them, because the down
+		//state parks them at 1. Honour it and finish the death properly so the waiter gets its event.
+		if( local.ally.health <= 0 ){
+			local.ally.coop_allyDown = 0
+			local.ally rendereffects "-coopboss"
+			local.ally takedamage
+			local.ally.health = 1
+			println( "^~^~^ ALLYSQUAD scripted-kill detected while down - releasing " + local.ally.targetname )
+			local.ally kill
+			end
+		}
+
+		//a living player close enough counts as picking them up
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.p = $player[local.pi]
+			if( local.p != NULL ){
+				if( isAlive local.p ){
+					local.d = vector_length ( local.p.origin - local.ally.origin )
+					local.rd = float( getcvar "coop_allyReviveDist" )
+					if( local.rd <= 0 ){ local.rd = 96 }
+					if( local.d < local.rd ){
+						waitthread ally_revive local.ally local.p
+						end
+					}
+				}
+			}
+			local.pi++
+		}
+
+		wait 0.5
+		local.t = local.t + 0.5
+	}
+
+	//nobody came: die for real, and let the map's own wipe check see it
+	if( local.ally == NULL ){ end }
+	local.ally.coop_allyDown = 0
+	local.ally rendereffects "-coopboss"
+	local.ally takedamage
+	iprintlnbold ( "A squadmate bled out." )
+	println( "^~^~^ ALLYSQUAD bledout " + local.ally.targetname )
+	local.ally kill
+}end
+
+//=========================================================================
+// Put a downed ally back in the fight.
+//=========================================================================
+ally_revive local.ally local.player:{
+	if( local.ally == NULL ){ end }
+	//[user 08-08] refuse to revive someone a script has already zeroed - see the watchdog above.
+	//Reviving them would swallow a scripted death and hang whatever is waiting on it.
+	if( local.ally.health <= 0 ){ end }
+	local.ally.coop_allyDown = 0
+
+	local.back = local.ally.coop_allyBase
+	if( local.back == NIL || local.back < 1 ){ local.back = 100 }
+	local.frac = float( getcvar "coop_allyReviveFrac" )
+	if( local.frac <= 0 ){ local.frac = 0.5 }
+
+	local.ally rendereffects "-coopboss"
+	local.ally takedamage
+	local.ally.health = local.back * local.frac
+	local.ally crouch 0
+	local.ally exec global/enable_ai.scr
+
+	if( local.player != NULL ){
+		iprintlnbold ( local.player.netname + " got a squadmate back on their feet - that was his last one." )
+		//[user 08-08] 5 XP, half what reviving a PLAYER pays (dbno.scr awards 10) - an ally is worth
+		//less than a teammate but the save should still register. Same "revive" category, so it rolls
+		//into the existing lifetime revive tracking rather than inventing a parallel one.
+		thread coop_mod/xp.scr::xp_award local.player 5 "revive" "Revived Ally"
+		//[user 2026-08-08] "Corpsman, Forward" (10 lifetime) + "Field Hospital" (do it while you are
+		//yourself under fire). Deliberately a SEPARATE stat from the player-revive one: this is a
+		//different act with a different risk profile, and folding them together would let a player
+		//finish an ally-medic goal without ever touching an ally.
+		thread coop_mod/challenges.scr::chal_bump local.player "allyrevive" 1
+		//"under fire" = the reviver took damage in the last 3s. coop_lastHurtT is stamped by the
+		//damage path; NIL means never hurt this map, which must not read as "hurt at time 0".
+		if( local.player.coop_lastHurtT != NIL && (level.time - local.player.coop_lastHurtT) < 3 ){
+			thread coop_mod/challenges.scr::chal_bump local.player "cc_field_hosp" 1
+		}
+		//"Nobody Bled Out" is a per-map team feat: count recoveries, compare at mission complete
+		//against the number that went down (ally_go_down bumps coop_allyDownN).
+		if( level.coop_allyRevN == NIL ){ level.coop_allyRevN = 0 }
+		level.coop_allyRevN = level.coop_allyRevN + 1
+	}
+	println( "^~^~^ ALLYSQUAD revived " + local.ally.targetname )
+
+	//watch them again - the watcher ended when they went down
+	local.ally thread ally_watch
+}end
+
+//=========================================================================
+// The downed-ally marker: spinning medkit + red glow, lifted straight from
+// dbno.scr::dbno_marker_manager so a downed ally looks exactly like a downed player.
+// self is the ally. Ends itself the moment they stop being down, however that happens
+// (revived, bled out, or the entity went away).
+//=========================================================================
+ally_down_marker:{
+	if( self == NULL ){ end }
+
+	local.medkit = spawn script_model
+	local.medkit model "models/items/item_50_healthbox.tik"
+	local.medkit notsolid
+	local.medkit scale 0.5
+	local.medkit.origin = self.origin + (0 0 70)
+
+	local.glow = spawn script_model
+	local.glow model "fx/dummy.tik"
+	local.glow.origin = self.origin
+	local.glow light (1 0 0)
+	local.glow lightRadius 200
+	local.glow lightOn
+	local.glow notsolid
+
+	local.spin = 0
+	wait 0.1
+	while( self != NULL && self.coop_allyDown == 1 ){
+		local.medkit.origin = self.origin + (0 0 70)
+		local.glow.origin = self.origin
+		local.spin = local.spin + 10
+		if( local.spin >= 360 ){ local.spin = 0 }
+		local.medkit.angles = (90 local.spin 0)
+		waitframe
+	}
+
+	if( local.medkit != NULL ){ local.medkit delete }
+	if( local.glow   != NULL ){ local.glow   delete }
+}end
+
+//=========================================================================
+// Hold the downed ally in the injured ground cycle for as long as they are down.
+// self is the ally. Re-issued on a timer rather than `waittill animdone` on purpose: a revive
+// (enable_ai) can interrupt the anim, and an animdone that never arrives would strand this
+// thread - the exact failure this project keeps paying for (see the conversation-guard trap).
+//=========================================================================
+ally_down_anim:{
+	if( self == NULL ){ end }
+	while( self != NULL && self.coop_allyDown == 1 ){
+		self anim coop_dbno_idle
+		wait 3
+	}
+}end

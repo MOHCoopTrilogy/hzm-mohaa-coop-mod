@@ -33,16 +33,40 @@
 
 	//[200] Smithy - make them work with coop
 	if (level.gametype != 0){
-		if (self.enemy.classname == "Player" && !self.flags["coop_isAttacking"] && thread coop_mod/aihandler.scr::canseeUndisguisedPlayers){
-			thread coop_mod/aihandler.scr::attackPlayer self.enemy
-			thread coop_mod/aihandler.scr::sentientIsSeen self self.enemy NIL 	//check to see if anyone can see him spot you
-			thread coop_mod/aihandler.scr::sentientIsHeard self self.enemy 		//check to see if anyone can hear him spot you	
-			self aimat self.enemy
-			wait 0.1
-			end
+		//[user 2026-08-10] PER-TARGET DISGUISE GATE (master plan v2 Step 2, commit A1).
+		//WAS: `&& thread coop_mod/aihandler.scr::canseeUndisguisedPlayers`. Two defects in one term.
+		//(1) `thread` starts a label ASYNCHRONOUSLY and evaluates to a HANDLE, not to the return
+		//value, so the term was ALWAYS TRUTHY - this guard never guarded anything.
+		//(2) Even read correctly it is a ROOM TEST ("can I see ANY undisguised player") used to
+		//decide whether to attack THIS enemy. In single player those are the same question; with
+		//four players they are not, so one man drawing a weapon three rooms away made this guard
+		//attack the disguised player standing in front of him, mid-papers-check.
+		//NOW: the engine's own per-target truth, is_disguised (maintained per frame in coop since
+		//bug-1638). Read into a local AFTER the classname test - is_disguised is a Player getter and
+		//Morpheus && is not relied on to short-circuit.
+		if (self.enemy != NULL && self.enemy.classname == "Player" && !self.flags["coop_isAttacking"]){
+			local.edisg = self.enemy.is_disguised
+			if (local.edisg != 1){
+				thread coop_mod/aihandler.scr::attackPlayer self.enemy
+				thread coop_mod/aihandler.scr::sentientIsSeen self self.enemy NIL 	//check to see if anyone can see him spot you
+				thread coop_mod/aihandler.scr::sentientIsHeard self self.enemy 		//check to see if anyone can hear him spot you	
+				self aimat self.enemy
+				wait 0.1
+				end
+			}
 		}
 	}
 
+	//[user 2026-08-09] SALUTE STALL PROBE. A card player stood up and never sat back down.
+	//He DID enter the state (engine logged "Saluting guy...." twice), so the suspect is the
+	//`self waittill flaggedanimdone` below: setmotionanim builds an anim NAME from weapongroup
+	//+ voicetype, and the retail TIKs only define den_(unarmed|rifle)_fullbody_salute_ for
+	//a01-a03, c01-c03 and d01-d03. Any other voicetype means the anim does not exist, the
+	//flaggedanimdone never arrives, and the actor holds the pose forever. Print what he
+	//actually tried to play so this stops being a guess.
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ SALUTE actor=" + self.targetname + " voicetype=" + self.voicetype + " weapongroup=" + self.weapongroup )
+	}
 	self lookat self.enemy
 	self.blendtime = 0.25
 	switch (self.weapongroup)

@@ -18,7 +18,13 @@
 main:
 	//exec global/loadout.scr "maps/m5l3.scr"
 
-	level waittill spawn
+	//[user 2026-08-09] bug-1637 ROOT: level waittill spawn NEVER FIRES in MP/coop (the documented
+	//BUG1 - player.scr:23 got the fix in [200], this file never did). The ENTIRE card system -
+	//sitman, sitthink, every sit-loop fix layered on it this week - has been dead code in coop:
+	//three instrumented runs produced zero narration because the manager never started. The
+	//actors sat via their scene setup and NOTHING existed to re-seat them once disturbed.
+	if( level.gametype != 0 ){ wait 0.5 }
+	else{ level waittill spawn }
 
 
 	if ($cardgame == NULL)
@@ -130,8 +136,79 @@ sitthink:
 
 	self exec global/setdeathanim.scr self.chairdeath
 
-	while (self.thinkstate == "idle")
-		waitframe
+	//[user 2026-08-09] RE-ARMING SIT LOOP. The original was one-shot: sit only while
+	//thinkstate == "idle", and the FIRST non-idle frame - any transient disguise/curious flicker,
+	//which the coop AI layer produces routinely - broke him out for good. There is no path back to
+	//the chair (chair_alert_stand_end below animates the CHAIR, not the man), so he stood up and
+	//idled beside the table forever. The user confirms he has NEVER charged, only stood - so the
+	//one-shot exit has always been the broken half of this, not the alert itself.
+	//The alert is real only if the map has actually gone loud (alarm up) or he has genuinely
+	//committed to combat (attack thinkstate). A flicker that settles back within a beat means
+	//nothing happened - re-holster and sit back down.
+	local.breakout = 0
+	while (isalive self && local.breakout == 0)
+	{
+		local.reassert = 0
+		while (self.thinkstate == "idle")
+		{
+			//[user 2026-08-09] SELF-HEAL. Two guards stood with the narrated loop seeing NOTHING:
+			//whatever replaces the sit anim never touches thinkstate, so no detector can fire.
+			//Re-assert the seat every 2s while pre-alarm - idempotent when already seated, and it
+			//repairs any invisible disturbance within a couple of seconds.
+			local.reassert = local.reassert + 1
+			if (local.reassert >= 40 && level.alarm != 1)
+			{
+				local.reassert = 0
+				self.origin = self.chair.origin
+				self.angles = self.chair.angles
+				self anim chair_radio_listenidle
+			}
+			waitframe
+		}
+		if (getcvar( "coop_aggroDebug" ) == "1"){ println ("^~^~^ CARD disturb ent=" + self.entnum + " ts=" + self.thinkstate) }
+		//non-idle frame: give it a moment to settle before deciding it is real
+		wait 1
+		if (level.alarm == 1 || self.thinkstate == "attack" || self.thinkstate == "pain")
+		{
+			if (getcvar( "coop_aggroDebug" ) == "1"){ println ("^~^~^ CARD breakout ent=" + self.entnum + " ts=" + self.thinkstate + " alarm=" + level.alarm) }
+			local.breakout = 1
+		}
+		else if (isalive self && self.thinkstate == "idle")
+		{
+			//false alarm - back to the game. Same setup sequence as the top of sitthink.
+			self exec coop_mod/replace.scr::holster
+			self.origin = self.chair.origin
+			self.angles = self.chair.angles
+			self anim chair_radio_listenidle
+		}
+		else if (isalive self)
+		{
+			//[user 2026-08-09] curious episodes are ROUTINE during the stealth window (footsteps and
+			//sight of a disguised player) and run LONGER than the 1s settle window - treating a >1s
+			//one as real stood a card player up permanently every run. Only alarm/attack/pain are
+			//real; wait the episode out entirely (30s guard) and deal the next hand.
+			if (getcvar( "coop_aggroDebug" ) == "1"){ println ("^~^~^ CARD waitout ent=" + self.entnum + " ts=" + self.thinkstate) }
+			local.guard = 0
+			while (isalive self && self.thinkstate != "idle" && self.thinkstate != "attack" && self.thinkstate != "pain" && level.alarm != 1 && local.guard < 300)
+			{
+				local.guard = local.guard + 1
+				wait 0.1
+			}
+			if (level.alarm == 1 || self.thinkstate == "attack" || self.thinkstate == "pain")
+			{
+				if (getcvar( "coop_aggroDebug" ) == "1"){ println ("^~^~^ CARD breakout ent=" + self.entnum + " ts=" + self.thinkstate + " alarm=" + level.alarm) }
+			local.breakout = 1
+			}
+			else if (isalive self)
+			{
+				if (getcvar( "coop_aggroDebug" ) == "1"){ println ("^~^~^ CARD resit ent=" + self.entnum + " after ts=" + self.thinkstate + " guard=" + local.guard) }
+				self exec coop_mod/replace.scr::holster
+				self.origin = self.chair.origin
+				self.angles = self.chair.angles
+				self anim chair_radio_listenidle
+			}
+		}
+	}
 
 	if (isalive self)
 	{
@@ -163,7 +240,13 @@ end
 //=========================================================================
 cabinettrigger:{
 //=========================================================================
-	level waittill spawn
+	//[user 2026-08-09] bug-1637 ROOT: level waittill spawn NEVER FIRES in MP/coop (the documented
+	//BUG1 - player.scr:23 got the fix in [200], this file never did). The ENTIRE card system -
+	//sitman, sitthink, every sit-loop fix layered on it this week - has been dead code in coop:
+	//three instrumented runs produced zero narration because the manager never started. The
+	//actors sat via their scene setup and NOTHING existed to re-seat them once disturbed.
+	if( level.gametype != 0 ){ wait 0.5 }
+	else{ level waittill spawn }
 
 	self waittill trigger
 	//while ($player istouching self) //[200] chrissstrahl

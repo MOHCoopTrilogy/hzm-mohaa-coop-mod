@@ -53,7 +53,15 @@ if(level.cMTE_coop_weaponstate){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		//now see if we can set their isDisguised flag - this is what makes him visible or invisible to ai
 		//if he has no active weapon, he can be disguised. otherwise, pew pew.
 		if (level.coop_enableDisguises){
-			thread coop_mod/itemhandler.scr::setIsDisguised local.player (local.player.flags["coop_activeWeapon"] == NULL)	
+			//[user 2026-08-09] AN INVENTORY ITEM IN HAND IS NOT "ARMED". This tested activeWeapon == NULL,
+			//so ANYTHING held cleared isDisguised - including the PAPERS, which the m2l2a stealth route
+			//deliberately forces into the hands (coop_forcePapersEquip). Measured 00:58: disguised at :29,
+			//isDisguised=0 by :36 with no cover-blown anywhere, then the alarm fired legitimately.
+			//The engine's own rule is player.cpp:5480 - `if (!pWeap || pWeap->IsSubclassOfInventoryItem())`
+			//- i.e. holding an inventory item keeps the disguise, which is exactly how showing papers is
+			//meant to work. itemhandler.scr:1017 already uses this classname test; this site did not.
+			local.awep = local.player.flags["coop_activeWeapon"]
+			thread coop_mod/itemhandler.scr::setIsDisguised local.player ( local.awep == NULL || local.awep.classname != "Weapon" )
 		}
 	}else if (local.state == "PUTAWAY_MAIN"){ 					//holstered		
 		//item was put away, definitely set isDisguised to true
@@ -64,7 +72,13 @@ if(level.cMTE_coop_weaponstate){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		}
 	}else if (local.state[0] == "A" && local.state[1] == "T"){ 	//fired
 		//if in disguise state, keep track of weaponfire so we can simulate reactions to noise
-		if (level.coop_enableDisguises && local.player.flags["coop_hasDisguise"] && local.player.has_disguise){
+		//[user 2026-08-10] Step 3 (round-3 addition): add the alarm terms. Today takeAllDisguises
+		//clears two of these three on the first alarm, so this branch dies permanently by accident.
+		//Under Phase C Step 21a (recoverable alarm) all three survive an alarm, which would leave a
+		//full actor-array walk running per shot per player for the whole loud firefight - a
+		//divergence from both current behaviour and vanilla. Gate it on the disguise axis explicitly
+		//so the behaviour no longer depends on a side effect that Phase C removes.
+		if (level.coop_enableDisguises && local.player.flags["coop_hasDisguise"] && local.player.has_disguise && level.coop_disgSuspended != 1 && !level.alarm){
 
 			local.item = local.player.flags["coop_activeWeapon"]
 

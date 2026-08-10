@@ -212,6 +212,42 @@ helmet_apply local.player:{
 		if( local.player.model != NIL ){ println local.player.model }
 	}
 
+	//[user 08-08] bug-1578 - WEAR-TIME unlock re-validation. The pick-time gate in armory_helmet_set
+	//only DECLINES a locked choice; nothing re-checked what was ALREADY equipped, and this function is
+	//the single choke point every spawn, revive and skin change passes through. Same shape as the
+	//locked-SKIN heal in player.scr::manageAliveSpawning (bug-803): a gate that can only refuse leaves
+	//whatever got in ahead of it in place. Also RANGE-checks the stored index - one above
+	//level.coop_helmetCount reads NIL out of coop_helmetTik and the attachmodel at the tail then
+	//errors on it (a roster shrink, or a stale flag from an older build, is enough).
+	//The fallback is DETERMINISTIC - index 1, Standard Issue - never "nearest unlocked", or a
+	//player's appearance drifts every map load as the roster or their unlock record changes.
+	if( local.idx < 1 || local.idx > level.coop_helmetCount ){
+		local.idx = 1
+		local.player.flags["coop_helmetIdx"] = 1
+	}
+	//[user 08-08] bug-1595 - FAIL OPEN, not closed. cosmetic_isUnlocked reads the challenge
+	//unlock record, and that record loads LAZILY: chal_ensure returns having loaded NOTHING if
+	//challenges are disabled or the player identity is not resolved yet (no guid at spawn) -
+	//and this runs AT spawn. An unloaded record is indistinguishable from "owns nothing", so
+	//the check below stripped helmets people had legitimately earned and nagged them about it.
+	//coop_chal_loaded is set only on a successful load, so it is the honest "do we actually
+	//know?" test. When we do not know, leave the player alone: the PICK-time gate in
+	//armory_helmet_set is the enforcement (see its comment), and no live path was ever found
+	//that could equip a locked helmet in the first place - this re-check only ever closed a
+	//theoretical hole, so it must not cost a real player their hat to do it.
+	local.recOk = 0
+	if( local.player.flags["coop_chal_loaded"] == 1 ){ local.recOk = 1 }
+	if( local.idx != 1 && local.recOk == 1 ){
+		if( !(waitthread cosmetic_isUnlocked local.player level.coop_helmetTik[local.idx]) ){
+			//cosmetic_isUnlocked can WAIT (chal_ensure loads the unlock record lazily) - re-check NULL
+			if( local.player == NULL ){ end }
+			local.locked = local.idx
+			local.idx = 1
+			local.player.flags["coop_helmetIdx"] = 1	//so the mannequin + the armory preview tile agree
+			if( local.hdbg ){ println( "^~^~^ HELMET locked-heal from=" + local.locked ) }
+			waitthread helmet_lockNotice local.player local.locked
+		}
+	}
 	//[user 08-07] bug-1545 - the old "UNTOUCHED default players: end here" fast path is GONE. It was
 	//correct while "Standard Issue" meant "leave the baked helmet alone"; now the armory bodies are
 	//HATLESS at source, so even a player who never opened the switcher needs (a) the swap onto their
@@ -432,6 +468,23 @@ helmet_apply local.player:{
 	if( local.hdbg ){ println( "^~^~^ HELMET attach tik=" + local.tik ) }
 	local.player attachmodel local.tik "Bip01 Head" 1.0 "coop_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
 	if( local.hdbg ){ println( "^~^~^ HELMET attached ok" ) }
+}end
+
+//-------------------------------------------------------------------------
+//[user 08-08] bug-1578 - ONE locked-helmet message per distinct item, shared by the pick-time gate
+// (armory_helmet_set) and the wear-time re-validation (helmet_apply). Both are re-entered by
+// automated traffic - the archived ,hn resend on every join/armory close, and helmet_apply on every
+// spawn, revive and skin change - so a bare iprint at either site is chatter, not information, for a
+// player whose preview is PARKED on a locked helmet (that parking is the intended
+// SHOW-ALL-WITH-LOCK design, not an error state). Keyed on the INDEX, so a different locked pick
+// still gets its own single message.
+//-------------------------------------------------------------------------
+helmet_lockNotice local.player local.idx:{
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_helmetLockMsg"] == local.idx ){ end }
+	local.player.flags["coop_helmetLockMsg"] = local.idx
+	waitthread helmet_initList
+	local.player iprint ( "Helmet locked: " + level.coop_helmetName[local.idx] + " - earn it via challenges/ranks" ) 1
 }end
 
 //-------------------------------------------------------------------------
@@ -778,7 +831,11 @@ armory_helmet_set local.player local.data:{
 	//lock icon + requirement caption explain why); the archived token simply keeps getting refused
 	//here on close-commit/join-resend, so the WORN helmet never changes.
 	if( !(waitthread cosmetic_isUnlocked local.player level.coop_helmetTik[local.idx]) ){
-		local.player iprint ( "Helmet locked: " + level.coop_helmetName[local.idx] + " - earn it via challenges/ranks" ) 1
+		//[user 08-08] bug-1578 - was an unconditional iprint here. This gate is re-entered by traffic
+		//the player never initiated (loadoutpick.scr resends the archived ,hn token on EVERY join and
+		//every armory close, :291 and :483), so a preview legitimately PARKED on a locked helmet got
+		//the same sentence over and over. helmet_lockNotice says it once per distinct item.
+		waitthread helmet_lockNotice local.player local.idx
 		end
 	}
 	//[bug-1208] DEAD/DOWN: cannot touch the live model right now (helmet_apply does surface + attachmodel

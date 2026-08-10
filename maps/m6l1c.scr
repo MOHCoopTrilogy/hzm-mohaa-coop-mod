@@ -490,16 +490,22 @@ sciencechatsequence:{
 	waitthread sciencesayto level.soldier4 level.scientist1 den_m6l1_607f den_m6l1_SNT1
 	waitthread sciencesayto level.scientist1 level.soldier4 den_m6l1_608q den_m6l1_SLD1
 	
-	if(level.soldier4.thinkstate != attack){
+	//[user 08-08] bug-1579 - was a bare `.thinkstate` read on a maybe-NULL/dead actor. local.sldanim
+	//records whether the anim was actually ISSUED, because the `waittill animdone` further down used
+	//to re-test the condition instead of the fact: an actor that was attacking here and had calmed by
+	//then passed the second test with no anim running, and waited for an animdone that never came.
+	local.sldanim = 0
+	if(level.soldier4 != NULL && isalive level.soldier4 && level.soldier4.thinkstate == idle){
 		level.soldier4 anim den_m6l1_SLD2
 		level.soldier4 anim den_m6l1_609f
+		local.sldanim = 1
 	}
 
-	if(level.scientist1.thinkstate != attack){
+	if(level.scientist1 != NULL && isalive level.scientist1 && level.scientist1.thinkstate != attack){	//[user 08-08] bug-1579 - NULL/dead read
 		level.scientist1 anim den_m6l1_SNT1
 	}
 
-	if(level.soldier4.thinkstate != attack){
+	if(local.sldanim == 1 && level.soldier4 != NULL && isalive level.soldier4){	//[user 08-08] bug-1579 - wait only on an anim we issued
 		level.soldier4 waittill animdone
 	}
 
@@ -519,14 +525,31 @@ sciencechatsequence:{
 //============================================================================
 sciencesayto local.talker local.talker2 local.word local.word2:{
 //============================================================================
-	if((isalive local.talker) && local.talker.thinkstate != "attack"){
+	//[user 08-08] bug-1579 conversation-guard sweep - THE worst line in this map. The tail
+	//`waittill animdone` sat OUTSIDE both guards: when the talker was dead, removed or alerted no anim
+	//was ever started, so nothing could ever fire animdone and the WHOLE sciencechatsequence stranded
+	//here - taking its tail with it (type_disguise "salute" at :515-516 is what hands both actors back).
+	//Only ever wait on an actor we actually animated. NULL is tested first and separately because
+	//isalive on NULL throws, and a thrown statement is skipped - taking the guard with it.
+	//"not attacking" is not "idle": a CURIOUS actor runs its own think and overrides the scripted anim.
+	local.said = 0
+	local.said2 = 0
+	if(local.talker != NULL && (isalive local.talker) && local.talker.thinkstate == idle){
 		local.talker anim local.word
+		local.said = 1
 	}
 
-	if((isalive local.talker2) && local.talker2.thinkstate != "attack"){
+	if(local.talker2 != NULL && (isalive local.talker2) && local.talker2.thinkstate == idle){
 		local.talker2 anim local.word2
+		local.said2 = 1
 	}
-	local.talker waittill animdone
+	if(local.said == 1){
+		local.talker waittill animdone
+	}
+	else{
+		//keep the pacing when only the second actor spoke, instead of returning in the same frame
+		if(local.said2 == 1){ local.talker2 waittill animdone }
+	}
 }end	
 
 //============================================================================
@@ -565,12 +588,20 @@ soldierchatsequence:{
 //============================================================================
 soldiersayto local.talker local.listener local.spot local.word:{
 //============================================================================
-	if((isalive local.talker) && local.talker.thinkstate != "attack"){
+	//[user 08-08] bug-1579 conversation-guard sweep. Two faults: (a) isalive was called on an entity
+	//that may be NULL (a removed actor) - that statement THROWS and a thrown statement is SKIPPED, so
+	//the guard vanishes and the say + `waittill saydone` below run anyway; (b) "not attacking" is not
+	//the same as "idle" - a CURIOUS/GRENADE/PAIN actor runs its own think, which overrides the scripted
+	//idle line, and the saydone may then never arrive. thinkstate stays "idle" for the whole scripted
+	//say (SetThinkIdle, actor.cpp:10819), so gating on idle does not silence a normal exchange.
+	//Silence the LINE, never the thread: the listener walkto below is this helper's release and still runs.
+	if(local.talker != NULL && (isalive local.talker) && local.talker.thinkstate == idle){
 		//local.talker idlesay local.word 										//[200] Smithy
 		local.talker thread coop_mod/replace.scr::say_wait local.word "idle" 	//[200] Smithy - coop compatible
 		local.talker waittill saydone
 	}
-	if(local.listener){
+	//was `if(local.listener)` - a truthiness test, not a liveness test (bug-1579)
+	if(local.listener != NULL && isalive local.listener){
 		local.listener exec global/walkto.scr local.spot
 	}
 }end	

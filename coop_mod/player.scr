@@ -220,6 +220,9 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//[302] HZM XP - identity + record restore (cl_guid via userinfo, cvar cache, save file)
 	thread coop_mod/xp.scr::xp_identify local.player
 
+	//[user 2026-08-07] SEVERE-INJURY WARNING - fires the moment the player starts limping.
+	thread coop_limpWarn local.player
+
 	//chrissstrahl-style - initialise the coop objectives display cvars + the
 	//"vstr coop_obj" toggle for every player, so the bound Objectives key always
 	//works even on maps that never register a map objective.
@@ -809,13 +812,13 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 			ihuddraw_alpha  local.player 39 0
 			ihuddraw_alpha  local.player 40 0
 			ihuddraw_alpha  local.player 41 0
-			ihuddraw_alpha  local.player 42 0
-			ihuddraw_alpha  local.player 43 0
-			ihuddraw_alpha  local.player 44 0
+			ihuddraw_alpha  local.player 145 0
+			ihuddraw_alpha  local.player 146 0
+			ihuddraw_alpha  local.player 147 0
 			ihuddraw_string local.player 37 ""
 			ihuddraw_string local.player 38 ""
 			ihuddraw_string local.player 41 ""
-			ihuddraw_string local.player 42 ""
+			ihuddraw_string local.player 145 ""	//[2026-08-10] cover prompt moved 42 -> 145 (fade-exempt)
 
 			//clear the coop bombing-run (binoc, slots 50/51) + paradrop (smoke, slots
 			//52/53) HUD icons when this player dies or goes spectator. ihuddraw state
@@ -1130,7 +1133,12 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		waitthread coop_mod/helmet.scr::armory_skin_build
 		if( level.coop_skinBase[local.curSkin] != NIL ){ local.curSkin = level.coop_skinBase[local.curSkin] }
 		if( waitthread coop_mod/helmet.scr::armory_skin_isValid local.curSkin ){
-			if( !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.curSkin + ".tik")) ){
+			//[user 08-08] bug-1595 - same fail-open rule as the helmet check. The unlock record loads
+		//LAZILY and this runs at spawn, so an unloaded record ("chal_ensure returned nothing")
+		//looks exactly like "owns nothing" and this heal would strip a uniform the player earned.
+		//coop_chal_loaded is set only on a real load. When it is not set we do not know, so we do
+		//nothing - armory_skin_set stays the enforcement for what can be equipped.
+		if( local.player.flags["coop_chal_loaded"] == 1 && !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.curSkin + ".tik")) ){
 				local.heal = local.player.flags["coop_armorySkin"]	//worn = last SUCCESSFUL gated apply (armory_skin_applyIdx)
 				local.healOk = 0
 				if( local.heal != NIL && local.heal != "" ){
@@ -1684,4 +1692,70 @@ coop_restoreSpectateState local.player:{
 		local.player.flags["coop_cover_placements"] = local.player.flags["coop_coverSaved"]
 	}
 	println "^~^~^ COOP_SPECRETURN state restored"
+}end
+
+
+//=========================================================================
+// [user 2026-08-07] Severe-injury warning.
+// Shown the instant the player drops into the LIMP, not at some separate number of my choosing:
+// the engine limps at health/max_health < coop_limpStart (default 0.30) whenever coop_limp is on
+// (Player::TickCoopLimp, player.cpp) - this reads the same two cvars and the same two values, so
+// the warning and the limp can never disagree about when "severely injured" begins.
+// Styled exactly like medkit.scr's "You have bandaged yourself up." (ihuddraw, verdana-14,
+// centred, 3s) but in red instead of green. Slot 30 is free and sits inside the 27-39
+// downed/medkit/low-HP block that _research/hud_slot_map.md reserves for exactly this - so it can
+// never collide with a co-displayed feature (bug-553).
+// Latched: it fires once per crossing, and re-arms only after the player heals back above the
+// threshold, so it cannot spam while he lingers at low health.
+//=========================================================================
+coop_limpWarn local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	local.player.flags["coop_limpWarned"] = 0
+
+	while( local.player != NULL ){
+		waitframe
+		waitframe
+
+		if( local.player == NULL ){ end }
+		if( getcvar( "coop_limp" ) == "0" ){ continue }
+		if( !isAlive local.player ){ local.player.flags["coop_limpWarned"] = 0; continue }
+		if( local.player.flags["coop_dbno_active"] == 1 ){ continue }
+
+		local.max = local.player.max_health
+		if( local.max == NIL || local.max <= 0 ){ continue }
+		local.frac = local.player.health / local.max
+		local.start = getcvar( "coop_limpStart" )
+		if( local.start == "" || local.start == NIL ){ local.start = 0.30 }
+		local.start = float( local.start )
+
+		if( local.frac < local.start ){
+			if( local.player.flags["coop_limpWarned"] != 1 ){
+				local.player.flags["coop_limpWarned"] = 1
+				thread coop_limpWarnShow local.player
+			}
+		}else{
+			//healed back out of the limp - re-arm for next time
+			local.player.flags["coop_limpWarned"] = 0
+		}
+	}
+}end
+
+//=========================================================================
+// The banner itself. Same recipe as the bandage message, red.
+//=========================================================================
+coop_limpWarnShow local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	ihuddraw_align  local.player 30 center center
+	ihuddraw_font   local.player 30 "verdana-14"
+	ihuddraw_color  local.player 30 1.0 0.2 0.2
+	ihuddraw_rect   local.player 30 0 0 0 0
+	ihuddraw_string local.player 30 "You are severely injured, retreat and find aid immediately."
+	ihuddraw_alpha  local.player 30 1
+	wait 4
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 30 0
+		ihuddraw_string local.player 30 ""
+	}
 }end

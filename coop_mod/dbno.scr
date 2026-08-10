@@ -98,8 +98,23 @@ dbno_monitor local.player:{
 			local.player.flags["coop_dbno_cumulative"] = 0
 		}
 
-		local.threshold = int( getcvar "coop_dbnoThreshold" )
-		if( local.threshold <= 0 ){ local.threshold = 250 }
+		//[user 2026-08-10] THROTTLED, not hoisted. This ran every frame: at 8 players that is ~320
+		//getcvar calls/sec, each a name hash plus a string->int parse. A plain hoist above the loop was
+		//rejected for two reasons: it would kill live cvar tuning mid-match (an established workflow),
+		//and the per-map override below shares this block - m3l1a raises coop_dbnoThresholdOverride for
+		//the beach crossfire, and if the map sets it AFTER this thread starts a hoist would silently
+		//read the default and revert that tuning with no error. Re-reading once per second keeps both
+		//working and removes ~97% of the calls. The override read stays PER-FRAME - it is a plain level
+		//var, cheap, and it is the part that must not go stale.
+		if( local.thrNext == NIL ){ local.thrNext = 0 }
+		if( level.time >= local.thrNext ){
+			local.thrNext = level.time + 1
+			local.threshold = int( getcvar "coop_dbnoThreshold" )
+			if( local.threshold <= 0 ){ local.threshold = 250 }
+			local.thrCached = local.threshold
+		}
+		local.threshold = local.thrCached
+		if( local.threshold == NIL || local.threshold <= 0 ){ local.threshold = 250 }
 		// HZM coop [user 07-31] - per-map override, same pattern as level.coop_dbno_disabled (jeep
 		// maps). m3l1a's opening beach crossfire converges more simultaneous fire on an exposed
 		// player than most maps; a map can raise level.coop_dbnoThresholdOverride so it takes more
@@ -529,8 +544,13 @@ dbno_crawl_manager local.player:{
 		local.prev_health = local.player.health
 		waitframe
 	}
-	ihuddraw_alpha local.player 32 0
-	local.player modheight "stand"
+	//[user 2026-08-10] NULL guard - same class as the HUD teardowns fixed elsewhere this pass, but
+	//this one also touches sounds/height/damage on the player, so an absent player throws on several
+	//lines rather than one. The loop above exits precisely when the player goes away.
+	if( local.player != NULL ){
+		ihuddraw_alpha local.player 32 0
+		local.player modheight "stand"
+	}
 }end
 
 
@@ -554,17 +574,22 @@ dbno_die local.player:{
 	ihuddraw_alpha local.player 20 0
 	ihuddraw_rect  local.player 20 0 0 0 0
 
-	local.player stoplocalsound coop_dbno_breath1
-	local.player stoplocalsound coop_dbno_breath2
-	local.player stoplocalsound coop_dbno_breath3
-	local.player stoplocalsound coop_dbno_heartbeat
-	local.player stoplocalsound coop_shellshock_dbno
-	ihuddraw_alpha local.player 31 0
-	ihuddraw_alpha local.player 32 0
-	ihuddraw_alpha local.player 33 0
-	ihuddraw_alpha local.player 34 0
-	ihuddraw_alpha local.player 35 0
-	local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+	//[user 2026-08-10] NULL guard - same class as the HUD teardowns fixed elsewhere this pass, but
+	//this one also touches sounds/height/damage on the player, so an absent player throws on several
+	//lines rather than one. The loop above exits precisely when the player goes away.
+	if( local.player != NULL ){
+		local.player stoplocalsound coop_dbno_breath1
+		local.player stoplocalsound coop_dbno_breath2
+		local.player stoplocalsound coop_dbno_breath3
+		local.player stoplocalsound coop_dbno_heartbeat
+		local.player stoplocalsound coop_shellshock_dbno
+		ihuddraw_alpha local.player 31 0
+		ihuddraw_alpha local.player 32 0
+		ihuddraw_alpha local.player 33 0
+		ihuddraw_alpha local.player 34 0
+		ihuddraw_alpha local.player 35 0
+		local.player damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+	}
 }end
 
 
@@ -584,18 +609,73 @@ dbno_revival_stub local.player:{
 //   coop_teamRevive 0 = off | coop_teamReviveRange (units) | coop_teamReviveTime (seconds)
 //=========================================================================
 dbno_teamrevive_monitor local.downed:{
-//=========================================================================
+	// [user 2026-08-10] TEAM REVIVE, reworked to spec after the first 2-player test.
+	//
+	// COSTS A MEDKIT. The reviver spends one on success; with none they cannot revive at all and
+	// are told so. Previously it was free, which made medkits pointless for the squad.
+	//
+	// USE-HOLD IS FORGIVING. Measured live: the reviver held USE continuously but `useheld` read 1
+	// only in bursts (11 samples in ~200), so a strict per-tick test reset the channel about once a
+	// second and it never reached 3.5s. Progress is therefore kept across a short dropout
+	// (coop_teamReviveGrace, default 0.5s) and only abandoned on a real release. A 3.5s channel that
+	// a single dropped input frame can cancel is bad design regardless of the input cause.
+	//
+	// HUD instead of iprint spam: both players get the DBNO-style centre text plus the same style of
+	// progress bar the self-revive uses. Slots 21-26 (free block, adjacent to the DBNO cluster
+	// engine HUD fade multiplies the alpha of every huddraw slot BELOW 100 when the player is
+	// calm (cg_drawtools.cpp:648-656). A medic stands perfectly still holding a key, which is
+	// exactly 'calm', so the prompt faded to nothing - measured: the reviver saw no text and no
+	// bar while the downed player's HUD was fine (a downed player never reads as calm).
+	// Slots >= 100 are fade-exempt. Do NOT reuse 33-35: medkit.scr owns those for the
+	// concurrent self-revive.
 	if( getcvar( "coop_teamRevive" ) == "0" ){ end }
 	local.range = int( getcvar "coop_teamReviveRange" )
 	if( local.range <= 0 ){ local.range = 80 }
 	local.rt = getcvar "coop_teamReviveTime"
-	if( local.rt == "" ){ local.rt = "3.5" }
+	//5.0, not 3.5: match the self-revive, which is 200 iterations of a waitframe loop
+	//(medkit.scr:312-325,463) = ~5s at sv_fps 40. A team revive should not be quicker
+	//than patching yourself up.
+	if( local.rt == "" ){ local.rt = "5.0" }
 	local.reviveSec = float( local.rt )
-	if( local.reviveSec <= 0 ){ local.reviveSec = 3.5 }
+	if( local.reviveSec <= 0 ){ local.reviveSec = 5.0 }
+	local.gr = getcvar "coop_teamReviveGrace"
+	if( local.gr == "" ){ local.gr = "0.5" }
+	local.grace = float( local.gr )
+	if( local.grace < 0 ){ local.grace = 0.5 }
+
 	local.dt = 0.1
 	local.progress = 0
-	local.nextPrompt = 0
 	local.reviver = NULL
+	local.reviverNum = -1
+	local.slack = 0			// seconds since USE was last seen held
+	local.shown = 0			// 0 none, 1 healing, 2 out-of-medkits
+
+	// ---- reviver HUD (21 text, 22 bar track, 23 bar fill) : created lazily on first use ----
+	// ---- downed  HUD (24 text, 25 bar track, 26 bar fill) ----
+	//[user 2026-08-10] INLINED, deliberately. These were helper labels taking the player as a
+	//THREAD PARAMETER - and an entity does not survive a thread-parameter boundary in this
+	//scripting language (the same failure as bug-1624 and bug-1632). The helper's NULL guard
+	//fired every time, so no HUD was ever created and the reviver saw nothing. Slots are literal
+	//constants here: reviver 135-137, downed 138-140.
+	ihuddraw_virtualsize local.downed 138 1
+	ihuddraw_align       local.downed 138 center center
+	ihuddraw_font        local.downed 138 "verdana-12"
+	ihuddraw_color       local.downed 138 1 1 1
+	ihuddraw_rect        local.downed 138 0 -58 0 0
+	ihuddraw_string      local.downed 138 ""
+	ihuddraw_alpha       local.downed 138 0
+	ihuddraw_virtualsize local.downed 139 1
+	ihuddraw_align       local.downed 139 left bottom
+	ihuddraw_shader      local.downed 139 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.downed 139 0.12 0.12 0.12
+	ihuddraw_rect        local.downed 139 270 -55 100 6
+	ihuddraw_alpha       local.downed 139 0
+	ihuddraw_virtualsize local.downed 140 1
+	ihuddraw_align       local.downed 140 left bottom
+	ihuddraw_shader      local.downed 140 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.downed 140 0.1 0.9 0.1
+	ihuddraw_rect        local.downed 140 270 -55 0 6
+	ihuddraw_alpha       local.downed 140 0
 
 	while( local.downed != NULL && local.downed.flags["coop_dbno_active"] == 1 ){
 		// nearest LIVING, non-downed teammate within range holding [USE]
@@ -604,7 +684,7 @@ dbno_teamrevive_monitor local.downed:{
 		local.i = 1
 		while( local.i <= $player.size ){
 			local.p = $player[local.i]
-			if( local.p != NULL && local.p != local.downed && isAlive local.p && local.p.flags["coop_dbno_active"] != 1 && local.p.useheld == 1 ){
+			if( local.p != NULL && local.p.entnum != local.downed.entnum && isAlive local.p && local.p.flags["coop_dbno_active"] != 1 && local.p.useheld == 1 ){
 				local.dist = vector_length( local.p.origin - local.downed.origin )
 				if( local.dist <= local.bestD ){
 					local.bestD = local.dist
@@ -615,43 +695,220 @@ dbno_teamrevive_monitor local.downed:{
 		}
 
 		if( local.best != NULL ){
-			if( local.best != local.reviver ){
-				if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
-				local.reviver    = local.best
-				local.progress   = 0
-				local.nextPrompt = 0
-				local.reviver forcelegsstate REVIVE_MEDIC
-				local.downed iprint "A medic is reviving you - hold on!" 1
-			}
-			local.progress = local.progress + local.dt
-			if( local.progress >= local.nextPrompt ){
-				local.nextPrompt = local.progress + 0.6
-				local.pct = int( ( local.progress / local.reviveSec ) * 100 )
-				local.reviver iprint ( "Reviving teammate... " + local.pct + "%" ) 1
-			}
-			if( local.progress >= local.reviveSec ){
-				if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
+			// a new medic takes over: reset and re-arm their HUD
+			if( local.best.entnum != local.reviverNum ){
 				if( local.reviver != NULL ){
-					local.reviver iprint "Teammate revived!" 1
-					thread coop_mod/xp.scr::xp_award local.reviver 10 "revive"		// [user 07-10] revive a teammate 15 -> 10
-					thread coop_mod/challenges.scr::chal_revive local.reviver	// [303] HZM CHALLENGES - revive task
+					local.reviver forcelegsstate STAND
+					if( local.reviver != NULL ){
+						ihuddraw_alpha  local.reviver 135 0
+						ihuddraw_string local.reviver 135 ""
+						ihuddraw_alpha  local.reviver 136 0
+						ihuddraw_alpha  local.reviver 137 0
+					}
 				}
-				waitthread dbno_ai_revive local.downed
-				end
+				local.reviver    = local.best
+				local.reviverNum = local.best.entnum
+				local.progress   = 0
+				local.shown      = 0
+				ihuddraw_virtualsize local.reviver 135 1
+				ihuddraw_align       local.reviver 135 center center
+				ihuddraw_font        local.reviver 135 "verdana-12"
+				ihuddraw_color       local.reviver 135 1 1 1
+				ihuddraw_rect        local.reviver 135 0 -58 0 0
+				ihuddraw_string      local.reviver 135 ""
+				ihuddraw_alpha       local.reviver 135 0
+				ihuddraw_virtualsize local.reviver 136 1
+				ihuddraw_align       local.reviver 136 left bottom
+				ihuddraw_shader      local.reviver 136 "textures/hud/coop_bar_white"
+				ihuddraw_color       local.reviver 136 0.12 0.12 0.12
+				ihuddraw_rect        local.reviver 136 270 -55 100 6
+				ihuddraw_alpha       local.reviver 136 0
+				ihuddraw_virtualsize local.reviver 137 1
+				ihuddraw_align       local.reviver 137 left bottom
+				ihuddraw_shader      local.reviver 137 "textures/hud/coop_bar_white"
+				ihuddraw_color       local.reviver 137 0.1 0.9 0.1
+				ihuddraw_rect        local.reviver 137 270 -55 0 6
+				ihuddraw_alpha       local.reviver 137 0
+			}
+			local.slack = 0
+			local.reviver.flags["coop_revivePrompt"] = NIL	//healing text takes over slot 135
+
+			local.mk = local.reviver.flags["coop_medkits"]
+			if( local.mk == NIL ){ local.mk = 0 }
+
+			if( local.mk < 1 ){
+				// no kit: say so in the SAME slot the healing text uses, and do not progress
+				if( local.shown != 2 ){
+					local.shown = 2
+					ihuddraw_string local.reviver 135 "You are out of medkits."
+					ihuddraw_alpha  local.reviver 135 1
+					ihuddraw_alpha  local.reviver 136 0
+					ihuddraw_alpha  local.reviver 137 0
+				}
+				local.progress = 0
+			}else{
+				if( local.shown != 1 ){
+					local.shown = 1
+					ihuddraw_string local.reviver 135 "Healing Player"
+					ihuddraw_alpha  local.reviver 135 1
+					ihuddraw_alpha  local.reviver 136 0.8
+					ihuddraw_alpha  local.reviver 137 0.9
+					ihuddraw_string local.downed  138 "You are being revived"
+					ihuddraw_alpha  local.downed  138 1
+					ihuddraw_alpha  local.downed  139 0.8
+					ihuddraw_alpha  local.downed  140 0.9
+				}
+				// pause the bleed-out clock while the channel runs - dbno_bleedout_timer already
+				// honours this flag (it is what the self-revive uses)
+				local.downed.flags["coop_dbno_healing"] = 1
+				local.progress = local.progress + local.dt
+
+				local.frac = local.progress / local.reviveSec
+				if( local.frac > 1 ){ local.frac = 1 }
+				local.fill = int( local.frac * 100 )
+				ihuddraw_rect local.reviver 137 270 -55 local.fill 6
+				ihuddraw_rect local.downed  140 270 -55 local.fill 6
+
+				if( local.progress >= local.reviveSec ){
+					local.reviver.flags["coop_medkits"] = local.mk - 1
+					local.reviver forcelegsstate STAND
+					if( local.reviver != NULL ){
+						ihuddraw_alpha  local.reviver 135 0
+						ihuddraw_string local.reviver 135 ""
+						ihuddraw_alpha  local.reviver 136 0
+						ihuddraw_alpha  local.reviver 137 0
+					}
+					if( local.downed != NULL ){
+						ihuddraw_alpha  local.downed 138 0
+						ihuddraw_string local.downed 138 ""
+						ihuddraw_alpha  local.downed 139 0
+						ihuddraw_alpha  local.downed 140 0
+					}
+					local.downed.flags["coop_dbno_healing"] = NIL
+					//[user 2026-08-10] "I dont think we got the XP for reviving a player, at least it didnt pop up".
+					//Cannot diagnose from logs: that revive happened in a session whose log the relaunch rotated.
+					//Probe the CALLER so one revive settles it. Note the entity-thread-param theory is WEAK here -
+					//kill XP uses this identical shape and works - so measure instead of assuming.
+					if( getcvar( "coop_aggroDebug" ) == "1" ){
+						local.rvOk = 0
+						local.rvCls = "none"
+						if( local.reviver != NULL && local.reviver != NIL ){ local.rvOk = 1; local.rvCls = local.reviver.classname }
+						println( "^~^~^ XPPROBE revive callerOk=" + local.rvOk + " cls=" + local.rvCls )
+					}
+					thread coop_mod/xp.scr::xp_award local.reviver 10 "revive"
+					thread coop_mod/challenges.scr::chal_revive local.reviver
+					//[user 2026-08-08] "Field Promotion" needs WHO was picked up, which chal_revive
+					//never received. Separate call rather than a new arg on chal_revive - that label
+					//is threaded from more than one site and adding a parameter would break them.
+					thread coop_mod/challenges.scr::chal_revive_target local.reviver local.downed
+					println( "^~^~^ DBNO teamrevive by=" + local.reviver.netname + " kitsLeft=" + ( local.mk - 1 ) )
+					waitthread dbno_ai_revive local.downed
+					end
+				}
 			}
 		}else{
+			//[user 2026-08-10] AVAILABILITY PROMPT. A teammate has no way to know a revive is even
+			//possible until they happen to hold USE, so tell them: standing close enough AND looking
+			//at the downed player shows "Hold [USE] to heal player" (or the out-of-medkits refusal).
+			//Facing test copied from the established pattern (aibehav.scr:82-89, ammobox.scr:30):
+			//angles_toforward on viewangles, then a 2D dot against the normalised direction. 0.55 is
+			//about a 57-degree half-angle - generous enough to catch "looking down at the body".
+			//The prompt is drawn in the SAME slot as the healing text, so it is replaced rather than
+			//stacked the moment the hold starts, and cleared for anyone who looks away.
+			local.k = 1
+			while( local.k <= $player.size ){
+				local.c = $player[local.k]
+				if( local.c != NULL && local.c.entnum != local.downed.entnum && isAlive local.c && local.c.flags["coop_dbno_active"] != 1 && local.c.classname == "Player" ){
+					local.cd = vector_length( local.c.origin - local.downed.origin )
+					local.look = 0
+					if( local.cd <= local.range && local.cd > 1 ){
+						local.cf = angles_toforward local.c.viewangles
+						local.cv = local.downed.origin - local.c.origin
+						local.cvx = local.cv[0] / local.cd
+						local.cvy = local.cv[1] / local.cd
+						local.cdot = ( local.cf[0] * local.cvx ) + ( local.cf[1] * local.cvy )
+						if( local.cdot >= 0.55 ){ local.look = 1 }
+					}
+					if( local.look == 1 ){
+						if( local.c.flags["coop_revivePrompt"] != 1 ){
+							local.c.flags["coop_revivePrompt"] = 1
+							ihuddraw_virtualsize local.c 135 1
+							ihuddraw_align       local.c 135 center center
+							ihuddraw_font        local.c 135 "verdana-12"
+							ihuddraw_color       local.c 135 1 1 1
+							ihuddraw_rect        local.c 135 0 -58 0 0
+							local.ck = local.c.flags["coop_medkits"]
+							if( local.ck == NIL ){ local.ck = 0 }
+							if( local.ck >= 1 ){
+								ihuddraw_string local.c 135 "Hold [USE] to heal player"
+							}else{
+								ihuddraw_string local.c 135 "You are out of medkits."
+							}
+							ihuddraw_alpha local.c 135 1
+						}
+					}else{
+						if( local.c.flags["coop_revivePrompt"] == 1 ){
+							local.c.flags["coop_revivePrompt"] = NIL
+							ihuddraw_alpha  local.c 135 0
+							ihuddraw_string local.c 135 ""
+						}
+					}
+				}
+				local.k++
+			}
+
+			// nobody holding USE THIS TICK. Do not tear the channel down immediately - see the
+			// grace note at the top. Only give up once the dropout exceeds the grace window.
 			if( local.reviver != NULL ){
-				local.reviver forcelegsstate STAND
-				local.reviver  = NULL
-				local.progress = 0
+				local.slack = local.slack + local.dt
+				if( local.slack >= local.grace ){
+					local.reviver forcelegsstate STAND
+					if( local.reviver != NULL ){
+						ihuddraw_alpha  local.reviver 135 0
+						ihuddraw_string local.reviver 135 ""
+						ihuddraw_alpha  local.reviver 136 0
+						ihuddraw_alpha  local.reviver 137 0
+					}
+					if( local.downed != NULL ){
+						ihuddraw_alpha  local.downed 138 0
+						ihuddraw_string local.downed 138 ""
+						ihuddraw_alpha  local.downed 139 0
+						ihuddraw_alpha  local.downed 140 0
+					}
+					if( local.downed != NULL ){ local.downed.flags["coop_dbno_healing"] = NIL }
+					local.reviver    = NULL
+					local.reviverNum = -1
+					local.progress   = 0
+					local.shown      = 0
+				}
 			}
 		}
 		wait local.dt
 	}
 
-	// patient resolved (self-revived / died) mid-channel: release the reviver's pose
-	if( local.reviver != NULL ){ local.reviver forcelegsstate STAND }
+	// patient resolved (self-revived / died) mid-channel: release the medic and clear both HUDs
+	if( local.reviver != NULL ){
+		local.reviver forcelegsstate STAND
+		if( local.reviver != NULL ){
+			ihuddraw_alpha  local.reviver 135 0
+			ihuddraw_string local.reviver 135 ""
+			ihuddraw_alpha  local.reviver 136 0
+			ihuddraw_alpha  local.reviver 137 0
+		}
+	}
+	if( local.downed != NULL ){
+		if( local.downed != NULL ){
+			ihuddraw_alpha  local.downed 138 0
+			ihuddraw_string local.downed 138 ""
+			ihuddraw_alpha  local.downed 139 0
+			ihuddraw_alpha  local.downed 140 0
+		}
+		local.downed.flags["coop_dbno_healing"] = NIL
+	}
 }end
+
+
+
 
 
 // AI MEDIC field-revive: lift a downed player back up. Mirrors the self-revive completion
@@ -838,21 +1095,14 @@ dbno_letgo_monitor:{
 	ihuddraw_rect        self local.hud_slot 0 -30 0 0
 	ihuddraw_alpha       self local.hud_slot 1
 
+	//[user 2026-08-10] BOTTOM-LEFT HINT REMOVED. This drew "Tap [USE]: Medic    Hold [USE]:
+	//Self-Revive" (or "...Give Up") at the bottom-left for the whole DBNO. With the centred
+	//revive HUD in place it is clutter: the downed player already gets the bleed-out timer, and
+	//"You are being revived" the moment a medic starts. Slot 29 is left defined-but-blank because
+	//three teardown paths still clear it (:6, :554, :927).
 	local.hint_slot = 29
-	ihuddraw_virtualsize self local.hint_slot 1
-	local.hint_kit = self.flags["coop_medkits"]
-	if( local.hint_kit == NIL ){ local.hint_kit = 0 }
-	if( local.hint_kit >= 1 ){
-		ihuddraw_string self local.hint_slot "Tap [USE]: Medic    Hold [USE]: Self-Revive"
-	}
-	else{
-		ihuddraw_string self local.hint_slot "Tap [USE]: Medic    Hold [USE]: Give Up"
-	}
-	ihuddraw_align       self local.hint_slot left bottom
-	ihuddraw_font        self local.hint_slot "verdana-12"
-	ihuddraw_color       self local.hint_slot 1 1 1
-	ihuddraw_rect        self local.hint_slot 0 -15 0 0
-	ihuddraw_alpha       self local.hint_slot 1
+	ihuddraw_alpha  self local.hint_slot 0
+	ihuddraw_string self local.hint_slot ""
 
 	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
 		if( self.useheld == 1 ){

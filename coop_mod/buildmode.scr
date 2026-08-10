@@ -157,7 +157,13 @@ coop_build_session local.player:{
 		//and failed to compile buildmode.scr ENTIRELY - a compile error is file-wide, not line-local, so
 		//the whole build-mode tool silently disappeared. Newlines inside the banner are not worth a
 		//dead file; keep the marker to a single line.
-		level.coop_build_basetext = level.coop_build_basetext + "// ===== SESSION START - blocks below are from THIS session. Anything above is an EARLIER session and CANNOT be undone in-game; use coop_build_cmd fresh to discard it. ====="
+		//[user 2026-08-08] bug-1602 - the banner had NO TRAILING NEWLINE, so it ran together with the
+		//next block's header and swallowed it (seen in build_m1l1.dat:238, where the marker absorbed
+		//"// coop_build STRUCTURE #1 mg_nest_manned"). Harmless only because every block happens to
+		//start with a // comment - a block whose first line was CODE would have been commented out
+		//and the placement lost silently. The bug-1283 lesson was "no REAL newlines in the source
+		//string"; a \n ESCAPE is fine and is what line 143 already uses.
+		level.coop_build_basetext = level.coop_build_basetext + "// ===== SESSION START - blocks below are from THIS session. Anything above is an EARLIER session and CANNOT be undone in-game; use coop_build_cmd fresh to discard it. =====\n\n"
 	}
 
 	// protect the builder so the AI never engages (developer.scr recipe: notarget event +
@@ -168,7 +174,7 @@ coop_build_session local.player:{
 	setcvar "coop_build_cmd" ""
 	local.player iprint "BUILD MODE: ON (numpad controls)" 1
 	println( "^~^~^ BUILD_ON " + level.coop_mapname )
-	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+15, KP_SLASH/KP_STAR pitch -/+15, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo (THIS session only), SEMICOLON snap, ' bpmark; console: set coop_build_bpname <n> + coop_build_cmd bpsave / bpremove / fresh (discard earlier sessions)"
+	println "^~^~^ BUILD_HELP KP4/KP6 model, KP1/KP3 category, [ / ] anim (ALLIED ACTORS cat), KP7/KP9 yaw -/+step, KP_SLASH/KP_STAR pitch -/+step, KP8/KP2 raise/lower, , / . closer/farther, KP_PLUS/KP_MINUS scale, KP5 reset, KP0 solid toggle, KP_ENTER place, KP_DEL undo (THIS session only), SEMICOLON snap (45 deg), ' bpmark; step = coop_build_angleStep (default 1); console: set coop_build_bpname <n> + coop_build_cmd bpsave / bpremove / fresh (discard earlier sessions)"
 
 	thread coop_build_hud local.player
 	waitthread coop_build_ghostRefresh local.player
@@ -318,25 +324,30 @@ coop_build_doCmd local.player local.cmd:{
 		waitthread coop_build_ghostRefresh local.player
 		local.player iprint ( "CAT " + level.coop_build_cat + "/" + level.coop_build_catcount + ":  " + level.coop_build_catname[level.coop_build_cat] ) 1
 	}
+	//[user 2026-08-08] Rotation step was a hardcoded 15 degrees, too coarse to line a prop up against
+	//a surface. Now 1 degree by default and live-tunable via coop_build_angleStep, so a coarse pass
+	//costs a cvar rather than a rebuild - which matters because build mode is used in-session and a
+	//rebuild means closing the game. Snap mode still overrides to 45 for blueprint alignment, and
+	//holding a key repeats, so a full sweep is still quick.
 	else if( local.cmd == "yawplus" ){
-		local.step = 15
-		if( level.coop_build_snap == 1 ){ local.step = 45 }		//HZM coop BLUEPRINT: 45 deg steps while snapped
+		local.step = waitthread coop_build_angleStep
 		level.coop_build_yaw = level.coop_build_yaw + local.step
-		if( level.coop_build_yaw >= 360 ){ level.coop_build_yaw = level.coop_build_yaw - 360 }
+		while( level.coop_build_yaw >= 360 ){ level.coop_build_yaw = level.coop_build_yaw - 360 }
 	}
 	else if( local.cmd == "yawminus" ){
-		local.step = 15
-		if( level.coop_build_snap == 1 ){ local.step = 45 }
+		local.step = waitthread coop_build_angleStep
 		level.coop_build_yaw = level.coop_build_yaw - local.step
-		if( level.coop_build_yaw < 0 ){ level.coop_build_yaw = level.coop_build_yaw + 360 }
+		while( level.coop_build_yaw < 0 ){ level.coop_build_yaw = level.coop_build_yaw + 360 }
 	}
 	else if( local.cmd == "pitchplus" ){
-		level.coop_build_pitch = level.coop_build_pitch + 15
-		if( level.coop_build_pitch >= 360 ){ level.coop_build_pitch = level.coop_build_pitch - 360 }
+		local.step = waitthread coop_build_angleStep
+		level.coop_build_pitch = level.coop_build_pitch + local.step
+		while( level.coop_build_pitch >= 360 ){ level.coop_build_pitch = level.coop_build_pitch - 360 }
 	}
 	else if( local.cmd == "pitchminus" ){
-		level.coop_build_pitch = level.coop_build_pitch - 15
-		if( level.coop_build_pitch < 0 ){ level.coop_build_pitch = level.coop_build_pitch + 360 }
+		local.step = waitthread coop_build_angleStep
+		level.coop_build_pitch = level.coop_build_pitch - local.step
+		while( level.coop_build_pitch < 0 ){ level.coop_build_pitch = level.coop_build_pitch + 360 }
 	}
 	else if( local.cmd == "up" ){
 		level.coop_build_zofs = level.coop_build_zofs + 2
@@ -569,6 +580,10 @@ coop_build_place local.player:{
 		else if( level.coop_build_tik == "bunker_nest" ){ waitthread coop_mod/bunker.scr::bunker_nest level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
 		else if( level.coop_build_tik == "bunker_wall" ){ waitthread coop_mod/bunker.scr::bunker_wall level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
 		else if( level.coop_build_tik == "bunker_tower" ){ waitthread coop_mod/bunker.scr::bunker_tower level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "mg_nest_manned" ){ waitthread coop_mod/bunker.scr::mg_nest_manned level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "flak_emplacement" ){ waitthread coop_mod/bunker.scr::flak_emplacement level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "aagun_emplacement" ){ waitthread coop_mod/bunker.scr::aagun_emplacement level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
+		else if( level.coop_build_tik == "flak88_manned" ){ waitthread coop_mod/bunker.scr::flak88_manned level.coop_build_lastpos level.coop_build_yaw level.coop_build_scale }
 		else{ local.player iprint "unknown structure" 1 ; end }
 		//HZM coop BLUEPRINT: a refused template place (missing file / budget) must not be
 		//recorded or captured - the sid would point at an OLDER structure and undo would eat it
@@ -750,16 +765,29 @@ coop_build_place local.player:{
 		local.block = local.block + "local.m thread coop_mod/lobby.scr::coop_sceneActorAnimate\n"
 		local.block = local.block + "\n"
 	}else{
-		local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + "\n"
-		local.block = local.block + "local.m = spawn script_model\n"
-		local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
-		local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
-		local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
-		if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
-		if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
-		else{ local.block = local.block + "local.m notsolid\n" }
-		if( local.didSetsize == 1 ){ local.block = local.block + "local.m setsize ( " + local.smins[0] + " " + local.smins[1] + " " + local.smins[2] + " ) ( " + local.smaxs[0] + " " + local.smaxs[1] + " " + local.smaxs[2] + " )\n" }
-		local.block = local.block + "\n"
+		//[user 2026-08-08] COLLECTIBLE TAG. `set coop_build_pickup 1` in the console makes every
+		//subsequent placement emit as a collectible instead of a static prop. Tagging at PLACE time
+		//is the only thing that works here: the user is deliberately varying which model represents
+		//a blueprint, so nothing about the model path can identify one at bake time, and a prop that
+		//is scenery on one map may be a pickup on another. The tag rides with the placement.
+		//Emitted as a direct call rather than a spawn block so the .dat stays paste-ready and needs
+		//no transformation when it is baked.
+		local.pickup = getcvar "coop_build_pickup"
+		if( local.pickup == "1" ){
+			local.block = "// coop_build COLLECTIBLE #" + local.n + " " + level.coop_build_tik + "\n"
+			local.block = local.block + "thread coop_mod/collectible.scr::coop_bp_place ( " + local.px + " " + local.py + " " + local.pz + " ) " + level.coop_build_yaw + " \"" + level.coop_build_tik + "\" " + level.coop_build_scale + "\n\n"
+		}else{
+			local.block = "// coop_build #" + local.n + " " + level.coop_build_tik + "\n"
+			local.block = local.block + "local.m = spawn script_model\n"
+			local.block = local.block + "local.m model \"" + level.coop_build_tik + "\"\n"
+			local.block = local.block + "local.m.origin = ( " + local.px + " " + local.py + " " + local.pz + " )\n"
+			local.block = local.block + "local.m.angles = ( " + level.coop_build_pitch + " " + level.coop_build_yaw + " 0 )\n"
+			if( level.coop_build_scale != 1.0 ){ local.block = local.block + "local.m scale " + level.coop_build_scale + "\n" }
+			if( level.coop_build_solid == 1 ){ local.block = local.block + "local.m solid\n" }
+			else{ local.block = local.block + "local.m notsolid\n" }
+			if( local.didSetsize == 1 ){ local.block = local.block + "local.m setsize ( " + local.smins[0] + " " + local.smins[1] + " " + local.smins[2] + " ) ( " + local.smaxs[0] + " " + local.smaxs[1] + " " + local.smaxs[2] + " )\n" }
+			local.block = local.block + "\n"
+		}
 	}
 	level.coop_build_dumpline[local.n] = local.block
 
@@ -821,6 +849,22 @@ coop_build_undo local.player:{
 // Rewrite the whole capture file: prior sessions (basetext) + this session's blocks.
 // fs_write_content lands in the homepath: %APPDATA%/openmohaa/maintt/coop_mod/save/
 //=========================================================================
+//=========================================================================
+// [user 2026-08-08] Rotation step in degrees. 1 by default so a prop can be lined up against a
+// surface exactly; coop_build_angleStep raises it for coarse work without a rebuild. Snap mode
+// (SEMICOLON) still forces 45, which is the blueprint alignment grid and must not follow the
+// cvar. Clamped to 1..90: 0 would freeze rotation entirely and a step over 90 skips the useful
+// quadrants.
+//=========================================================================
+coop_build_angleStep:{
+	if( level.coop_build_snap == 1 ){ end 45 }
+	local.s = int( getcvar "coop_build_angleStep" )
+	if( local.s < 1 ){ local.s = 1 }
+	if( local.s > 90 ){ local.s = 90 }
+	end local.s
+}end
+
+
 coop_build_save:{
 //=========================================================================
 	local.txt = level.coop_build_basetext
@@ -873,6 +917,23 @@ coop_build_hud local.player:{
 	ihuddraw_string local.player 59 "KP4/6 model KP1/3 cat  [ / ] anim  KP7/9 yaw KP8/2 z  , / . dist  KP+/- scale KP0 solid KPEnter place KPDel undo  ; snap  ' bpmark"
 
 	while( level.coop_build_active == 1 && local.player != NULL ){
+		//[user 2026-08-10] KEEP THE BUILD OVERLAY AWAKE. The HUD fade counts only firing/ADS, the
+		//scoreboard, health/ammo/weapon deltas and coop_hudPoke as activity (cg_drawtools.cpp:1997-2046).
+		//Lining up a placement is NONE of those, so after coop_hudFadeTime (default 5s) the entire build
+		//readout - mode, category, item, tuning values, keybind help - faded to nothing while the builder
+		//stood still, which is exactly when it is needed. User: "I need the tools there and ability to
+		//see what I am placing."
+		//Poking the cvar is the mechanism built for this (xp.scr:1182 holds the debrief card up the same
+		//way) and it costs ZERO huddraw slots - which matters, because the slot namespace is a single
+		//BYTE (MSG_ReadByte, cg_parsemsg.cpp:1886) and the fade exemption is positional (>= 100), so
+		//every exempted element burns scarce address space. coop_hudPoke is registered WITHOUT
+		//CVAR_ARCHIVE, so the stuffed seta is not dropped by the archive filter.
+		//One reliable command per 2s - negligible next to the ring budget (see bug-1670).
+		if( level.coop_build_pokeNext == NIL ){ level.coop_build_pokeNext = 0 }
+		if( level.time > level.coop_build_pokeNext ){
+			level.coop_build_pokeNext = level.time + 2
+			local.player stufftext ( "seta coop_hudPoke " + level.time )
+		}
 		if( level.coop_build_hudDirty == 1 ){
 			level.coop_build_hudDirty = 0
 			if( level.coop_build_mode == "sound" ){
@@ -913,8 +974,13 @@ coop_build_hud local.player:{
 		ihuddraw_string local.player local.i ""
 		local.i++
 	}
-	ihuddraw_alpha  local.player 61 0
-	ihuddraw_string local.player 61 ""
+	//[user 2026-08-10] NULL guard: this teardown runs AFTER the display loop above, and that
+	//loop exits precisely BECAUSE the player went away (disconnect / spectate / map change).
+	//Measured in the 2-player test as "Script Error : Player entity is NULL for ihuddraw_*".
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 61 0
+		ihuddraw_string local.player 61 ""
+	}
 }end
 
 //=========================================================================

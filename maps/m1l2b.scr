@@ -12,6 +12,8 @@ main:{
 //=========================================================================
 	level.coop_aaMap = 1						//chrissstrahl - let global scripts know this is a AA level
 	waitthread coop_mod/main.scr::main 				//chrissstrahl - start coop mod extensions
+	thread coop_baked_0808
+	thread coop_phone_easteregg	//[user 2026-08-08] answerable ringing telephone
 	thread coop_bakedProps	//[user 07-29] baked build-mode props (label at end of file)
 	level.coop_weatherTheme = "sand"				//HZM coop - dynamic weather: N.Africa desert night (sandstorms, user 07-16)
 	//[207] opt-in to per-map optional callbacks (guarded dispatch)
@@ -946,3 +948,146 @@ local.m scale 1.300
 local.m solid
 local.m setsize ( -268.624 -82.394 -3.580 ) ( 268.603 82.394 209.117 )
 }end
+
+//=========================================================================
+// [user 2026-08-08] THE RINGING TELEPHONE.
+// global/ambience.scr:399 spawns a dummy script_model at ( 1814 -3686 -191 ) running a loopsound
+// of alias "telephone" (ubersound.scr:1245, Mec_PhoneRing_01.wav, soundparms 1.0 0.0 1.0 0.0
+// 200 1200, scoped maps "m1l2b"). Nothing in any script ever referenced that emitter, so the
+// ring could not be stopped - ambience.scr now registers each emitter in level.coop_ambByAlias by
+// alias so it can be found again.
+//
+// Answering it: the ring stops, one clip plays from the SAME emitter so it inherits the ring's
+// exact position, mindist and maxdist, and afterwards the phone is silent for good.
+//=========================================================================
+coop_phone_easteregg:
+	level waittill prespawn
+	waitframe
+	//[user 2026-08-08] coop_phoneGag 0 leaves the phone ringing and unanswerable, exactly as retail.
+	//Default ON. It exists because the clip is a 1942 historical recording and this mod is
+	//distributed publicly - a server operator in a jurisdiction that treats that material
+	//differently can switch it off without a separate build.
+	local.gag = getcvar "coop_phoneGag"
+	if( local.gag == "0" ){ end }
+	//[user 2026-08-08] POLL, do not sample once. m1l2b execs the ambient chain at :49 - AFTER
+	//prespawn - and that chain (global/ambient.scr:107 -> global/ambience.scr) is what spawns
+	//the ring emitter. This thread also wakes on prespawn, so a single waitframe was a race
+	//this thread usually LOST: it read the registry before the emitter existed, hit the NIL
+	//guard, and ended silently - which is exactly "I press Use and nothing happens".
+	local.tries = 0
+	local.ent = NIL
+	while( local.tries < 100 ){
+		local.ent = level.coop_ambByAlias["telephone"]
+		if( local.ent != NIL && local.ent != NULL ){ break }
+		local.tries++
+		wait 0.1
+	}
+	if( local.ent == NIL || local.ent == NULL ){
+		println "^~^~^ PHONEGAG FAIL no telephone emitter after 10s"
+		end
+	}
+
+	//trigger_use rather than a proximity check: USE on the phone, and a walk-by must not spend
+	//the gag. 96u, not 48: the emitter is a dummy at the AMBIENCE origin, which can sit inside
+	//the desk or wall the phone stands on rather than at the handset itself.
+	local.trig = spawn trigger_use targetname "coop_phone_trigger"
+	local.trig.origin = local.ent.origin
+	local.trig setsize ( -96 -96 -96 ) ( 96 96 96 )
+	local.trig triggerable
+
+	println( "^~^~^ PHONEGAG armed at " + local.ent.origin )
+	local.trig waittill trigger
+	println "^~^~^ PHONEGAG answered"
+
+	//stop the ring FIRST so the two never overlap
+	local.ent stoploopsound
+	waitframe
+
+	//playsound, not loopsound: it must run once and leave the phone dead afterwards. Played on the
+	//ring emitter itself, so the clip is heard at exactly the ring's distance and volume.
+	local.ent playsound coop_phone_answer
+
+	//one-shot: the trigger is gone, so the gag cannot be replayed
+	local.trig remove
+end
+
+//=========================================================================
+// [user 2026-08-08] BAKED build-mode placements. Source: coop_mod/save/build_m1l2b.dat
+// (below its SESSION START marker). Blueprints route through collectible.scr, which
+// spawns a private copy per player so one can vanish for its finder alone.
+// Angles are passed as the full (pitch yaw roll) triple: several placements are pitched
+// flat against a surface and a yaw-only bake stood them upright.
+//=========================================================================
+coop_baked_0808:
+	// blueprint  documents_pulse.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -3728.201 3749.218 -151.875 ) ( 0 330 0 ) "models/items/documents_pulse.tik" 1.0
+	// blueprint  naxosplans3.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( -1915.079 3637.411 -7.354 ) ( 90 45 0 ) "models/items/naxosplans3.tik" 0.300
+	// blueprint  naxosplans2.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( 2092.684 -143.423 -255.748 ) ( 0 120 0 ) "models/items/naxosplans2.tik" 0.300
+	// blueprint  it_p_anziomappuls.tik
+	thread coop_mod/collectible.scr::coop_bp_place ( 1736.293 -2855.596 -42.638 ) ( 90 0 0 ) "models/items/it_p_anziomappuls.tik" 0.300
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -3734.704 4019.514 -255.875 )
+	local.m.angles = ( 0 330 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1851.714 3834.336 -255.875 )
+	local.m.angles = ( 0 0 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1855.219 3753.928 -255.875 )
+	local.m.angles = ( 0 330 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1854.747 3792.763 -208.568 )
+	local.m.angles = ( 0 0 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1801.440 3703.653 -255.875 )
+	local.m.angles = ( 0 15 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1804.059 3704.226 -208.568 )
+	local.m.angles = ( 0 15 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1835.226 3760.946 -161.260 )
+	local.m.angles = ( 0 15 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1806.020 3692.754 -161.260 )
+	local.m.angles = ( 0 15 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+	// prop  indycrate.tik
+	local.m = spawn script_model
+	local.m model "models/static/indycrate.tik"
+	local.m.origin = ( -1777.833 3804.796 -255.875 )
+	local.m.angles = ( 0 45 0 )
+	local.m solid
+	local.m setsize ( -26.212 -36.837 0.000 ) ( 25.654 37.652 47.182 )
+end

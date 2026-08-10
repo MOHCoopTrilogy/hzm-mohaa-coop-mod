@@ -264,8 +264,18 @@ coop_spawnReplica local.model local.gun local.acc local.health local.origin loca
 	local.r.leash = 4096
 	local.r.enableEnemy = 1
 	local.r german
+	//[user 2026-08-09] A CLONE MUST NOT BE BORN HOSTILE DURING A STEALTH PHASE. The replica still
+	//spawns and still runs the full coop pipeline - it simply is not handed a target, exactly like
+	//the guards the disguise already protects you from.
+	//[user 2026-08-09] forceactivate ALWAYS - it only makes the actor live, and gating it left
+	//clones inert, which reads in-game as "their animations are blocked". Only `attackplayer`,
+	//which hands them the player as a target, belongs behind the stealth gate.
 	local.r forceactivate
-	local.r attackplayer
+	if( waitthread coop_stealthBlocksAggro NIL ){
+		if( getcvar( "coop_aggroDebug" ) == "1" ){ println( "^~^~^ AGGRO BLOCKED replica-spawn" ) }
+	}else{
+		local.r attackplayer
+	}
 	// replicas behave naturally too (personality roll + cover think + hurt manager coverage)
 	waitthread coop_mod/officer.scr::coop_apply_personality local.r
 }end
@@ -419,9 +429,29 @@ coop_reinf_brain:{
 					local.hp = local.a.flags["coop_actorActualHealth"]
 					if( local.hp == NIL ){ local.hp = local.a.health }
 					if( local.hp != NIL && local.hp > 0 && local.hp < 40 ){
-						local.a.flags["coop_hurt_covered"] = 1
-						local.a type_attack "cover"		// fall back to cover (native; crouches at duck nodes)
-						thread coop_trooper_canteen local.a
+						//[user 2026-08-10] A3 INSTRUMENT (master plan v2 Step 4). Prints only - no behaviour
+						//change - so the next run names which system rewrites a scene actor.
+						//hasAlarm is a 0/1 BOOLEAN on purpose: alarmthread is an EV_GETTER returning a const
+						//ARRAY when set, and concatenating that into a string throws, which SKIPS the whole
+						//println - so a naive print would have emitted lines only for actors with NO
+						//alarmthread, i.e. never for the welders, the cower man or the scientists, which are
+						//exactly the actors this probe exists to attribute.
+						if( getcvar( "coop_aggroDebug" ) == "1" ){
+							local.hasAlarm = 0
+							if( local.a.alarmthread != NIL ){ local.hasAlarm = 1 }
+							println( "^~^~^ HURT actor=" + local.a.targetname + " hp=" + local.hp + " oldtype=" + local.a.type_attack + " hasAlarm=" + local.hasAlarm )
+						}
+						//[user 2026-08-10] A4: A3 caught this branch hitting suckyfatty (the card man) three
+						//times at hp=2 - the seated card-player health - flipping his type_attack around.
+						//WRAPPED, NOT `continue`: the enclosing loop is a WHILE (:302) whose index only
+						//advances at :484, so a continue here would skip the increment and spin the
+						//server forever. In a for-loop continue is safe; in this one it is a hang.
+						local.aProt = waitthread coop_mod/officer.scr::coop_isProtectedActor local.a
+						if( local.aProt != 1 ){
+							local.a.flags["coop_hurt_covered"] = 1
+							local.a type_attack "cover"		// fall back to cover (native; crouches at duck nodes)
+							thread coop_trooper_canteen local.a
+						}
 					}
 				}
 				// IDLE LIVELINESS: a tagged trooper with NO current target (waiting/unaware) mutters in
@@ -1008,8 +1038,15 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 
 				for (local.j = 1; local.j <= $player.size; local.j++){
 					local.player 	= $player[local.j]
-					if (isAlive local.player && local.player.has_disguise && local.player.flags["coop_hasDisguise"] && !local.player.flags["coop_isDisguised"] && local.player.dmteam != "spectator"){
+					//[user 2026-08-10] Step 3: last non-parity reader switched from the MOD flag to the
+					//ENGINE flag. coop_isDisguised is written by script and can disagree with what the AI
+					//actually reads; is_disguised is the value EnemyIsDisguised() consults.
+					//NOTE (Phase C dependency): this loop can never restart after an alarm until Step 21
+					//clears level.coop_disguiseHandlerThread - post-alarm this edit is unreachable code.
+					local.pdisg = local.player.is_disguised
+					if (isAlive local.player && local.player.has_disguise && local.player.flags["coop_hasDisguise"] && local.pdisg != 1 && local.player.dmteam != "spectator"){
 						if (local.enemy cansee local.player local.enemy.fov local.enemy.sight){
+							if( getcvar( "coop_aggroDebug" ) == "1" ){ println( "^~^~^ AGGRO_SRC disguiseHandler undisguised-player-seen" ) }
 							local.enemy thread attackPlayer local.player
 							thread sentientIsSeen local.enemy local.player NIL 	//check to see if anyone can see him spot you
 							thread sentientIsHeard local.enemy local.player 	//check to see if anyone can hear him spot you
@@ -1028,6 +1065,39 @@ attackPlayer local.player:{
 //=========================================================================
 if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread aihandler/attackPlayer->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	local.enemy = self
+	//[user 2026-08-09] AGGRO PROBE + OPTIONAL GUARD.
+	//Every path that makes an actor attack a player funnels through here - disguiseHandler,
+	//sentientIsSeen, sentientIsHeard and setEnemyAttackStates - so this one place captures the
+	//whole aggro surface. It prints the TARGET disguise state because m2l2a aggroes while every
+	//disguise flag reads correct, meaning something attacks a player it should treat as its own.
+	local.tn = "none"
+	local.td = "-"
+	if( local.player != NIL && local.player != NULL ){
+		local.tn = local.player.netname
+		local.td = local.player.flags["coop_isDisguised"]
+	}
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ AGGRO actor=" + local.enemy.targetname + " target=" + local.tn + " tgtDisguised=" + local.td + " alarm=" + level.alarm + " enableDisg=" + level.coop_enableDisguises )
+	}
+	//[user 2026-08-10] ONE AGGRO RULE (master plan v2 Step 3, commit A2).
+	//DELETED: the coop_stealthNoAggro / coop_stealthFunnelGuard cvar pair and the inline
+	//local.blockAggro construction. Both cvars were seeded 0, so this funnel has been FULLY OPEN
+	//in shipped code - the "guard" text above described behaviour that was not running.
+	//NOW: the single implementation of the disguise-deference rule, coop_stealthBlocksAggro, which
+	//defers per target to the ENGINE is_disguised flag (live per frame in coop since bug-1638).
+	//No second parameter and no fail-open: the helper's no-target walk already ends (0) the moment
+	//ANY live player is undisguised, so fail-open would buy no aggro and would only open the
+	//permanent m_bForceAttackPlayer latch on the one NIL-capable route into this funnel.
+	//coop_disgAggroParity 0 skips the gate entirely for every target = exact pre-Phase-A behaviour.
+	local.parity = getcvar( "coop_disgAggroParity" )
+	if( local.parity != "0" ){
+		if( waitthread coop_stealthBlocksAggro local.player ){
+			if( getcvar( "coop_aggroDebug" ) == "1" ){
+				println( "^~^~^ AGGRO BLOCKED actor=" + local.enemy.targetname + " target=" + local.tn + " tgtDisguised=" + local.td )
+			}
+			end
+		}
+	}
 	//[user 2026-08-06] bug-1477 - resolves the TODO below: den_head_sighted_a/c/h were never defined
 	//anywhere, in the mod or any retail pak (confirmed by direct search) - a genuinely invented name,
 	//not a scoping regression. The 'say' dispatch tries multiple lettered-suffix takes for
@@ -1038,8 +1108,20 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	local.enemy say den_alarm_12a
 	local.enemy.enablePain = 1
 	local.enemy.flags["coop_isAttacking"] = game.true
-	local.enemy attackplayer
-	local.enemy favoriteenemy local.player
+	//[user 2026-08-10] Step 3 item 4: attackENTITY when we have a real target. `attackplayer` calls
+	//Actor::ForceAttackPlayer, which sets m_bForceAttackPlayer - a ONE-WAY latch cleared only in the
+	//Actor constructor (actor.cpp:3092/:9339). EnemyIsDisguised() returns false unconditionally
+	//while it is set, so ONE call blinds that actor to every disguise for the rest of the map, and
+	//it confirms G_GetEntity(0) - the HOST - rather than the actual offender. attackentity is
+	//advisory: it confirms the enemy and lets PassesTransitionConditions_Attack decide, and it does
+	//not latch. Bare attackplayer is kept ONLY for the legacy no-target path, where there is no
+	//entity to hand it. favoriteenemy is NIL-guarded - it was receiving NIL on that same path.
+	if( local.player != NIL && local.player != NULL ){
+		local.enemy attackentity local.player
+		local.enemy favoriteenemy local.player
+	}else{
+		local.enemy attackplayer
+	}
 }end
 
 //checks to see if any enemies can 'hear' this sentient.
@@ -1101,6 +1183,7 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 			local.fov = local.enemy.fov
 		}
 		if (local.enemy cansee local.sentient local.fov local.enemy.sight){
+			if( getcvar( "coop_aggroDebug" ) == "1" ){ println( "^~^~^ AGGRO_SRC sentientIsSeen" ) }
 			local.enemy thread attackPlayer local.target
 			//thread sentientIsSeen local.enemy local.target //check to see if anyone can see him spot you
 		}
@@ -1110,6 +1193,55 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 //check if he can see any undisguised players (!isDisguised)
 //i.e are they are holding a weapon
 //=========================================================================
+//[user 2026-08-09] ONE PLACE THAT DECIDES "may an actor go loud on the players right now".
+//Measured 01:16 on m2l2a: both disguise flags read 1, alarm 0, and the attacker count still climbed
+//0 -> 7 -> 9 -> 15. The disguise-aware guards held (the first two guards ignored the player, as the
+//user observed) while other actors reached attack state through RAW `attackplayer` calls that never
+//passed through aihandler::attackPlayer: coop_spawnReplica (the count-scaling clones, born hostile),
+//aisquad go-loud, and morale berserk. Those three are the "others barging in".
+//Returns 1 when aggro must be suppressed. Pass the intended target, or NIL when there is not one.
+//=========================================================================
+coop_stealthBlocksAggro local.target:{
+//=========================================================================
+	//[user 2026-08-09] bug-1639 ENGINE PARITY: no cvar window any more. With bug-1638 the engine
+	//maintains m_bIsDisguised per frame in coop (holster = disguised, draw = blown), so the gate
+	//simply defers to it PER TARGET: scripts never fire attackplayer (the one-way
+	//m_bForceAttackPlayer latch, see below) at a player the ENGINE currently counts as disguised.
+	//An undisguised player is fair game the same frame.
+	if( local.target != NULL && local.target != NIL ){
+		if( local.target.classname == "Player" ){
+			local.ed = local.target.is_disguised
+			if( local.ed == 1 && !level.alarm && level.coop_enableDisguises ){ end (1) }
+		}
+		end (0)
+	}
+	if( level.alarm ){ end (0) }
+	if( !level.coop_enableDisguises ){ end (0) }
+	//[user 2026-08-09] NO PER-TARGET DISGUISE TEST ANY MORE - block for the whole pre-alarm
+	//window on a disguise map, whatever the player is wearing right now.
+	//WHY: `attackplayer` calls Actor::ForceAttackPlayer(), which sets m_bForceAttackPlayer, and
+	//EnemyIsDisguised() returns false unconditionally when that is set. It is a ONE-WAY LATCH -
+	//cleared only in the Actor constructor (actor.cpp:3092), never from script. So one call blinds
+	//that actor to the disguise permanently.
+	//The player is LEGITIMATELY undisguised while walking from the spawn to the papers, so guards
+	//that spot them en route were being latched and stayed hostile forever - which is exactly the
+	//"they catch me the moment I put the uniform on" report, and why attackers never fell back.
+	//Nothing is lost by refusing: the ENGINE still attacks an undisguised player perfectly well
+	//through the threat system (actorenemy.cpp:164) - and, unlike this, reversibly. Vanilla never
+	//sets the latch at all, which is the behaviour we are trying to match.
+	//no specific target: block only while EVERY live player is engine-disguised
+	if( level.alarm || !level.coop_enableDisguises ){ end (0) }
+	local.anyUn = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL && isAlive local.p ){
+			local.ed = local.p.is_disguised
+			if( local.ed != 1 ){ local.anyUn = 1 }
+		}
+	}
+	if( local.anyUn == 0 ){ end (1) }
+}end (0)
+
 canseeUndisguisedPlayers:{
 //=========================================================================
 if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread aihandler/canseeUndisguisedPlayers->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
@@ -1118,7 +1250,9 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	if ($player){
 		for (local.i = 1; local.i <= $player.size; local.i++){
 			local.player = $player[local.i]
-			if (!local.player.flags["coop_isDisguised"] && local.actor cansee local.player local.actor.fov local.actor.sight){
+			//[user 2026-08-09] bug-1639: ENGINE flag, not the stale mod flag
+			local.ed = local.player.is_disguised
+			if (local.ed != 1 && local.actor cansee local.player local.actor.fov local.actor.sight){
 				local.cansee = game.true
 			}
 		}
@@ -1166,8 +1300,19 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	for (local.i = 1; local.i <= level.coop_actorArray["german"].size; local.i++){
 		local.enemy = level.coop_actorArray["german"][local.i]
 		if (local.enemy.flags["coop_actorResetThinkstate"]){
+			if( getcvar( "coop_aggroDebug" ) == "1" ){ println( "^~^~^ AGGRO_SRC setEnemyAttackStates restore" ) }
 			local.enemy.enableEnemy = 1
-			local.enemy attackplayer
+			//[user 2026-08-10] Step 3: gate ONLY the aggro line. enableEnemy / no_idle /
+			//coop_actorResetThinkstate must be restored UNCONDITIONALLY - this label is their sole
+			//restorer, and skipping them would strand every actor it touched.
+			//The enemy captured before the reset is already NULL by restore time (actor.cpp:8608-8626
+			//NULLs .enemy when enableEnemy went 0), so there is no per-target judgement available -
+			//gate on the room instead, which is exactly what the NIL walk of the shared helper does.
+			local.skipAggro = 0
+			if( getcvar( "coop_disgAggroParity" ) != "0" ){
+				if( waitthread coop_stealthBlocksAggro NIL ){ local.skipAggro = 1 }
+			}
+			if( local.skipAggro != 1 ){ local.enemy attackplayer }
 			local.enemy.no_idle 							= game.false
 			local.enemy.flags["coop_isAttacking"] 			= game.true
 			local.enemy.flags["coop_actorResetThinkstate"] 	= game.false

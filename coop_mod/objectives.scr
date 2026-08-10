@@ -51,6 +51,104 @@ coop_obj_push local.so local.status local.text:{
 	}
 }end
 
+//=========================================================================
+// [user 08-08] Brief left-hand card announcing a newly assigned objective. The mission
+// objectives panel (o-key) is opt-in and easy to never open, so a first-time objective could
+// be assigned with nothing on screen to say so - "I kept failing the mission and I have no
+// idea why". This is the nudge, not a replacement for the panel.
+//
+// SLOTS 135-149, taken from the block _research/hud_slot_map.md reserves for mid overlays.
+// Two reasons that block and not a lower one: nothing else can be on screen in it (bug-553
+// was the debrief card and the XP popup fighting over 62-69), and >=100 is FADE-EXEMPT, so a
+// toast still shows if the HUD has already faded out after five quiet seconds - which is
+// exactly when a new objective tends to land.
+//=========================================================================
+coop_obj_toast local.player local.key local.text:{
+	if( local.player == NULL ){ end }
+	if( local.text == NIL || local.text == "" ){ end }
+	if( getcvar( "coop_objToast" ) == "0" ){ end }
+
+	//once per objective per player. NIL and 0 both mean "not shown yet".
+	if( local.player.flags["coop_objToastSeen" + local.key] == 1 ){ end }
+	local.player.flags["coop_objToastSeen" + local.key] = 1
+
+	//queue rather than overlap: two objectives assigned together would otherwise draw on top of
+	//each other in the same slots.
+	while( level.coop_objToastBusy == 1 ){
+		wait 0.5
+		if( local.player == NULL ){ end }
+	}
+	level.coop_objToastBusy = 1
+
+	local.hold = float( getcvar "coop_objToastTime" )
+	if( local.hold < 1 ){ local.hold = 6 }
+
+	//heading
+	ihuddraw_virtualsize local.player 135 1
+	ihuddraw_align       local.player 135 left top
+	ihuddraw_font        local.player 135 "facfont-20"
+	ihuddraw_color       local.player 135 1 0.85 0.4
+	ihuddraw_rect        local.player 135 18 150 300 22
+	ihuddraw_string      local.player 135 "NEW OBJECTIVE"
+	ihuddraw_alpha       local.player 135 1
+
+	//the objective itself, wrapped with the panel s own wrapper rather than a second one
+	local.w = waitthread coop_objWrap local.text 34
+	if( local.player == NULL ){ level.coop_objToastBusy = 0; end }
+
+	local.line = 0
+	while( local.line < local.w.size ){
+		if( local.line > 5 ){ break }	//slots 136-141 only; anything longer is the panel s job
+		local.slot = 136 + local.line
+		ihuddraw_virtualsize local.player local.slot 1
+		ihuddraw_align       local.player local.slot left top
+		ihuddraw_font        local.player local.slot "courier-16"
+		ihuddraw_color       local.player local.slot 1 1 1
+		ihuddraw_rect        local.player local.slot 18 ( 174 + ( local.line * 18 ) ) 300 18
+		ihuddraw_string      local.player local.slot local.w[local.line + 1]
+		ihuddraw_alpha       local.player local.slot 1
+		local.line++
+	}
+
+	//[user 08-08] tracking hint. The objectives panel is a toggle most players never discover, so
+	//the toast that tells you about a new objective is the natural place to mention it. Named by
+	//ACTION rather than a hard-coded key, because it is rebindable and printing "[O]" at someone who
+	//moved it is worse than saying nothing.
+	ihuddraw_virtualsize local.player 142 1
+	ihuddraw_align       local.player 142 left top
+	ihuddraw_font        local.player 142 "verdana-12"
+	ihuddraw_color       local.player 142 0.75 0.75 0.75
+	ihuddraw_rect        local.player 142 18 ( 174 + ( local.line * 18 ) + 6 ) 300 16
+	//[user 08-08] bug-1593 - name the ACTUAL key. Only the client knows its own binds, so it
+	//publishes the answer as the USERINFO cvar coop_objKey (CL_CoopObjKey_f scans the bind table
+	//for "coop_obj" and is re-run on every bind/unbind) - the same userinfo channel challenges.scr
+	//already reads. Falls back to naming the ACTION when nothing is bound, which is also what a
+	//player running an older client will see, since their exe never sets the cvar.
+	local.k = info_valueforkey local.player.userinfo "coop_objKey"
+	if( local.k == NIL || local.k == "" ){
+		ihuddraw_string      local.player 142 "Bind Coop Objectives in Controls to track them"
+	}else{
+		ihuddraw_string      local.player 142 ( "Press [" + local.k + "] to track your objectives" )
+	}
+	ihuddraw_alpha       local.player 142 1
+
+	wait local.hold
+
+	//tear down every slot we touched, whether or not the player survived the hold
+	if( local.player != NULL ){
+		//[user 08-08] bug-1592 - was `<= 141`, but the tracking hint draws on 142, so it was never
+		//cleared and stayed burned on screen for the rest of the map. The teardown range must cover
+		//EVERY slot this function can write; 135 heading, 136-141 text, 142 hint.
+		local.s = 135
+		while( local.s <= 142 ){
+			ihuddraw_alpha  local.player local.s 0
+			ihuddraw_string local.player local.s ""
+			local.s++
+		}
+	}
+	level.coop_objToastBusy = 0
+}end
+
 
 //=========================================================================
 // Push one dedicated secondary line to a SINGLE player's HUD (late-join /
@@ -99,10 +197,15 @@ coop_obj_repush_player local.ent:{
 			waitthread coop_obj_push_one local.ent 1 2 "Eliminate the High-Ranking Officer"
 		}
 	}
+	//[user 08-08] gated like the officer line above. Ungated, this re-pushed the radio ACTIVE on
+	//every respawn and late join - which is what made a mission reload "default to destroying the
+	//officer's radio".
 	if( level.coop_sideObjRadioDone == 1 ){
 		waitthread coop_obj_push_one local.ent 2 3 "Destroy the Radio to Stop Reinforcements"
-	} else {
+	} else if( level.coop_sideObjOfficerDone == 1 ){
 		waitthread coop_obj_push_one local.ent 2 2 "Destroy the Radio to Stop Reinforcements"
+	} else {
+		waitthread coop_obj_push_one local.ent 2 1 "Destroy the Radio to Stop Reinforcements"
 	}
 }end
 
@@ -167,6 +270,19 @@ coop_obj_register_delayed:{
 		end
 	}
 
+	//[user 08-08] bug-1594 - THE RULE, stated universally: these two lines ARE the officer
+	//encounter, so they must never appear on a mission where no officer spawns. The policy check
+	//above was not sufficient - a map can pass it and still never place a boss (no anchor, no
+	//suitable infrastructure), which is exactly how two permanently-ACTIVE, never-completable lines
+	//ended up on missions that have nothing to do with an officer. Requiring a live officer here
+	//costs nothing, because officer.scr::coop_officer_spawn (officer.scr:607) calls coop_obj_register
+	//directly the moment one exists - so the lines appear precisely when the encounter does, on any
+	//map, with no per-map list to maintain. The officerDone case still registers, so a completed
+	//encounter keeps its lines after the boss is gone.
+	if( level.coop_officer == NIL || level.coop_officer == NULL ){
+		if( level.coop_sideObjOfficerDone != 1 ){ end }
+	}
+
 	waitthread coop_obj_register
 }end
 
@@ -180,7 +296,14 @@ coop_obj_register:{
 	if( level.coop_officer != NULL || level.coop_sideObjOfficerDone == 1 ){
 		waitthread coop_obj_push 1 2 "Eliminate the High-Ranking Officer"
 	}
-	waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+	//[user 08-08] the radio line used to be pushed ACTIVE here unconditionally, so from map start -
+	//and on every reload - "Destroy the Radio to Stop Reinforcements" read as the current objective,
+	//before the officer was even engaged. You cannot do it until he is dead (officer.scr only exposes
+	//the radio then: "Plant explosives on the radio..."), so it pointed players at something the
+	//mission had not unlocked yet. Hidden until coop_obj_officer_done flips it.
+	local.rstat = 1
+	if( level.coop_sideObjOfficerDone == 1 ){ local.rstat = 2 }
+	waitthread coop_obj_push 2 local.rstat "Destroy the Radio to Stop Reinforcements"
 
 	// Re-assert a few times: a per-player obj_setup.cfg that runs slightly AFTER this
 	// initial push (spawn timing race) resets the coop_so cvars and would blank the lines.
@@ -211,7 +334,10 @@ coop_obj_reassert:{
 		if( level.coop_sideObjRadioDone == 1 ){
 			waitthread coop_obj_push 2 3 "Destroy the Radio to Stop Reinforcements"
 		} else {
-			waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+			//[user 08-08] gated - see the registration site above.
+			if( level.coop_sideObjOfficerDone == 1 ){
+				waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+			}
 		}
 		local.n = local.n + 1
 	}
@@ -236,6 +362,11 @@ coop_obj_officer_done:{
 	// monitor, radio XP from coop_obj_radio_done)
 	level.coop_xp_sideObjPush = 1
 	waitthread coop_obj_push 1 3 "Eliminate the High-Ranking Officer"
+	//[user 08-08] and NOW the radio becomes a real objective - the moment it is actually doable,
+	//and the moment officer.scr tells the player to go plant explosives on it.
+	if( level.coop_sideObjRadioDone != 1 ){
+		waitthread coop_obj_push 2 2 "Destroy the Radio to Stop Reinforcements"
+	}
 	level.coop_xp_sideObjPush = 0
 }end
 
@@ -531,5 +662,31 @@ coop_objPanel_monitor local.player:{
 			ihuddraw_alpha local.player local.s 0
 			local.s++
 		}
+	}
+}end
+
+//=========================================================================
+// [user 08-08] Toast one PRIMARY objective to everyone. Hooked from
+// global/objectives.scr::add_objectives, which is the channel the maps' own objectives use
+// (exec global/obj.scr -> add_objectives). The first version of this was hooked to
+// coop_obj_push instead - the coop SIDE-objective bus - which announced the officer/radio
+// lines and stayed silent on the actual mission objective. Exactly backwards.
+//
+// Keyed on the objective INDEX, not its text, so a map that republishes the same line with a
+// changing count ("Destroy the Nebelwerfers [3 remaining]") announces once and then updates
+// quietly.
+//=========================================================================
+coop_obj_toast_all local.index local.text:{
+	if( local.text == NIL || local.text == "" ){ end }
+	if( $player == NULL || $player.size < 1 ){ end }
+
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			if( $player[local.i].flags["coop_isActive"] == 1 ){
+				thread coop_obj_toast $player[local.i] ( "m" + local.index ) local.text
+			}
+		}
+		local.i++
 	}
 }end

@@ -46,6 +46,10 @@ cover_place local.player:{
 	if( local.slot == NIL ){ local.slot = 0 }
 	local.slot++
 	level.coop_cover_count = local.slot
+	//[user 2026-08-08] who deployed this piece, for the "Dug In" challenge
+	//(challenges.scr::chal_nearOwnCover). Entity ref, not entnum - a reconnecting client gets a new
+	//entity, so it can never inherit a previous player's sandbags through a recycled slot number.
+	level.coop_cover_owner[local.slot] = local.player
 
 	local.yaw       = local.player.viewangles[1]
 	local.bagangles = (0 0 0)
@@ -126,36 +130,49 @@ cover_hud_monitor local.player:{
 		wait 0.1
 	}
 
-	ihuddraw_alpha  local.player 40 0
-	ihuddraw_alpha  local.player 41 0
-	ihuddraw_string local.player 41 ""
+	//[user 2026-08-10] NULL guard: this teardown runs AFTER the display loop above, and that
+	//loop exits precisely BECAUSE the player went away (disconnect / spectate / map change).
+	//Measured in the 2-player test as "Script Error : Player entity is NULL for ihuddraw_*".
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 40 0
+		ihuddraw_alpha  local.player 41 0
+		ihuddraw_string local.player 41 ""
+	}
 }end
 
 
 cover_proximity_monitor local.player:{
+	//[user 2026-08-10] "only the owner can remove the cover, not the other player". There is NO
+	//ownership check anywhere in this file - not here, not in the scan below, not in cover_remove -
+	//so a non-owner is ALREADY permitted to remove. The asymmetry is the HUD fade: the prompt and its
+	//progress bar drew on slots 42-44, and the engine multiplies alpha by s_hudFadeAlpha for every
+	//slot BELOW 100 when the player is calm (cg_drawtools.cpp:651-653). The OWNER just placed the
+	//sandbag, so their HUD is awake and they see the prompt; the other player walks up, stands still,
+	//and the prompt fades to nothing - owner-only behaviour with no owner logic. Moved to 145-147.
+	//FOURTH sighting in one day: revive HUD 21-26, blueprint ack, XP micro popup, this.
 	local.hint_showing = 0
 	local.bar_showing  = 0
 
-	ihuddraw_virtualsize local.player 42 1
-	ihuddraw_align       local.player 42 center bottom
-	ihuddraw_font        local.player 42 "verdana-14"
-	ihuddraw_color       local.player 42 1 1 1
-	ihuddraw_rect        local.player 42 0 -20 0 0
-	ihuddraw_alpha       local.player 42 0
+	ihuddraw_virtualsize local.player 145 1
+	ihuddraw_align       local.player 145 center bottom
+	ihuddraw_font        local.player 145 "verdana-14"
+	ihuddraw_color       local.player 145 1 1 1
+	ihuddraw_rect        local.player 145 0 -20 0 0
+	ihuddraw_alpha       local.player 145 0
 
-	ihuddraw_virtualsize local.player 43 1
-	ihuddraw_align       local.player 43 center bottom
-	ihuddraw_shader      local.player 43 "textures/hud/coop_bar_white.tga"
-	ihuddraw_color       local.player 43 0.12 0.12 0.12
-	ihuddraw_rect        local.player 43 -60 -38 120 8
-	ihuddraw_alpha       local.player 43 0
+	ihuddraw_virtualsize local.player 146 1
+	ihuddraw_align       local.player 146 center bottom
+	ihuddraw_shader      local.player 146 "textures/hud/coop_bar_white.tga"
+	ihuddraw_color       local.player 146 0.12 0.12 0.12
+	ihuddraw_rect        local.player 146 -60 -38 120 8
+	ihuddraw_alpha       local.player 146 0
 
-	ihuddraw_virtualsize local.player 44 1
-	ihuddraw_align       local.player 44 center bottom
-	ihuddraw_shader      local.player 44 "textures/hud/coop_bar_white.tga"
-	ihuddraw_color       local.player 44 0.1 0.9 0.1
-	ihuddraw_rect        local.player 44 -60 -38 0 8
-	ihuddraw_alpha       local.player 44 0
+	ihuddraw_virtualsize local.player 147 1
+	ihuddraw_align       local.player 147 center bottom
+	ihuddraw_shader      local.player 147 "textures/hud/coop_bar_white.tga"
+	ihuddraw_color       local.player 147 0.1 0.9 0.1
+	ihuddraw_rect        local.player 147 -60 -38 0 8
+	ihuddraw_alpha       local.player 147 0
 
 	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
 		local.f = 0
@@ -167,13 +184,13 @@ cover_proximity_monitor local.player:{
 
 		if( local.player.flags["coop_dbno_active"] == 1 ){
 			if( local.hint_showing ){
-				ihuddraw_alpha local.player 42 0
+				ihuddraw_alpha local.player 145 0
 				local.hint_showing = 0
 			}
 			if( local.bar_showing ){
-				ihuddraw_alpha local.player 43 0
-				ihuddraw_alpha local.player 44 0
-				ihuddraw_rect  local.player 44 -60 -38 0 8
+				ihuddraw_alpha local.player 146 0
+				ihuddraw_alpha local.player 147 0
+				ihuddraw_rect  local.player 147 -60 -38 0 8
 				local.bar_showing = 0
 			}
 			continue
@@ -200,14 +217,31 @@ cover_proximity_monitor local.player:{
 
 		if( local.nearslot != NIL ){
 			if( !local.hint_showing ){
-				ihuddraw_string local.player 42 "Hold [USE] to remove cover"
-				ihuddraw_alpha  local.player 42 0.7
+				ihuddraw_string local.player 145 "Hold [USE] to remove cover"
+				ihuddraw_alpha  local.player 145 0.7
 				local.hint_showing = 1
 			}
 
+			//[user 2026-08-10] PROBE. The fade explains an invisible prompt, NOT a blocked action, and
+			//assuming has been wrong repeatedly today. Report who is near, whether they own it, and
+			//whether useheld actually arrives for a non-owner. Rate-limited to 1 line / 2s.
+			if( getcvar( "coop_aggroDebug" ) == "1" ){
+				if( level.coop_coverDbgNext == NIL ){ level.coop_coverDbgNext = 0 }
+				if( level.time > level.coop_coverDbgNext ){
+					level.coop_coverDbgNext = level.time + 2
+					local.dOwn = 0
+					local.dOe = level.coop_cover_owner_ent[local.nearslot]
+					if( local.dOe != NULL && local.dOe != NIL ){
+						if( local.dOe.entnum == local.player.entnum ){ local.dOwn = 1 }
+					}
+					local.dUh = local.player.useheld
+					if( local.dUh == NIL ){ local.dUh = -1 }
+					println( "^~^~^ COVER near slot=" + local.nearslot + " byE" + local.player.entnum + " isOwner=" + local.dOwn + " useheld=" + local.dUh )
+				}
+			}
 			if( local.player.useheld == 1 && local.player.flags["coop_medkit_in_use"] != 1 ){
-				ihuddraw_alpha local.player 43 0.8
-				ihuddraw_alpha local.player 44 0.9
+				ihuddraw_alpha local.player 146 0.8
+				ihuddraw_alpha local.player 147 0.9
 				local.bar_showing   = 1
 				local.remove_frames = 0
 
@@ -222,39 +256,47 @@ cover_proximity_monitor local.player:{
 					if( local.chk == NULL ){ break }
 					if( vector_length(local.chk.origin - local.player.origin) > 80 ){ break }
 					local.fill_w = local.remove_frames * 1.2
-					ihuddraw_rect local.player 44 -60 -38 local.fill_w 8
+					ihuddraw_rect local.player 147 -60 -38 local.fill_w 8
 					local.remove_frames++
 				}
 
+				if( getcvar( "coop_aggroDebug" ) == "1" ){
+					println( "^~^~^ COVER holddone frames=" + local.remove_frames + " slot=" + local.nearslot + " byE" + local.player.entnum )
+				}
 				if( local.remove_frames >= 100 ){
 					if( level.coop_cover_visual[local.nearslot] != NIL ){
 						thread cover_remove local.player local.nearslot
 						local.hint_showing = 0
-						ihuddraw_alpha local.player 42 0
+						ihuddraw_alpha local.player 145 0
 					}
 				}
-				ihuddraw_alpha local.player 43 0
-				ihuddraw_alpha local.player 44 0
-				ihuddraw_rect  local.player 44 -60 -38 0 8
+				ihuddraw_alpha local.player 146 0
+				ihuddraw_alpha local.player 147 0
+				ihuddraw_rect  local.player 147 -60 -38 0 8
 				local.bar_showing = 0
 			}
 		} else {
 			if( local.hint_showing ){
-				ihuddraw_alpha  local.player 42 0
+				ihuddraw_alpha  local.player 145 0
 				local.hint_showing = 0
 			}
 			if( local.bar_showing ){
-				ihuddraw_alpha  local.player 43 0
-				ihuddraw_alpha  local.player 44 0
-				ihuddraw_rect   local.player 44 -60 -38 0 8
+				ihuddraw_alpha  local.player 146 0
+				ihuddraw_alpha  local.player 147 0
+				ihuddraw_rect   local.player 147 -60 -38 0 8
 				local.bar_showing = 0
 			}
 		}
 	}
 
-	ihuddraw_alpha  local.player 42 0
-	ihuddraw_alpha  local.player 43 0
-	ihuddraw_alpha  local.player 44 0
+	//[user 2026-08-10] NULL guard: this teardown runs AFTER the display loop above, and that
+	//loop exits precisely BECAUSE the player went away (disconnect / spectate / map change).
+	//Measured in the 2-player test as "Script Error : Player entity is NULL for ihuddraw_*".
+	if( local.player != NULL ){
+		ihuddraw_alpha  local.player 145 0
+		ihuddraw_alpha  local.player 146 0
+		ihuddraw_alpha  local.player 147 0
+	}
 }end
 
 
