@@ -26,6 +26,16 @@ chal_init:{
 	if( level.coop_chal_init == 1 ){ end }
 	level.coop_chal_init = 1
 
+	//[user 2026-08-14] SHARED "was the alarm EVER raised on this map" latch. Five of the unwired
+	//feats are some form of "do X without the alarm going off", and checking level.alarm at the
+	//END would pass a run where the alarm was raised and later cleared - which is the normal
+	//behaviour of alarm_system.scr and e1l4alarm.scr, both of which reset it. Latching means once
+	//it goes off, it stays off for scoring purposes, which is what the challenge text promises.
+	//A 2s poll rather than hooking the ~6 places that raise it: those live in vanilla global
+	//scripts that per-map copies override, so a hook would silently not apply on some maps.
+	level.coop_chalAlarmEver = 0
+	thread chal_alarm_watch
+
 	level.coop_chal_enabled = 1
 	if( getcvar "coop_challenges" == "" ){ setcvar "coop_challenges" "1" }
 	if( getcvar "coop_challenges" == "0" ){ level.coop_chal_enabled = 0 }
@@ -550,7 +560,7 @@ chal_init:{
 	waitthread chal_def "evt_full_deck" "combat" "The Full Deck" "Face down all eight kinds of reinforcement the Officer can call" "evt_full_deck" 8 ""
 	waitthread chal_def "evt_not_today_fritz" "combat" "Not Today, Fritz" "Survive a Stuka dive and an artillery barrage on the same map without going down" "evt_not_today_fritz" 1 "models/coop_helmets/coop_helmet_us_gasmask.tik"
 	waitthread chal_def "obj_clean_sweep" "campaign" "Spotless Record" "Complete 5 missions with every primary objective done and nobody going down" "obj_clean_sweep" 5 "models/player/allied_Airborne_101E_Corp_Liebgott.tik"
-	waitthread chal_def "obj_the_quiet_type" "discovery" "The Quiet Type" "Complete five different missions without ever raising the alarm" "obj_the_quiet_type" 5 "models/player/allied_British_Officer.tik"
+	waitthread chal_def "obj_the_quiet_type" "discovery" "The Quiet Type" "Complete five missions without ever raising the alarm" "obj_the_quiet_type" 5 "models/player/allied_British_Officer.tik"
 
 	// category display order + labels for the review printout
 	level.coop_chal_catOrder[0] = "rifles"
@@ -1874,6 +1884,20 @@ chal_mission_complete local.mapname:{
 		waitthread chal_team_bump ( "map_" + local.mapname ) 1
 	}
 	waitthread chal_team_bump "missions" 1
+
+	//[user 2026-08-14] "The Quiet Type" - finish a mission without the alarm ever being raised.
+	//Counted here because this is the one point that already knows a REAL mission just ended:
+	//briefings and lobbies are filtered out above, and coop_chal_missionPaid guards against the
+	//same completion paying twice.
+	//NOTE ON WORDING: the challenge originally said five DIFFERENT missions, and that is not
+	//enforceable here - level.* resets on every map change, so nothing at this point remembers
+	//which maps have already paid. Rather than ship a description the code does not honour, the
+	//text now says five missions and the code delivers exactly that. Making it truly distinct
+	//needs a persisted per-map record, which is a bigger change than this feat is worth.
+	if( level.coop_chalAlarmEver != 1 ){
+		waitthread chal_team_bump "obj_the_quiet_type" 1
+		println( "^~^~^ CHAL quiet mission completed: " + local.mapname )
+	}
 
 	// [user 07-11] per-player PLAYSTYLE feats, evaluated once at mission complete. Skip lobby maps. The
 	// weapon-only feats need at least one kill (you must actually fight the level with that weapon).
@@ -3530,4 +3554,40 @@ chal_respite_play local.what:{
 	if( level.coop_chal_respiteCello != 1 ){ end }
 	level.coop_chal_respitePaid = 1
 	waitthread chal_team_bump "cc_brief_respite" 1
+}end
+
+
+//=========================================================================
+// [user 2026-08-14] Alarm latch. Once the alarm has been raised on this map it stays raised for
+// scoring, because every "without the alarm" feat means "not once", not "not right now".
+// level.alarm and level.alarm_on are both watched: the vanilla alarm scripts use the first,
+// the coop stealth layer (bust.scr) uses the second, and a map can trip either.
+//=========================================================================
+chal_alarm_watch:{
+//=========================================================================
+	while( 1 ){
+		if( level.alarm || level.alarm_on == 1 || level.coop_bustLoud == 1 ){
+			level.coop_chalAlarmEver = 1
+			end
+		}
+		wait 2
+	}
+}end
+
+//=========================================================================
+// [user 2026-08-14] "Quiet" segment feats. A map calls this when the thing the challenge asks
+// about is done; it pays out only if the alarm never went off. One helper for all of them, so a
+// new quiet feat is one call from a map script rather than a new block of logic.
+//   local.cid  - the stat to bump
+// Team-scoped: these are squad outcomes, not individual ones.
+//=========================================================================
+chal_quiet_feat local.stat:{
+//=========================================================================
+	if( level.coop_chal_enabled != 1 ){ end }
+	if( local.stat == NIL || local.stat == "" ){ end }
+	if( level.coop_chalAlarmEver == 1 ){ end }
+	if( level.coop_chalQuietPaid[local.stat] == 1 ){ end }
+	level.coop_chalQuietPaid[local.stat] = 1
+	waitthread chal_team_bump local.stat 1
+	println( "^~^~^ CHAL quiet feat paid: " + local.stat )
 }end
