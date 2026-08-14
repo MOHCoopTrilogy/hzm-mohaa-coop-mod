@@ -16,6 +16,30 @@ and different maps draw different voices). The small character pools (flvo / gur
 Usage:  python _research/gen_sndcache.py            # rewrites coop_mod/sndcache.scr
 """
 import os, re, io, glob
+import sys
+
+# ============================================================================================
+# [user 2026-08-10] OBSOLETE - DO NOT RUN WITHOUT READING THIS.
+#
+# deathvox, flvo, gurgle and headshot are no longer precached through this script. They are now
+# declared with `aliascache` in ubersound/, which precaches inside CG_RegisterSounds during
+# CA_LOADING - behind the loading screen, at ZERO configstrings and zero network traffic.
+#
+# That removes the problem this generator was written to work around. Its own header records
+# coop sitting at 1585/1600 MAX_SOUNDS, fifteen slots from a hard ERR_DROP, which is why death
+# voices were sliced to a per-map window of 60 out of 484. The aliascache migration freed 633
+# server sound-index slots outright, so the slicing is no longer needed and every death voice is
+# available on every map again.
+#
+# This script would also now FAIL: it derives its file list by re-reading the previous
+# sndcache.scr and asserts that deathvox entries are present. Those lines are gone.
+#
+# If you ever need to regenerate the remaining 62 sound/dialogue/ caches, source the list from the
+# ubersound alias files rather than from the previous output, and do NOT re-add any directory that
+# is aliascache-owned (coop_deathvox, coop_flvo, coop_gurgle, coop_headshot).
+# ============================================================================================
+sys.exit("gen_sndcache.py is obsolete - see the header. deathvox/flvo/gurgle/headshot are now aliascache-precached in ubersound/, and this script would re-add them AND fail its own assert.")
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.dirname(HERE)

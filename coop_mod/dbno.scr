@@ -216,17 +216,36 @@ dbno_enter local.player local.hitclass:{
 	local.player iprint local.down_msg 1
 	thread dbno_play_random_call local.player
 
+	//[user 2026-08-11] TOP CENTRE, NOT TOP LEFT. This was `iprint`, and iprint draws at the engine's
+	//fixed top-left print position - straight under the compass, which the message then overlaps.
+	//An iprint cannot be repositioned, so the teammate alert becomes a real HUD element.
+	//SLOT 216, chosen deliberately rather than conveniently: the fade-exempt band (>=100) is FULL,
+	//and anything below 100 is multiplied by s_hudFadeAlpha when the player is calm
+	//(cg_drawtools.cpp:651-653) - a teammate standing still reading that someone went down is
+	//exactly "calm", so a sub-100 slot would fade out at the moment it matters most. 216 sits in the
+	//challenge Service Record bar range (challenges.scr:2475, `214 + local.r`), which is
+	//menu/lobby-time ONLY and never on screen during a mission - the same never-concurrent gating
+	//already used for 156-173 and for the Naxos bar on 118-120.
 	local.msg = local.player.netname + " is down - " + local.detail + " (" + local.actual_timer + " seconds)"
+	level.coop_dbnoBannerUntil = level.time + 6
 	local.maxclients = $player.size
 	local.i = 1
 	while( local.i <= local.maxclients ){
 		if( $player[local.i] && $player[local.i] != local.player ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
-				$player[local.i] iprint local.msg 0
+				local.o = $player[local.i]
+				ihuddraw_virtualsize local.o 216 1
+				ihuddraw_align       local.o 216 center top
+				ihuddraw_font        local.o 216 "verdana-12"
+				ihuddraw_color       local.o 216 1 0.25 0.2
+				ihuddraw_rect        local.o 216 0 58 0 0
+				ihuddraw_string      local.o 216 local.msg
+				ihuddraw_alpha       local.o 216 1
 			}
 		}
 		local.i++
 	}
+	thread dbno_downBannerClear
 
 	//[306] KEY ITEMS: before takeall strips everything, drop any HEAVY weapon (panzerschreck/bazooka)
 	//to the world where they fell so it is never lost with the downed player (recoverable by a
@@ -600,6 +619,31 @@ dbno_revival_stub local.player:{
 }end
 
 
+
+//=========================================================================
+// Stand the "<name> is down" banner back down. [user 2026-08-11]
+//=========================================================================
+// Keyed on a LEVEL deadline rather than a local timer, so a second man going down while the first
+// banner is still up simply extends it instead of the first clear wiping the newer message.
+// Re-walks $player rather than capturing a list - a player who joined or left during the window
+// must not be able to strand text on a HUD, which is the bug-1679 lesson this file already paid
+// for once with the revive prompt.
+//=========================================================================
+dbno_downBannerClear:{
+	while( level.coop_dbnoBannerUntil != NIL && level.time < level.coop_dbnoBannerUntil ){
+		wait 0.5
+	}
+	level.coop_dbnoBannerUntil = NIL
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_alpha  local.p 216 0
+			ihuddraw_string local.p 216 ""
+		}
+		local.i++
+	}
+}end
 //=========================================================================
 // TEAM REVIVE [user 07-09]: a LIVING teammate stands over a downed player and HOLDS [USE] (F) to
 // bring them back up - no medkit needed. Threaded from dbno_enter. While a reviver channels, they
@@ -708,6 +752,23 @@ dbno_teamrevive_monitor local.downed:{
 				}
 				local.reviver    = local.best
 				local.reviverNum = local.best.entnum
+				//[user 2026-08-10] PLAY THE KNEEL. This was the actual bug behind "no healing animation is
+				//working" - and it was never the animation. player_legs.st:1479 defines a REVIVE_MEDIC legs
+				//state that loops coop_dbno_medic, dbno.scr forces the reviver back to STAND at all four
+				//exits, and the comment at :606 says the reviver should "play the coop_dbno_medic kneel" -
+				//but NOTHING ever put them INTO the state. So no clip could ever have played, and swapping
+				//the alias (medic01 -> cot_medic -> HealingCycle) was never going to help. Two auditions
+				//were burned before checking whether the state was entered at all.
+				//Safe to leave: the state auto-exits to STAND on any movement/jump/crouch/attack
+				//(player_legs.st:1494-1501), and the four existing forcelegsstate STAND calls still cover
+				//completion, cancel, death and disconnect.
+				local.reviver forcelegsstate REVIVE_MEDIC
+				//[user 2026-08-10] and the DOWNED player rises with him. The user asked for the pair: "the dbno
+				//player should play the same animation while the healer plays their new medic animation".
+				//Same chain the self-revive uses - struggle onto the knees, hold there while the medkit is
+				//applied, stand only when it completes (the stand happens in dbno_ai_revive, which both the
+				//team revive and the AI medic funnel through, so they stay consistent).
+				if( local.downed != NULL ){ local.downed forcelegsstate DBNO_GETUP_KNEES }
 				local.progress   = 0
 				local.shown      = 0
 				ihuddraw_virtualsize local.reviver 135 1
@@ -802,6 +863,15 @@ dbno_teamrevive_monitor local.downed:{
 					//is threaded from more than one site and adding a parameter would break them.
 					thread coop_mod/challenges.scr::chal_revive_target local.reviver local.downed
 					println( "^~^~^ DBNO teamrevive by=" + local.reviver.netname + " kitsLeft=" + ( local.mk - 1 ) )
+					//[user 2026-08-10] "anytime a player self revives or gets revived both players should hear the
+					//medkit apply sound (distance based)". The team revive never played it at all - med_kit fired
+					//only in medkit.scr (self-heal, self-revive) and paradrop.scr. Played on the DOWNED player so it
+					//originates at the patient, which is where both of them are standing.
+					//med_kit is already the right alias for this: soundparms ... 160 1600 ITEM - a world sound with
+					//distance falloff, so nearby squadmates hear it and distant ones do not. Note coop_medkit_cloth
+					//is deliberately LOCAL channel (only its own player hears it), which is why the rustle never
+					//carried and why it is not the alias to use here.
+					if( local.downed != NULL ){ local.downed playsound med_kit }
 					waitthread dbno_ai_revive local.downed
 					end
 				}
@@ -818,7 +888,12 @@ dbno_teamrevive_monitor local.downed:{
 			local.k = 1
 			while( local.k <= $player.size ){
 				local.c = $player[local.k]
-				if( local.c != NULL && local.c.entnum != local.downed.entnum && isAlive local.c && local.c.flags["coop_dbno_active"] != 1 && local.c.classname == "Player" ){
+				//[user 2026-08-10] SPECTATORS EXCLUDED. A team spectator can still read as isAlive, and a
+				//spectating camera parked on the body passes both the range and the facing test - so the
+				//prompt was drawn on someone who cannot possibly revive anyone. That is half of the
+				//"messages get stuck on screen when you spectate a DBNO player" report; the other half is
+				//the missing teardown at this monitor's exit (below).
+				if( local.c != NULL && local.c.entnum != local.downed.entnum && isAlive local.c && local.c.flags["coop_dbno_active"] != 1 && local.c.classname == "Player" && local.c.dmteam != "spectator" && local.c.flags["coop_isActive"] == 1 ){
 					local.cd = vector_length( local.c.origin - local.downed.origin )
 					local.look = 0
 					if( local.cd <= local.range && local.cd > 1 ){
@@ -878,6 +953,12 @@ dbno_teamrevive_monitor local.downed:{
 					if( local.downed != NULL ){ local.downed.flags["coop_dbno_healing"] = NIL }
 					local.reviver    = NULL
 					local.reviverNum = -1
+					//[user 2026-08-10] reviver lost: put the downed player back down. Without this they freeze
+					//half-risen, exactly the bug the self-revive cancel path just had. Guarded on the flag so a
+					//completed revive is never dragged back to the floor.
+					if( local.downed != NULL && local.downed.flags["coop_dbno_active"] == 1 ){
+						local.downed forcelegsstate DBNO_IDLE
+					}
 					local.progress   = 0
 					local.shown      = 0
 				}
@@ -904,6 +985,27 @@ dbno_teamrevive_monitor local.downed:{
 			ihuddraw_alpha  local.downed 140 0
 		}
 		local.downed.flags["coop_dbno_healing"] = NIL
+	}
+
+	//[user 2026-08-10] "going into spectator makes messages like Hold Use to heal player get stuck on
+	//screen". THIS is why, and spectating was only one way to trigger it. The availability prompt is
+	//drawn on CANDIDATES (the local.c scan above), but every teardown in this label only ever cleared
+	//local.reviver and local.downed - two roles a candidate is not. So the moment the patient resolved
+	//(died, self-revived, or spectated out) this loop exited and left "Hold [USE] to heal player" drawn
+	//on anyone who happened to be looking at the body, with coop_revivePrompt latched at 1 so nothing
+	//would clear it later either. ihuddraw state lives on the client until something overwrites it.
+	//Walk $player fresh rather than reusing a captured list - the roster can change during a revive.
+	local.k = 1
+	while( local.k <= $player.size ){
+		local.c = $player[local.k]
+		if( local.c != NULL ){
+			if( local.c.flags["coop_revivePrompt"] == 1 ){
+				local.c.flags["coop_revivePrompt"] = NIL
+				ihuddraw_alpha  local.c 135 0
+				ihuddraw_string local.c 135 ""
+			}
+		}
+		local.k++
 	}
 }end
 
@@ -963,7 +1065,9 @@ dbno_ai_revive local.player:{
 
 	local.player modheight "stand"
 	println ( "^~^~^ DBNO getup_teamrevive p=" + local.player.netname )
-	local.player forcelegsstate STAND
+	//[user 2026-08-10] rise to the feet rather than snapping upright. Shared by the team revive
+	//AND the AI medic revive, so both look the same. DBNO_GETUP_STAND exits to STAND itself.
+	local.player forcelegsstate DBNO_GETUP_STAND
 	local.player health level.coop_health
 	local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
@@ -1029,6 +1133,18 @@ dbno_ai_revive local.player:{
 	//on top; a pistol is a SECONDARY weapon class so it can never collide with the one-primary rule, and
 	//an already-held one makes the give a no-op. noWrap=1 - we are already inside the gametype-0 window.
 	local.player waitthread coop_mod/itemhandler.scr::coop_giveSidearmPick local.player 1
+	//[user 2026-08-11] SILENCED PISTOL SURVIVES A DBNO TOO. dbno_enter does a takeall, and the restore
+	//tiers above are EXCLUSIVE - registered inv > picks > map default > failsafe - so on a disguise map
+	//the silenced pistol was lost on every revive: it is ADDITIVE (level.coop_silencedOnSpawn), not part
+	//of coop_loWeapons, and the map-default tier that does list it never runs once a player has picks -
+	//which, since bug-1675/1678 seeds every new player, is everyone. Exactly the shape of bug-1204 one
+	//line above, so it is fixed the same way: re-issued unconditionally on top. A pistol is a SECONDARY
+	//weapon class so it cannot collide with the one-primary rule, and a re-give of a held weapon is a
+	//no-op. Already inside the gametype-0 window here, same as the sidearm re-give.
+	if( level.coop_silencedOnSpawn == 1 ){
+		local.player item "models/weapons/silencedpistol.tik"
+		local.player ammo "pistol" 40
+	}
 	waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
 	}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
 	//[user 07-16] bug-620 / [user 07-19] bug-893: mission-critical map gear (e1l2 minedetector etc.)
@@ -1170,17 +1286,36 @@ dbno_letgo_monitor:{
 dbno_medic_callout local.player:{
 	thread dbno_play_random_call local.player
 
+	//[user 2026-08-11] SECOND top-left message, same fix. The "is down" alert moved to the top-centre
+	//banner, and the user still saw red text under the compass - because THIS one was a separate
+	//iprint that nobody had touched. Two DBNO squad alerts, two call sites; moving one was half a fix.
+	//Shares slot 216 with the down banner on purpose: they are the same feature announcing the same
+	//player, they fire SEQUENTIALLY (down, then the medic call), and one line replacing another is
+	//exactly what should happen. The shared level deadline means the later message extends the window
+	//rather than the earlier clear wiping it.
+	//INLINE rather than a shared helper, deliberately - dbno.scr:655 already records that an entity
+	//handed to a helper as a thread parameter arrives NULL in this scripting language, which is why
+	//the revive HUD in this same file was inlined too.
 	local.msg = local.player.netname + " is calling for a medic!"
+	level.coop_dbnoBannerUntil = level.time + 6
 	local.maxclients = $player.size
 	local.i = 1
 	while( local.i <= local.maxclients ){
 		if( $player[local.i] ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
-				$player[local.i] iprint local.msg 1
+				local.o = $player[local.i]
+				ihuddraw_virtualsize local.o 216 1
+				ihuddraw_align       local.o 216 center top
+				ihuddraw_font        local.o 216 "verdana-12"
+				ihuddraw_color       local.o 216 1 0.25 0.2
+				ihuddraw_rect        local.o 216 0 58 0 0
+				ihuddraw_string      local.o 216 local.msg
+				ihuddraw_alpha       local.o 216 1
 			}
 		}
 		local.i++
 	}
+	thread dbno_downBannerClear
 }end
 
 

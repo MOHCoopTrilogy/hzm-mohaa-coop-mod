@@ -61,7 +61,13 @@ main:{
 		//class). Set at map load, before any player can spawn, no weapon is ever granted at all:
 		//nothing to strip, nothing to race. itemhandler.scr::coop_armOnBlown clears all three and
 		//re-arms everyone the moment the cover breaks (naxos caught, alarm/takeAllDisguises).
-		if( getcvar "coop_stealthStart" == "1" ){
+		//[user 2026-08-11] PER-MAP STEALTH GATE. coop_stealthStart was ONE global boolean doing TWO
+		//jobs - "is the stealth layer enabled at all" and "does THIS map start you unarmed" - so a
+		//second map could not opt in without inheriting m2l2a's opening. level.coop_stealthMap is the
+		//per-map half (set by the map); the cvar stays as the global kill switch, and !="0" rather
+		//than =="1" so an unset cvar does not silently disable a map that opted in.
+		level.coop_stealthMap = 1
+		if( getcvar "coop_stealthStart" != "0" ){
 			level.coop_noWeapon = game.true
 			level.coop_startUnarmed = 1
 			level.coop_forcePapersEquip = game.true
@@ -556,21 +562,113 @@ coop_naxosSabotage:
 	local.pos = $naxosnotsmashed.origin
 	local.need = float( getcvar "coop_naxosHold" )
 	if( local.need <= 0 ){ local.need = 2.5 }
+	//[user 2026-08-10] "When you enter the Naxos room a message saying 'Wait for the scientists to be
+	//distracted to destroy the Naxos.'" - a ROOM-sized radius, distinct from the 128u reach that
+	//arms the hold. It tells you what the puzzle IS on the way in, rather than only once you are
+	//already standing on the device.
+	local.room = int( getcvar "coop_naxosRoomRadius" )
+	if( local.room <= 0 ){ local.room = 512 }
 	local.hold = 0
-	local.tick = 0
 	while( level.coop_naxosQuiet != 1 && $naxosnotsmashed != NULL ){
 		local.holding = 0
 		for( local.i = 1; local.i <= $player.size; local.i++ ){
 			local.p = $player[local.i]
 			if( local.p == NULL ){ continue }
 			if( !isAlive local.p ){ continue }
-			if( ( vector_length ( local.p.origin - local.pos ) ) > 128 ){
+			local.d = vector_length ( local.p.origin - local.pos )
+
+			//---- entering the room: state the objective ONCE ----
+			//[user 2026-08-10] "I want the naxos text to be DBNO text... also it popped up twice".
+			//Both fixed here. (1) It is now HUD slot 255 at the DBNO centre position (0 -74 is the
+			//sabotage bar's label, so this sits on the DBNO line at -58) instead of an iprint on the
+			//left. (2) The latch is now PERMANENT - one shot per player per map. It used to be
+			//cleared the moment you stepped back outside the radius, so any movement across the
+			//512u boundary re-armed it and it fired again on the way back in. A "first time you
+			//enter" message must never be edge-triggered on a radius the player walks in and out of.
+			//
+			//[user 2026-08-10, round 2] "The Naxos text appears when you are downstairs underneath
+			//the room itself". Of course it did: vector_length is a 3D distance, so a 512u radius is
+			//a SPHERE and reaches straight through the floor. "In the room" is a horizontal
+			//question plus a same-storey question, so it is tested as one - 2D distance for the
+			//room, and a vertical band for the floor. Any radius test in a multi-storey building
+			//needs this; the officer advisory had the identical defect.
+			local.dz = local.p.origin[2] - local.pos[2]
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			//HORIZONTAL DISTANCE VIA vector_length, NOT HAND-ROLLED PYTHAGORAS. Flatten both points
+			//to z=0 with a vector literal (locals inside a literal are proven - props.scr:407,
+			//tracescan.scr:79) and let the engine's own distance routine do it.
+			//
+			//⚠ HONEST NOTE, because the alternative is folklore: a hand-rolled
+			//`sqrt( (dx*dx) + (dy*dy) )` here returned 265.965 for two points 2013u apart, twice,
+			//while `dz` by plain subtraction on the next line was exactly right - so this message
+			//fired at the spawn no matter what radius was set. But instrumenting the SAME expression
+			//a build later, at a different position, produced numbers that were exactly correct
+			//(dx=-263.439 dy=-363.762 sum=201722.938, whose root is the 449.136 vector_length also
+			//returned). So the arithmetic is NOT reliably broken and I could not reproduce the
+			//failure on demand - the mechanism is UNEXPLAINED, and no trap entry claims otherwise.
+			//What is certain is only this: vector_length was correct on every sample, the hand-rolled
+			//form was not, and there is no reason to prefer the hand-rolled form. Use vector_length.
+			local.flatP = ( local.p.origin[0] local.p.origin[1] 0 )
+			local.flatN = ( local.pos[0] local.pos[1] 0 )
+			local.d2 = vector_length( local.flatP - local.flatN )
+			if( local.d2 <= local.room && local.dz <= 96 && local.p.flags["coop_naxosRoomHint"] != 1 ){
+				local.p.flags["coop_naxosRoomHint"] = 1
+				//[user 2026-08-10] "I saw the wait scientists naxos text as soon as I spawned."
+				//It should be impossible: the BSP puts $naxosnotsmashed at (-4423 -1905 -136) and the
+				//info_player spawn at (-4816 -3880 -36), which is 2013u apart horizontally and 100u
+				//vertically - outside BOTH gates. So one of my inputs is not what I think it is, and
+				//the honest move is to print all four rather than guess a fourth time tonight.
+				//If d2 is small, local.pos is not the device (a coop spawn nearer the room, or the
+				//entity moved). If room is huge, the cvar read is wrong. If dz is small, the storey
+				//assumption is wrong.
+				if( getcvar( "coop_aggroDebug" ) == "1" ){
+					println( "^~^~^ NAXOSROOM fired e" + local.p.entnum + " d2=" + local.d2 + " dz=" + local.dz + " room=" + local.room )
+				}
+				local.p.flags["coop_naxosRoomMsgT"] = level.time + 6
+				ihuddraw_virtualsize local.p 255 1
+				ihuddraw_align       local.p 255 center center
+				ihuddraw_font        local.p 255 "verdana-12"
+				ihuddraw_color       local.p 255 1 1 1
+				ihuddraw_rect        local.p 255 0 -58 0 0
+				ihuddraw_string      local.p 255 "Wait for the scientists to be distracted to destroy the Naxos."
+				ihuddraw_alpha       local.p 255 1
+			}
+			//timed clear, done inline rather than in a threaded helper: an entity handed across a
+			//thread boundary has arrived NIL three times in this project (docs/TRAPS.md T6).
+			if( local.p.flags["coop_naxosRoomMsgT"] != NIL ){
+				if( level.time >= local.p.flags["coop_naxosRoomMsgT"] ){
+					local.p.flags["coop_naxosRoomMsgT"] = NIL
+					ihuddraw_alpha  local.p 255 0
+					ihuddraw_string local.p 255 ""
+				}
+			}
+
+			//[user 2026-08-10] "Hold Use to sabotage Naxos should appear in DBNO text when you are
+			//near it AND looking at it." Near alone was too loose - the old iprint fired just for
+			//standing in the corner of the room. The facing test is the established one from
+			//dbno.scr's revive prompt (angles_toforward on viewangles, 2D dot against the normalised
+			//direction, 0.55 ~= a 57-degree half-angle), so all the "look at a thing to use it"
+			//prompts in the mod agree.
+			local.look = 0
+			if( local.d <= 128 && local.d > 1 ){
+				local.f  = angles_toforward local.p.viewangles
+				local.v  = local.pos - local.p.origin
+				local.dt = ( local.f[0] * ( local.v[0] / local.d ) ) + ( local.f[1] * ( local.v[1] / local.d ) )
+				if( local.dt >= 0.55 ){ local.look = 1 }
+			}
+			if( local.look != 1 ){
 				local.p.flags["coop_naxosHint"] = NIL
+				waitthread coop_naxosBarHide local.p
 				continue
 			}
-			if( local.p.flags["coop_naxosHint"] != 1 ){
-				local.p.flags["coop_naxosHint"] = 1
-				local.p iprint "Hold USE to sabotage the Naxos" 1
+			//the room message has done its job the moment the real prompt is up - one line at a time
+			if( local.p.flags["coop_naxosRoomMsgT"] != NIL ){
+				local.p.flags["coop_naxosRoomMsgT"] = NIL
+				ihuddraw_alpha  local.p 255 0
+				ihuddraw_string local.p 255 ""
+			}
+			if( local.p.useheld != 1 ){
+				waitthread coop_naxosBarPrompt local.p
 			}
 			if( local.p.useheld == 1 ){
 				local.holding = 1
@@ -578,11 +676,14 @@ coop_naxosSabotage:
 				if( isAlive $guy1 && ( $guy1 cansee local.p $guy1.fov $guy1.sight ) ){ thread coop_naxosCaught }
 				else if( isAlive $guy2 && ( $guy2 cansee local.p $guy2.fov $guy2.sight ) ){ thread coop_naxosCaught }
 				else if( isAlive $guy3 && ( $guy3 cansee local.p $guy3.fov $guy3.sight ) ){ thread coop_naxosCaught }
-				local.tick = local.tick + 0.1
-				if( local.tick >= 0.8 ){
-					local.tick = 0
-					local.p iprint "Sabotaging..." 1
-				}
+				//[user 2026-08-10] PROGRESS BAR, not a stream of iprints. This used to fire
+				//`iprint "Sabotaging..."` every 0.8s, which pushed a new line onto the left of the
+				//screen roughly three times per sabotage and read as spam. The mod already has one
+				//house style for "hold a key while something fills" - the medkit/DBNO channel bar -
+				//so use that instead of inventing a second idiom.
+				waitthread coop_naxosBarShow local.p ( local.hold / local.need )
+			}else{
+				waitthread coop_naxosBarHide local.p
 			}
 		}
 		if( local.holding == 1 ){ local.hold = local.hold + 0.1 }
@@ -595,11 +696,97 @@ coop_naxosSabotage:
 			//skips the bust; the touch window is a single frame and the flag wins regardless.
 			$naxos triggerable
 			trigger $naxos
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				if( $player[local.i] != NULL ){ waitthread coop_naxosBarHide $player[local.i] }
+			}
 			iprintlnbold "Naxos sabotaged."
 			println "^~^~^ NAXOS quiet sabotage complete"
 		}
 		wait 0.1
 	}
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] != NULL ){ waitthread coop_naxosBarHide $player[local.i] }
+	}
+end
+
+
+//=========================================================================
+// Sabotage progress bar - the same channel bar the medkit / DBNO revive uses.
+//=========================================================================
+// SLOTS 118-120, and the reuse is deliberate and safe rather than opportunistic. The fade-exempt
+// band (>= 100) is effectively full - see _research/hud_slot_map.md - and anything BELOW 100 is
+// multiplied by s_hudFadeAlpha whenever the player is calm (cg_drawtools.cpp:651-653). Holding USE
+// while standing perfectly still next to a machine is the textbook definition of calm, so a sub-100
+// bar would fade out exactly while you watched it. That trap has cost this project six features.
+//
+// 118-125 belongs to the LOBBY's "NEW UNLOCKS" list (lobby.scr, computed base 118 + j), which is
+// lobby-time only and wipes 117-126 itself on lobby end (lobby.scr:901). Mission-time and lobby-time
+// are strictly disjoint here, which is the same never-concurrent gating that already double-books
+// 156-173 between the objectives panel and the challenge Service Record.
+//
+// Geometry copied from dbno.scr's revive channel so the two read as one system.
+//=========================================================================
+// Slot 118 is ONE line in the DBNO position carrying two mutually exclusive states of the same
+// feature: "Hold [USE] to sabotage the Naxos" when you are near it and looking at it, and
+// "Sabotaging the Naxos" while you actually hold. Two states, one line, so they can never stack.
+coop_naxosBarPrompt local.player:
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_naxosPrompt"] == 1 ){ end }
+	local.player.flags["coop_naxosPrompt"] = 1
+	local.player.flags["coop_naxosBar"] = NIL
+	ihuddraw_virtualsize local.player 118 1
+	ihuddraw_align       local.player 118 center center
+	ihuddraw_font        local.player 118 "verdana-12"
+	ihuddraw_color       local.player 118 1 1 1
+	ihuddraw_rect        local.player 118 0 -58 0 0
+	ihuddraw_string      local.player 118 "Hold [USE] to sabotage the Naxos"
+	ihuddraw_alpha       local.player 118 1
+	ihuddraw_alpha       local.player 119 0
+	ihuddraw_alpha       local.player 120 0
+end
+
+coop_naxosBarShow local.player local.frac:
+	if( local.player == NULL ){ end }
+	if( local.frac < 0 ){ local.frac = 0 }
+	if( local.frac > 1 ){ local.frac = 1 }
+
+	if( local.player.flags["coop_naxosBar"] != 1 ){
+		local.player.flags["coop_naxosBar"] = 1
+		local.player.flags["coop_naxosPrompt"] = NIL
+		ihuddraw_virtualsize local.player 118 1
+		ihuddraw_align       local.player 118 center center
+		ihuddraw_font        local.player 118 "verdana-12"
+		ihuddraw_color       local.player 118 1 1 1
+		ihuddraw_rect        local.player 118 0 -58 0 0
+		ihuddraw_string      local.player 118 "Sabotaging the Naxos"
+		ihuddraw_alpha       local.player 118 1
+
+		ihuddraw_virtualsize local.player 119 1
+		ihuddraw_align       local.player 119 left bottom
+		ihuddraw_shader      local.player 119 "textures/hud/coop_bar_white"
+		ihuddraw_color       local.player 119 0.12 0.12 0.12
+		ihuddraw_rect        local.player 119 270 -55 100 6
+		ihuddraw_alpha       local.player 119 0.8
+
+		ihuddraw_virtualsize local.player 120 1
+		ihuddraw_align       local.player 120 left bottom
+		ihuddraw_shader      local.player 120 "textures/hud/coop_bar_white"
+		ihuddraw_color       local.player 120 0.9 0.75 0.2
+		ihuddraw_rect        local.player 120 270 -55 0 6
+		ihuddraw_alpha       local.player 120 0.9
+	}
+	ihuddraw_rect local.player 120 270 -55 ( int( local.frac * 100 ) ) 6
+end
+
+coop_naxosBarHide local.player:
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_naxosBar"] != 1 && local.player.flags["coop_naxosPrompt"] != 1 ){ end }
+	local.player.flags["coop_naxosBar"] = NIL
+	local.player.flags["coop_naxosPrompt"] = NIL
+	ihuddraw_alpha  local.player 118 0
+	ihuddraw_string local.player 118 ""
+	ihuddraw_alpha  local.player 119 0
+	ihuddraw_alpha  local.player 120 0
 end
 
 //=========================================================================
@@ -642,6 +829,14 @@ coop_blownOnDamage:
 end
 
 blowupthenaxos:
+	//[user 2026-08-11] CHALLENGES: Dead Static (destroy the Naxos with no scientist alerted) and
+	//one half of OSS Efficiency. level.scienceinterupt is the map's own 'a scientist noticed'
+	//flag, set by suspiciousscientists when $sciencetrig fires; level.coop_alarmEver is the sticky
+	//was-the-base-ever-alerted latch, needed because level.alarm is a toggle.
+	local.quiet = 1
+	if( level.scienceinterupt == 1 ){ local.quiet = 0 }
+	if( level.coop_alarmEver == 1 ){ local.quiet = 0 }
+	thread coop_mod/challenges.scr::chal_naxos_done local.quiet
 	$antenanotsmashed remove
 	$naxosnotsmashed remove
 	$naxossmashed show
@@ -830,6 +1025,10 @@ end
 
 endmission:
 	$endlevel waittill trigger
+	//[user 2026-08-11] CHALLENGES: Shadow over U-529 / Alarm! Alarm! - exactly one of the pair,
+	//chosen by whether an alarm was EVER raised this mission. Awarded here rather than in
+	//missioncomplete so the flush happens before the map transition tears the level down.
+	waitthread coop_mod/challenges.scr::chal_u529_boarded
 	thread objective3
 	exec global/missioncomplete.scr m2l2b 1
 end
@@ -872,7 +1071,7 @@ likeynorway:
 	//loadout here to strip and no grant to race (the bug-1604/1606/1607 class). The sweep stays
 	//as a defensive containment pass - it also force-sets the disguise state and starts the
 	//per-player hold-disguise watchdog, and it is a no-op on empty hands.
-	if( getcvar "coop_stealthStart" == "1" ){
+	if( level.coop_stealthMap == 1 && getcvar "coop_stealthStart" != "0" ){
 		waitthread coop_mod/itemhandler.scr::coop_stealthStripWeapons
 	}
 	$likeynorwaydoor unlock

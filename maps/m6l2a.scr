@@ -8,10 +8,59 @@ main:{
 //============================================================================
 	level.coop_aaMap = 1					//Pasted by Criminal for coop comp. - let global scripts know this is a AA level
 	level.coop_debugSpawn = 0 				//Pasted by Criminal for coop comp. - enable spawnpoint debug (make visible)
+	//[user 2026-08-11] MUST be set BEFORE coop_mod/main.scr::main - that is what threads
+	//officer.scr::coop_officer_init (main.scr:165). Set after it, as this first was, the officer
+	//boss-wave system has already started and the opt-out never fires. No coop officer waves here:
+	//the map reinforces itself from its own ~15 alarm_spawndetector entities via global/alarmer.scr.
+	//[user 2026-08-12] STEALTH-NATIVE MODE - the only map in the game that sets this.
+	//level.stealthnative is a Level field (Level::m_bStealthNative), not a cvar, and Level::Init()
+	//zeroes it on EVERY map load - so it cannot leak into m6l2b, or into m2l2a via a console `map`,
+	//or survive a crash or a dedicated restart, all of which a cvar would outlive. It is also
+	//unreachable from console, config and autoexec: only this line turns it on.
+	//What it currently buys, both in fgame:
+	//  E1 weapon.cpp - gunfire is heard at SP's 1500u instead of OPM's world-scaled up-to-8000u
+	//  E3 player.cpp - the alarm LATCHES: once blown, cover stays blown for the mission
+	level.stealthnative = 1
+
+	//[user 2026-08-12] "a saluter here MAY become a live checker later". Set at MAP LOAD, not at
+	//cache pickup, because coop_apply_personality rolls ~1s after actor spawn and would otherwise
+	//have already re-personalitied and proned the whole cast. See officer.scr::coop_isProtectedActor.
+	level.coop_stealthCapable = 1
+	//set-2's radio pulls a SENTRY (alarm2_officer_patroller), so the contain must accept one here
+	level.coop_bustAllowSentry = 1
+	//[user 2026-08-12] any isolated german can be contained here; the witnesses and the body
+	//watch are what make it risky, not the target's rank.
+	level.coop_bustAnyone = 1
+	//you have to be genuinely on top of him. The default 112 reaches about as far as a doorway,
+	//and USE is the same key as every door on the map.
+	level.coop_bustUseRangeMap = 64
+	thread coop_mod/bust.scr::coop_bustAnyoneWatch
+
+	level.coop_noOfficerWaves = 1
 	waitthread coop_mod/main.scr::main		//Pasted by Criminal for coop comp. - start coop mod extensions
 	level.coop_weatherTheme = "snow"		//HZM coop - dynamic weather: snowy Germany (comms blackout)
 
 	exec global/loadout.scr maps/m6l2a.scr
+
+	//[user 2026-08-11] SPAWN CAMP (user build-mode placement, build_m6l2a.dat). A German camp at
+	//the player spawn holding a uniform and papers - the disguise for this map comes from here
+	//rather than from a pickup deep in the town, the same shape as m6l1c's truck cache.
+	thread coop_m6l2aCamp
+	thread coop_m6l2aSpawns
+	thread coop_m6l2aOfficers
+	thread coop_m6l2aAlarmBridge
+	thread coop_m6l2aBrief
+	thread coop_m6l2aRadios
+	thread coop_m6l2aSabotage
+	thread coop_m6l2aDressing
+	thread coop_m6l2aGuards
+	thread coop_m6l2aSchedule
+	thread coop_m6l2aPatrolWatchdog
+	thread coop_m6l2aPapersChain
+	//objectives 2 and 3 EXIST now, so they block for real - coop_m6l2aBombGate only defaults them
+	//to 1 when they are still NIL, i.e. when nothing can ever set them.
+	level.coop_m6ObjTransmit = 0
+	thread coop_m6l2aSignals
 
 	//*** INITIALIZE ALARM SYSTEM
 	exec global/alarmer.scr 
@@ -104,8 +153,18 @@ main:{
 	thread objective1_donecheck
 
 	//*** INITIALIZE OBJECTIVES
-	waitthread global/objectives.scr::add_objectives 1 2 "Plant explosives in the radio command post, in the northeast corner of the town. [6 remaining]" $cp1_bomb1.origin
-	//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+	//[user 2026-08-12] the three new objectives sit AHEAD of the charges - the user's order, and
+	//the reason the transmission is worth doing: reinforcements diverted before the shooting.
+	waitthread global/objectives.scr::add_objectives 1 2 "Steal the train schedule from the Reichsbahn Officer's quarters, on the north side of town." ( -2972 -2328 57 )
+	println "^~^~^ M6L2A objective 1 registered (slot 1 = schedule)"
+	thread coop_m6l2aObjDump
+	//[user 2026-08-12] STATUS 1 = HIDDEN. The charges are not an objective until the three that
+	//precede them are done - the user's own note that objectives should update as you complete
+	//them, and it also removes any question of which line sits at the top of the list at spawn:
+	//at spawn there is exactly one. coop_m6l2aBombGateCheck flips this to 2 when the gate opens,
+	//which is the same moment the charges physically become plantable.
+	waitthread global/objectives.scr::add_objectives 4 1 "Plant explosives in the radio command post, in the northeast corner of the town. [6 remaining]" $cp1_bomb1.origin
+	//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
 
 	thread global/objectives.scr::current_objectives 1
 
@@ -176,6 +235,12 @@ initialize_bombsites:{
 //============================================================================
 cp1_bombplant1:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	//[bug-1748] RETIRED - interior site, replaced by an exterior sabotage target.
+	waitthread coop_m6l2aSabRefuse
+	end
+	if( waitthread coop_m6l2aBombGate "cp1_bombplant1" ( -3777 -709 60 ) 1 ){ end }
 //*** Trigger_useonce in bsp
 	$cp1_bomb1 model "animate//radiobomb.tik"
 	$cp1_bomb1 playsound radiobomb
@@ -190,6 +255,12 @@ cp1_bombplant1:{
 //============================================================================
 cp1_bombplant2:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	//[bug-1748] RETIRED - interior site, replaced by an exterior sabotage target.
+	waitthread coop_m6l2aSabRefuse
+	end
+	if( waitthread coop_m6l2aBombGate "cp1_bombplant2" ( -3776 -433 59 ) 2 ){ end }
 //*** Trigger_useonce in bsp
 	$cp1_bomb2 model "animate//radiobomb.tik"
 	$cp1_bomb2 playsound radiobomb
@@ -204,6 +275,9 @@ cp1_bombplant2:{
 //============================================================================
 cp1_bombplant3:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	if( waitthread coop_m6l2aBombGate "cp1_bombplant3" ( -3933 -560 76 ) 3 ){ end }
 //*** Trigger_useonce in bsp
 	$cp1_bomb3 model "animate//radiobomb.tik"
 	$cp1_bomb3 playsound radiobomb
@@ -219,6 +293,12 @@ cp1_bombplant3:{
 //============================================================================
 cp2_bombplant1:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	//[bug-1748] RETIRED - interior site, replaced by an exterior sabotage target.
+	waitthread coop_m6l2aSabRefuse
+	end
+	if( waitthread coop_m6l2aBombGate "cp2_bombplant1" ( -3756 -105 59 ) 4 ){ end }
 	//*** Trigger_useonce in bsp
 	$cp2_bomb1 model "animate//radiobomb.tik"
 	$cp2_bomb1 playsound radiobomb
@@ -234,6 +314,12 @@ cp2_bombplant1:{
 //============================================================================
 cp2_bombplant2:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	//[bug-1748] RETIRED - interior site, replaced by an exterior sabotage target.
+	waitthread coop_m6l2aSabRefuse
+	end
+	if( waitthread coop_m6l2aBombGate "cp2_bombplant2" ( -3757 166 58 ) 5 ){ end }
 //*** Trigger_useonce in bsp
 	$cp2_bomb2 model "animate//radiobomb.tik"
 	$cp2_bomb2 playsound radiobomb
@@ -249,6 +335,9 @@ cp2_bombplant2:{
 //============================================================================
 cp2_bombplant3:{
 //============================================================================
+	//[user 2026-08-12] ORDERING GATE. FIRST statement in the label on purpose: everything below
+	//mutates state (model swap, bombcount--, status flag) and none of it is cleanly undoable.
+	if( waitthread coop_m6l2aBombGate "cp2_bombplant3" ( -4053 32 79 ) 6 ){ end }
 //*** Trigger_useonce in bsp
 	$cp2_bomb3 model "animate//radiobomb.tik"
 	$cp2_bomb3 playsound radiobomb
@@ -279,8 +368,8 @@ objective1_bombtracker:{
 		//*** Player can now exit the window at the end of the level
 		$levelchange_blocker remove
 
-		waitthread global/objectives.scr::add_objectives 1 3 "Plant explosives in the radio command post, in the northeast corner of the town."
-		waitthread global/objectives.scr::add_objectives 2 2 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		waitthread global/objectives.scr::add_objectives 4 3 "Plant explosives in the radio command post, in the northeast corner of the town."
+		waitthread global/objectives.scr::add_objectives 5 2 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
 		thread global/objectives.scr::current_objectives 2
 
 		//*** Start the bomb ticking at the player's position
@@ -301,14 +390,34 @@ objective1_bombtracker:{
 		
 		//$player stopwatch 8			// Criminal.
 		//$player loopsound bombtick	// Criminal.
-		exec coop_mod/replace.scr::stopwatch 8			//Criminal - coop comp.
+		//[user 2026-08-13, bug-1767] THE PHANTOM 10 SECONDS. "Stop watch timer still starts at 10
+		//seconds, goes down to 60. And then you get the charges set message... so something is still
+		//triggering it to go thru 10 seconds before truly being triggered." This is it: the retail
+		//fuse ran its own 8s stopwatch and a `wait 8` BEFORE the ending branch, so the escape clock
+		//could not even start until it finished. The ticking is kept - it is the charges arming - but
+		//the widget is not, and the wait is gone so the escape clock starts on the plant.
 		exec coop_mod/replace.scr::loopsound bombtick	//Criminal - coop comp.
-		wait 8
+		wait 1
 
 		//$player stoploopsound bombtick	//Criminal.
 		exec coop_mod/replace.scr::stoploopsound bombtick //Criminal - coop comp.	
-		thread objective1_detonation
-		thread threat_condition_delta
+		//[user 2026-08-12] STEALTH ENDING (approved). Vanilla fires the charges and immediately runs
+		//threat_condition_delta, which spawns scene3, pins level.alarm_always_on and rings the alarm -
+		//so planting ALWAYS ended the mission loud, however quietly you got there. m2l2b solves this by
+		//holding the charges; same shape here. If the town is still quiet, the blast waits until the
+		//squad reaches the exit and threat_condition_delta never runs. Go loud and nothing changes.
+		//[user 2026-08-13, bug-1771] THE ENDING IS NOT OPTIONAL ANY MORE. "I had no stopwatch or timer
+		//this time I guess because it was loud, but as a result also no cutscene played?" - exactly
+		//that: planting while the town was already up took this vanilla branch, fired the charges on
+		//the spot and never started coop_m6l2aQuietEnding, so there was no escape clock and no
+		//cutscene at all. That branch made sense when the ending WAS the stealth reward; it does not
+		//now that the fuse, the camera and the mission end all live in the escape sequence.
+		//Loud still costs you - threat_condition_delta runs immediately instead of never - it just no
+		//longer removes the ending.
+		if( level.alarm || level.alarm_on || level.coop_startUnarmed != 1 ){
+			thread threat_condition_delta
+		}
+		thread coop_m6l2aQuietEnding
 	}
 }end
 
@@ -318,29 +427,29 @@ objective1_locationcheck:{
 //============================================================================
 //*** Moves the compass waypoint indicator to the next bomb plant location
 	if (level.cp1_bomb1_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp1_bomb1.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext level.coop_m6SabPos[1]
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}else if (level.cp1_bomb2_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp1_bomb2.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext level.coop_m6SabPos[2]
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}else if (level.cp1_bomb3_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp1_bomb3.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext $cp1_bomb3.origin
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}else if (level.cp2_bomb1_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp2_bomb1.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext level.coop_m6SabPos[3]
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}else if (level.cp2_bomb2_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp2_bomb2.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext level.coop_m6SabPos[4]
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}else if (level.cp2_bomb3_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $cp2_bomb3.origin
-		//waitthread global/objectives.scr::add_objectives 2 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
-		thread global/objectives.scr::current_objectives 1
+		waitthread global/objectives.scr::add_objectives 4 2 level.locationchecktext $cp2_bomb3.origin
+		//waitthread global/objectives.scr::add_objectives 5 1 "Escape through the Commandant's residence on the south side of town." $exitnode.origin
+		thread global/objectives.scr::current_objectives 4
 	}
 }end
 
@@ -352,6 +461,8 @@ objective1_detonation:{
 
 	//*** Set off the pyrotechnics
 	thread objective1_fireballs
+	//[bug-1748] and the three exterior sabotage targets come apart with it
+	thread coop_m6l2aSabotageBlow
 
 	//*** Execute massive radius damage and kill player if he is in the predetermined kill zone
 	radiusdamage ( ($objective1_shockwave.origin) + (0 0 16) ) 1000 1000 0
@@ -360,10 +471,13 @@ objective1_detonation:{
 	exec global/earthquake.scr .23 4 0 0
 
 	//*** Make the funky falling tower sound
-	$explosion_speaker1 playsound m6l2a_tower
+	//[bug-1782] was `m6l2a_tower` on both lines - no such alias, so the engine logged "needs an alias
+	//in ubersound.scr" and the map's own signature sound never played. The two that exist are
+	//m6l2a_tower1 (the fall) and m6l2a_tower2 (the stone impact).
+	$explosion_speaker1 playsound m6l2a_tower1
 	wait 0.15 
 
-	$explosion_speaker2 playsound m6l2a_tower
+	$explosion_speaker2 playsound m6l2a_tower2
 	
 	if(level.gametype==0){//Criminal - Singleplayer
 		if ($player[1] != NULL && $player[1] isTouching $death_detector){	// HZM coop - host touch test ($player is an array)
@@ -522,7 +636,7 @@ threat_condition_delta:{
 m6l2a_changelevel:{
 //============================================================================
 //*** Set next level to "The Schmerzen Express - M6L2B" and propagate weapons listed in loadout.scr
-	waitthread global/objectives.scr::add_objectives 2 3 "Escape through the Commandant's residence on the south side of town." 
+	waitthread global/objectives.scr::add_objectives 5 3 "Escape through the Commandant's residence on the south side of town." 
 	exec global/missioncomplete.scr m6l2b 1
 }end
 
@@ -571,6 +685,13 @@ patrol_ai_forceactivate:{
 
 	//*** NPC: alarm3_winterguy_patroller_alarmer
 		//[DEGRADED-5] fix: check if alarmer can see ANY player, not just P1
+		//[user 2026-08-11] bug-1718 NULL GUARD. $alarm3_winterguy_patroller_alarmer does NOT exist in
+		//m6l2a.bsp - only its patrolnode chain does; the actor walking that route is targetname
+		//"enemy". So this whole block has always been dead code, and every pass threw
+		//"cansee applied to NULL listener" (4 in one idle session). A Script Error only SKIPS the
+		//statement, so it never broke anything - it just filled the log with noise that masks real
+		//errors, which is exactly what happened tonight.
+		if( $alarm3_winterguy_patroller_alarmer == NULL ){ goto alm_skip }
 		local.alm_seen = 0
 		local.alm_i = 1
 		while (local.alm_i <= $player.size){
@@ -580,6 +701,7 @@ patrol_ai_forceactivate:{
 		if ( (isAlive $alarm3_winterguy_patroller_alarmer) && !local.alm_seen ){
 			$alarm3_winterguy_patroller_alarmer forceactivate
 		}
+	alm_skip:
 
 	//*** NPC: bridge_winter_patroller1
 		//if ( (isAlive $bridge_winter_patroller1) && !($bridge_winter_patroller1 cansee $player) ){ //chrissstrahl
@@ -625,9 +747,19 @@ scene3_spawner1_initialize:{
 	level.scene3_spawner_started = 1		//signals that this is spawner is active and is used to test the shutdown trigger for this spawner
 	level.scene3_spawn1_teamvalue = 0		//initializes variable for total number spawned to date
 	level.scene3_spawn1_teamlimitmax = 6	//initializes constant for total number allowed to spawn (original = 30)
+	//[bug-1770] a transmission made BEFORE the town went loud is honoured here, which is the whole
+	//point of sending false orders ahead of the shooting.
+	if( level.coop_reinforcementsDiverted == 1 ){
+		level.scene3_spawn1_teamlimitmax = level.coop_m6ReinfLimit
+	}
 	level.scene3_spawn1_currentalive = 0	//initializes variable for number of enemies currently alive from this spawner
 	level.scene3_spawn1_currentalivemax = 3	//initializes constant for maximum number allowed to be alive at any given time from this spawner
 	level.scene3_spawn1_loopwaittime = 1	//initializes constant for time between respawns
+	if( level.coop_reinforcementsDiverted == 1 ){
+		level.scene3_spawn1_currentalivemax = level.coop_m6ReinfAlive
+		level.scene3_spawn1_loopwaittime    = level.coop_m6ReinfWait
+		println "^~^~^ M6L2A scene3 spawner starting THINNED - the false orders held"
+	}
 	level.scene3_spawn1_deactivator = 0		//initializes variable for shutting down this loop's ability to spawn when the player is past this area
 
 	thread scene3_spawndetector1_control
@@ -788,6 +920,16 @@ farplane_far:{
 piano:{
 //============================================================================	
 	$pianospeaker playsound moh_piano
+	thread coop_mod/challenges.scr::chal_respite_play "piano"
+	//[user 2026-08-12] THE PIANO IS A DISTRACTION. `ai_event <type> <radius>` (entity.cpp:772) is
+	//script-callable on any entity and makes every german inside the radius CURIOUS - actor.cpp
+	//routes a heard event to CuriousSound, so they walk to the noise rather than to you.
+	//"misc" rather than a voice type: a voice from a german is treated as friendly chatter and
+	//gets the softer NoticeVoice path, while misc is an unexplained noise worth looking at.
+	//700u is deliberately smaller than the 1500 default - this should pull the man in the next
+	//room, not the whole street.
+	$pianospeaker ai_event "misc" 700
+	println "^~^~^ M6L2A piano played - ai_event misc 700"
 }end
 
 //*** Player plucks the cello
@@ -795,6 +937,9 @@ piano:{
 cello:{
 //============================================================================
 	$cellospeaker playsound moh_cello
+	thread coop_mod/challenges.scr::chal_respite_play "cello"
+	$cellospeaker ai_event "misc" 700
+	println "^~^~^ M6L2A cello played - ai_event misc 700"
 }end
 
 //============================================================================
@@ -889,4 +1034,2690 @@ coop_coma_watch:{
 		local.pi = local.pi + 1
 	}
 
+}end
+
+//============================================================================
+// SPAWN CAMP PROPS. Baked from coop_mod/save/build_m6l2a.dat, coordinates verbatim.
+//============================================================================
+coop_m6l2aCamp:{
+//============================================================================
+	//[user 2026-08-11] FROZEN. A script_model auto-plays its TIK's `idle` animation and most
+	//vehicle TIKs define one, so a parked panzerwerfer sits there with its treads turning -
+	//user: "the panzer vehicle has spinning treads still, we need those to stop spinning for the
+	//actual map". stopanimating is the engine's own answer (Animate, animate.cpp:119).
+	//Deferred by a frame rather than called inline: spawn/model/stopanimating in one frame is the
+	//T9 same-frame race, and a stop issued before the idle animation has started does nothing.
+	//static variant - the retail TIK's tread and tire shaders scroll and rotate via tcMod, which
+	//no script command can stop. See models/vehicles/coop_panzerwerfer_snow_static.tik.
+	waitthread coop_m6l2aProp "models/vehicles/coop_panzerwerfer_snow_static.tik" ( -4540.645 -4540.570 13.909 ) ( 0 130 0 ) 0 ( -60.000 -60.000 0.000 ) ( 60.000 60.000 78.000 )
+	waitthread coop_m6l2aProp "models/static/officer_tent.tik" ( -4514.255 -5063.143 19.679 ) ( 0 96 0 ) 0 ( -87.102 -89.757 -2.121 ) ( 89.208 87.679 136.388 )
+
+	//the disguise itself - same two models m6l1c uses, so the pickups read identically across maps
+	//[user 2026-08-11] second build-mode pass - these supersede the first placement.
+	level.coop_m6l2aPapersPos  = ( -4584.551 -5114.786 50.611 )
+	level.coop_m6l2aUniformPos = ( -4503.989 -5124.467 66.604 )
+	//level-2 papers, on the desk in the building the level-2 checker guards. NOT yet wired - it
+	//pairs with the spawned level-2 checker and the bypass trigger.
+	level.coop_m6l2aPapers2Pos = ( 107.805 -2210.604 -36.750 )
+	level.coop_m6l2aPapers = 0
+	level.coop_m6l2aUniform = 0
+	thread coop_m6l2aPickup "papers"  "models/items/pulse_papers1.tik" ( -4584.551 -5114.786 50.611 ) ( 0 36 0 )
+	thread coop_m6l2aPickup "uniform" "models/animate/officer_uniform_pulsating.tik" ( -4503.989 -5124.467 66.604 ) ( 0 36 0 )
+}end
+
+//============================================================================
+// [user 2026-08-12] MIRRORS BUILD MODE EXACTLY, setsize included. Two defects fixed here:
+//  (1) the saved `local.m setsize` line was never replayed, so every prop got the model's
+//      default bounding box instead of the one build mode measured; and
+//  (2) call sites passed level vars - including ARRAY SUBSCRIPTS like
+//      level.coop_m6RadioPos[3] - as thread arguments. Every call site now passes a literal
+//      vector copied from build_m6l2a.dat, so a placement can never depend on argument
+//      evaluation again.
+coop_m6l2aProp local.mdl local.pos local.ang local.freeze local.mins local.maxs:{
+//============================================================================
+	local.m = spawn script_model
+	local.m model local.mdl
+	local.m.origin = local.pos
+	local.m.angles = local.ang
+	local.m solid
+	if( local.mins != NIL && local.maxs != NIL ){ local.m setsize local.mins local.maxs }
+	if( local.freeze == 1 ){ local.m thread coop_m6l2aFreeze }
+	//[user 2026-08-12] RETURNS THE ENTITY. Without this the pickups had no handle to remove, so
+	//the train schedule stayed sitting on the table after it was taken.
+}end (local.m)
+
+//============================================================================
+// One frame of daylight before stopping, so the stop lands AFTER the engine has started the
+// idle animation rather than before it. Re-asserted once more shortly after, because a TIK
+// whose idle is driven by an anim-done callback can restart itself a beat later.
+//============================================================================
+coop_m6l2aFreeze:{
+//============================================================================
+	waitframe
+	if( self == NULL ){ end }
+	self stopanimating
+	wait 0.5
+	if( self == NULL ){ end }
+	self stopanimating
+}end
+
+//============================================================================
+// PLAYER SPAWNS - the user's five in-game viewpos readings, taken at the camp.
+// Eight slots exist; five readings cycle through them so a 6th-8th player still lands in camp
+// rather than at the map's own start.
+//============================================================================
+coop_m6l2aSpawns:{
+//============================================================================
+	if( level.gametype == 0 ){ end }	//singleplayer keeps its own start
+	level.coop_m6l2aSpawnPos[1] = ( -4725 -5234 82 )
+	level.coop_m6l2aSpawnPos[2] = ( -4726 -5354 78 )
+	level.coop_m6l2aSpawnPos[3] = ( -4642 -5346 81 )
+	level.coop_m6l2aSpawnPos[4] = ( -4578 -5347 98 )
+	level.coop_m6l2aSpawnPos[5] = ( -4653 -5287 81 )
+	level.coop_m6l2aSpawnAng[1] = 45
+	level.coop_m6l2aSpawnAng[2] = 64
+	level.coop_m6l2aSpawnAng[3] = 64
+	level.coop_m6l2aSpawnAng[4] = 79
+	level.coop_m6l2aSpawnAng[5] = 62
+
+	for( local.i = 1; local.i <= 8; local.i++ ){
+		local.slot = local.i
+		while( local.slot > 5 ){ local.slot = local.slot - 5 }
+		level.flags["coop_spawn" + local.i + "origin"] = level.coop_m6l2aSpawnPos[local.slot]
+		level.flags["coop_spawn" + local.i + "angles"] = ( 0 level.coop_m6l2aSpawnAng[local.slot] 0 )
+	}
+	thread coop_mod/spawnlocations.scr::spawnlocationsUpdated
+}end
+
+//============================================================================
+// MAKE THE OFFICERS CHECK PAPERS.
+// This map ships 40 salute actors and NO officer or sentry - so before this, a disguise had
+// nobody to be tested by and papers would have been scenery (the m2l2b problem). Three actors
+// are named as officers/gestapo in the BSP but carry no type_disguise, so they never entered the
+// disguise state machine at all.
+// type_disguise is settable at runtime - m6l1c does exactly this to its own soldiers - and
+// setting it to "officer" is what makes them (a) demand papers, (b) see through level-1 papers
+// by retail rule, and (c) qualify for the Phase C contain, which refuses anything that is not
+// type_disguise officer.
+//============================================================================
+coop_m6l2aOfficers:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	local.n = 0
+	if( $alarm5_officer != NULL ){
+		$alarm5_officer.type_disguise = "officer"
+		local.n++
+	}
+	//[user 2026-08-11] bug-1714 THESE TWO ARE SENTRIES, NOT OFFICERS.
+	//The two papers states are NOT symmetric. State_Disguise_Papers (sentry,
+	//actor_disguise_common.cpp:96-121) can reach ACTOR_STATE_DISGUISE_ACCEPT and runs
+	//m_DisguiseAcceptThread -> anim/disguise_accept.scr -> the squad-wide free pass.
+	//State_Disguise_Fake_Papers (officer, :123-139) has NO accept branch at all - it can only reach
+	//DISGUISE_ENEMY or DISGUISE_HALT. Retyping all three checkers to officer therefore guaranteed
+	//that every papers challenge on this map ended hostile, which is not a disguise mechanic.
+	//The working maps carry a MIX for exactly this reason: m2l2a 2 officers / 3 sentries,
+	//m6l1c 3 / 2. One officer here keeps the Phase C contain available (it refuses anything that is
+	//not type_disguise officer); the sentries are what make papers worth carrying.
+	if( $alarm2_officer_patroller != NULL ){
+		$alarm2_officer_patroller.type_disguise = "sentry"
+		local.n++
+	}
+	if( $alarm3_gestapo_patroller != NULL ){
+		$alarm3_gestapo_patroller.type_disguise = "sentry"
+		local.n++
+	}
+	//[user 2026-08-11] NO WATCHER RETYPES. Converting saluters to type_disguise "none" bought
+	//witnesses by spending salutes - InitDisguiseNone installs only IsState, so a converted actor
+	//never enters the disguise think and never salutes again. On a map whose whole disguise charm
+	//is that forty people acknowledge you, that is the wrong currency.
+	//coop_bustWitnessAll instead makes the witness sweep use the narrow predicate
+	//(bust.scr::coop_bustCanWitness), so all forty keep saluting AND all forty can catch you.
+	//Scoped to this map: m2l2a and m6l1c keep today's behaviour until this one is proven.
+	//[user 2026-08-12] coop_bustWitnessAll RETIRED. It synthesised a witness pool by counting every
+	//actor, because this map shipped with ZERO type_disguise "none" actors to inherit one from.
+	//coop_m6l2aProtectWorkers below now creates that population the way m2l2a and m6l1c have it -
+	//from actors who have an authored job - so the wide coop_isProtectedActor predicate works here
+	//exactly as it does on m6l1c, and nothing has to be special-cased.
+	//level.coop_bustWitnessAll = 1
+	waitthread coop_m6l2aProtectWorkers
+	//[user 2026-08-12] THE DOGS. Both ship with type_disguise "salute" and gun "MP40" - template
+	//defaults nobody cleaned up - which means a dog entering the disguise think tries to play
+	//disguise_salute, an animation its TIK almost certainly does not have. "none" installs only
+	//IsState (InitDisguiseNone), so they never enter that think at all.
+	//NOTE for the record: this does NOT make them see through the disguise. Nothing does -
+	//PassesTransitionConditions_Attack returns false whenever EnemyIsDisguised() (actor.cpp:9026),
+	//engine-wide and regardless of type. It only stops a broken salute.
+	//Matched by spawn position: waitTillPrespawn runs before they walk their patrol.
+	local.dogs = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr != NIL ){
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NULL || local.a == NIL ){ continue }
+			local.d1 = vector_length ( local.a.origin - ( -4112 -672 8 ) )
+			local.d2 = vector_length ( local.a.origin - ( -3312 -336 8 ) )
+			if( local.d1 > 64 && local.d2 > 64 ){ continue }
+			local.a.type_disguise = "none"
+			local.dogs++
+		}
+	}
+	println( "^~^~^ M6L2A retyped " + local.n + " checker(s) + " + local.dogs + " dog(s)" )
+}end
+
+//============================================================================
+// ALARM BRIDGE - REQUIRED, not cosmetic.
+// m6l2a does not use global/alarm_system.scr; it runs global/alarmer.scr, which tracks
+// level.alarm_on and never touches level.alarm. But the ENGINE's disguise gate reads
+// level.m_bAlarm, which comes from level.alarm (player.cpp:5522 - m_bIsDisguised requires
+// !level.m_bAlarm). Without this bridge the town's alarm would blare, reinforcements would pour
+// in, and every player would stay perfectly disguised throughout - the alarm would mean nothing.
+// Mirrored both ways so switching the alarm back off restores the disguise, exactly as the
+// m-series maps behave.
+//============================================================================
+coop_m6l2aAlarmBridge:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	local.was = 0
+	while( 1 ){
+		local.now = 0
+		if( level.alarm_on == 1 ){ local.now = 1 }
+		if( local.now != local.was ){
+			local.was = local.now
+			level.alarm = local.now
+			if( local.now == 1 ){
+				println "^~^~^ M6L2A alarm raised - bridging alarm_on -> level.alarm, disguises die"
+				//[user 2026-08-11] bug-1715 THE DISGUISE MUST BE GONE FOR GOOD.
+				//coop_armOnBlown alone hands weapons back but leaves coop_enableDisguises,
+				//coop_uniformOnSpawn and every player has_disguise set - so switching the alarm back off
+				//(alarmer.scr lets a player do exactly that) silently re-disguises the squad, and once
+				//threat_condition_delta sets alarm_always_on the disguise flickers with the 6-10s alarm
+				//cycle for the rest of the mission. takeAllDisguises is the single choke point the
+				//m-series alarm uses (alarm_system.scr:704) and it threads coop_armOnBlown itself.
+				waitthread coop_mod/itemhandler.scr::takeAllDisguises
+			}else{
+				println "^~^~^ M6L2A alarm cleared - level.alarm back to 0"
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//============================================================================
+// The camp cache. Same shape as m6l1c's truck: either half alone grants NOTHING, because
+// granting the uniform on its own calls giveUniformToAll -> giveDisguiseToAll while weapons are
+// still in hand, which is the frame-rate retry loop of bug-1701.
+//============================================================================
+// [user 2026-08-12] TAKES ITS ANGLES, and every call site passes LITERALS.
+// Two defects, both reported as "the papers are missing and the disguise is floating":
+//  (1) the angle is now a PARAMETER rather than hardcoded - but it is still ( 0 96 0 ).
+//      build_m6l2a.dat lists ( 0 43 0 ) against these two positions and I 'corrected' 96 to 43 on
+//      that basis. It broke both models on screen. The user had them looking right at 96 all
+//      morning, so the .dat's angle field does not mean what I assumed for these entries - most
+//      likely it records the placing player's view angle rather than the model's. REVERTED.
+//      Rule: a coordinate that looks right in game outranks a number in a save file.
+//  (2) position and angles arrived as thread ARGUMENTS carrying level variables. That is the same
+//      shape that silently failed on the radios, and the fix there was the same: literals only.
+coop_m6l2aPickup local.kind local.mdl local.pos local.ang:{
+//============================================================================
+	local.vis = spawn script_model
+	local.vis model local.mdl
+	local.vis.origin = local.pos
+	local.vis.angles = local.ang
+	local.vis notsolid
+	local.vis rendereffects "+fullbright"
+
+	local.trig = spawn trigger_use
+	local.trig.origin = local.pos
+	local.trig solid
+	local.trig setsize ( -20 -20 -8 ) ( 20 20 40 )
+
+	local.trig waittill trigger
+	local.taker = parm.other
+	local.vis remove
+	local.trig remove
+
+	if( local.kind == "papers" ){
+		level.coop_m6l2aPapers = 1
+		if( local.taker != NULL && local.taker != NIL ){ local.taker playsound pickup_papers }
+	}else{
+		level.coop_m6l2aUniform = 1
+		if( local.taker != NULL && local.taker != NIL ){ local.taker playsound pickup_uniform }
+	}
+
+	if( level.coop_m6l2aPapers == 1 && level.coop_m6l2aUniform == 1 ){
+		thread coop_m6l2aStealthArm
+	}else{
+		if( level.coop_m6l2aPapers == 1 ){
+			iprintlnbold_noloc( "Papers taken. The uniform is here too." )
+		}else{
+			iprintlnbold_noloc( "Uniform taken. The papers are here too." )
+		}
+	}
+}end
+
+//============================================================================
+// Gate -> strip -> grant, in that order. Same reasoning as m6l1c: the no-weapon gate must be up
+// BEFORE the strip so a loadout grant cannot race it (the bug-1604/1606/1607 class), and hands
+// must be empty BEFORE add_item "uniform" so giveDisguiseToAll's success test can pass on its
+// first attempt instead of re-threading itself forever (bug-1701).
+//============================================================================
+coop_m6l2aStealthArm:{
+//============================================================================
+	if( level.coop_m6l2aArmed == 1 ){ end }
+
+	//the engine cannot disguise anyone while the alarm is up; refuse and put the cache back
+	if( level.alarm == 1 || level.alarm_on == 1 ){
+		iprintlnbold_noloc( "The alarm is up. Shut it off before you can pass as one of them." )
+		level.coop_m6l2aPapers = 0
+		level.coop_m6l2aUniform = 0
+		thread coop_m6l2aPickup "papers"  "models/items/pulse_papers1.tik" ( -4584.551 -5114.786 50.611 ) ( 0 36 0 )
+		thread coop_m6l2aPickup "uniform" "models/animate/officer_uniform_pulsating.tik" ( -4503.989 -5124.467 66.604 ) ( 0 36 0 )
+		end
+	}
+
+	level.coop_m6l2aArmed = 1
+	level.coop_stealthMap = 1
+
+	//[user 2026-08-12] HOLSTER, DON'T STRIP - the moment-to-moment stealth model.
+	//
+	//Sentient::DeactivateWeapon ends with activeWeaponList[hand] = NULL after attaching the weapon
+	//to its holster (sentient_combat.cpp:776), and Player::Think only ever asks
+	//GetActiveWeapon(WEAPON_MAIN). So a player carrying a FULL LOADOUT, holstered, is disguised.
+	//Drawing breaks cover; re-holstering restores it, unless the alarm has latched (E3).
+	//giveDisguiseToAll already depends on this - deactivateAllPlayerWeapons at itemhandler.scr:1035
+	//is how it satisfies the engine's empty-hand test before granting.
+	//
+	//The old path did `takeall` + coop_noWeapon, which is m2l2a's model - never armed at all - bolted
+	//onto a map that offers a CHOICE. That turned loud-or-quiet into a one-time fork at the cache.
+	//m2l2a can do it because stealth there is mandatory and set at map load (m2l2a.scr:69-73), so a
+	//player is never armed and disguised at once. Here both are meant to be true.
+	//
+	//Reversible in one cvar: coop_stealthHolster 0 restores the strip model exactly.
+	local.holster = 1
+	//tells coop_bustArm the squad is already carrying its loadout, so a contain must not re-give it
+	level.coop_stealthHolsterMode = 1
+	if( getcvar "coop_stealthHolster" == "0" ){ local.holster = 0 }
+	if( local.holster == 0 ){ level.coop_stealthHolsterMode = 0 }
+
+	if( getcvar "coop_stealthStart" != "0" ){
+		//still the honest "stealth is live RIGHT NOW" flag either way - the hints, the radio prompt
+		//and coop_blownOnDamage all key off it, and it is cleared by coop_armOnBlown.
+		level.coop_startUnarmed = 1
+		if( local.holster == 0 ){
+			level.coop_noWeapon = game.true
+			level.coop_forcePapersEquip = game.true
+		}
+	}
+
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.holster == 1 ){
+			//weapons stay in inventory and go visibly onto his back
+			local.p thread coop_mod/itemhandler.scr::deactivatePlayerWeapon
+		}else{
+			local.p takeall
+		}
+	}
+	waitframe
+
+	waitthread global/items.scr::add_item "uniform"
+	waitthread global/items.scr::add_item "papers_level1"
+
+	//[user 2026-08-11] A QUIET WEAPON. The arm above does takeall and coop_noWeapon then blocks
+	//every grant site, so without this a disguised player has no way to kill anyone quietly -
+	//m2l2a gets away with it only because its one silent objective is scripted (coop_naxosSabotage).
+	//Same recipe coop_bustArm uses: lift the lockout for THIS give only, then put it back exactly
+	//as it was. A bare `give` grants the weapon and no rounds, hence the explicit ammo (bug-1683).
+	local.lock = level.coop_noWeapon
+	level.coop_noWeapon = game.false
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( !isAlive local.p ){ continue }
+		local.p give "models/weapons/silencedpistol.tik"
+		local.p ammo "pistol" 40
+	}
+	level.coop_noWeapon = local.lock
+	//keeps a mid-stealth respawner armed with it too
+	level.coop_silencedOnSpawn = 1
+
+	if( local.holster == 1 ){
+		iprintlnbold_noloc( "In uniform. Keep your weapon holstered and you pass as one of them." )
+	}else{
+		iprintlnbold_noloc( "You are in uniform. Show your papers, and stay quiet." )
+	}
+	//the papers-only escape hatch, same as m6l1c - threaded here because its loop condition is
+	//coop_startUnarmed, which is 0 until this moment.
+	thread coop_blownOnDamage
+}end
+
+//============================================================================
+// BLOWN ON DAMAGE - ported from m6l1c/m2l2a. Officers see through level-1 papers by retail rule
+// and genuinely open fire; without this a player is left holding paperwork while being shot.
+// Polling rather than `waittill damage` (player damage routes through ArmorDamage, where the
+// script unregister is not guaranteed), and the attacking-german-within-1600u filter stops fall
+// damage re-arming the squad.
+//============================================================================
+coop_blownOnDamage:{
+//============================================================================
+	while( level.coop_startUnarmed == 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ local.p.flags["coop_bodHp"] = NIL; continue }
+			local.hp = local.p.health
+			local.prev = local.p.flags["coop_bodHp"]
+			local.p.flags["coop_bodHp"] = local.hp
+			if( local.prev == NIL ){ continue }
+			if( local.hp >= ( local.prev - 1 ) ){ continue }
+			local.garr = level.coop_actorArray["german"]
+			for( local.gi = 1; local.gi <= local.garr.size; local.gi++ ){
+				local.g = local.garr[local.gi]
+				if( local.g == NULL ){ continue }
+				if( local.g.thinkstate != "attack" ){ continue }
+				if( ( vector_length ( local.g.origin - local.p.origin ) ) > 1600 ){ continue }
+				iprintlnbold "Your cover is blown!"
+				println "^~^~^ M6L2A BLOWN by damage, alerting the town"
+				//[user 2026-08-11] blown cover RINGS THE TOWN. On the m-series this is automatic -
+				//alarm_system.scr:700 sets level.alarm and calls takeAllDisguises. m6l2a's alarmer.scr
+				//can only be rung by an actor from $enemy, and the papers checkers are not in it, so
+				//nothing here would ever have raised it. Raised explicitly instead; the alarm bridge
+				//then mirrors alarm_on -> level.alarm and calls takeAllDisguises.
+				thread coop_m6l2aRaiseAlarm
+				end
+			}
+		}
+		wait 0.25
+	}
+}end
+
+//============================================================================
+// SPAWN BRIEF. The player has to be told the choice exists, or the camp is just scenery they
+// walk past - m6l1c shipped without this at first and the uniform went unnoticed.
+// Slot 255 at rect 0 -58 is the map-level DBNO line, the same slot and position m6l1c and m2l2a
+// use for their briefs, so this kind of text always appears in one place.
+// Once per player, cleared after 12s or the moment the cache is taken - whichever comes first,
+// so it can never sit on screen during a firefight. Polls rather than firing once at map load,
+// so a late joiner gets it too.
+//============================================================================
+coop_m6l2aBrief:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	while( level.coop_m6l2aArmed != 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.p.flags["coop_m6l2aBriefed"] == 1 ){ continue }
+			local.p.flags["coop_m6l2aBriefed"] = 1
+			thread coop_m6l2aBriefShow local.p
+		}
+		wait 0.5
+	}
+	//cache taken - pull the brief off every screen that still has it
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		waitthread coop_m6l2aBriefClear local.p
+	}
+}end
+
+//============================================================================
+coop_m6l2aBriefShow local.p:{
+//============================================================================
+	if( local.p == NULL || local.p == NIL ){ end }
+	ihuddraw_virtualsize local.p 255 1
+	ihuddraw_align       local.p 255 center center
+	ihuddraw_font        local.p 255 "verdana-12"
+	ihuddraw_color       local.p 255 1 1 1
+	ihuddraw_rect        local.p 255 0 -58 0 0
+	ihuddraw_string      local.p 255 "Go loud or quiet."
+	ihuddraw_alpha       local.p 255 1
+	//[user 2026-08-11] second row, 16px under the first. 246 rather than 254 or 250: bust.scr owns
+	//those two on every stealth map (250 = the contain prompt and the Avoid-the-Officer advisory,
+	//254 = Body Being Investigated), and this brief can legitimately be up while an officer is
+	//challenging. 246 is unclaimed here and >= 100 so the calm-player HUD fade cannot hide it.
+	ihuddraw_virtualsize local.p 246 1
+	ihuddraw_align       local.p 246 center center
+	ihuddraw_font        local.p 246 "verdana-12"
+	ihuddraw_color       local.p 246 1 1 1
+	ihuddraw_rect        local.p 246 0 -90 0 0
+	ihuddraw_string      local.p 246 "There is a uniform and papers in the camp."
+	ihuddraw_alpha       local.p 246 1
+	wait 12
+	waitthread coop_m6l2aBriefClear local.p
+}end
+
+//============================================================================
+coop_m6l2aBriefClear local.p:{
+//============================================================================
+	if( local.p == NULL || local.p == NIL ){ end }
+	ihuddraw_alpha  local.p 255 0
+	ihuddraw_string local.p 255 ""
+	ihuddraw_alpha  local.p 246 0
+	ihuddraw_string local.p 246 ""
+}end
+
+//============================================================================
+// Ring the town's alarm from script. turn_alarm_on does `self playsound alarm_switch`, so it
+// needs a real self - called bare from a level thread that line throws and is skipped. One of
+// the map's own $alarm entities is the natural speaker.
+//============================================================================
+coop_m6l2aRaiseAlarm:{
+//============================================================================
+	if( level.alarm_on == 1 ){ end }
+	if( $alarm != NULL && $alarm.size >= 1 ){
+		$alarm[1] thread global/alarmer.scr::turn_alarm_on
+	}else{
+		//no alarm entity to speak through - at least make the disguise die
+		level.alarm_on = 1
+	}
+}end
+
+//============================================================================
+// TWO RADIO DISTRACTIONS, ported from m6l1c's single one and parameterised by index, so the
+// two sets share one implementation instead of a copy each. Every piece of per-set state is an
+// array slot: a second copy of the code would have to be fixed twice every time m6l1c's is.
+//
+// Set 1 - the alarm-switch room, upstairs. DELIBERATELY tense: the alarm switch is 138u from
+// the set and an alarm runner's own destination node (alarm3node) is 132u away, so distracting
+// a man here walks him to within reach of the switch. A failed contain does not just cost you
+// the officer, it rings the town. The user chose this over a safer spot.
+// Set 2 - the piano room, where the train schedule sits. alarm2_officer_patroller posts 130u
+// from the documents, so pulling him out is what makes the theft possible at all.
+//
+// coop_m6RadioSpot is a REAL info_pathnode both times, never the user's viewpos. A viewpos is
+// an eye position with air under it, and global/walkto.scr fails outright with 'couldn't find
+// end node' when the destination has no node (bug-1710, cost a session on m6l1c). 81u and 71u
+// from their sets respectively, so he still ends up standing at the radio.
+//============================================================================
+coop_m6l2aRadios:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+
+	//user placements, from build_m6l2a.dat
+	level.coop_m6RadioPos[1]  = ( -3258.289 -1701.850 286.125 )
+	level.coop_m6RadioSpot[1] = ( -3216 -1760 248 )
+	//no actor is PLACED within 900u of set 1 - whoever is there is a patroller passing through -
+	//so the search origin is the set itself rather than a post that does not exist.
+	level.coop_m6RadioPost[1] = ( -3258.289 -1701.850 286.125 )
+	level.coop_m6RadioHint[1] = ( -3223 -1702 321 )
+	level.coop_m6RadioRow2[1] = "Check the upstairs room for a radio"
+
+	level.coop_m6RadioPos[2]  = ( -3298.120 -2401.433 41.125 )
+	//[user 2026-08-12] THE SIDE, not the distance. ( -3232 -2400 16 ) is 71u from the set - fine -
+	//but it sits on the OPPOSITE side of it from the room, so he walked to the hallway and operated
+	//the radio from there. The user stood at ( -3349 -2404 90 ) to show where he should be; this is
+	//the nearest real info_pathnode to that, 78u from the set and on the room side.
+	//walkto needs a real node (bug-1710), so the spot is always snapped rather than taken literally.
+	level.coop_m6RadioSpot[2] = ( -3368 -2376 16 )
+	//alarm2_officer_patroller's own spawn post
+	level.coop_m6RadioPost[2] = ( -2960 -2448 16 )
+	level.coop_m6RadioHint[2] = ( -3332 -2409 90 )
+	level.coop_m6RadioRow2[2] = "There is a radio in the side room"
+
+	//[user 2026-08-12] Set 3 - the MAIN TRANSMITTER room. This is the one that matters: the guard
+	//here becomes the Signals Officer, and the objective radio (radio_military, bug-1744) is his post.
+	//The actor 108u from the set ships as ai_german_winter_type1 with type_disguise "salute", so
+	//as authored he waves you past and never challenges - he is retyped in coop_m6l2aOfficers.
+	level.coop_m6RadioPos[3]  = ( 936.703 -3155.333 104.875 )
+	level.coop_m6RadioSpot[3] = ( 944 -3224 72 )
+	level.coop_m6RadioPost[3] = ( 936.703 -3155.333 104.875 )
+	//[user 2026-08-12] the INTERIOR THRESHOLD, not the set itself. trigger_multiple "interior" is
+	//81u from here and "exterior" 120u, with a func_rotatingdoor between - so this fires as you
+	//cross into the building, which is 1027u before you reach the radio. Deliberate: it advertises
+	//the mechanic on entry rather than when you are already standing on the answer.
+	level.coop_m6RadioHint[3] = ( 109 -3745 -44 )
+	//[user 2026-08-12] EMPTY = standard message only. Row 2 is opt-in per set; this one gets just
+	//the one advisory line, so the threshold reads as a hint and not as a wall of instructions.
+	level.coop_m6RadioRow2[3] = ""
+
+	//the objective set itself - a prop here, wired to the false-orders objective separately
+	level.coop_m6l2aMainSet = ( 1387.498 -3326.391 190.125 )
+	//[user 2026-08-12, bug-1744] ONE RADIO, NOT TWO. The first cut of the red-highlight spawned a
+	//SECOND, pulsating radio at this exact origin and left the user's static_radiostation3 standing,
+	//so the new set sat inside the old one - "you replaced my broadcast radio but didn't remove the
+	//old radio... so its sitting inside of it". Highlighting an object by parking another object in
+	//the same cubic inch was the wrong shape of fix.
+	//The set is now a SINGLE prop that changes its own model, using the pulse/no-pulse pair MOHAA
+	//ships for exactly this (compare electrical_switch_pulse / _nopulse, redvalve_pulse / _nopulse):
+	//   models/miscobj/radio_military.tik        - the set, inert, visible from map load
+	//   models/miscobj/radio_military_pulsing.tik  - same geometry, glowing, once the call sign lands
+	//The set has to exist BEFORE the call sign - objective 3 points here and the player will walk up
+	//to it - so it cannot simply be spawned at glow time.
+	//No setsize passed on purpose: the measured box in build_m6l2a.dat was taken against
+	//static_radiostation3 and does not describe this model. coop_m6l2aProp skips setsize when mins
+	//and maxs are NIL, so it takes the model's own bounds until the user re-measures it.
+	level.coop_m6SetModel = waitthread coop_m6l2aProp "models/miscobj/radio_military.tik" ( 1387.498 -3326.391 190.125 ) ( 0 270 0 ) 0
+
+	waitthread coop_m6l2aProp "models/miscobj/radio_civilian.tik" ( -3258.289 -1701.850 286.125 ) ( 0 3 0 ) 0 ( -4.902 -8.622 0.000 ) ( 5.508 8.749 12.182 )
+	waitthread coop_m6l2aProp "models/miscobj/radio_civilian.tik" ( -3298.120 -2401.433 41.125 ) ( 0 181 0 ) 0 ( -4.902 -8.622 0.000 ) ( 5.508 8.749 12.182 )
+	waitthread coop_m6l2aProp "models/miscobj/radio_civilian.tik" ( 936.703 -3155.333 104.875 ) ( 0 221 0 ) 0 ( -4.902 -8.622 0.000 ) ( 5.508 8.749 12.182 )
+
+	//[user 2026-08-12] UNROLLED, WITH LITERAL ORIGINS. The loop built each USE trigger from
+	//level.coop_m6RadioPos[local.n] - a subscripted array read into an entity field. That is the
+	//same shape that silently failed on the props, and here it was invisible: the radio MODEL is
+	//placed from a literal so you can see it, while the trigger was landing somewhere else entirely.
+	//Symptom was exactly "he can't be distracted by the radio" - you walk up, press USE, nothing.
+	//Confirmed by the log: not one den_curious line, so no errand ever started.
+	//[user 2026-08-12] ADDING A RADIO IS FOUR LINES: a Pos/Spot/Post/Hint block above, a
+	//coop_m6l2aProp for the model, a coop_m6l2aRadioTrig here, and bump coop_m6RadioCount.
+	//Spot MUST be a real info_pathnode - global/walkto.scr fails outright on a point with no node
+	//(bug-1710), so it is snapped from map_entities/m6l2a_entities.txt rather than eyeballed.
+	//Origins stay LITERAL: the loop that built these from level.coop_m6RadioPos[local.n] put the
+	//triggers somewhere other than the models, which read in game as "the radio does nothing".
+	level.coop_m6RadioCount = 3
+	waitthread coop_m6l2aRadioTrig 1 ( -3258.289 -1701.850 286.125 )
+	waitthread coop_m6l2aRadioTrig 2 ( -3298.120 -2401.433 41.125 )
+	waitthread coop_m6l2aRadioTrig 3 ( 936.703 -3155.333 104.875 )
+	thread coop_m6l2aRadioPrompt
+}end
+
+//============================================================================
+coop_m6l2aRadioWatch local.n:{
+//============================================================================
+	while( 1 ){
+		self waittill trigger
+		local.user = parm.other
+		if( local.user == NULL || local.user == NIL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		if( level.coop_m6RadioBusy[local.n] == 1 ){ continue }
+		thread coop_m6l2aRadioPlay local.n local.user
+	}
+}end
+
+//============================================================================
+// Resolve the man by PROXIMITY, never by name - both candidates here patrol, so a name would
+// point at a spawn origin he is not standing on. Re-resolved per use so a death or a reload
+// cannot leave a stale handle behind.
+// Accepts SENTRY as well as OFFICER, unlike m6l1c's version: this map's piano-room guard is
+// alarm2_officer_patroller, retyped to sentry because officers have no papers-accept branch
+// (State_Disguise_Fake_Papers cannot reach DISGUISE_ACCEPT). An officer-only filter would have
+// silently skipped the one man set 2 exists to pull off the documents.
+//============================================================================
+coop_m6l2aRadioFind local.n:{
+//============================================================================
+	local.best  = NULL
+	local.bestd = 100000
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end (NULL) }
+
+	//[user 2026-08-12, bug-1740] A CORPSE OUTRANKS A RADIO. User, twice: "instead of stopping at the
+	//body the piano officer walked past him to the radio I turned on, even though it said he was
+	//investigating the body... Radio seemed to take precedence again" and earlier "the dead body
+	//should take precedence... that makes sense". It did, because this picker only ever asked for
+	//alive + officer/sentry + nearest: nothing told it that its best candidate was at that moment
+	//staring at a dead man. So the distraction pulled the investigator off the body, which both reads
+	//as broken AI and hands the player a free way to clear an investigation.
+	//TWO PASSES rather than a hard filter, so this can never STARVE the radio: prefer a man with no
+	//eyes on a corpse, and fall back to the full pool only if every candidate is busy with one. The
+	//stamp is coop_bustEyesOn, refreshed each 0.5s sweep by bust.scr while he can actually see the
+	//body, so a 2s window means "right now" and it lapses on its own once he looks away.
+	local.pass = 1
+	while( local.pass <= 2 ){
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NULL || local.a == NIL ){ continue }
+			if( !isAlive local.a ){ continue }
+			if( local.a.type_disguise != "officer" && local.a.type_disguise != "sentry" ){ continue }
+			if( local.pass == 1 ){
+				local.eyes = local.a.coop_bustEyesOn
+				if( local.eyes != NIL && ( level.time - local.eyes ) < 2 ){ continue }
+			}
+			local.dd = vector_length ( local.a.origin - level.coop_m6RadioPost[local.n] )
+			if( local.dd < local.bestd ){
+				local.bestd = local.dd
+				local.best  = local.a
+			}
+		}
+		if( local.best != NULL ){ break }		//pass 1 found someone free - never widen
+		local.pass = local.pass + 1
+	}
+	if( local.bestd > 1200 ){ end (NULL) }
+	//PROBE. The radio system has had no telemetry at all, which is why "the radio takes precedence
+	//over the body" could be reported twice without anything in the log to check it against.
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		local.who = "(none)"
+		local.eyesAge = -1
+		if( local.best != NULL && local.best != NIL ){
+			local.who = local.best.targetname
+			if( local.best.coop_bustEyesOn != NIL ){ local.eyesAge = level.time - local.best.coop_bustEyesOn }
+		}
+		println( "^~^~^ RADIOFIND " + local.n + " picked=" + local.who + " d=" + int( local.bestd ) + " pass=" + local.pass + " eyesAge=" + local.eyesAge )
+	}
+}end (local.best)
+
+//============================================================================
+coop_m6l2aRadioPlay local.n local.user:{
+//============================================================================
+	if( level.coop_m6RadioBusy[local.n] == 1 ){ end }
+	local.off = waitthread coop_m6l2aRadioFind local.n
+	if( local.off == NULL || local.off == NIL ){
+		if( local.user != NULL ){ local.user iprint "Nobody is left to come and investigate." 1 }
+		end
+	}
+	level.coop_m6RadioBusy[local.n] = 1
+
+	//the loop rides a dummy.tik emitter, not the visible set: dummy.tik is invisible but has a
+	//modelindex, so it is networked and loopsound follows normal PVS. m1l2a's coop_alarm_emitter
+	//comment warns that a radio MODEL carrying sound corrupted the opeltruck models.
+	local.emit = spawn script_model
+	local.emit model "models/fx/dummy.tik"
+	local.emit.origin = level.coop_m6RadioPos[local.n]
+	local.emit notsolid
+	local.emit playsound coop_radio_on
+	//volume and 300/1200 falloff live in the alias (ubersound/coop_audio.scr), one place to tune
+	local.emit loopsound coop_radio_music
+	level.coop_m6RadioEmit[local.n] = local.emit
+
+	thread coop_m6l2aRadioGo local.n local.off
+}end
+
+//============================================================================
+coop_m6l2aRadioGo local.n local.off:{
+//============================================================================
+	if( local.off == NULL || local.off == NIL ){ end }
+	local.key = "coop_radioWindowOpen" + local.n
+
+	local.post = spawn script_origin
+	local.post.origin = local.off.origin
+	local.dest = spawn script_origin
+	local.dest.origin = level.coop_m6RadioSpot[local.n]
+	//[bug-1742] parked here rather than inside the watcher so its lifetime matches the other two and
+	//it is removed by the same teardown - an origin removed while a walkto still references it is
+	//exactly the kind of stale handle this file's own comments keep warning about.
+	local.hold = spawn script_origin
+	local.hold.origin = local.off.origin
+	local.off.coop_radioAbort = 0
+
+	//Generic/G/curious/ is the retail German curiosity family. Randomised so repeat pulls do not
+	//replay one line.
+	local.line = 1 + ( randomint 8 )
+	local.off say ( "den_curious1_10a" + local.line )
+
+	//OPEN THE CONTAIN WINDOW FOR THE WHOLE ERRAND. The contain prompt is normally raised BY the
+	//papers challenge, and a distracted man never challenges - so the distraction would otherwise
+	//create the isolation and simultaneously remove the only thing offering the contain. Opened
+	//here rather than on arrival so you can take him en route; he is as alone walking as standing.
+	thread coop_m6l2aRadioContain local.n local.off
+	//disable_ai is, in full, `self.enableEnemy = 0` - it does not freeze him, it stops him taking
+	//enemies while he walks. The engine NULLs .enemy when that drops, so it MUST be restored below
+	//or he is left inert for the rest of the map.
+	local.off.coop_onRadioErrand = 1
+	local.off exec global/disable_ai.scr
+	//[user 2026-08-12, bug-1742] A CORPSE OUTRANKS A RADIO *EN ROUTE* TOO. bug-1740 only stopped the
+	//PICKER choosing a man who was already watching a body; it did nothing for the case the user
+	//actually hit first, and hit again: "piano guard still bypasses body to investigate the radio".
+	//The probe showed why - RADIOFIND picked him at 20:00:36 with eyesAge=-1 (correct, no body
+	//existed yet), the corpse appeared 12s later at 20:00:48, and he walked straight past it because
+	//nothing re-evaluates the errand once it has started.
+	thread coop_m6l2aRadioBodyAbort local.n local.off local.hold
+	local.off exec global/walkto.scr local.dest
+	//movedone only. `waittill turndone` blocks forever if the turn never completes (TRAPS T16),
+	//and movedone is safe even when the walk itself failed to find a path.
+	local.off waittill movedone
+
+	if( local.off.coop_radioAbort == 1 ){
+		//He found a body on the way. Drop the errand where he stands: hush the set so the music does
+		//not loop forever, and fall through to the teardown, which restores enableEnemy and hands him
+		//back to the normal AI - i.e. to the body sweep that is already watching him look at it.
+		waitthread coop_m6l2aRadioHush local.n
+	}else if( isAlive local.off ){
+		wait 5
+		waitthread coop_m6l2aRadioHush local.n
+		local.off exec global/walkto.scr local.post
+		local.off waittill movedone
+	}else{
+		//he died on the way over - kill the music so it does not play forever
+		waitthread coop_m6l2aRadioHush local.n
+	}
+
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		local.p.flags[local.key] = 0
+		local.p.flags["coop_clickablePapersEnabled"] = game.false
+		ihuddraw_alpha  local.p 250 0
+		ihuddraw_string local.p 250 ""
+	}
+	if( isAlive local.off ){
+		local.off.enableEnemy = 1
+		local.off.coop_onRadioErrand = 0
+		local.off.coop_radioAbort = 0
+	}
+	local.post remove
+	local.dest remove
+	local.hold remove
+	level.coop_m6RadioBusy[local.n] = 0
+}end
+
+//============================================================================
+// [user 2026-08-12, bug-1742] Drop the radio errand if he finds a corpse on the way.
+//============================================================================
+// Rides coop_bustEyesOn, the live stamp bust.scr refreshes every 0.5s sweep for any actor who can
+// actually SEE a body - the same signal the radio picker uses, so the two halves cannot disagree.
+// Deliberately NOT coop_bustSawBody, which latches once per actor and never clears: that would abort
+// every future errand for anyone who had ever walked past a corpse.
+//
+// Breaking the walk is what makes this work. coop_m6l2aRadioGo is parked on `waittill movedone`, so
+// re-issuing walkto at the spot he is standing on completes that wait immediately and lets the
+// errand thread unwind through its own teardown - which is the only place enableEnemy gets restored.
+// Anything that killed the walk without satisfying movedone would strand him with enemies disabled
+// for the rest of the map, the failure global/disable_ai.scr is explicitly warned about.
+//============================================================================
+coop_m6l2aRadioBodyAbort local.n local.off local.hold:{
+//============================================================================
+	if( local.off == NULL || local.off == NIL ){ end }
+	if( local.hold == NULL || local.hold == NIL ){ end }
+	while( local.off != NULL && isAlive local.off && local.off.coop_onRadioErrand == 1 ){
+		local.eyes = local.off.coop_bustEyesOn
+		if( local.eyes != NIL && ( level.time - local.eyes ) < 1.5 ){
+			local.off.coop_radioAbort = 1
+			println( "^~^~^ RADIOABORT " + local.n + " " + local.off.targetname + " found a body en route - errand dropped" )
+			local.hold.origin = local.off.origin
+			local.off exec global/walkto.scr local.hold
+			end
+		}
+		wait 0.25
+	}
+}end
+
+//============================================================================
+coop_m6l2aRadioHush local.n:{
+//============================================================================
+	local.e = level.coop_m6RadioEmit[local.n]
+	if( local.e == NULL || local.e == NIL ){ end }
+	local.e stoploopsound
+	local.e playsound coop_radio_off
+	wait 1
+	local.e remove
+	level.coop_m6RadioEmit[local.n] = NULL
+}end
+
+//============================================================================
+// bug-1709 OPEN ONCE PER PLAYER, NEVER RE-ARM. An earlier version of this on m6l1c re-checked
+// coop_clickablePapersEnabled and re-enabled whenever it read false - which fought coop_bustArm,
+// whose whole job is to CLEAR that flag the moment the bash starts. Re-arming restarted the
+// papers loop mid-contain and its force-equip branch put the papers back into the hands holding
+// the silenced pistol, so the officer could not be shot. A private per-errand latch instead, and
+// the latch is keyed PER RADIO - a shared flag would let set 1 finishing close set 2's window.
+//============================================================================
+coop_m6l2aRadioContain local.n local.off:{
+//============================================================================
+	if( local.off == NULL || local.off == NIL ){ end }
+	local.key = "coop_radioWindowOpen" + local.n
+	while( level.coop_m6RadioBusy[local.n] == 1 && isAlive local.off ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.p.flags[local.key] == 1 ){ continue }
+			local.p.flags[local.key] = 1
+			thread coop_mod/itemhandler.scr::enableClickablePapers local.off local.p
+		}
+		wait 0.5
+	}
+}end
+
+//============================================================================
+// USE prompt, one thread covering both sets. Slot 244 at rect 0 -26.
+// Slot >= 100 so the engine's calm-player fade cannot hide it (cg_drawtools.cpp:655 fades only
+// below 100), and -26 rather than the DBNO line at -58, which the advisory and itemhandler's
+// 'Avoid the Officer' row already share - three strings on one line just render as garble.
+//============================================================================
+coop_m6l2aRadioPrompt:{
+//============================================================================
+	while( 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			local.show = 0
+			if( isAlive local.p && level.coop_startUnarmed == 1 ){
+				for( local.n = 1; local.n <= level.coop_m6RadioCount; local.n++ ){
+					if( level.coop_m6RadioBusy[local.n] == 1 ){ continue }
+					if( ( vector_length ( local.p.origin - level.coop_m6RadioPos[local.n] ) ) < 112 ){ local.show = 1 }
+				}
+			}
+			if( local.show == 1 && local.p.flags["coop_radioPrompted"] != 1 ){
+				local.p.flags["coop_radioPrompted"] = 1
+				ihuddraw_virtualsize local.p 244 1
+				ihuddraw_align       local.p 244 center center
+				ihuddraw_font        local.p 244 "verdana-12"
+				ihuddraw_color       local.p 244 1 1 1
+				ihuddraw_rect        local.p 244 0 -26 0 0
+				ihuddraw_string      local.p 244 "Press [USE] to Distract the Officer"
+				ihuddraw_alpha       local.p 244 1
+				//the advisory shares the DBNO line, so retire it the moment the real prompt is up
+				ihuddraw_alpha  local.p 245 0
+				ihuddraw_string local.p 245 ""
+				ihuddraw_alpha  local.p 246 0
+				ihuddraw_string local.p 246 ""
+			}
+			if( local.show != 1 && local.p.flags["coop_radioPrompted"] == 1 ){
+				local.p.flags["coop_radioPrompted"] = 0
+				ihuddraw_alpha  local.p 244 0
+				ihuddraw_string local.p 244 ""
+			}
+		}
+		wait 0.25
+	}
+}end
+
+//============================================================================
+// Advisory zone, one instance per set, fired at the user's viewpos for that set.
+// STEALTH ONLY: on the loud path there is nothing to contain, so the hint is pure clutter.
+// coop_startUnarmed is the honest 'stealth is live RIGHT NOW' flag - the arm sets it and
+// coop_armOnBlown clears it, so this covers never-armed and armed-then-blown alike.
+// ONCE per player per set, self-retiring after 6s. An edge-triggered version on m6l1c hung on
+// screen for as long as you stood in the room and re-armed on every boundary crossing.
+// 2D + same-storey, never a raw 3D radius - a sphere reaches through the floor (TRAPS T19).
+//============================================================================
+coop_m6l2aRadioMsgZone local.n:{
+//============================================================================
+	local.zone = level.coop_m6RadioHint[local.n]
+	local.key  = "coop_radioMsg" + local.n
+	while( 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( level.coop_startUnarmed != 1 ){ continue }
+			if( local.p.flags[local.key] == 1 ){ continue }
+			local.fp = ( local.p.origin[0] local.p.origin[1] 0 )
+			local.fz = ( local.zone[0] local.zone[1] 0 )
+			local.dz = local.p.origin[2] - local.zone[2]
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			local.rad = 400
+			if( local.n == 3 ){ local.rad = 560 }
+			if( ( vector_length ( local.fp - local.fz ) ) >= local.rad ){ continue }
+			if( local.dz >= 160 ){ continue }
+			local.p.flags[local.key] = 1
+			thread coop_m6l2aRadioMsgShow local.p local.n
+		}
+		wait 0.25
+	}
+}end
+
+//============================================================================
+coop_m6l2aRadioMsgShow local.p local.n:{
+//============================================================================
+	if( local.p == NULL || local.p == NIL ){ end }
+	ihuddraw_virtualsize local.p 245 1
+	ihuddraw_align       local.p 245 center center
+	ihuddraw_font        local.p 245 "verdana-12"
+	ihuddraw_color       local.p 245 1 1 1
+	//[user 2026-08-12] MOVED OFF THE DBNO LINE. itemhandler's "Avoid the Officer. Contain him only
+	//when alone." is slot 250 at rect 0 -58 and this advisory sat on the same y - two strings at one
+	//line render on top of each other and the engine gives no hint that it happened.
+	ihuddraw_rect        local.p 245 0 -106 0 0
+	ihuddraw_string      local.p 245 "Some Officers can be distracted to Contain"
+	ihuddraw_alpha       local.p 245 1
+	if( level.coop_m6RadioRow2[local.n] != "" ){
+		ihuddraw_virtualsize local.p 246 1
+		ihuddraw_align       local.p 246 center center
+		ihuddraw_font        local.p 246 "verdana-12"
+		ihuddraw_color       local.p 246 1 1 1
+		ihuddraw_rect        local.p 246 0 -90 0 0
+		ihuddraw_string      local.p 246 level.coop_m6RadioRow2[local.n]
+		ihuddraw_alpha       local.p 246 1
+	}
+	wait 6
+	if( local.p == NULL || local.p == NIL ){ end }
+	ihuddraw_alpha  local.p 245 0
+	ihuddraw_string local.p 245 ""
+	ihuddraw_alpha  local.p 246 0
+	ihuddraw_string local.p 246 ""
+}end
+
+//============================================================================
+// THE THREE MEN THE USER MEASURED.
+//
+// 1. The REICHSBAHN OFFICER - "the piano officer... he is the train nazi" - stands near the
+//    logbook. type_disguise "officer" with a NORMAL disguise_range, so he challenges like any
+//    officer. That challenge is also what makes him read as seeing through you: officers run
+//    State_Disguise_Fake_Papers, which (actor_disguise_common.cpp:123-139) has NO accept branch
+//    at all - it can only reach DISGUISE_ENEMY or DISGUISE_HALT. Showing him papers CANNOT work,
+//    so containing him is the only way to his logbook. No extra watcher needed for that.
+//
+// 2+3. Two PATROLLING soldiers, kept deliberately distinct - route A walks the schedule room,
+//    route B the level-2 papers corridor. Both are typed "officer" purely so the contain is
+//    offered (itemhandler.scr:2907 refuses anything that is not type_disguise officer), and then
+//    silenced with disguise_range 1: the challenge gate is 32 < dist < range (actor.cpp:9075),
+//    which with range 1 is an empty interval, so they never challenge and never salute. Takeable,
+//    but no threat to your cover - exactly what the user asked for.
+//
+// The routes are the user's viewpos points SNAPPED to real info_pathnodes. A viewpos is an eye
+// position with air under it and global/walkto.scr fails outright with "couldn't find end node"
+// when the destination has no node (bug-1710). Worst snap was 109u on A and 149u on B, and
+// consecutive duplicates were collapsed, so 25 given points became 23 and 24 became 18.
+//============================================================================
+coop_m6l2aGuards:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	//---- the train nazi, standing by the logbook ----
+	//[user 2026-08-12] "Walter P38" - ONE t, no h. That is retail's own misspelling and the TIK
+	//cases match it literally (german_waffenss_officer.tik:62). Our officer TIKs comment out the
+	//top-level body skelmodel and load it INSIDE each `case weapon` block, while hand.skd and the
+	//head load unconditionally - so an unmatched weapon name yields a head and arms with no body,
+	//which is exactly what "Walther" produced. Silent: no error, just half a man.
+	spawn "models/human/german_waffenss_officer" targetname "coop_trainNazi" gun "Walter P38" angle "231"
+	if( $coop_trainNazi != NULL ){
+		//[user 2026-08-12] third and final placement. ( -2967 -2093 91 ) was the coordinate from when he
+		//was going to be the PATROLLING contain guard, and ( -3018 -2065 91 ) was still 268u from the
+		//logbook - a corridor, not the room, which is also why the patrol kept shoving him. This one is
+		//48u from the schedule, i.e. actually standing over it.
+		$coop_trainNazi.origin = ( -2970 -2280 91 )
+		$coop_trainNazi.type_disguise = "officer"
+		$coop_trainNazi.disguise_level = 1
+		$coop_trainNazi.type_idle = "idle"
+		println( "^~^~^ M6L2A Reichsbahn officer at " + $coop_trainNazi.origin )
+		//[user 2026-08-12] STOPPER RETIRED. It existed because the patrol shoved him off his mark in
+		//the corridor; at ( -2970 -2280 91 ) he is out of that route, and the user: "he may not even
+		//need the stopper now that he is out of the path of the other guard". One less thread able to
+		//fight the radio errand for control of him. Label kept in case the shoving returns.
+		//thread coop_m6l2aHoldPost
+	}
+
+	//---- patroller A: the schedule room ----
+		level.coop_m6PatrolA[1] = ( -2960 -2600 16 )
+		level.coop_m6PatrolA[2] = ( -3096 -2704 16 )
+		level.coop_m6PatrolA[3] = ( -3168 -2704 16 )
+		level.coop_m6PatrolA[4] = ( -3168 -2544 16 )
+		level.coop_m6PatrolA[5] = ( -3168 -2400 16 )
+		level.coop_m6PatrolA[6] = ( -3176 -2288 16 )
+		level.coop_m6PatrolA[7] = ( -3064 -2288 16 )
+		level.coop_m6PatrolA[8] = ( -3224 -2288 16 )
+		level.coop_m6PatrolA[9] = ( -3304 -2288 16 )
+		level.coop_m6PatrolA[10] = ( -3368 -2376 16 )
+		level.coop_m6PatrolA[11] = ( -3176 -2288 16 )
+		level.coop_m6PatrolA[12] = ( -3224 -2112 120 )
+		level.coop_m6PatrolA[13] = ( -3224 -1968 200 )
+		level.coop_m6PatrolA[14] = ( -3224 -2112 120 )
+		level.coop_m6PatrolA[15] = ( -3224 -2288 16 )
+		level.coop_m6PatrolA[16] = ( -3232 -2400 16 )
+		level.coop_m6PatrolA[17] = ( -3232 -2544 16 )
+		level.coop_m6PatrolA[18] = ( -3232 -2704 16 )
+		level.coop_m6PatrolA[19] = ( -3096 -2704 16 )
+		level.coop_m6PatrolA[20] = ( -2960 -2704 16 )
+		level.coop_m6PatrolA[21] = ( -2824 -2704 16 )
+		level.coop_m6PatrolA[22] = ( -2824 -2616 16 )
+		level.coop_m6PatrolA[23] = ( -2824 -2480 16 )
+	//[user 2026-08-12] PATROL MAN A REMOVED. alarm2_officer_patroller already walks this ground by
+	//default - his patrolpath is alarm2_officer_patroller_patrolnode and he spawns 130u from the
+	//train schedule - so a second scripted patroller on route A was doubling up. It also removes the
+	//conflict where coop_m6l2aRadioFind could select him for the set-2 errand while his own walkto
+	//loop was still driving him, leaving two commands fighting over one actor.
+	//Route A itself is kept (level.coop_m6PatrolA) in case a man is wanted here again.
+
+	//---- patroller B: the level-2 papers corridor ----
+		level.coop_m6PatrolB[1] = ( -324 -2588 -140 )
+		level.coop_m6PatrolB[2] = ( -232 -2672 -80 )
+		level.coop_m6PatrolB[3] = ( -144 -2432 -80 )
+		level.coop_m6PatrolB[4] = ( -144 -2280 -80 )
+		level.coop_m6PatrolB[5] = ( -96 -2128 -80 )
+		level.coop_m6PatrolB[6] = ( 16 -2064 -80 )
+		level.coop_m6PatrolB[7] = ( -168 -2128 -80 )
+		level.coop_m6PatrolB[8] = ( -144 -2280 -80 )
+		level.coop_m6PatrolB[9] = ( -404 -2212 -112 )
+		level.coop_m6PatrolB[10] = ( -324 -2456 -140 )
+		level.coop_m6PatrolB[11] = ( -436 -2456 -168 )
+		level.coop_m6PatrolB[12] = ( -404 -2212 -112 )
+		level.coop_m6PatrolB[13] = ( -360 -1964 -112 )
+		level.coop_m6PatrolB[14] = ( -404 -2212 -112 )
+		level.coop_m6PatrolB[15] = ( -436 -2456 -168 )
+		level.coop_m6PatrolB[16] = ( -324 -2456 -140 )
+		level.coop_m6PatrolB[17] = ( -324 -2588 -140 )
+		level.coop_m6PatrolB[18] = ( -232 -2672 -80 )
+	spawn "models/human/german_winter_type2" targetname "coop_m6PatrolManB" gun "MP40" angle "309"
+	if( $coop_m6PatrolManB != NULL ){
+		$coop_m6PatrolManB.origin = level.coop_m6PatrolB[1]
+		waitthread coop_m6l2aSilentContainable $coop_m6PatrolManB
+		$coop_m6PatrolManB thread coop_m6l2aPatrol "B"
+	}
+	//[user 2026-08-12] SUPERSEDED by coop_bustAnyoneWatch, which offers the contain on ANY isolated
+	//german including this one. Running both would put two threads through enableClickablePapers on
+	//the same guard - the bug-1709 re-arm shape, which fights coop_bustArm's deliberate clear and
+	//force-equips papers over the drawn pistol. Kept as a label in case coop_bustAnyone is ever
+	//turned off and the silent men still need a route.
+	//thread coop_m6l2aSilentContainWatch
+}end
+
+//============================================================================
+// Containable but silent. Both halves are load-bearing and they are set in this order for
+// clarity, not necessity: the TYPE is what the contain predicate reads, the RANGE is what the
+// engine reads before it lets him open his mouth.
+//============================================================================
+coop_m6l2aSilentContainable local.a:{
+//============================================================================
+	if( local.a == NULL || local.a == NIL ){ end }
+	local.a.type_disguise = "officer"
+	local.a.disguise_level = 1
+	local.a disguise_range 1
+}end
+
+//============================================================================
+// SCRIPTED patrol, not the engine's patrolpath. patrolpath needs map-authored pathnodes carrying
+// a targetname chain, and info_pathnode accepts only nodeflags and low_wall_arc anyway - there is
+// no wait key and no anim key on a node (navigate.cpp:1295), so an engine patrol physically
+// cannot pause or perform. Walking it from script is the only way to get the user's "stop where
+// they started and at the point before they turn back".
+//
+// PAUSE POINTS: node 1 (his post) and the node furthest from it (the turn-around). Derived rather
+// than hand-listed so the two routes share one implementation and re-snapping a route cannot
+// leave a stale index behind.
+//============================================================================
+coop_m6l2aPatrol local.which:{
+//============================================================================
+	if( local.which == "A" ){ local.r = level.coop_m6PatrolA }else{ local.r = level.coop_m6PatrolB }
+	if( local.r == NIL ){ end }
+
+	//furthest node from the start = the turn-around
+	local.far = 1
+	local.fard = 0
+	for( local.i = 2; local.i <= local.r.size; local.i++ ){
+		local.dd = vector_length ( local.r[local.i] - local.r[1] )
+		if( local.dd > local.fard ){
+			local.fard = local.dd
+			local.far  = local.i
+		}
+	}
+
+	local.dest = spawn script_origin
+	local.i = 1
+	while( isAlive self ){
+		//an alarm ends the theatre for good - he has somewhere better to be
+		if( level.alarm || level.alarm_on ){ break }
+
+		local.dest.origin = local.r[local.i]
+		self exec global/walkto.scr local.dest
+		//movedone only - waittill turndone blocks forever if the turn never completes (TRAPS T16)
+		self waittill movedone
+
+		if( local.i == 1 || local.i == local.far ){
+			waitthread coop_m6l2aIdleBusiness self
+		}
+
+		local.i++
+		if( local.i > local.r.size ){ local.i = 1 }
+	}
+	local.dest remove
+}end
+
+//============================================================================
+// A moment of business at the end of a leg. new_generic_human.tik - the SHARED human skeleton, so
+// every actor in the game already has these - carries a five-stage smoking set:
+//   smoking01 lightup (attaches models/items/cigarette.tik to Bip01 L Finger11 on frame 16)
+//   smoking02 firstinhale | smoking03 inhale | smoking04 buttout | smoking05 throwaway
+// plus matching facial morphs. Authored content that no map on this level ever used.
+//
+// ABORTS THE MOMENT HE HAS SOMETHING BETTER TO DO. An actor mid anim_scripted is not scanning,
+// and a guard who keeps smoking while you shoot his friend is worse than one who never smokes.
+// Checked between every stage rather than during: each stage is a couple of seconds, and
+// `waittill animdone` cannot be interrupted once entered.
+//============================================================================
+coop_m6l2aIdleBusiness local.a:{
+//============================================================================
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !isAlive local.a ){ end }
+
+	//[user 2026-08-12] 5s MINIMUM. The first version waited 1-3s, which read as a stumble rather
+	//than a stop - the user: "they should stop for like 5 seconds at least".
+	wait ( 5 + randomint 4 )
+	if( waitthread coop_m6l2aBusinessAborted local.a ){ end }
+	//not every stop is a cigarette
+	if( randomint 100 >= 55 ){ end }
+
+	local.a anim_scripted smoking01
+	local.a waittill animdone
+	if( waitthread coop_m6l2aBusinessAborted local.a ){ end }
+	local.a anim_scripted smoking02
+	local.a waittill animdone
+	if( waitthread coop_m6l2aBusinessAborted local.a ){ end }
+	local.a anim_scripted smoking03
+	local.a waittill animdone
+	if( waitthread coop_m6l2aBusinessAborted local.a ){ end }
+	local.a anim_scripted smoking05
+	local.a waittill animdone
+}end
+
+//============================================================================
+coop_m6l2aBusinessAborted local.a:{
+//============================================================================
+	if( local.a == NULL || local.a == NIL ){ end (1) }
+	if( !isAlive local.a ){ end (1) }
+	if( level.alarm || level.alarm_on ){ end (1) }
+	//NIL != NULL in this language, so a maybe-unset entity field needs BOTH tests
+	if( local.a.enemy != NIL && local.a.enemy != NULL ){ end (1) }
+}end (0)
+
+//============================================================================
+// OBJECTIVE 1 - the train schedule, on the Reichsbahn officer's desk.
+// The pulse model is the user's build-mode placement. Taking it needs no special state: the man
+// standing over it is an "officer" who can never accept papers, so the difficulty is reaching
+// the desk at all, not the desk itself.
+//============================================================================
+coop_m6l2aSchedule:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	level.coop_m6SchedulePos = ( -2972.125 -2328.029 56.642 )
+	level.coop_m6ScheduleModel = waitthread coop_m6l2aProp "models/items/documents_pulse.tik" ( -2972.125 -2328.029 56.642 ) ( 0 43 0 ) 0 ( -11.820 -8.927 0.000 ) ( 12.818 10.381 1.504 )
+
+	spawn trigger_use targetname "coop_m6schedtrig" origin ( -2972.125 -2328.029 56.642 )
+	if( $coop_m6schedtrig != NULL ){
+		$coop_m6schedtrig setsize ( -32 -32 -32 ) ( 32 32 48 )
+	}
+
+	while( level.coop_m6ObjSchedule != 1 ){
+		$coop_m6schedtrig waittill trigger
+		local.user = parm.other
+		if( local.user == NULL || local.user == NIL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		level.coop_m6ObjSchedule = 1
+	}
+
+	if( $coop_m6schedtrig != NULL ){ $coop_m6schedtrig remove }
+	//[user 2026-08-12] TAKE THE MODEL OFF THE TABLE. This existed, then was lost when this label was
+	//rewritten around m2l2b's trigger pattern - the capture above survived the rewrite and the remove
+	//did not, so the schedule stayed sitting there after it was picked up. Exactly the class of
+	//regression docs/generated/FIX_INDEX.md exists to catch: one entry says a thing was fixed, the
+	//file's net state says otherwise.
+	if( level.coop_m6ScheduleModel != NULL && level.coop_m6ScheduleModel != NIL ){
+		level.coop_m6ScheduleModel remove
+	}
+	iprintlnbold "Train schedule acquired."
+	println "^~^~^ M6L2A objective 1 complete - train schedule taken"
+	waitthread global/objectives.scr::add_objectives 1 3 "Steal the train schedule from the Reichsbahn Officer's quarters, on the north side of town."
+	//[user 2026-08-13, bug-1746] OBJECTIVE 2 IS THE TRANSMISSION ITSELF. It used to be "take the
+	//Signals Officer's call sign", completed by KILLING him, with the transmission as a separate
+	//objective 3 afterwards. User: "lets not require you to take a callsign... all you have to do
+	//now is use the radio itself not kill the guy". Two objectives for one location and one action
+	//was a step of bookkeeping, and it forced a kill on a route the player may want to walk through
+	//without firing. Slot 3 is retired; the radio does everything.
+	waitthread global/objectives.scr::add_objectives 2 2 "Transmit false orders from the radio set to divert the town's reinforcements." ( 1387 -3326 190 )
+	thread global/objectives.scr::current_objectives 2
+	//the set is actionable from this moment, so light it now rather than after a kill that no
+	//longer has to happen - and offer the prompt to anyone who walks up to it [bug-1758]
+	thread coop_m6l2aSetGlow
+	thread coop_m6l2aTransmitPrompt
+	thread coop_m6l2aBombGateCheck
+}end
+
+//============================================================================
+// THE ORDERING GATE. User: "we need to make sure you cant plant explosives until the other
+// objectives are completed first", and: "we did this in m2l2b if you need reference".
+//
+// This is m2l2b::plantthebomb's recipe verbatim (bug-1620), for reasons that map exactly:
+//   * the six BSP trigger_useonce entities here carry NO targetname either - confirmed against
+//     map_entities/m6l2a_entities.txt - so there is nothing to call `nottriggerable` on; and
+//   * refusing the call cannot be undone by re-arming, because TriggerUseOnce has count = 1 and
+//     the engine REMOVES the trigger when count reaches 0 (trigger.cpp:565-577). No command
+//     resurrects a removed entity. m2l2b learned this the hard way - its first fix re-armed the
+//     bomb PROP by mistake and could not have worked regardless.
+// So on first refusal, spawn a PERSISTENT replacement trigger_use - count -1, never consumed -
+// at the BSP trigger origin with the same setthread, guarded so it happens once per site. The
+// allow path removes it, exactly as m2l2b removes $coop_bombtrig1 once the charge really goes in.
+//
+// The flags for objectives 2 and 3 DEFAULT TO 1, i.e. not blocking, because the Signals Officer
+// and the transmission do not exist yet. Blocking on a flag nothing can set would be the same
+// unwinnable mission by a different route. They flip to 0 in their own systems when those land,
+// and this gate needs no edit when they do.
+//============================================================================
+coop_m6l2aBombGate local.lbl local.pos local.idx:{
+//============================================================================
+	if( level.gametype == 0 ){ end (0) }
+	if( level.coop_m6ObjTransmit == NIL ){ level.coop_m6ObjTransmit = 1 }
+
+	//[bug-1746] the call sign rung is gone from this chain - the radio is the only gate now.
+	local.missing = ""
+	if( level.coop_m6ObjSchedule != 1 ){
+		local.missing = "the train schedule"
+	}else{
+		if( level.coop_m6ObjTransmit != 1 ){ local.missing = "the false orders" }
+	}
+
+	if( local.missing == "" ){
+		//allowed - retire the stand-in if this site ever refused before
+		if( level.coop_m6BombTrig[local.idx] != NIL ){
+			if( level.coop_m6BombTrig[local.idx] != NULL ){ level.coop_m6BombTrig[local.idx] remove }
+		}
+		end (0)
+	}
+
+	iprintlnbold ( "Not yet - you still need " + local.missing + "." )
+	//give the site back, ONCE. The BSP trigger is already gone by the time we get here.
+	if( level.coop_m6BombTrig[local.idx] == NIL ){
+		local.t = spawn trigger_use
+		local.t.origin = local.pos
+		local.t setsize ( -48 -48 -24 ) ( 48 48 48 )
+		local.t setthread local.lbl
+		level.coop_m6BombTrig[local.idx] = local.t
+	}
+	println ( "^~^~^ M6L2A bomb gate BLOCKED " + local.lbl + " - missing " + local.missing )
+}end (1)
+
+//============================================================================
+// Announces the moment the charges become available, so the unlock is legible rather than the
+// player re-trying a bomb site on spec.
+//============================================================================
+coop_m6l2aBombGateCheck:{
+//============================================================================
+	if( level.coop_m6BombGateOpen == 1 ){ end }
+	if( level.coop_m6ObjSchedule != 1 ){ end }
+	if( level.coop_m6ObjTransmit == NIL ){ level.coop_m6ObjTransmit = 1 }
+	if( level.coop_m6ObjTransmit != 1 ){ end }		//[bug-1746] call sign no longer gates the charges
+	level.coop_m6BombGateOpen = 1
+	waitthread global/objectives.scr::add_objectives 4 2 "Plant explosives in the radio command post, in the northeast corner of the town. [6 remaining]" level.coop_m6SabPos[1]
+	thread global/objectives.scr::current_objectives 4
+	iprintlnbold "The radio command post can now be rigged."
+	println "^~^~^ M6L2A bomb gate OPEN"
+}end
+
+//============================================================================
+// THE PAPERS CHAIN - a level-1 checker out front, and a level-2 checker guarding the way on.
+//
+// Both are SENTRIES, never officers: State_Disguise_Papers is the only papers state with an
+// accept branch (actor_disguise_common.cpp:96-121). An officer here would make the route
+// impossible, because State_Disguise_Fake_Papers cannot reach DISGUISE_ACCEPT at all.
+//
+// The BYPASS is m2l2a's recipe (its $sentry2trigger), which the user asked me to match: a trigger
+// placed PAST the checker that extends his leash and turns him hostile, disabled the moment he
+// accepts level-2 papers. Showing him level 1 does not aggravate him - he denies you and returns
+// to idle after 3s (State_Disguise_Deny is passive) - so you can go and find the real papers. It
+// is walking past him regardless that has a consequence.
+//
+// The turn is aihandler::attackPlayer, NOT a bare `attackplayer`. The bare command is
+// Actor::ForceAttackPlayer, a one-way latch cleared only in the Actor constructor - four sites
+// were fixed for exactly that (bugs 1700/1704/1708) and this does not become a fifth.
+//============================================================================
+coop_m6l2aPapersChain:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	//---- level-1 checker, out front ----
+	spawn "models/human/german_elite_sentry" targetname "coop_m6papers1" gun "MP40" angle "277"
+	if( $coop_m6papers1 != NULL ){
+		$coop_m6papers1.origin = ( -204 -3298 -37 )
+		//[user 2026-08-13, bug-1784] DROP TO THE FLOOR. These origins came from `viewpos`, which
+		//reports the EYE position, not the feet - this project has documented that twice already
+		//(main.scr:724 bug-940 "the hand-authored coords carry an eye-height Z (viewpos capture
+		//workflow), so players materialized in the air, fell"; lobby.scr:377 drops its slot origins
+		//by 82). So each checker was being placed ~82 units above the step and then falling, and on
+		//a staircase what you land on is whatever geometry catches you - which is why they "never
+		//spawned in the right spots". droptofloor snaps to the real surface and makes the recorded
+		//X/Y the thing that matters. Same call aihandler.scr:272 uses on its spawned replica actors.
+		$coop_m6papers1 droptofloor
+		$coop_m6papers1.type_disguise = "sentry"
+		$coop_m6papers1.disguise_level = 1
+	}
+
+	//---- level-2 checkpoint ----
+	//[user 2026-08-13, bug-1791] The two old checkers at ( -798 -1735 ) / ( -804 -1741 ) are GONE, and
+	//so is the guesswork that went with them. One of them ascended endlessly - visually confirmed
+	//spawning grounded and then shooting up, so it was never a bad coordinate; something shoved a
+	//static actor parked in a walkway and "out" resolved upward. Rather than keep hunting it, the whole
+	//checkpoint moved to a spot the user placed and eyeballed in BUILD MODE, which is ground truth: the
+	//saved origin is the entity's real origin, not a viewpos eye reading, and it was seen standing
+	//correctly before it was saved. Used verbatim - no eye-height subtraction, no droptofloor, nothing
+	//inferred. The 355 pitch from the file is dropped: that is build-mode tilt for a prop, and a man
+	//stands upright.
+	waitthread coop_m6l2aCheckpoint
+
+	//---- the level-2 papers themselves, on the desk the user placed ----
+	level.coop_m6Papers2Pos = ( 107.805 -2210.604 -36.750 )
+	level.coop_m6Papers2Model = waitthread coop_m6l2aProp "models/items/pulse_papers2.tik" ( 107.805 -2210.604 -36.750 ) ( 0 43 0 ) 0 ( -2.567 -4.203 0.000 ) ( 9.651 4.417 3.915 )
+	spawn trigger_use targetname "coop_m6papers2trig" origin ( 107.805 -2210.604 -36.750 )
+	if( $coop_m6papers2trig != NULL ){
+		$coop_m6papers2trig setsize ( -32 -32 -32 ) ( 32 32 48 )
+	}
+	thread coop_m6l2aPapers2Pickup
+
+}end
+
+//============================================================================
+coop_m6l2aPapers2Pickup:{
+//============================================================================
+	while( level.coop_m6HasPapers2 != 1 ){
+		$coop_m6papers2trig waittill trigger
+		local.user = parm.other
+		if( local.user == NULL || local.user == NIL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		level.coop_m6HasPapers2 = 1
+	}
+	if( $coop_m6papers2trig != NULL ){ $coop_m6papers2trig remove }
+	if( level.coop_m6Papers2Model != NULL && level.coop_m6Papers2Model != NIL ){
+		level.coop_m6Papers2Model remove
+	}
+	//[user 2026-08-12] THE ACTUAL PAPERS LEVEL, not a fudge. State_Disguise_Papers compares
+	//level.m_iPapersLevel against each actor's disguise_level (actor_disguise_common.cpp:112), and
+	//the script-visible name of that engine field is level.papers - an EV_GETTER/EV_SETTER pair on
+	//Level (level.cpp:163-181). ONLY global/items.scr writes it: add_item "papers_level1" sets 1
+	//(items.scr:215), "papers_level2" sets 2 (:234), remove_item sets 0 (:464,:469).
+	//Taking this model used to set a private flag and nothing else, so level.papers stayed at 1 and
+	//a disguise_level 2 checker denied forever - which I had hidden by demoting him to level 1,
+	//defeating the whole point of a two-tier gate. Same order m2l2a uses at :449-450: REMOVE first
+	//(which zeroes it) then ADD, or the add is overwritten by the remove.
+	waitthread global/items.scr::remove_item "papers_level1"
+	//[user 2026-08-13, bug-1778] nomessage. add_item's second parameter suppresses its own
+	//"You have acquired level 2 papers!" (global/items.scr:231). Passing only one argument left it
+	//NIL, so items.scr announced the pickup and then the line below announced it again - the same
+	//fact twice, back to back, in two different styles.
+	waitthread global/items.scr::add_item "papers_level2" nomessage
+
+	//he accepts from here on, so walking past is no longer a provocation
+	if( $coop_m6bypass != NULL ){ $coop_m6bypass nottriggerable }
+	iprintlnbold "Level 2 papers acquired."
+	println "^~^~^ M6L2A level-2 papers taken - bypass disarmed"
+}end
+
+
+
+//============================================================================
+// OBJECTIVES 2 AND 3 - the Signals Officer and the false orders.
+//
+// He is resolved by PROXIMITY to the transmitter, not by name: the man who ships nearest to it
+// is an ai_german_winter_type1 with no targetname and type_disguise "salute", i.e. as authored he
+// waves you past. Retyped to "officer" so he challenges, can never accept papers
+// (State_Disguise_Fake_Papers has no accept branch), and is eligible for the Phase C contain.
+//
+// The call sign drops on DEATH, not on contain specifically - the user moved the objective onto
+// the loud path too ("if we are calling into a base elsewhere they likely wouldnt know the town
+// is under attack"), and once you have gone loud there is no contain, only a rifle.
+//============================================================================
+coop_m6l2aSignals:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	local.best  = NULL
+	local.bestd = 100000
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr != NIL ){
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NULL || local.a == NIL ){ continue }
+			if( !isAlive local.a ){ continue }
+			//[user 2026-08-12, bug-1741] ANCHOR HIM TO THE RADIO HE ACTUALLY OPERATES.
+			//"the callsign should come from the german beside the actual radio you take the callsign
+			//from, that makes more sense." It does, and the old anchor was simply the wrong radio:
+			//( 936.703 -3155.333 104.875 ) is level.coop_m6RadioPos[3], one of the DISTRACTION radios
+			//the player switches on to pull an officer away. The set you transmit from is
+			//level.coop_m6l2aMainSet at ( 1387.498 -3326.391 190.125 ) - the radio prop carrying the
+			//coop_m6settrig use-trigger - about 490u away. So the man holding the call
+			//sign had no relationship to the radio the objective sends you to, and killing whoever
+			//happened to stand near a distraction radio completed it.
+			//LITERAL origin on purpose, not level.coop_m6l2aMainSet: this label runs off
+			//waitTillPrespawn and must not depend on the prop-setup thread having got there first.
+			//Same reason the other two sites (the trigger spawn and the transmit emitter) use literals.
+			local.dd = vector_length ( local.a.origin - ( 1387.498 -3326.391 190.125 ) )
+			if( local.dd < local.bestd ){
+				local.bestd = local.dd
+				local.best  = local.a
+			}
+		}
+	}
+	if( local.best == NULL || local.best == NIL ){
+		println "^~^~^ M6L2A WARNING - no Signals Officer candidate found"
+		end
+	}
+	local.best.type_disguise = "officer"
+	local.best.disguise_level = 1
+	level.coop_m6Signals = local.best
+	//[user 2026-08-12] SAY WHO AND WHERE. This printed a bare "assigned", so "which man is the
+	//Signals Officer?" could only be answered by re-deriving the nearest-actor pick from source.
+	//He is whoever spawned closest to the objective-2 marker, so his identity is not guessable.
+	println( "^~^~^ M6L2A Signals Officer assigned tn=" + local.best.targetname + " model=" + local.best.model + " at " + local.best.origin + " d=" + int( local.bestd ) )
+
+	waitthread coop_m6l2aTransmitSetup
+
+	//[user 2026-08-13, bug-1746] NO DEATH WATCH. This label used to sit here on `while( isAlive
+	//local.best ){ wait 1 }` and hand out the call sign when the Signals Officer died. He is still
+	//assigned and still retyped to a challenging officer above - he is the man at the set, and
+	//containing him is still a perfectly good way to work - but killing him is no longer REQUIRED
+	//by anything, and the objective no longer waits on it.
+}end
+
+//============================================================================
+// [user 2026-08-12] "make the radio itself do the red effect the papers and uniform does so its
+// obvious to see right after the call sign is taken."
+//============================================================================
+// Same mechanism as those two, which is not a runtime shader at all - the glow is baked into
+// dedicated retail models (pulse_papers1/2.tik, officer_uniform_pulsating.tik).
+//
+// So the set is ONE prop that changes its own model between the matched pair
+// models/miscobj/radio_military.tik and models/miscobj/radio_military_pulsing.tik, spawned inert at
+// map load (the player must be able to find it before the call sign) and lit here. [bug-1744] the
+// first cut spawned a separate pulsating radio at the same origin and left the user's
+// static_radiostation3 standing, which put two radios inside each other - the set is no longer that
+// prop at all, see the placement note at level.coop_m6l2aMainSet.
+//============================================================================
+coop_m6l2aSetGlow:{
+//============================================================================
+	//[bug-1744] SWAP THE MODEL ON THE SET ITSELF - do not spawn a second radio on top of it.
+	if( level.coop_m6SetModel == NULL || level.coop_m6SetModel == NIL ){
+		println "^~^~^ M6L2A WARNING - no radio set model to light up"
+		end
+	}
+	level.coop_m6SetModel model "models/miscobj/radio_military_pulsing.tik"
+	println "^~^~^ M6L2A radio set glowing - call sign taken, transmit available"
+}end
+
+//============================================================================
+coop_m6l2aTransmitSetup:{
+//============================================================================
+	spawn trigger_use targetname "coop_m6settrig" origin ( 1387.498 -3326.391 190.125 )
+	if( $coop_m6settrig == NULL ){ end }
+	$coop_m6settrig setsize ( -48 -48 -40 ) ( 48 48 64 )
+	thread coop_m6l2aTransmitWatch
+}end
+
+//============================================================================
+// THE TRANSMISSION. The player never speaks - the user: "it needs to be the response thru the
+// radio... another radio station confirming receipt" - so all three lines are the far end.
+//
+// The static rides a LOOPSOUND under the whole sequence rather than being baked into the three
+// wavs: the carrier then never restarts between lines, the dropouts fall independently of the
+// speech, and it keeps running through the silence before line 1, which is the beat where you
+// find out whether the dead officer's call sign held.
+//============================================================================
+coop_m6l2aTransmitWatch:{
+//============================================================================
+	while( level.coop_m6ObjTransmit != 1 ){
+		$coop_m6settrig waittill trigger
+		local.user = parm.other
+		if( local.user == NULL || local.user == NIL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		if( level.coop_m6TransmitBusy == 1 ){ continue }
+		level.coop_m6TransmitBusy = 1
+		waitthread coop_m6l2aTransmitRun
+	}
+}end
+
+//============================================================================
+coop_m6l2aTransmitRun:{
+//============================================================================
+	local.emit = spawn script_model
+	local.emit model "models/fx/dummy.tik"
+	local.emit.origin = ( 1387.498 -3326.391 190.125 )
+	local.emit notsolid
+	local.emit loopsound coop_radio_bed
+
+	//the wait before the reply is the whole tension of the objective
+	wait 1.5
+	local.emit playsound den_coop_falseorder1
+	waitthread coop_m6l2aSubtitle 0 "This is Sector North. Receipt confirmed, Eagle."
+	wait 4.4
+	local.emit playsound den_coop_falseorder2
+	waitthread coop_m6l2aSubtitle 1 "Authorization Habicht verified. Message being forwarded."
+	wait 4.4
+	local.emit playsound den_coop_falseorder3
+	waitthread coop_m6l2aSubtitle 2 "All reserves are being redeployed north. Out."
+	wait 4.2
+	local.emit stoploopsound
+	local.emit playsound coop_radio_off
+	wait 1
+	local.emit remove
+
+	level.coop_m6ObjTransmit = 1
+	level.coop_m6TransmitBusy = 0
+	//the set has done its job - drop it back to the inert model, or a completed objective keeps
+	//glowing. [bug-1744] a model swap back, not a remove: the radio must still BE there afterwards.
+	if( level.coop_m6SetModel != NULL && level.coop_m6SetModel != NIL ){
+		level.coop_m6SetModel model "models/miscobj/radio_military.tik"
+	}
+	if( $coop_m6settrig != NULL ){ $coop_m6settrig remove }
+	println "^~^~^ M6L2A objective 2 complete - false orders sent"
+	//[bug-1746] slot 2, not 3 - the transmission IS objective 2 now and slot 3 is retired.
+	waitthread global/objectives.scr::add_objectives 2 3 "Transmit false orders from the radio set to divert the town's reinforcements."
+	thread coop_m6l2aBombGateCheck
+	thread coop_m6l2aDivertReinforcements
+}end
+
+//============================================================================
+// [user 2026-08-13, bug-1747] SUBTITLES FOR THE TRANSMISSION, drawn by the VANILLA renderer.
+//============================================================================
+// The aliases have carried `subtitle "..."` all along; nothing was wrong with them. The engine's
+// server-side subtitle path is hard-gated to single-player - fgame/entity.cpp:3781 opens with
+// `if (g_gametype->integer == GT_SINGLE_PLAYER && ...)` - and coop is g_gametype 2, so it has never
+// once run here. It would not have worked anyway: it does gi.cvar_set, a SERVER cvar, and only
+// measures distance to G_GetEntity(0), so on a dedicated server it reaches no client at all.
+//
+// No engine change needed, because the DRAWING half is not gated. client/cl_uiview3d.cpp reads
+// subtitle0..3 in View3D::DrawSubtitleOverlay and renders them in facfont-20 / URed, fading each
+// line in and out on a life computed from its own length. Set those cvars on the client and you get
+// vanilla output because it IS the vanilla renderer - which is what "exactly the same way as vanilla
+// does it" asks for. cg_servercmds_filter.cpp explicitly whitelists subtitle0-3 for the server.
+//
+// TWO WIRE RULES, both learned the hard way (bug-758):
+//   * value sent UNQUOTED. Cvar_Set_f does Cvar_Set2(Cmd_Argv(1), Cmd_ArgsFrom(2)) - qcommon/cvar.c
+//     :976 - so ArgsFrom rejoins every remaining token and a multi-word value arrives whole. An
+//     escaped quote instead ends the client's Argv(1) early and the seta arrives VALUELESS.
+//   * ONE statement per stufftext, never ';'-joined.
+// `set` and not `seta`: the filter accepts both (cg_servercmds_filter.cpp:295) and these are
+// transient lines that have no business being written into the player's config.
+//============================================================================
+coop_m6l2aSubtitle local.slot local.text:{
+//============================================================================
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.p stufftext ( "set subtitle" + local.slot + " " + local.text )
+	}
+}end
+
+//============================================================================
+// The payoff, spoken plainly by line 3: "Der Ort bleibt unbesetzt" - the town is left unmanned.
+// alarmer.scr reinforces this map from its own alarm_spawndetector entities; the flag is read
+// where those spawn so the diversion is a real reduction and not just a line of dialogue.
+//============================================================================
+coop_m6l2aDivertReinforcements:{
+//============================================================================
+	//[user 2026-08-13, bug-1770] THIS USED TO BE THEATRE. It set level.coop_reinforcementsDiverted,
+	//which was read NOWHERE in the mod, and wrote alarm_always_on_base/_random - which are not a
+	//troop count at all, they are the alarm siren's RE-RING interval (alarmer.scr:220), only read
+	//when level.alarm_always_on is 1, i.e. on the loud path. And the values it wrote (14/7) are
+	//alarmer's own defaults, so at best it undid the tightening threat_condition_delta applies. The
+	//objective promised a diversion the code did not deliver.
+	//
+	//The real reinforcement levers on this map are the scene3 spawner's own three constants, set in
+	//scene3_spawner1_initialize: how many may EVER spawn, how many may be alive at once, and how
+	//fast they come back. Those are what "thin the numbers" means here.
+	level.coop_reinforcementsDiverted = 1
+	//[user 2026-08-13, bug-1773] "The Final Broadcast" - use the call sign to divert reinforcements
+	//before the blackout. Awarded here rather than at the blast because this IS the diversion, and
+	//the bomb gate already guarantees it happened first: coop_m6l2aBombGate refuses every charge
+	//until coop_m6ObjTransmit is 1, so there is no ordering to test for.
+	thread coop_mod/challenges.scr::chal_team_bump "cc_final_broadcast" 1
+
+	//the thinned figures, kept in level vars so the spawner reads the same numbers whether it starts
+	//later (stealth: it is not running yet) or is already running (loud: applied live, below)
+	level.coop_m6ReinfLimit = 3		//was 6 - total that may ever arrive
+	level.coop_m6ReinfAlive = 2		//was 3 - how many may be up at once
+	level.coop_m6ReinfWait  = 3		//was 1 - seconds between respawns
+
+	if( level.scene3_spawner_started == 1 ){
+		//ALREADY LOUD: the spawner is live, so thin it in place. This is the case the user called
+		//out - "This should slow down existing reinforcements. Which should actually happen after
+		//you call the radio when loud too."
+		level.scene3_spawn1_teamlimitmax    = level.coop_m6ReinfLimit
+		level.scene3_spawn1_currentalivemax = level.coop_m6ReinfAlive
+		level.scene3_spawn1_loopwaittime    = level.coop_m6ReinfWait
+		iprintlnbold "This should slow down existing reinforcements."
+		println "^~^~^ M6L2A reinforcements thinned LIVE - limit 6->3, alive 3->2, respawn 1s->3s"
+	}else{
+		//STILL QUIET: the spawner has not been initialised yet, so the flag above is what
+		//scene3_spawner1_initialize reads when it does start.
+		iprintlnbold "This should buy you some time should things Go Loud."
+		println "^~^~^ M6L2A reinforcements pre-thinned - spawner will start at limit 3, alive 2, respawn 3s"
+	}
+}end
+
+//============================================================================
+// QUIET ENDING. Holds the blast until the squad is at the exit, and never runs
+// threat_condition_delta - so a clean infiltration ends clean.
+//============================================================================
+coop_m6l2aQuietEnding:{
+//============================================================================
+	//[user 2026-08-13, bug-1750] THE ESCAPE IS A RACE NOW, not an open-ended stroll.
+	//"You have 2 minutes to escape before the bombs explode. If you hit the escape before the timer
+	//goes off, mission completes and we get the cutscene (we trigger the bomb at cutscene). If you
+	//dont make it in 2 minutes, you still get the cutscene, but right after cutscene finishes you
+	//are forced loud." So the clean run is still the good outcome and still the one worth playing
+	//for - but overstaying costs you the quiet exit rather than the mission.
+	local.fuse = int( getcvar "coop_m6EscapeFuse" )
+	if( local.fuse <= 0 ){ local.fuse = 120 }
+	local.deadline = level.time + local.fuse
+	level.coop_m6EscapeLate = 0
+
+	println( "^~^~^ M6L2A quiet ending armed - fuse=" + local.fuse + "s to reach the exit" )
+	iprintlnbold ( "Charges set. " + local.fuse + " seconds to get clear of the town." )
+	//[user 2026-08-13, bug-1753] THE DIAL IS A 60-SECOND FACE. Read it out of the retail UI rather
+	//than guessing: ui/hud_stopwatch.urc drives the needle with `statbar spinner 0 60000` and
+	//`statbar_endangles 0 360`, i.e. 0-60000 MILLISECONDS mapped onto one full revolution. Handing it
+	//a 120s fuse pushes the value clean off the end of that range, which is why the face never read
+	//as two minutes. User: "it should have 60 seconds that goes around twice".
+	//So the fuse is run as 60-second LEGS - coop_m6l2aEscapeClock re-arms the widget once per leg -
+	//and the needle does exactly one full sweep per leg, twice for the default 120.
+	exec coop_mod/replace.scr::stopwatch 0
+	waitframe
+	thread coop_m6l2aEscapeClock local.fuse
+
+	//[user 2026-08-13, bug-1761] THE WINDOW, not the building. "your coords drew the explosion when
+	//you enter the building you exit the mission from. There's an actual window you have to jump out
+	//of." The old point was only ~82u away from this one - the real fault was the 512u radius, which
+	//covers the whole room and fired on entry. User's own viewpos at the window, and a radius tight
+	//enough that it means the window itself.
+	local.exit = ( 2006 -3236 402 )
+	local.exitr = 110
+	while( 1 ){
+		//[user 2026-08-13, bug-1757] GOING LOUD NO LONGER DETONATES. It used to end the run on the
+		//spot - "M6L2A quiet ending lost - detonating now" - which is exactly what the user hit:
+		//"Cutscene didnt play when things went loud". The charges fire on their own schedule now, so
+		//there are only TWO triggers, which is what was asked for: the fuse expiring, or the mission
+		//actually being completed. An alarm still costs you the clean ending (level.alarm is read at
+		//the end), it just no longer skips the ending beat.
+
+		//TIME UP. The charges keep their own schedule - they do not wait for you. You still get the
+		//ending beat, then the town wakes up and you fight your way out of it.
+		//[user 2026-08-13, bug-1762] THE FUSE AND THE CUTSCENE ARE DIFFERENT EVENTS. "it should
+		//trigger the explosion either at 120 seconds OR when I actually complete the mission... The
+		//cutscene should be where we also actually end the mission and see the stats screen."
+		//So the charges fire on EITHER trigger, but the cutscene belongs only to the completion -
+		//running it here would have ended the mission from the middle of town.
+		//Overstaying costs the clean run: the town wakes up and the squad still has to reach the
+		//window, which is the risk the timer exists to create.
+		//[user 2026-08-13, bug-1769] "If you are loud and dont get to mission end and it blows up,
+		//cutscene should trigger, but then when it ends you still have to fight your way out."
+		//So this path gets the SAME camera on the same blast - it just does not end the mission.
+		//coop_m6l2aEndCutscene takes that as its argument, and hands the view and the controls back
+		//when it is told not to end. The loop then keeps running, so reaching the window afterwards
+		//still finishes the mission properly.
+		if( level.coop_m6Blown != 1 && level.time >= local.deadline ){
+			level.coop_m6EscapeLate = 1
+			println "^~^~^ M6L2A escape fuse expired - blowing it on camera, then they fight their way out"
+			iprintlnbold "Out of time - the charges are going."
+			thread threat_condition_delta
+			waitthread coop_m6l2aEndCutscene 0
+		}
+
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( ( vector_length ( local.p.origin - local.exit ) ) < local.exitr ){
+				//[user 2026-08-13, bug-1768] DO NOT LATCH coop_m6Blown HERE. Setting it before the
+				//cutscene made the cutscene's own "blow it if it has not gone" test false, so on the
+				//on-time path the charges never fired at all: "you just see the area without a
+				//detonation and when cutscene time runs out, you get the rank up screen without even
+				//seeing the explosion." The cutscene owns the detonation; this branch only reports.
+				if( level.coop_m6Blown != 1 ){
+					println "^~^~^ M6L2A squad clear with time to spare - blowing it on the cut"
+					iprintlnbold "Clear. Blow it."
+					wait 1
+				}else{
+					println "^~^~^ M6L2A squad reached the window after the charges went - ending late"
+				}
+				waitthread coop_m6l2aEndCutscene 1
+				end
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//============================================================================
+// [bug-1750] THE ENDING BEAT. Both outcomes come through here, and the charges fire INSIDE it -
+// "we trigger the bomb at cutscene" - so the blast is the thing the camera is looking at.
+//============================================================================
+// !! THE CAMERA WORK IS NOT BUILT. There is no cutscene anywhere on m6l2a today (verified: zero
+// camera/cinematic references in this file), and the one note that exists - a camera position of
+// ( -2838 -792 279 ) - still has no look-at target, so there is nothing here to call yet. This
+// label is the seam, deliberately named and wired into BOTH endings, so adding the camera later is
+// a change in one place and neither outcome has to be re-plumbed.
+// It is NOT a pretend cutscene: it fires the detonation and holds long enough for the blast to
+// read, which is honest behaviour on its own, and it does not claim to be more than that.
+//============================================================================
+coop_m6l2aEndCutscene local.endsMission:{
+//============================================================================
+	//[bug-1759] latch first, then clear, so the escape clock cannot re-arm the dial behind us
+	level.coop_m6ObjDone = 1
+	exec coop_mod/replace.scr::stopwatch 0
+
+	//[bug-1763] nobody dies during their own ending. On the late path the town is actively hostile
+	//when this runs. `nodamage` is the call developer.scr's god mode uses.
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.p nodamage
+		local.p freezecontrols 1
+	}
+
+	//camera + look-at are the user's own viewpos readings; `watch` derives yaw AND pitch from the
+	//two points, which viewpos cannot give (it prints yaw only). Recipe from t2l2.scr::endlevel.
+	local.cam = spawn Camera
+	local.cam.targetname = "coop_m6EndCam"
+	local.look = spawn script_origin
+	local.look.targetname = "coop_m6EndLook"
+	local.look.origin = ( -3844 137 473 )
+	local.cam movetopos ( -2299 -989 473 )
+	local.cam watch local.look 0
+	local.cam cut
+	cuecamera local.cam
+
+	//[bug-1768] THE CUTSCENE OWNS THE DETONATION. Whichever route got here, if the charges have not
+	//gone they go now - on the cut, so the blast is what the camera is pointed at. Nothing upstream
+	//may latch coop_m6Blown, or this test goes false and the shot is of an intact town.
+	if( level.coop_m6Blown != 1 ){
+		level.coop_m6Blown = 1
+		thread objective1_detonation
+	}
+
+	wait 14
+
+	if( local.endsMission == 1 ){
+		//[user 2026-08-13, bug-1773] "Stealing the Show" - go loud after detonating the command post
+		//and fight your way out. All three parts are required and all three are checked here, at the
+		//only point that can know the run finished: the charges went, the town is up, and the squad
+		//still reached the window. coop_m6EscapeLate marks the run where the fuse beat them, which is
+		//exactly the fight-your-way-out ending this rewards.
+		if( level.coop_m6EscapeLate == 1 || level.alarm || level.alarm_on ){
+			thread coop_mod/challenges.scr::chal_team_bump "cc_stealing_show" 1
+			println "^~^~^ M6L2A challenge: Stealing the Show - loud finish earned"
+		}
+
+		//reached the window: this is the mission end, and the stats screen comes from missioncomplete
+		fadeout 3 0 0 0 1
+		println( "^~^~^ M6L2A mission complete (late=" + level.coop_m6EscapeLate + ") - handing off to m6l2b" )
+		exec global/missioncomplete.scr m6l2b 1
+		end
+	}
+
+	//[bug-1769] the fuse ran out and they are still in town: give the view, the controls AND their
+	//mortality back, and let them fight to the window. cueplayer is the engine's counterpart to
+	//cuecamera (scriptthread.cpp:398); `takedamage` undoes the nodamage above.
+	cueplayer 1
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.p freezecontrols 0
+		local.p takedamage
+	}
+	if( local.cam != NULL ){ local.cam remove }
+	if( local.look != NULL ){ local.look remove }
+	//the mission is NOT over - let the escape clock stay dead but re-open the ending watch
+	level.coop_m6ObjDone = 0
+	println "^~^~^ M6L2A blast shown, squad handed back to the fight - window still ends the mission"
+}end
+
+//============================================================================
+// KEEPS THE MAP'S OWN PATROLLERS WALKING. User: "the papers guys will ask me for the papers and
+// then just stand there, they never go back to patrolling", and "they wont even check the radio
+// because they are stuck".
+//
+// A papers challenge drives the actor through the DISGUISE think, and every exit from it lands on
+// SetThinkState(THINKSTATE_IDLE, THINKLEVEL_IDLE) - Accept, Deny and Halt all do
+// (actor_disguise_common.cpp:150-176). Nothing re-arms the patrol he was walking when he stopped,
+// so he stands where the conversation ended. The map's own patrol_ai_forceactivate does exactly
+// this job but runs ONCE at init, long before any challenge can happen.
+//
+// Same command, on a slow tick, and only when he is idle and has no enemy - so it can never
+// interrupt a fight, an alarm errand, or the radio walk it is meant to unblock.
+//============================================================================
+coop_m6l2aPatrolWatchdog:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+	while( 1 ){
+		wait 3
+		if( level.alarm || level.alarm_on ){ continue }
+		waitthread coop_m6l2aKick $alarm2_officer_patroller
+		waitthread coop_m6l2aKick $alarm3_gestapo_patroller
+		waitthread coop_m6l2aKick $alarm5_officer
+	}
+}end
+
+//============================================================================
+coop_m6l2aKick local.a:{
+//============================================================================
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !isAlive local.a ){ end }
+	//busy with something real - leave him alone
+	if( local.a.enemy != NIL && local.a.enemy != NULL ){ end }
+	//[user 2026-08-12] mid radio errand - coop_m6l2aRadioGo owns him until it hands him back.
+	//This used to READ local.a.enableEnemy, which throws "Cannot set a read-only variable": that
+	//property is SETTER-ONLY, so `x = ent.enableEnemy` is not a legal read even though
+	//`ent.enableEnemy = 0` is a legal write. Our own flag instead, which is readable by definition.
+	if( local.a.coop_onRadioErrand == 1 ){ end }
+	local.a forceactivate
+}end
+
+//============================================================================
+// One-shot dump of what the coop objectives panel actually holds, 6s after init.
+// global/objectives.scr::add_objectives switches on the index to fill coopObjectiveNText, and
+// the panel (coop_mod/objectives.scr::coop_objPanel_refresh) renders those eight vars - so
+// this prints the exact strings the player is looking at, rather than what the map asked for.
+//============================================================================
+coop_m6l2aObjDump:{
+//============================================================================
+	//5s after registration, not after map load: on a DEDICATED server main blocks at
+	//waitForPlayer until someone connects, so a load-time dump reads an empty room.
+	wait 5
+	waitthread coop_m6l2aObjOne 1 level.coopObjective1 level.coopObjective1Text
+	waitthread coop_m6l2aObjOne 2 level.coopObjective2 level.coopObjective2Text
+	waitthread coop_m6l2aObjOne 3 level.coopObjective3 level.coopObjective3Text
+	waitthread coop_m6l2aObjOne 4 level.coopObjective4 level.coopObjective4Text
+	waitthread coop_m6l2aObjOne 5 level.coopObjective5 level.coopObjective5Text
+}end
+
+//============================================================================
+// NIL-safe: `"x" + <none>` throws "binary '+' applied to incompatible types", which is what
+// made the first version of this dump unreadable.
+//============================================================================
+coop_m6l2aObjOne local.i local.st local.tx:{
+//============================================================================
+	if( local.st == NIL ){ local.st = "NIL" }
+	if( local.tx == NIL ){ local.tx = "NIL" }
+	println ( "^~^~^ OBJDUMP " + local.i + " st=" + local.st + " tx=" + local.tx )
+}end
+
+//============================================================================
+// GIVE THE WORKING ACTORS THEIR JOBS BACK - m2l2a's architecture, ported.
+//
+// m2l2a reads as the most pristine AI in the game for a structural reason, not a tuning one: its
+// scientists, welders, crate and wrench men are all type_disguise "none", and it declares 21
+// coop_sceneActorNames protecting their conversations. The disguise theatre is run by a small
+// separate cast. There is even a retail promotion of two card players to "salute" that the coop
+// maintainer fenced to SINGLE-PLAYER (m2l2a.scr:1093-1110), because in coop they stand up from the
+// table to salute and never sit back down.
+//
+// m6l2a shipped the exact inverse - 40 saluters, ZERO "none" - so every actor on the map is liable
+// to abandon whatever it is doing and turn to acknowledge the player. That is one root cause behind
+// three separate complaints: patrols that stop, the Waffen-SS officer who burst out of a cabinet to
+// WAVE rather than ambush, and the general sense that the AI here are not behaving like m2l2a's.
+//
+// So: anyone with a JOB becomes "none" so the disguise think never interrupts him. NOTE it does
+// NOT make him protected from the AI-dynamics layer - coop_isProtectedActor has no "none" clause;
+// that job is done by coop_stealthCapable above. Anyone merely standing about keeps his
+// salute, so the town still acknowledges the uniform. Roughly 24 workers against 24 idlers.
+// Those workers are then eligible witnesses BY CONSTRUCTION, which is where m6l1c's ~33 come from -
+// so coop_bustWitnessAll is no longer needed and the standard wide predicate applies.
+//
+// ORDER IS LOAD-BEARING. This runs AFTER the checker retypes above and skips anything not still
+// "salute", so it can never demote the officer, the two sentries, the Signals Officer or the two
+// spawned patrol men - all of which are already officer/sentry by this point.
+// It also runs at prespawn (the caller is inside coop_m6l2aOfficers, past waitTillPrespawn):
+// InitDisguiseNone installs ONLY IsState, so retyping an actor that is CURRENTLY inside the disguise
+// think leaves it with no BeginState/ThinkState and pins it in DISGUISE for good (bug-1631; the same
+// demotion was deleted from itemhandler.scr::coop_paperPassAll for exactly this reason). Before any
+// actor can be mid-challenge is the only safe window.
+//============================================================================
+coop_m6l2aProtectWorkers:{
+//============================================================================
+	local.w = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end }
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.a = local.arr[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		//never touch a checker - they were retyped above and are the disguise cast
+		if( local.a.type_disguise != "salute" ){ continue }
+
+		local.hasJob = 0
+		if( local.a.type_idle == "patrol" ){ local.hasJob = 1 }
+		if( local.a.type_idle == "machinegunner" ){ local.hasJob = 1 }
+		if( local.a.type_idle == "balcony_idle" ){ local.hasJob = 1 }
+		//alarm runners have a scripted errand of their own; officer.scr reads both of these fields the
+		//same way, so they are known-safe to read here
+		if( local.a.type_attack == "alarm" ){ local.hasJob = 1 }
+		if( local.a.alarmthread != NIL ){ local.hasJob = 1 }
+		if( local.hasJob == 0 ){ continue }
+
+		local.a.type_disguise = "none"
+		local.w++
+	}
+	println( "^~^~^ M6L2A protected " + local.w + " working actor(s) from the salute; they are now witnesses" )
+}end
+
+//============================================================================
+// CONTAIN FOR THE SILENT MEN.
+//
+// [user 2026-08-12] disguise_range 1 does NOT produce a silent-but-containable officer, which is
+// what coop_m6l2aSilentContainable's name claimed. actor.cpp:9075 rejects the transition unless
+// 32 < dist < range, so range 1 is an empty interval and the disguise think is unreachable - and
+// the contain prompt lives INSIDE that think (anim/disguise_papers.scr:16 is the only caller of
+// enableClickablePapers). Silent, yes. Containable, not at all - the exact opposite of the intent.
+//
+// Rather than give the range back and have them challenge - which for an "officer" always ends
+// hostile, since State_Disguise_Fake_Papers has no accept branch - the prompt is raised directly,
+// the same way coop_m6l2aRadioGo does for a distracted man who likewise never challenges.
+// Per-player latch, never re-armed: re-arming fights coop_bustArm, which clears
+// coop_clickablePapersEnabled as a handshake when the bash starts (bug-1709).
+//============================================================================
+coop_m6l2aSilentContainWatch:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	while( 1 ){
+		wait 0.5
+		if( level.coop_stealthMap != 1 ){ continue }
+		if( level.alarm || level.alarm_on ){ continue }
+		waitthread coop_m6l2aSilentOffer $coop_m6PatrolManB "B"
+	}
+}end
+
+//============================================================================
+coop_m6l2aSilentOffer local.a local.tag:{
+//============================================================================
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !isAlive local.a ){ end }
+	//busy with something real - do not offer a contain on a man already fighting
+	if( local.a.enemy != NIL && local.a.enemy != NULL ){ end }
+	local.key = "coop_silentContain" + local.tag
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( !isAlive local.p ){ continue }
+		local.d = vector_length ( local.p.origin - local.a.origin )
+		if( local.d > 400 ){
+			local.p.flags[local.key] = 0
+			continue
+		}
+		if( local.p.flags[local.key] == 1 ){ continue }
+		local.p.flags[local.key] = 1
+		thread coop_mod/itemhandler.scr::enableClickablePapers local.a local.p
+	}
+}end
+
+//============================================================================
+coop_m6l2aRadioTrig local.n local.pos:{
+//============================================================================
+	local.trig = spawn trigger_use
+	local.trig.origin = local.pos
+	local.trig solid
+	local.trig setsize ( -28 -28 -56 ) ( 28 28 40 )
+	level.coop_m6RadioTrig[local.n] = local.trig
+	level.coop_m6RadioBusy[local.n] = 0
+	local.trig thread coop_m6l2aRadioWatch local.n
+	thread coop_m6l2aRadioMsgZone local.n
+	println( "^~^~^ M6L2A radio " + local.n + " trigger at " + local.trig.origin )
+}end
+
+//============================================================================
+// KEEP THE REICHSBAHN OFFICER ON HIS SPOT.
+//
+// [user 2026-08-12] "Piano officer moved but I bet the other ai is pushing him there that patrols"
+// - and that is almost certainly it. alarm2_officer_patroller's route runs through this ground and
+// actors shove each other on contact, so a man with type_idle "idle" has nothing to walk him back.
+// Moving him a third time would not help: whatever spot he is given, the patrol still crosses it.
+//
+// Self-correcting instead. Only nudges him when he is idle, has no enemy and the town is quiet, so
+// it can never fight a fight, an alarm errand or a contain. 48u is past shoving distance but well
+// inside anything the player would read as teleporting.
+//============================================================================
+coop_m6l2aHoldPost:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	local.post = ( -2970 -2280 91 )
+	while( 1 ){
+		wait 3
+		if( $coop_trainNazi == NULL ){ end }
+		if( !isAlive $coop_trainNazi ){ end }
+		if( level.alarm || level.alarm_on ){ continue }
+		if( $coop_trainNazi.enemy != NIL && $coop_trainNazi.enemy != NULL ){ continue }
+		//[user 2026-08-12] LET HIM GO TO THE RADIO. Walking to a distraction looks exactly like being
+		//shoved off his mark - no enemy, no alarm, just off his spot - so this was hauling him back
+		//mid-errand and the distraction did nothing. coop_m6l2aRadioGo sets this flag for the whole
+		//errand and clears it when it hands him back; coop_m6l2aKick already defers to it the same way.
+		if( $coop_trainNazi.coop_onRadioErrand == 1 ){ continue }
+		//likewise a contain in progress - he is stunned, not misplaced
+		if( $coop_trainNazi.coop_bustVictim == 1 ){ continue }
+		if( ( vector_length ( $coop_trainNazi.origin - local.post ) ) < 48 ){ continue }
+		$coop_trainNazi.origin = local.post
+	}
+}end
+
+//============================================================================
+// [user 2026-08-13, bug-1748] EXTERIOR SABOTAGE TARGETS - the stealth route to objective 4.
+//============================================================================
+// User: "I have also placed 3 new objects that need destroyed as opposed to going inside of the
+// hangers and planting those bombs and risking loud."
+//
+// Four of the six retail charge sites sit INSIDE the two hangars, each with a garrison, so the
+// mission could not be finished without a firefight - which defeats the whole stealth layer this
+// map has been built around. Those four are retired and replaced by four exterior charges on three
+// objects the user placed in build mode. The count stays SIX, so the objective text, the
+// [n remaining] counter and the completion test are all untouched:
+//
+//   slot cp1_bomb1  ->  power box     ( -3789.0  -910.650  10.044 )
+//   slot cp1_bomb2  ->  radio mast A  ( -2335.583 -955.975 31.875 )
+//   slot cp2_bomb1  ->  radio mast B  ( -2538.399 -1170.196 26.970 )
+//   slot cp2_bomb2  ->  generator     ( -2346.137  292.211  5.997 )
+//   slot cp1_bomb3 / cp2_bomb3        - the two reachable retail sites, kept as authored
+//
+// REUSING THE RETAIL STATUS FLAGS is deliberate. objective1_bombtracker, objective1_locationcheck
+// and the objective1_bombcount == 0 completion all key off cp*_bomb*_status; a parallel counter
+// would have to be kept in sync with them forever, and this map has already been bitten twice by
+// two systems owning one fact. The mast takes TWO charges because it is 1153 units tall and the
+// user placed two markers at its feet, on opposite sides.
+//============================================================================
+coop_m6l2aSabotage:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	//---- the three targets, exactly as measured in build mode -------------------------------
+	//[user 2026-08-13, bug-1749] freeze=0. Passing 1 here ran coop_m6l2aFreeze, whose stopanimating
+	//leaves this ANIMATED tik parked in a collapsed pose - the mast spawned already lying down,
+	//before a single charge was planted. Build mode spawned it with no freeze at all and it stood
+	//correctly, which is the placement being copied, so match it exactly.
+	level.coop_m6SabTower = waitthread coop_m6l2aProp "models/animate/sc_p_radiotower.tik" ( -2442.889 -1060.263 8.949 ) ( 0 0 0 ) 0 ( -121.213 -206.530 -0.008 ) ( 180.403 184.316 1153.646 )
+	//[user 2026-08-13, bug-1756] "I can't plant one of the explosives on the tower. I think the object
+	//itself has some kind of invisible wall around the legs." It does, and it was mine: coop_m6l2aProp
+	//always spawns solid, and build mode measured this mast at 301 x 390 x 1153 - a single box that
+	//size around a LATTICE is a wall you cannot walk through. Charge site 3 at ( -2538 -1170 27 ) sits
+	//INSIDE that box (x -2564..-2262, y -1267..-876), so its trigger was unreachable by construction.
+	//notsolid: a scenery mast has no business blocking anyone, and the real legs are thin.
+	//[user 2026-08-13, bug-1766] "The huge tower now has no collision at all. We overcorrected."
+	//It did - notsolid was the opposite mistake to the 301x390 wall. A box cannot describe a lattice,
+	//so give it a CENTRAL COLUMN: you cannot walk through the middle of the mast, and the corners
+	//where the legs and the charge markers actually are stay open. Charge site 3 sits at local
+	//( -95.5, -109.9 ) from the base, comfortably outside a 48-unit column.
+	if( level.coop_m6SabTower != NULL ){
+		//[user 2026-08-13] widened 48 -> 80 to cover the legs better. Still clear of charge site 3,
+		//which sits at local ( -95.5, -109.9 ) from the base - 80 is the most it can take without
+		//walling that marker off again (bug-1756).
+		level.coop_m6SabTower setsize ( -80 -80 0 ) ( 80 80 1153 )
+	}
+	level.coop_m6SabGen   = waitthread coop_m6l2aProp "models/static/generator.tik" ( -2474.794 238.002 5.138 ) ( 0 184 0 ) 0 ( -132.000 -132.000 -1.167 ) ( 132.000 152.547 170.500 )
+	level.coop_m6SabBox   = waitthread coop_m6l2aProp "models/static/static_powerbox2.tik" ( -3806.020 -889.941 8.125 ) ( 0 0 0 ) 0 ( -10.841 -23.638 -0.000 ) ( 16.927 41.094 78.231 )
+
+	//---- the four charge sites --------------------------------------------------------------
+	level.coop_m6SabPos[1] = ( -3789.000 -910.650 10.044 )
+	level.coop_m6SabPos[2] = ( -2335.583 -955.975 31.875 )
+	level.coop_m6SabPos[3] = ( -2538.399 -1170.196 26.970 )
+	level.coop_m6SabPos[4] = ( -2346.137 292.211 5.997 )
+	waitthread coop_m6l2aSabSite 1 "coop_m6SabPlant1"
+	waitthread coop_m6l2aSabSite 2 "coop_m6SabPlant2"
+	waitthread coop_m6l2aSabSite 3 "coop_m6SabPlant3"
+	waitthread coop_m6l2aSabSite 4 "coop_m6SabPlant4"
+
+	//---- retire the four interior sites ------------------------------------------------------
+	//HIDE, never remove: objective1_locationcheck and the objective-4 registration both read
+	//$cp1_bomb1.origin, and a removed entity would take its origin with it. Hidden, the charge is
+	//not there to walk up to, while every reference that still names it keeps resolving.
+	//The BSP trigger_useonce at each interior spot cannot be reached from script at all - those
+	//entities carry a `setthread` and NO targetname (verified against map_entities) - so the labels
+	//themselves refuse instead, below.
+	if( $cp1_bomb1 != NULL ){ $cp1_bomb1 hide }
+	if( $cp1_bomb2 != NULL ){ $cp1_bomb2 hide }
+	if( $cp2_bomb1 != NULL ){ $cp2_bomb1 hide }
+	if( $cp2_bomb2 != NULL ){ $cp2_bomb2 hide }
+	println "^~^~^ M6L2A sabotage targets armed - 4 exterior sites, 4 interior retired"
+}end
+
+//============================================================================
+// One exterior charge site: the pulsing marker plus the use-trigger that plants on it.
+//============================================================================
+coop_m6l2aSabSite local.idx local.lbl:{
+//============================================================================
+	local.pos = level.coop_m6SabPos[local.idx]
+	local.m = spawn script_model
+	local.m model "models/animate/pulse_explosive.tik"
+	local.m.origin = local.pos
+	local.m.angles = ( 0 0 0 )
+	local.m notsolid
+	level.coop_m6SabMark[local.idx] = local.m
+
+	local.t = spawn trigger_use
+	local.t.origin = local.pos
+	local.t setsize ( -48 -48 -24 ) ( 48 48 48 )
+	local.t setthread local.lbl
+	level.coop_m6SabTrig[local.idx] = local.t
+}end
+
+//============================================================================
+// The plant itself. Mirrors a retail cp*_bombplant label line for line - same ordering gate first,
+// same model swap, same counter, same two threads - so nothing downstream can tell the difference.
+//============================================================================
+coop_m6l2aSabPlant local.idx local.lbl:{
+//============================================================================
+	if( waitthread coop_m6l2aBombGate local.lbl level.coop_m6SabPos[local.idx] local.idx ){ end }
+	local.m = level.coop_m6SabMark[local.idx]
+	if( local.m != NULL && local.m != NIL ){
+		local.m model "models/animate/radiobomb.tik"
+		local.m playsound radiobomb
+	}
+	level.objective1_bombcount --
+	if( local.idx == 1 ){ level.cp1_bomb1_status = 1 }
+	if( local.idx == 2 ){ level.cp1_bomb2_status = 1 }
+	if( local.idx == 3 ){ level.cp2_bomb1_status = 1 }
+	if( local.idx == 4 ){ level.cp2_bomb2_status = 1 }
+	println( "^~^~^ M6L2A sabotage charge " + local.idx + " planted - " + level.objective1_bombcount + " remaining" )
+	thread objective1_bombtracker
+	thread objective1_locationcheck
+}end
+
+coop_m6SabPlant1:{ waitthread coop_m6l2aSabPlant 1 "coop_m6SabPlant1" }end
+coop_m6SabPlant2:{ waitthread coop_m6l2aSabPlant 2 "coop_m6SabPlant2" }end
+coop_m6SabPlant3:{ waitthread coop_m6l2aSabPlant 3 "coop_m6SabPlant3" }end
+coop_m6SabPlant4:{ waitthread coop_m6l2aSabPlant 4 "coop_m6SabPlant4" }end
+
+//============================================================================
+// [bug-1748] THE TARGETS COMING APART. Threaded from objective1_detonation.
+//============================================================================
+// The mast is the one object in this set that MOHAA ships a real destruction for, so it gets the
+// retail treatment copied from e2l2's radioTower.scr: swap in the animated leg, play its `fall`,
+// then leave the fallen wreck standing in its place, with dust at the base. That is the shipped
+// recipe rather than an invented one - the same rule this project follows everywhere.
+//
+// The generator and the power box have NO destroyed variant - almost nothing in MOHAA does, which
+// is exactly why the mast is special - so their destruction is faked the way the base game fakes
+// it: a blast, the model DISPLACED rather than deleted (a demolished generator should be wrecked in
+// place, not absent), and a persistent electrical fire left burning on it. Direct .origin/.angles
+// assignment is used, never moveto - moveto silently no-ops on a script_model.
+//============================================================================
+coop_m6l2aSabotageBlow:{
+//============================================================================
+	thread coop_m6l2aSabTower
+	thread coop_m6l2aSabWreck level.coop_m6SabGen ( -2474.794 238.002 5.138 ) ( 30 184 0 ) "models/emitters/electric_arc.tik"
+	thread coop_m6l2aSabWreck level.coop_m6SabBox ( -3806.020 -889.941 8.125 ) ( 18 0 12 ) "models/emitters/electric_panelmelt.tik"
+	//[bug-1774] the user's own 28 placed emitters, and the charges themselves going away
+	thread coop_m6l2aBlastFx
+	thread coop_m6l2aClearCharges
+}end
+
+//============================================================================
+coop_m6l2aSabTower:{
+//============================================================================
+	local.o = ( -2442.889 -1060.263 8.949 )
+	//[user 2026-08-13, bug-1754] "the tower falls the wrong way". sc_p_radiotowerleg's `fall` anim
+	//topples along the model's OWN axis, so the only way to aim it is to yaw the entity that plays
+	//it. A cvar rather than a literal because the right answer is a thing you look at, not compute:
+	//set coop_m6TowerFallYaw <deg> and re-run the ending until it drops where it should.
+	//[user 2026-08-13] DEFAULT FROM THE USER'S OWN READING. They stood where the mast should land
+	//and took a viewpos. SOLVED by measurement rather than guessed: with the yaw set to 137 the mast
+	//came down on bearing 71.0 (tip at ( -2138 -177 ), 934u out), so the model's fall axis sits 66 deg
+	//BEHIND its yaw. Target bearing is 137.3 (tip at ( -3169 -391 )), so yaw = 137.3 + 66 = 203.
+	//Baked in as the default so it survives a restart; the cvar still overrides it live.
+	local.fy = int( getcvar "coop_m6TowerFallYaw" )
+	if( local.fy == 0 ){ local.fy = 203 }
+	local.a = ( 0 local.fy 0 )
+	//dust at the base first - it wants to be up before the mast starts moving, not after
+	local.d = spawn script_model
+	local.d model "models/emitters/tehao_explosionDust.tik"
+	local.d.origin = local.o
+	local.d notsolid
+	local.d anim start
+
+	//the animated leg replaces the standing mast for the length of the fall
+	local.falling = spawn script_model
+	local.falling model "models/animate/sc_p_radiotowerleg.tik"
+	local.falling notsolid
+	local.falling.origin = local.o
+	local.falling.angles = local.a
+	if( level.coop_m6SabTower != NULL && level.coop_m6SabTower != NIL ){ level.coop_m6SabTower hide }
+	//[user 2026-08-13, bug-1782] "We need a sound for the tower falling and when it crashes on the
+	//ground." Both already ship, and this map already tried to use them - objective1_detonation calls
+	//`playsound m6l2a_tower`, an alias that DOES NOT EXIST. ubersound.scr:1500-1501 define
+	//m6l2a_tower1 (sound/mechanics/M1_TowerFall.wav - literally the tower-fall sample) and
+	//m6l2a_tower2 (Explo_StoneMed2.wav - the stone impact). So: 1 on the way down, 2 on landing.
+	local.falling playsound m6l2a_tower1
+	local.falling anim fall
+	local.falling waittill animdone
+	local.falling playsound m6l2a_tower2
+	local.falling playsound coop_debris_gravel
+	local.falling hide
+
+	//and the wreck stays for the rest of the mission
+	local.fallen = spawn script_model
+	local.fallen model "models/animate/sc_p_radiotowerfallen.tik"
+	local.fallen.origin = local.o
+	local.fallen.angles = local.a
+	local.fallen notsolid
+	if( level.coop_m6SabTower != NULL && level.coop_m6SabTower != NIL ){ level.coop_m6SabTower remove }
+	level.coop_m6SabTower = NULL
+	local.falling remove
+	//[user 2026-08-13, bug-1755] "There should also be fire near the exploded objects." The generator
+	//and the box got theirs from coop_m6l2aSabWreck; the mast had none because it takes the retail
+	//topple path instead, which only ever produced dust.
+	waitthread coop_m6l2aSabFire local.o
+	println( "^~^~^ M6L2A radio mast down (fallYaw=" + local.fy + ")" )
+	wait 6
+	if( local.d != NULL ){ local.d remove }
+}end
+
+//============================================================================
+// Blast, tip, then leave it burning. local.ang is the WRECKED attitude, not a delta.
+//============================================================================
+// [user 2026-08-13, bug-1755] Persistent fire at a wrecked site. THREE emitters on a small spread
+// rather than one on the origin: a single sprite sitting exactly at a prop's base reads as a decal,
+// while a few offset flames read as the thing itself burning. Left running for the rest of the
+// mission on purpose - this is the mark the squad leaves on the town.
+//============================================================================
+coop_m6l2aSabFire local.pos:{
+//============================================================================
+	//[bug-1781] models/emitters/* are self-running - spawn the tik DIRECTLY, no script_model and no
+	//`anim start`. Copied from e1l1/explosion.scr:384, the retail reference, right down to the
+	//loopsound: a fire you can hear crackling reads as a fire, one that is silent reads as a decal.
+	waitthread coop_m6l2aOneFire "models/emitters/firesmoke.tik" local.pos
+	waitthread coop_m6l2aOneFire "models/emitters/fireandsmoke.tik" ( local.pos + ( 34 22 0 ) )
+	waitthread coop_m6l2aOneFire "models/emitters/firesmoke.tik" ( local.pos + ( -28 30 0 ) )
+}end
+
+//============================================================================
+coop_m6l2aOneFire local.mdl local.pos:{
+//============================================================================
+	local.f = spawn local.mdl
+	local.f.origin = local.pos
+	local.f loopsound fire_med
+}end
+
+//============================================================================
+// [user 2026-08-13, bug-1776] "the explosive charge models all need to disappear after the explosion
+// (this is already the case with the 2 vanilla charges)."
+//============================================================================
+// The two retail charges vanish because exploder.scr::explode owns them. The four exterior ones are
+// script_models this map spawned, so nothing was ever going to clean them up - a planted charge was
+// left sitting on a wreck for the rest of the mission.
+//============================================================================
+coop_m6l2aClearCharges:{
+//============================================================================
+	local.i = 1
+	while( local.i <= 4 ){
+		local.m = level.coop_m6SabMark[local.i]
+		if( local.m != NULL && local.m != NIL ){
+			local.m remove
+			level.coop_m6SabMark[local.i] = NULL
+		}
+		local.i++
+	}
+}end
+
+//============================================================================
+coop_m6l2aSabWreck local.ent local.pos local.ang local.fire:{
+//============================================================================
+	local.fx = spawn script_model
+	local.fx model "models/animate/fx_explosion_tank.tik"
+	local.fx.origin = local.pos
+	local.fx notsolid
+	local.fx anim start
+
+	if( local.ent != NULL && local.ent != NIL ){
+		local.ent.angles = local.ang
+		local.ent notsolid
+	}
+
+	//[bug-1755] the spread, plus the panel-specific emitter this site was given
+	waitthread coop_m6l2aSabFire local.pos
+	local.f = spawn script_model
+	local.f model local.fire
+	local.f.origin = local.pos
+	local.f notsolid
+	local.f anim start
+
+	local.arc = spawn script_model
+	local.arc model "models/emitters/electric_arc.tik"
+	local.arc.origin = local.pos
+	local.arc notsolid
+	local.arc anim start
+
+	wait 5
+	if( local.fx != NULL ){ local.fx remove }
+}end
+
+//============================================================================
+// [bug-1748] The four interior sites refuse. The BSP trigger_useonce that fires each of these has
+// no targetname and cannot be removed from script, so the refusal lives in the label - and because
+// the trigger is USE-ONCE it is consumed by the attempt, so nobody can sit on it.
+//============================================================================
+coop_m6l2aSabRefuse:{
+//============================================================================
+	iprintlnbold "Too exposed - rig the mast, the generator and the power box instead."
+	println "^~^~^ M6L2A interior bomb site refused - retired by bug-1748"
+}end
+
+//============================================================================
+// [user 2026-08-13, bug-1753] The escape clock, run as 60-SECOND LEGS.
+//============================================================================
+// ui/hud_stopwatch.urc drives its needle with `statbar spinner 0 60000` / `statbar_endangles 0 360`
+// - one full revolution IS sixty seconds, and a value past 60000ms falls off the end of that range.
+// Re-arming the widget once per leg makes the needle sweep once per minute, so a 120s fuse reads as
+// "60 seconds that goes around twice", which is what the user asked for.
+// The leg loop only DRIVES THE DIAL - coop_m6l2aQuietEnding owns the real deadline, so a dropped or
+// clamped leg can never change when the charges actually go off.
+//============================================================================
+coop_m6l2aEscapeClock local.total:{
+//============================================================================
+	local.left = local.total
+	while( local.left > 0 ){
+		if( level.coop_m6ObjDone == 1 ){ end }
+		local.leg = local.left
+		if( local.leg > 60 ){ local.leg = 60 }
+		//[user 2026-08-13, bug-1760] SET IT PER PLAYER, exactly as officer.scr:4471-4477 does. The
+		//previous form went through `exec coop_mod/replace.scr::stopwatch local.leg` - and every
+		//WORKING caller of that helper in the tree passes a LITERAL (`stopwatch 8`), never a variable.
+		//The dial kept reading ~10s rather than a full 60 sweep, which is what a duration that never
+		//arrived looks like. The per-player call is the one form proven with a variable.
+		println( "^~^~^ M6L2A escape clock: leg=" + local.leg + "s, " + local.left + "s left of " + local.total )
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			local.p stopwatch local.leg
+		}
+		wait local.leg
+		local.left = local.left - local.leg
+	}
+}end
+
+//============================================================================
+// [user 2026-08-13, bug-1758] "a Press Use to Transmit False Signal should come up when you are
+// right by the radio."
+//============================================================================
+// Same shape as the contain prompt, on its own HUD slot. 121 is free (the m2l2a Naxos block ends at
+// 120, the next thing in use is 126) and is >= 100, which matters: below 100 the engine's own HUD
+// fade can hide a line while the player stands still reading it (TRAPS T18).
+// Runs only while the set is actually usable - after objective 2 opens, until the orders are sent.
+//============================================================================
+coop_m6l2aTransmitPrompt:{
+//============================================================================
+	local.shown = 0
+	while( level.coop_m6ObjTransmit != 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			local.near = 0
+			//2D + storey band, never a 3D sphere - the set sits on an upper floor and a sphere would
+			//offer it to anyone standing underneath (TRAPS T19, the same rule the body radius uses).
+			local.dz = local.p.origin[2] - 190.125
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			local.flatP = ( local.p.origin[0] local.p.origin[1] 0 )
+			local.flatR = ( 1387.498 -3326.391 0 )
+			if( ( vector_length ( local.flatP - local.flatR ) ) <= 96 && local.dz <= 80 ){ local.near = 1 }
+
+			if( local.near == 1 && local.p.flags["coop_m6TxPrompt"] != 1 ){
+				local.p.flags["coop_m6TxPrompt"] = 1
+				ihuddraw_virtualsize local.p 121 1
+				ihuddraw_align       local.p 121 center center
+				ihuddraw_font        local.p 121 "verdana-12"
+				ihuddraw_color       local.p 121 1 0.8 0.4
+				//[user 2026-08-13, bug-1764] "The text about containing overlaps with the use radio
+				//text." The contain prompt (slot 250) draws at y -58 and this was drawing on the same
+				//line, so by the radio - where a guard can also be containable - they printed on top
+				//of each other. -42 sits clear of both it and the body warning at -74.
+				ihuddraw_rect        local.p 121 0 -42 0 0
+				ihuddraw_string      local.p 121 "Press [USE] to Transmit False Signal"
+				ihuddraw_alpha       local.p 121 1
+			}
+			if( local.near == 0 && local.p.flags["coop_m6TxPrompt"] == 1 ){
+				local.p.flags["coop_m6TxPrompt"] = 0
+				ihuddraw_alpha  local.p 121 0
+				ihuddraw_string local.p 121 ""
+			}
+		}
+		waitframe
+	}
+	//tear it down on every client, however this ended (TRAPS T18: ihuddraw state persists until
+	//something overwrites it - a prompt for a finished objective would sit there for the rest of the map)
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		local.p.flags["coop_m6TxPrompt"] = 0
+		ihuddraw_alpha  local.p 121 0
+		ihuddraw_string local.p 121 ""
+	}
+}end
+
+
+//============================================================================
+// [user 2026-08-13, bug-1774] THE BLACKOUT ITSELF - 28 build-mode emitters, in two lifetimes.
+//============================================================================
+// The user placed these by hand and was explicit about how they behave: "explosions should play with
+// the explosions... anything like smoke or electricity should keep playing after the actual
+// explosion is triggered." So the set is split:
+//
+//   ONE-SHOT (24) - the blast. Spawned, `anim start`, and removed once they have played out.
+//   PERSISTENT (4) - two smoke columns and two electrical fires. Spawned and never touched again;
+//                    they are what the town looks like afterwards.
+//
+// Sounds were NOT placed ("there should be explosive sounds too but i didnt place those please add
+// some"), so they are attached here rather than being their own entities: coop_demo_explosion is the
+// heavy one (1500/8000 falloff, so it carries across the whole town) with coop_debris_brick and
+// coop_debris_gravel as the tail. Played on a handful of the emitters, not all 24 - twenty-four
+// simultaneous explosion samples is mud, and MAX_SOUNDS is a real ceiling on this engine.
+//============================================================================
+coop_m6l2aBlastFx:{
+//============================================================================
+	//[user 2026-08-13, bug-1781] SPAWN METHOD MATTERS, and it differs by model family. "Not seeing
+	//any fire over the hangers or the other objets we blew up" - none of the models/emitters/* ones
+	//were appearing at all, because they were being spawned the way an ANIMATED model is:
+	//    spawn script_model / model X / anim start
+	//That is right for models/animate/* and models/fx/* (proven in this tree by ambience.scr:310 and
+	//the fx_truck_explosion site), and WRONG for models/emitters/*, which are self-running emitters
+	//with no `start` anim to play. Retail spawns those directly - explosion.scr:384 in e1l1 is the
+	//reference: `local.fire = spawn "models/emitters/fireandsmoke.tik"`, set origin, add a loopsound,
+	//and it runs on its own. 18 of the 28 placements are emitters, which is why so little showed up.
+	//The trailing argument on each line is that family flag: 1 = emitter, 0 = fx/animate.
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -3081.169 -502.523 0.125 ) 1 1
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2912.192 -673.548 0.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2728.281 -794.598 0.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/fx/exp_dynamic1.tik" ( -3724.751 -609.593 25.416 ) 0 1
+	waitthread coop_m6l2aBoom "models/emitters/sm_explosion.tik" ( -3917.476 -555.436 17.563 ) 1 0
+	waitthread coop_m6l2aBoom "models/fx/fx_truck_explosion.tik" ( -3957.054 -486.292 48.125 ) 0 0
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -3971.535 -552.182 0.125 ) 1 0
+	wait 0.3
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2614.689 -1059.270 8.125 ) 1 1
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2387.190 -1018.974 8.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2497.452 -1187.104 8.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/fx/bombblast_snow.tik" ( -2479.700 -991.698 -5.875 ) 0 1
+	waitthread coop_m6l2aBoom "models/fx/concrete2.tik" ( -2533.483 -813.490 -13.875 ) 0 0
+	waitthread coop_m6l2aBoom "models/fx/concrete2.tik" ( -2582.544 -948.434 -5.875 ) 0 0
+	waitthread coop_m6l2aBoom "models/fx/fx_explosion.tik" ( -2744.036 -127.911 89.608 ) 0 0
+	wait 0.3
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2351.909 104.707 8.125 ) 1 1
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -2332.116 203.950 8.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -4069.209 7.310 0.125 ) 1 0
+	waitthread coop_m6l2aBoom "models/emitters/nebel_snowexplosion.tik" ( -3805.864 -855.062 8.125 ) 1 1
+	waitthread coop_m6l2aBoom "models/emitters/sm_explosion.tik" ( -4016.125 53.624 -4.600 ) 1 0
+	waitthread coop_m6l2aBoom "models/emitters/sm_explosion.tik" ( -2364.240 339.069 -5.875 ) 1 0
+	waitthread coop_m6l2aBoom "models/fx/exp_dynamic2.tik" ( -3812.702 6.465 -13.875 ) 0 0
+	waitthread coop_m6l2aBoom "models/fx/fx_truck_explosion.tik" ( -3756.963 -819.007 0.125 ) 0 0
+	waitthread coop_m6l2aBoom "models/fx/veltro_explode2.tik" ( -4124.509 170.973 0.125 ) 0 0
+	waitthread coop_m6l2aBoom "models/fx/veltro_explode2.tik" ( -3603.447 95.422 0.125 ) 0 0
+
+	//---- what is left behind, and stays -----------------------------------------------------
+	waitthread coop_m6l2aLinger "models/emitters/tanksmoke.tik" ( -2621.555 -134.621 -5.992 )
+	waitthread coop_m6l2aLinger "models/emitters/thin_long_grey.tik" ( -3773.215 -891.013 -5.875 )
+	waitthread coop_m6l2aLinger "models/emitters/electrical_fire.tik" ( -3107.706 -478.900 0.125 )
+	waitthread coop_m6l2aLinger "models/emitters/electrical_fire.tik" ( -2667.793 -906.075 0.125 )
+	println "^~^~^ M6L2A blast fx: 24 one-shot, 4 persistent, charges cleared"
+}end
+
+//============================================================================
+// One blast emitter. local.kind 1 = models/emitters (spawn the tik direct), 0 = fx/animate
+// (script_model + anim start). local.snd 1 = carry a sound - only a handful do, since two dozen
+// simultaneous explosion samples is mud and MAX_SOUNDS is a real ceiling on this engine.
+//============================================================================
+coop_m6l2aBoom local.mdl local.pos local.kind local.snd:{
+//============================================================================
+	if( local.kind == 1 ){
+		local.e = spawn local.mdl
+		local.e.origin = local.pos
+	}else{
+		local.e = spawn script_model
+		local.e model local.mdl
+		local.e.origin = local.pos
+		local.e notsolid
+		local.e anim start
+	}
+	if( local.snd == 1 ){
+		local.e playsound coop_demo_explosion
+		local.e playsound coop_debris_brick
+	}
+	thread coop_m6l2aBoomClear local.e
+}end
+
+//============================================================================
+coop_m6l2aBoomClear local.e:{
+//============================================================================
+	//long enough for the emitter to finish, short enough not to hold 24 entities for the map's life
+	wait 8
+	if( local.e != NULL && local.e != NIL ){ local.e remove }
+}end
+
+//============================================================================
+// Smoke and electrical fire that outlive the blast - spawned and deliberately never removed.
+// All four are models/emitters/*, so all four take the direct-spawn path.
+//============================================================================
+coop_m6l2aLinger local.mdl local.pos:{
+//============================================================================
+	local.e = spawn local.mdl
+	local.e.origin = local.pos
+}end
+
+
+//============================================================================
+// [user 2026-08-13, bug-1789] "we are missing one of the guards again". Three reports now, each
+// judged by eye at a different moment. This says once every 10s whether each checker still EXISTS,
+// whether it is ALIVE, and where it is - so a disappearance can be pinned to a time and a cause
+// (never spawned / removed / killed / moved) instead of being re-reported as the same symptom.
+// coop_aggroDebug only.
+
+
+//============================================================================
+// [user 2026-08-13, bug-1791] THE LEVEL-2 CHECKPOINT, entirely from build-mode placements.
+//============================================================================
+// Every origin and angle below was placed and eyeballed in build mode and is used VERBATIM. That is
+// the point: viewpos gives EYE height, droptofloor silently no-ops when it cannot resolve, and
+// inferring a floor from a checker 1500u away is how the previous checkpoint ended up with a guard
+// climbing into the sky. Build mode's saved origin is the entity's real origin, already confirmed by
+// eye before saving. Actor pitch is dropped (355 is prop tilt); props keep theirs.
+//============================================================================
+coop_m6l2aCheckpoint:{
+//============================================================================
+	spawn "models/human/german_elite_gestapo" targetname "coop_m6papers2" gun "MP40" angle "359"
+	if( $coop_m6papers2 != NULL ){
+		$coop_m6papers2.origin = ( -2268.269 -348.210 4.125 )
+		$coop_m6papers2.type_disguise = "sentry"
+		$coop_m6papers2.disguise_level = 2
+	}
+	waitthread coop_m6l2aProp "models/static/sandbag_small_semicircle_winter.tik" ( -2231.234 -377.670 1.592 ) ( 355 359 0 ) 0 ( -27.114 -77.664 0.000 ) ( 51.201 83.225 53.641 )
+
+	//THE NO-ENTRY LINE, from the four readings: x -2308..-2365, y -147..-417. Those are eye height,
+	//so only their X/Y are used and the box is built from the FLOOR up - the sandbag sits at z 1.6,
+	//so 0..96 covers a standing man. Getting this wrong by a storey is exactly why the old bypass
+	//trigger never once fired.
+	spawn trigger_multiple targetname "coop_m6bypass"
+	if( $coop_m6bypass != NULL ){
+		$coop_m6bypass.origin = ( -2336 -282 40 )
+		$coop_m6bypass setsize ( -52 -150 -40 ) ( 52 150 56 )
+		println( "^~^~^ M6L2A checkpoint: guard + no-entry line built at " + $coop_m6bypass.origin )
+		thread coop_m6l2aBypassWatch
+	}
+	thread coop_m6l2aCheckpointHint
+}end
+
+//============================================================================
+// The hint. Once per player, on approach to the GUARD rather than at the line, so it arrives before
+// you are turned away instead of explaining why you just were.
+//============================================================================
+coop_m6l2aCheckpointHint:{
+//============================================================================
+	while( level.coop_m6HasPapers2 != 1 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.p.flags["coop_m6HintL2"] == 1 ){ continue }
+			//2D + storey band, never a sphere (TRAPS T19)
+			local.dz = local.p.origin[2] - 4.125
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			local.fp = ( local.p.origin[0] local.p.origin[1] 0 )
+			local.fg = ( -2268.269 -348.210 0 )
+			if( ( vector_length ( local.fp - local.fg ) ) <= 320 && local.dz <= 96 ){
+				local.p.flags["coop_m6HintL2"] = 1
+				local.p iprint "Intel reports an Officer with Level 2 Access is held up in one of the buildings in the Town. His signature mark is that he collects the helmets of the soldiers he has killed." 1
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//============================================================================
+// Turned away at the line without level-2 papers.
+//============================================================================
+coop_m6l2aBypassWatch:{
+//============================================================================
+	while( level.coop_m6HasPapers2 != 1 ){
+		$coop_m6bypass waittill trigger
+		local.user = parm.other
+		println( "^~^~^ M6L2A bypass TOUCH by " + local.user )
+		if( local.user == NULL || local.user == NIL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		if( level.coop_m6HasPapers2 == 1 ){ break }
+		if( $coop_m6papers2 == NULL ){ break }
+		if( !isAlive $coop_m6papers2 ){ break }
+		$coop_m6papers2 leash 2048
+		$coop_m6papers2 resetleash
+		$coop_m6papers2 thread coop_mod/aihandler.scr::attackPlayer local.user
+		println( "^~^~^ M6L2A level-2 bypass TRIPPED by " + local.user.netname + " - checker turned" )
+		//[user 2026-08-13, bug-1793] NO `break` HERE. This watch used to retire itself after the first
+		//trip, so the checkpoint was armed exactly once per map load - and the log proves it spent that
+		//one shot during the two-player boot, long before anyone walked up to it. User: "I walked thru
+		//the level 2 area and it still didn't trigger. He didn't react at all to me going through."
+		//The line stays live for the whole mission; the while condition already retires it the moment
+		//level-2 papers are found, which is the only condition that should.
+		//Walking a checkpoint you cannot answer for IS blowing cover, so it escalates rather than
+		//leaving one annoyed guard - that is the "alert" the user expected to see.
+		thread coop_mod/bust.scr::coop_bustGoLoud "walked the level-2 checkpoint without papers"
+		//A short settle so one crossing cannot re-task the checker every frame while he is turning.
+		wait 3
+	}
+}end
+
+//============================================================================
+// [user 2026-08-13] The trophy line and the room around it, plus the radio microphone. All
+// build-mode placements, verbatim. The helmets are the landmark the hint points at - the papers
+// stay on the desk, so these mark WHICH building to search rather than carrying anything.
+//============================================================================
+coop_m6l2aDressing:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	waitthread coop_mod/replace.scr::waitTillPrespawn
+
+	waitthread coop_m6l2aProp "models/static/microphone_ns.tik" ( 1387.253 -3337.348 188.125 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_private_net_cig.tik" ( -301.695 -1949.265 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_private_net_cig.tik" ( -301.353 -1932.163 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_engineer01.tik" ( -300.475 -1915.031 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_ltnt.tik" ( -299.675 -1897.866 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_medic.tik" ( -295.062 -1875.772 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/static/static_us-helmet_captain.tik" ( -297.796 -1856.020 -121.875 ) ( 0 280 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_blank_capt.tik" ( -428.6 -2516.8 -234.0 ) ( 359 272 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_blank.tik" ( -449.9 -2518.2 -238.9 ) ( 359 272 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_captain.tik" ( -128.3 -2762.0 -182.6 ) ( 359 272 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_engineer02.tik" ( -157.1 -2775.9 -180.6 ) ( 359 272 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_engineer01.tik" ( -187.9 -2770.9 -184.5 ) ( 359 272 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_ltnt.tik" ( 113.4 -2155.9 -123.5 ) ( 0 5 0 ) 0
+	waitthread coop_m6l2aProp "models/equipment/ushelmet_ltnt.tik" ( -27.8 -2409.5 -122.9 ) ( 11 5 0 ) 0
+	waitthread coop_m6l2aProp "models/animate/body_2nd-ranger-engineer3.tik" ( 38.6 -2584.4 -42.1 ) ( 1 216 0 ) 0
+	waitthread coop_m6l2aScaled "models/static/ballpeen_hammer.tik" ( 115.6 -2386.3 -37.3 ) ( 1 216 0 ) 0.6
+	waitthread coop_m6l2aScaled "models/miscobj/sledgehammer.tik" ( 24.6 -2557.3 -37.4 ) ( 288 216 0 ) 0.6
+	waitthread coop_m6l2aScaled "models/static/flourbag-single.tik" ( 69.8 -2567.8 -40.2 ) ( 346 297 0 ) 1.2
+	waitthread coop_m6l2aScaled "models/static/body_usvest02.tik" ( 96.9 -2495.7 -86.6 ) ( 358 357 0 ) 1.2
+	waitthread coop_m6l2aScaled "models/static/typewriter_ns.tik" ( 134.3 -2512.2 -81.1 ) ( 338 157 0 ) 1.2
+	waitthread coop_m6l2aScaled "models/equipment/ushelmet_private_net_cig.tik" ( 85.5 -2614.2 -142.3 ) ( 9 157 0 ) 1.2
+	waitthread coop_m6l2aScaled "models/equipment/ushelmet_medic.tik" ( 103.2 -2489.9 -180.4 ) ( 12 192 0 ) 1.2
+	println "^~^~^ M6L2A dressing placed - 12 helmets, trophy room, microphone"
+}end
+
+//============================================================================
+// Build mode saves a scale on some props and coop_m6l2aProp has no scale argument, so these go
+// through here rather than losing it silently.
+//============================================================================
+coop_m6l2aScaled local.mdl local.pos local.ang local.sc:{
+//============================================================================
+	local.m = spawn script_model
+	local.m model local.mdl
+	local.m.origin = local.pos
+	local.m.angles = local.ang
+	local.m.scale = local.sc
+	local.m solid
 }end

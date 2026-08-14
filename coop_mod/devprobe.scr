@@ -1,0 +1,147 @@
+//============================================================================
+// DEV PROBE - "who is that actor, right now?"
+//
+// [user 2026-08-12] Built because every identification in this project has been made from the
+// BSP entity dump, which holds SPAWN positions. That answers "who lives here" and is the right
+// basis for retyping actors at map init - but it is worthless once a map goes loud, because
+// patrollers have walked, alarm_spawndetector reinforcements have appeared, and nothing is
+// where the dump says. The user hit exactly that: "they are all over me right now, so you're
+// not seeing the right person."
+//
+// Off unless coop_whoProbe is 1. Prints nothing, costs nothing, and touches nothing when off.
+// Read the output out of qconsole.log; every line is ^~^~^ prefixed so it is greppable.
+//
+// type_disguise is the field that decides whether a man challenges you:
+//   officer - challenges, and can NEVER accept (State_Disguise_Fake_Papers has no accept branch)
+//   sentry  - challenges, and CAN accept your papers
+//   salute  - waves you past, never challenges
+//   none    - never enters the disguise think at all; sees through the disguise
+//============================================================================
+
+//============================================================================
+main:{
+//============================================================================
+	//never on a shipped server unless explicitly asked for
+	if( getcvar( "coop_whoProbe" ) != "1" ){ end }
+	println "^~^~^ WHOPROBE armed - set coop_whoProbe 0 to silence"
+	while( getcvar( "coop_whoProbe" ) == "1" ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			waitthread reportNearest local.p
+		}
+		wait 2
+	}
+	println "^~^~^ WHOPROBE disarmed"
+}end
+
+
+//============================================================================
+// Nearest live german to this player, described in full. Reports only when the answer CHANGES,
+// so standing still does not fill the log - the failure mode of every probe that prints on a
+// timer. The comparison is on the description string rather than the entity, so a state change
+// on the same man (he goes hostile, he gets retyped) still reports.
+//============================================================================
+reportNearest local.p:{
+//============================================================================
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end }
+
+	local.best  = NULL
+	local.bestd = 100000
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.a = local.arr[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.dd = vector_length ( local.a.origin - local.p.origin )
+		if( local.dd < local.bestd ){
+			local.bestd = local.dd
+			local.best  = local.a
+		}
+	}
+	if( local.best == NULL || local.best == NIL ){ end }
+	//beyond this there is nobody meaningfully "near" you and the answer is noise
+	if( local.bestd > 900 ){ end }
+
+	local.tn = local.best.targetname
+	if( local.tn == NIL || local.tn == "" ){ local.tn = "(unnamed)" }
+	local.td = local.best.type_disguise
+	if( local.td == NIL || local.td == "" ){ local.td = "(none set)" }
+
+	//enemy is NIL until he takes one, so guard with BOTH tests - NIL != NULL in this language
+	local.hostile = "no"
+	if( local.best.enemy != NIL && local.best.enemy != NULL ){ local.hostile = "YES" }
+
+	//built in two steps on purpose: a continuation line may not START with a binary operator,
+	//which is a silent parse kill of the whole file (caught by docs/tools/linecheck.py)
+	local.desc = ( "tn=" + local.tn + " disg=" + local.td + " hp=" + int( local.best.health ) )
+	local.desc = ( local.desc + " hostile=" + local.hostile + " d=" + int( local.bestd ) )
+
+	if( local.p.flags["coop_whoLast"] == local.desc ){ end }
+	local.p.flags["coop_whoLast"] = local.desc
+
+	println ( "^~^~^ WHO " + local.desc + " at " + local.best.origin )
+	local.p iprint local.desc 1
+}end
+
+//============================================================================
+// STUCK-ACTOR DETECTOR - answers "did that guard actually freeze, or is he just idle?"
+//
+// [user 2026-08-12] Built because the question could not otherwise be settled. Reading the engine
+// says an actor resumes its authored behaviour after a disguise interaction: SetThinkState only
+// resets the MODE, and ThinkStateTransitions re-runs BeginState on the POLICY held in m_ThinkMap.
+// But a playtest showed guards standing still after a papers challenge. A code-reading does not win
+// that argument, so this measures it.
+//
+// thinkstate is EV_GETTER (actor.cpp:1831) and returns one of
+//   void | idle | pain | killed | attack | curious | disguise | grenade
+// so a genuine freeze is visible: an actor pinned in DISGUISE never leaves that value.
+//
+// LEGITIMATE MAXIMUM is about 15s - State_Disguise_Papers allows 12s before it gives up to ENEMY
+// (actor_disguise_common.cpp:103), plus a WAIT of up to 3s. 25s is therefore comfortably past any
+// honest interaction and cannot false-positive on a slow challenge.
+//
+// THE FAILURE IT IS HUNTING: InitDisguiseNone installs ONLY IsState - no BeginState, no ThinkState
+// - so an actor retyped to type_disguise "none" WHILE inside the disguise think takes the one exit
+// carrying no SetThinkState call and is pinned there permanently (bug-1631). m6l2a retypes ~24
+// actors to "none", at prespawn, which should be before any player can hold a disguise. Should is
+// doing a lot of work in that sentence; this checks it.
+//
+// Self-gating on coop_enableDisguises, so it costs nothing on the ~50 maps without a disguise layer
+// and needs no cvar to be useful during ordinary play.
+//============================================================================
+stuckWatch:{
+//============================================================================
+	if( level.gametype == 0 ){ end }
+	while( !level.coop_enableDisguises ){ wait 2 }
+	println "^~^~^ STUCKWATCH armed (disguises live)"
+	while( 1 ){
+		wait 2
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NULL || local.a == NIL ){ continue }
+			if( !isAlive local.a ){ continue }
+			if( local.a.thinkstate != "disguise" ){
+				local.a.coop_disgTicks = 0
+				local.a.coop_disgReported = 0
+				continue
+			}
+			if( local.a.coop_disgTicks == NIL ){ local.a.coop_disgTicks = 0 }
+			local.a.coop_disgTicks++
+			//12 ticks x 2s = 24s, past any legitimate challenge
+			if( local.a.coop_disgTicks < 12 ){ continue }
+			if( local.a.coop_disgReported == 1 ){ continue }
+			local.a.coop_disgReported = 1
+			local.tn = local.a.targetname
+			if( local.tn == NIL || local.tn == "" ){ local.tn = "(unnamed)" }
+			local.td = local.a.type_disguise
+			if( local.td == NIL || local.td == "" ){ local.td = "(none set)" }
+			local.msg = ( "tn=" + local.tn + " disg=" + local.td + " idle=" + local.a.type_idle )
+			println ( "^~^~^ STUCK actor pinned in DISGUISE >24s : " + local.msg + " at " + local.a.origin )
+		}
+	}
+}end

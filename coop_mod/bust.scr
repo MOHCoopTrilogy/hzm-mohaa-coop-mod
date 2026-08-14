@@ -1,0 +1,1553 @@
+//=========================================================================
+// HZM COOP - PHASE C: THE BUST LOOP  (m2l2a stealth)
+//=========================================================================
+// User spec 2026-08-10, verbatim intent:
+//   "if a guard does catch me (likely an officer), I should be given my loadout PLUS SILENCED PISTOL,
+//    which should be the first weapon that comes out (not the weapon start kit), not lose my
+//    papers/uniform, be able to kill him quickly, and if no one saw his death, it will say Situation
+//    Contained on the screen where our DBNO text is and then auto go back to just having the
+//    uniforms and paper."
+// And on what breaks containment:
+//   "if someone sees their death, or an alarm is raised, or you get spotted, it goes loud."
+//   "literally sees the body."
+//   "If the guard isnt killed he will likely draw attention or raise an alarm so the situation will
+//    not get contained."
+//
+// Being caught is therefore NOT failure. It is a fight you can win quietly. Loud is what happens when
+// you lose the race, or someone walks in on the aftermath.
+//
+// ISOLATED ON PURPOSE. Everything lives in this one file and NOTHING here is called yet. When it is
+// wired, every call site must be gated on `getcvar "coop_stealthStart" == "1"` (0 today, the same
+// dormant gate m2l2a.scr:64/875 already uses), so none of it can disturb behaviour that is currently
+// verified working. The arm/disarm halves live in itemhandler.scr as coop_bustArm/coop_bustDisarm.
+//=========================================================================
+
+
+//=========================================================================
+// Did anyone LITERALLY SEE THE BODY? Sweeps every live german and asks the engine.
+//=========================================================================
+// Uses the same idiom the quiet Naxos sabotage already relies on for the scientists
+// (maps/m2l2a.scr:578 - `$guy1 cansee local.p $guy1.fov $guy1.sight`), because that one is proven in
+// play rather than invented here. Actor list is level.coop_actorArray["german"], maintained by
+// aihandler.scr::addActorToArray / removeActorFromArray.
+//
+// The corpse is passed in rather than the killer: the spec is "literally sees the body", so a guard
+// who saw the muzzle flash but has since lost sight of the corpse does NOT count, and one who walks
+// in on it a minute later DOES.
+//=========================================================================
+// [user 2026-08-10] local.ignore (optional): an actor to leave OUT of the sweep. Required once the
+// same sweep started being used on a LIVE officer mid-stun - he is himself a member of
+// level.coop_actorArray["german"], and `local.a cansee local.a` is trivially true, so without this
+// the assault watch would report a witness on its very first tick, every single time, and no bust
+// could ever be contained. The corpse case never needed it because `isAlive` already removed him.
+coop_bustWitnessed local.corpse local.ignore:{
+	local.seen = 0
+	if( local.corpse == NULL || local.corpse == NIL ){ end local.seen }
+
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end local.seen }
+	local.n = local.arr.size
+	//an empty mod array reports .size -1, not 0 (docs/TRAPS.md T5) - the loop below is safe either way
+	local.i = 1
+	while( local.i <= local.n ){
+		local.a = local.arr[local.i]
+		if( local.a != NULL && local.a != NIL ){
+			if( local.ignore != NIL && local.ignore != NULL && local.a.entnum == local.ignore.entnum ){
+				local.a = NULL
+			}
+		}
+		if( local.a != NULL && local.a != NIL ){
+			if( isAlive local.a ){
+				//skip the actors that are not really observers: alarm runners and scene actors are
+				//busy playing authored routines, and counting them would make containment impossible
+				//on a map with 13 ai_alarm actors standing around.
+				//[user 2026-08-11] PER-MAP: narrow witness predicate.
+				//coop_isProtectedActor answers "should the AI-dynamics layer leave this actor alone",
+				//not "could this actor see that". bug-1687 already separated those two questions for
+				//the BODY sweep (detection counts everyone; only the KNEEL role respects protection)
+				//and deliberately left this one alone, with a stated reason: on m2l2a thirteen ai_alarm
+				//actors loiter near the contain and unfiltered they would make a clean kill impossible.
+				//That reason is real but map-specific. On m6l2a the same filter protects 40 of 44 actors
+				//- the map-editor default type_disguise "salute" - so the contain cannot be lost at all.
+				//coop_bustWitnessAll lets ONE map try the narrow rule without touching the two signed-off
+				//maps. Same shape as coop_bustCanKneel: unpack the flag into the reasons that apply here.
+				local.blind = 0
+				if( level.coop_bustWitnessAll == 1 ){
+					if( waitthread coop_bustCanWitness local.a ){ local.blind = 0 }else{ local.blind = 1 }
+				}else{
+					if( waitthread coop_mod/officer.scr::coop_isProtectedActor local.a ){ local.blind = 1 }
+				}
+				if( local.blind == 0 ){
+					if( local.a cansee local.corpse local.a.fov local.a.sight ){
+						local.seen = 1
+						println( "^~^~^ BUST witness " + local.a.targetname + " sees the body" )
+						local.i = local.n + 1
+					}
+				}
+			}
+		}
+		local.i++
+	}
+}end local.seen
+
+
+//=========================================================================
+// "Situation Contained" - nobody saw it. Show it where the DBNO text goes, then revert.
+//=========================================================================
+// HUD slot 149. MUST be >= 100: the engine multiplies alpha by s_hudFadeAlpha for every slot below
+// 100 when the player is calm (cg_drawtools.cpp:651-653), and standing over a body you just hid is
+// exactly "calm". That trap cost five separate features one day (revive HUD, blueprint ack, XP
+// popup, cover prompt, ammo prompt) - see _research/hud_slot_map.md.
+// 149 carries BOTH outcomes (contained here, escalated in coop_bustGoLoud) because exactly one of
+// them ever fires. The [USE] PROMPT is deliberately NOT on 149 - it lives on 250, because player 2
+// can legitimately be standing in front of their own officer with the prompt up at the moment
+// player 1 escalates, and the squad-wide escalation banner would otherwise overwrite it.
+//=========================================================================
+// [user 2026-08-10] TWO-BEAT RESOLUTION, not one.
+//   the moment he drops (and nobody saw)   -> papers back AT ONCE + "Leave the Area Immediately."
+//   ten seconds later, still unseen        -> "Situation Contained. Proceed with Caution."
+//                                             and the SQUAD is told "<name> Contained the Situation."
+// The disarm moved off the end of the window and onto the kill: standing over a body holding a gun
+// you are no longer allowed to use, for ten seconds, was the wrong shape - the reward for a clean
+// kill should be immediate, and the ten seconds is suspense, not punishment.
+coop_bustBanner local.player local.text:{
+	if( local.player == NULL ){ end }
+	ihuddraw_virtualsize local.player 149 1
+	ihuddraw_align       local.player 149 center center
+	ihuddraw_font        local.player 149 "verdana-12"
+	ihuddraw_color       local.player 149 1 1 1
+	ihuddraw_rect        local.player 149 0 -58 0 0
+	ihuddraw_string      local.player 149 local.text
+	ihuddraw_alpha       local.player 149 1
+}end
+
+coop_bustContained local.player:{
+	if( local.player == NULL ){ end }
+	//retires the first-contact advisory: once a situation has actually been contained, the squad
+	//has demonstrably learned the mechanic and does not need telling again.
+	level.coop_bustEverContained = 1
+	//[user 2026-08-11] CHALLENGE: Pattern Disrupt. Team-scoped and map-agnostic - this label is
+	//the shared contain success for every stealth map, so it earns on m2l2a and m6l1c alike.
+	thread coop_mod/challenges.scr::chal_contain_done
+	local.who = local.player.netname
+	if( local.who == NIL ){ local.who = "Someone" }
+
+	waitthread coop_bustBanner local.player "Situation Contained. Proceed with Caution."
+
+	//everyone ELSE is told who did it. Walked fresh rather than captured, so a player who joined or
+	//left during the ten seconds cannot strand a line of text on a HUD (the bug-1679 lesson).
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			if( local.p.entnum != local.player.entnum ){
+				waitthread coop_bustBanner local.p ( local.who + " Contained the Situation." )
+			}
+		}
+		local.i++
+	}
+
+	println( "^~^~^ BUST contained e" + local.player.entnum + " by " + local.who )
+
+	wait 5
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_alpha  local.p 149 0
+			ihuddraw_string local.p 149 ""
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// It went loud. Escalate for the WHOLE squad - this is the one path that changes player 2's state.
+//=========================================================================
+// User: "player 2 state changes IF the situation escalates and situation doesnt become contained."
+// Delegates to the existing, already-verified loud path rather than reimplementing it:
+// takeAllDisguises is the single "the disguise is gone for good" choke point and it threads
+// coop_armOnBlown itself (itemhandler.scr:1162), which clears level.coop_startUnarmed and issues
+// loadouts to everyone.
+//=========================================================================
+coop_bustGoLoud local.why:{
+	if( level.coop_bustLoud == 1 ){ end }
+	level.coop_bustLoud = 1
+	if( local.why == NIL ){ local.why = "unknown" }
+	println( "^~^~^ BUST going loud: " + local.why )
+
+	//[user 2026-08-10] "'Situation Escalated. Leave the Area Immediately.' Should be the message."
+	//Squad-wide, because escalation is the ONE outcome that changes the other player's state too.
+	//The ihuddraw calls are INLINE rather than in a per-player helper on purpose: an entity handed
+	//across a thread boundary has arrived NIL three times in this project (bugs 1624, 1632, 1665),
+	//and dbno.scr:655-659 inlined its own HUD for exactly this reason after the helper's NULL guard
+	//fired on every single revive.
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_virtualsize local.p 149 1
+			ihuddraw_align       local.p 149 center center
+			ihuddraw_font        local.p 149 "verdana-12"
+			ihuddraw_color       local.p 149 1 0.4 0.3
+			ihuddraw_rect        local.p 149 0 -58 0 0
+			ihuddraw_string      local.p 149 "Situation Escalated - Weapons Free"
+			ihuddraw_alpha       local.p 149 1
+		}
+		local.i++
+	}
+	thread coop_bustBannerClear
+
+	//[user 2026-08-10] "that too should trigger the alarm scenario". Escalation is not merely
+	//"everyone is armed now" - it is the map's real alarm going off, with the switches, the sound,
+	//the backup spawns and the whole authored cascade. Fire the vanilla entry point rather than
+	//setting level.alarm by hand: global/alarm_system.scr:677 does exactly `trigger
+	//$waittrigger_alarm_master`, and its master loop (:690-710) sets level.alarm, animates every
+	//switch, plays the alarm sound and threads takeAllDisguises itself.
+	//
+	//!! ONLY WHEN THE ALARM IS OFF. That master loop is a TOGGLE - the same trigger turns the alarm
+	//back OFF at :728 when level.alarm is already 1. Firing it on the "alarm raised" escalation
+	//path, which by definition happens with the alarm already on, would SILENCE it.
+	if( level.alarm != 1 ){
+		if( $waittrigger_alarm_master != NULL ){
+			trigger $waittrigger_alarm_master
+		}else{
+			//[user 2026-08-12] alarm_system.scr's master trigger does not exist on every map.
+			//m6l2a has ZERO $waittrigger_alarm_master (m2l2a has 1) because it runs the OTHER alarm
+			//system, global/alarmer.scr. Without this branch a failed contain there silently did
+			//nothing: no switches, no alarm sound, and none of the 15 alarm_spawndetector
+			//reinforcements - i.e. "failure of stealth transitions to loud" did not happen at all.
+			//turn_alarm_on does `self playsound alarm_switch`, so it needs a real speaker; one of the
+			//map's own $alarm entities is the natural one.
+			if( $alarm != NULL && $alarm.size >= 1 ){
+				println "^~^~^ BUST escalating via alarmer.scr (no alarm_master on this map)"
+				$alarm[1] thread global/alarmer.scr::turn_alarm_on
+			}
+			//still strip the disguise even if neither alarm system is present
+			waitthread coop_mod/itemhandler.scr::takeAllDisguises
+		}
+	}else{
+		waitthread coop_mod/itemhandler.scr::takeAllDisguises
+	}
+}end
+
+
+//=========================================================================
+// Tear the outcome banner back down. Re-walks $player rather than capturing a list, so a player who
+// connected or disconnected during the 5s window cannot strand a line of text on screen.
+//=========================================================================
+coop_bustBannerClear:{
+	wait 5
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_alpha  local.p 149 0
+			ihuddraw_string local.p 149 ""
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// The state machine. Started when a checker commits to a player; ends contained or loud.
+//=========================================================================
+// Three ways this ends loud, straight from the spec: the body is seen, an alarm is raised, or a
+// player is spotted. Plus the implicit fourth the user named - if the guard is never killed he
+// raises it himself, which arrives here as level.alarm.
+//=========================================================================
+coop_bustMonitor local.player local.guard:{
+	if( local.player == NULL || local.guard == NULL ){ end }
+	println( "^~^~^ BUST start e" + local.player.entnum + " guard=" + local.guard.targetname )
+
+	waitthread coop_mod/itemhandler.scr::coop_bustArm local.player
+
+	//watch until the guard dies, the alarm goes, or the player is gone
+	while( local.player != NULL && isAlive local.player && local.guard != NULL && isAlive local.guard ){
+		if( level.alarm ){
+			waitthread coop_bustGoLoud "alarm raised while the guard was still alive"
+			end
+		}
+		waitframe
+	}
+
+	if( local.player == NULL || !isAlive local.player ){ end }
+	if( level.alarm ){
+		waitthread coop_bustGoLoud "alarm raised"
+		end
+	}
+
+	//the guard is down. Give the corpse a moment to settle, then WATCH IT FOR A WINDOW.
+	local.w = 0
+	while( local.w < 20 ){
+		waitframe
+		local.w++
+	}
+
+	//[user 2026-08-10] "If after 10 seconds no one sees the body, you're clear."
+	//This used to be ONE sweep the instant he fell, which only ever asked who could see him at that
+	//exact moment - a patrol that rounds the corner two seconds later was missed entirely, and the
+	//user's rule is explicitly a WINDOW you have to survive. Polls at 2Hz: cansee is a per-actor
+	//engine trace over the german array, so a per-frame sweep would be 40x the cost for no extra
+	//fidelity against walking AI.
+	local.wsec = getcvar "coop_bustClearTime"
+	if( local.wsec == "" ){ local.wsec = "10" }
+	local.window = float( local.wsec )
+	if( local.window <= 0 ){ local.window = 10 }
+
+	if( level.coop_bustLoud == 1 ){ end }
+
+	//[user 2026-08-10] PAPERS BACK THE MOMENT HE DROPS - not ten seconds later. The kill is the
+	//thing that earns the disguise back; the window that follows is suspense, not a penalty.
+	waitthread coop_mod/itemhandler.scr::coop_bustDisarm local.player
+	waitthread coop_bustBanner local.player "Leave the Area Immediately."
+
+	local.t = 0
+	while( local.t < local.window ){
+		//[user 2026-08-10] if the ASSAULT was already seen (coop_bustAssaultWatch) this bust is over -
+		//without this the corpse sweep could still come back clean and print "Situation Contained"
+		//on top of an escalation that has already armed the squad and set the alarm off.
+		if( level.coop_bustLoud == 1 ){ end }
+		if( level.alarm ){
+			waitthread coop_bustGoLoud "alarm raised over the body"
+			end
+		}
+		if( waitthread coop_bustWitnessed local.guard local.guard ){
+			waitthread coop_bustGoLoud "the body was seen"
+			end
+		}
+		wait 0.5
+		local.t = local.t + 0.5
+	}
+
+	if( level.coop_bustLoud == 1 ){ end }
+	waitthread coop_bustContained local.player
+
+	//The body does not stop existing because you got away with it. Hand the corpse to the
+	//investigation watcher, which owns everything from here.
+	thread coop_bustBodyWatch local.player.entnum
+}end
+
+
+//=========================================================================
+// AFTER containment: the body is still lying there, and it can still be found.
+//=========================================================================
+// [user 2026-08-10] "we now have a dead body... if someone sees it after 10 seconds, can they
+// investigate the body/area without going nuts... from there if a player hangs around a radius of
+// that body the Situation gets Escalated as Cover Blown ... Ideally you have to get out of that
+// radius within say 15 seconds."  And: "It should only be whoever sees the dead body that
+// investigates."
+//
+// So this is deliberately NOT an alarm. Finding a corpse starts a LOCAL, single-actor investigation:
+// the one german who actually has line of sight becomes the investigator, nothing is broadcast to
+// anyone else, and the mission stays quiet. What blows it is you still being there - which makes it
+// a choice the player controls, not a dice roll.
+//
+// THE FIFTEEN SECONDS IS A LEAVING TIMER, NOT A DEATH SENTENCE. It only counts while a player is
+// inside the radius; stepping out resets it, so walking away always works and lingering never does.
+//=========================================================================
+coop_bustBodyWatch local.pnum:{
+	local.body = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.body == NULL || local.body == NIL ){ end }
+
+	local.rad = int( getcvar "coop_bustBodyRadius" )
+	if( local.rad <= 0 ){ local.rad = 320 }
+	local.grace = float( getcvar "coop_bustBodyGrace" )
+	if( local.grace <= 0 ){ local.grace = 15 }
+	//coop_bustBodyLife 0 means NO BOUND - keep hunting for a finder for the whole mission. Only an
+	//EMPTY cvar falls back to a default. The previous `if( local.life <= 0 )` swallowed the 0 and
+	//silently reimposed 120s, which is why the log still read findWindow=120 after the cfg said 0.
+	local.lifeS = getcvar "coop_bustBodyLife"
+	if( local.lifeS == "" ){ local.lifeS = "0" }
+	local.life = float( local.lifeS )
+	if( local.life < 0 ){ local.life = 0 }
+
+	local.timer = 0
+	local.shown = 0
+	local.age   = 0
+
+	//[user 2026-08-10] "does that investigation time expire for the body.. like will this area be
+	//investigated all mission? it should probably be." - and "I was getting the investigating area
+	//message for a while but I don't see it now that Ive revisted it", which is the same thing seen
+	//from the other side. TWO causes, both closed by latching:
+	//  * coop_bustBodyLife retired the whole watcher after 120s
+	//  * even inside that window, the warning stood down whenever the finder lost line of sight
+	//ONCE THE BODY HAS BEEN FOUND THE SPOT IS HOT FOR THE REST OF THE MISSION. That is the right
+	//fiction - the germans know a body is lying there and would not forget in two minutes - and it
+	//is also CHEAPER than expiring: the expensive half is the cansee sweep hunting for a finder, and
+	//that stops the moment one is found. coop_bustBodyLife now bounds only the SEARCH for a finder,
+	//not the aftermath; set it to 0 to remove that bound too.
+	local.found = 0
+	//[bug-1794] The sweep below can only ever test actors that are IN the array, so the array size is
+	//the ceiling on how many germans are capable of noticing this body. Printed next to the live
+	//german count so a gap between them is visible in one line rather than inferred.
+	local.probeArr = level.coop_actorArray["german"]
+	local.probeN = 0
+	if( local.probeArr != NIL ){ local.probeN = local.probeArr.size }
+	println( "^~^~^ BUSTBODY watch started body=" + local.body.targetname + " rad=" + local.rad + " grace=" + local.grace + " findWindow=" + local.life + " germansInArray=" + local.probeN )
+
+	while( local.found == 1 || local.life <= 0 || local.age < local.life ){
+		if( level.coop_bustLoud == 1 ){ break }		//already loud - this is moot
+		if( level.alarm ){ break }
+		if( local.body == NULL ){ break }			//corpse despawned (coop_corpseLife) - nothing to find
+
+		//---- EVERYONE who can actually see it reacts --------------------------------------
+		//[user 2026-08-10] "two guards just walked right by dead officer ... that should impact
+		//anyone that visibly spots their body ... they should both be investigating/concerned."
+		//This was a single-investigator latch (the first finder, and only him) and it is now the
+		//whole set with line of sight. That is NOT a reversal of "only whoever sees the dead body
+		//investigates" - the point of that rule was that nothing is BROADCAST: a german across the
+		//map who cannot see the corpse still knows nothing. Seeing it is the only qualification,
+		//and every actor who passes that test qualifies.
+		//
+		//`lookat` is the reaction: it turns the actor toward the body, costs nothing, and cannot
+		//hang. Deliberately NOT `runto` - this map already throws "Path not found in
+		//Actor::MoveToPatrolCurrentNode" continuously, and a failed runto pins an actor in
+		//THINK_RUNNER where any later turndone wait blocks forever (docs/TRAPS.md T16). Latched
+		//per actor so it fires once on discovery rather than re-issuing every half second.
+		//[user 2026-08-10] "They walked right past the body this time." MY REGRESSION, and the log
+		//named it: `BUSTBODY spotted by ai_alarm` fired once and nothing else was ever evaluated.
+		//I had made the latch skip the ENTIRE sweep once a first finder was found, to save the
+		//cansee cost - so every actor who arrived AFTER that was never tested, never marked, and
+		//never so much as turned his head. The saving was not worth it and the user asked for the
+		//opposite ("anyone that visibly spots their body").
+		//NOW: the sweep always runs so newcomers still react; the latch keeps the WATCH alive (see the
+		//while above) so the body stays rediscoverable for the rest of the map.
+		//[user 2026-08-12, bug-1738] IT NO LONGER KEEPS THE AREA HOT. This used to also force
+		//local.seers to 1 forever once anyone had ever seen the body, so the loiter timer kept running
+		//with nobody there - and the player got blown 6s AFTER containing the very man who was
+		//investigating. User's rule, and it is the right one: "the body can always be rediscoverable
+		//and for as long as someone is investigating the body, you can get caught there. But if no one
+		//is there at the body investigating, you wouldn't get caught because no one is there to catch
+		//you." You are caught by a PERSON, not by a timer. So local.seers is now a LIVE count: it is
+		//whoever can see the corpse this tick, and it falls back to 0 when they are dead or gone,
+		//which re-enables the stand-down branch below that already resets the timer and clears the HUD.
+		local.seers = 0
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr != NIL ){
+			local.n = local.arr.size
+			local.i = 1
+			while( local.i <= local.n ){
+				local.a = local.arr[local.i]
+				if( local.a != NULL && local.a != NIL ){
+					if( isAlive local.a && local.a.entnum != local.body.entnum ){
+						//The candidate probe that lived here has been REMOVED - it answered its
+						//question in a single run: every actor on this map came back protected=1
+						//(guy1/guy2/guy3 and both ai_alarm at 375-629u), which is what proved the
+						//protection filter was the defect rather than cansee or array membership.
+						//See bug-1687.
+						local.prot = 0
+						if( waitthread coop_mod/officer.scr::coop_isProtectedActor local.a ){ local.prot = 1 }
+						local.cs = 0
+						if( local.a cansee local.body local.a.fov local.a.sight ){ local.cs = 1 }
+						//[user 2026-08-12] TRIPPING OVER IT COUNTS. Third report of a guard walking past a
+						//corpse, this time one he passed repeatedly. cansee honours the actor's FOV CONE, and
+						//a body lies on the FLOOR: a man walking by at eye level, looking ahead, can have it
+						//outside his vertical field of view entirely. The two earlier fixes here were about
+						//WHO was tested (protection filter, array membership); this one is about the test.
+						//Inside 160u a full FOV check is asked instead - you notice a corpse you nearly step
+						//on wherever you happen to be looking. The line-of-sight requirement stays, so a body
+						//through a wall or on another storey is still unseen: 160u is 2D with a storey band,
+						//never a 3D sphere (TRAPS T19).
+						if( local.cs == 0 ){
+							local.fb = local.a.origin[2] - local.body.origin[2]
+							if( local.fb < 0 ){ local.fb = 0 - local.fb }
+							if( local.fb < 72 ){
+								local.fa = ( local.a.origin[0] local.a.origin[1] 0 )
+								local.fbo = ( local.body.origin[0] local.body.origin[1] 0 )
+								if( ( vector_length ( local.fa - local.fbo ) ) < 160 ){
+									if( local.a cansee local.body 360 local.a.sight ){
+										local.cs = 1
+										println( "^~^~^ BUSTBODY close-range notice by " + local.a.targetname )
+									}
+								}
+							}
+						}
+						//[user 2026-08-10] "two mechanic looking guys walked right past the dead
+						//officer again" - twice reported, and the probe named the cause in one line:
+						//EVERY candidate came back protected=1. coop_isProtectedActor is true for any
+						//actor carrying an alarmthread, which on m2l2a is effectively the whole cast,
+						//so the sweep rejected all of them and nobody could ever notice the body.
+						//
+						//That filter is LOAD-BEARING for containment - coop_bustWitnessed keeps it,
+						//because without it the 13 ai_alarm actors standing around would make a
+						//clean kill impossible - but it is the wrong question here. "Who is busy
+						//playing an authored routine" is not "who would notice a corpse".
+						//
+						//So DETECTION now counts anyone who can see it, and only the ROLE assignment
+						//still respects the protection: a protected actor may notice and stare, but
+						//is never dragged out of its scripted routine to go kneel on the body.
+						if( local.cs == 1 ){
+							local.seers = local.seers + 1
+							//[user 2026-08-12, bug-1740] LIVE "eyes on a corpse" stamp, for anything that
+							//wants to know NOT to drag this man away right now - the m6l2a radio picker
+							//being the first. A TIMESTAMP rather than a flag on purpose: this sweep only
+							//ever visits actors who can see the body, so a boolean would need a second
+							//full-array walk to clear and would go stale the moment he looked away.
+							//coop_bustSawBody cannot serve: it latches once and is never cleared, so it
+							//means "ever saw a corpse", not "is looking at one".
+							local.a.coop_bustEyesOn = level.time
+							if( local.a.coop_bustSawBody != 1 ){
+								local.a.coop_bustSawBody = 1
+								local.found = 1
+								local.a lookat local.body
+								println( "^~^~^ BUSTBODY spotted by " + local.a.targetname + " protected=" + local.prot )
+								//[user 2026-08-10] "at least one of them should go over the body and
+								//stay in the medic animation pose, if there is more than one they are
+								//the ones that investigate/get kinda suspicious."
+								//FIRST spotter who is SAFE TO INTERRUPT kneels over him; the rest stare.
+								//NOT gated on coop_isProtectedActor: on m2l2a that is true of every
+								//actor in the cast, so gating on it meant nobody ever knelt - which is
+								//what "is there no way to make them investigate the body?" was really
+								//asking about. coop_bustCanKneel unpacks that one flag into the parts
+								//that actually matter here.
+								if( level.coop_bustBodyMedic != 1 && ( waitthread coop_bustCanKneel local.a ) ){
+									level.coop_bustBodyMedic = 1
+									level.coop_bustEnt[ "m" + local.pnum ] = local.a
+									thread coop_bustBodyExamine local.pnum
+								}
+							}
+						}
+					}
+				}
+				local.i++
+			}
+		}
+
+		//---- while ANYONE is looking at it, loitering is what blows it ---------------------
+		if( local.seers > 0 ){
+			local.near = 0
+			local.i = 1
+			while( local.i <= $player.size ){
+				local.p = $player[local.i]
+				if( local.p != NULL ){
+					if( isAlive local.p && local.p.flags["coop_isActive"] == 1 ){
+						//[user 2026-08-10] "the radius for his body should also be on the same floor
+						//so you don't get caught on the 2nd floor for his dead body on the first."
+						//THIRD site with the same defect, so it is a rule rather than an oversight:
+						//vector_length is a 3D distance, so every radius in this file was a SPHERE
+						//that reached through floors. 2D distance for the radius, plus a vertical
+						//band for the storey - the same test the Naxos room and the officer advisory
+						//now use. Standing above the body is not standing over it.
+						local.bz = local.p.origin[2] - local.body.origin[2]
+						if( local.bz < 0 ){ local.bz = 0 - local.bz }
+						//Horizontal distance via vector_length on flattened points, not hand-rolled
+						//pythagoras - see maps/m2l2a.scr::coop_naxosSabotage for what was measured
+						//and what is still unexplained. vector_length was right on every sample.
+						local.flatP = ( local.p.origin[0] local.p.origin[1] 0 )
+						local.flatB = ( local.body.origin[0] local.body.origin[1] 0 )
+						local.b2 = vector_length( local.flatP - local.flatB )
+						if( local.b2 <= local.rad && local.bz <= 96 ){
+							//[user 2026-08-12] HE HAS TO SEE YOU. Radius alone caught a player who was hiding in
+							//a different room with a wall between them - "I was in a totally different room".
+							//The 2D + storey test above already stops the sphere reaching through FLOORS, but
+							//nothing stopped it reaching through WALLS. cansee uses the actor's own fov and
+							//sight, the same idiom the witness sweep uses (bust.scr:82, from m2l2a.scr:578).
+							//Falls back to "seen" if there is no kneeling investigator to ask. [bug-1738] that
+							//is still correct and is NOT the thing that stranded the timer: this whole block
+							//is now gated on a LIVE local.seers, so reaching here already proves some living
+							//actor has eyes on the corpse - the dead medic just is not the one to ask. When
+							//nobody is watching at all, the stand-down branch below runs instead.
+							//the man kneeling over the body, parked by entnum at the spot he was chosen (:462)
+							local.seen = 1
+							local.medic = level.coop_bustEnt[ "m" + local.pnum ]
+							if( local.medic != NIL && local.medic != NULL ){
+								if( isAlive local.medic ){
+									local.seen = 0
+									if( local.medic cansee local.p local.medic.fov local.medic.sight ){
+										local.seen = 1
+									}
+								}
+							}
+							//[user 2026-08-13, bug-1792] THE DRAW MUST ANSWER THE SAME QUESTION local.near DOES.
+							//It used to sit outside this test, so a player inside the radius whose examiner
+							//could NOT see him got the warning drawn while local.near stayed 0 - and local.shown
+							//is only ever set from local.near, so it stayed 0 too. That combination is
+							//unclearable: the stand-down branch below is guarded on shown==1, so containing the
+							//investigator (seers -> 0) left "Body Being Investigated" on screen permanently.
+							//User: "Body being investigated text doesnt seem to leave if I kill the guy
+							//investigating the body by containg him too." One condition now drives both.
+							if( local.seen == 1 ){
+								local.near = local.near + 1
+							}else{
+								ihuddraw_alpha  local.p 254 0
+								ihuddraw_string local.p 254 ""
+							}
+							if( local.seen == 1 && local.shown != 1 ){
+								//HUD 254 - a genuinely unused slot, and >= 100 so the engine fade cannot
+								//hide it while the player stands still deciding what to do, which is the
+								//exact moment it has to be readable (docs/TRAPS.md T18).
+								ihuddraw_virtualsize local.p 254 1
+								ihuddraw_align       local.p 254 center center
+								ihuddraw_font        local.p 254 "verdana-12"
+								ihuddraw_color       local.p 254 1 0.5 0.3
+								ihuddraw_rect        local.p 254 0 -74 0 0
+								ihuddraw_string      local.p 254 "Body Being Investigated. Leave the Area Immediately"
+								ihuddraw_alpha       local.p 254 1
+							}
+						}else{
+							ihuddraw_alpha  local.p 254 0
+							ihuddraw_string local.p 254 ""
+						}
+					}
+				}
+				local.i++
+			}
+
+			if( local.near > 0 ){
+				local.shown = 1
+				local.timer = local.timer + 0.5
+				if( local.timer >= local.grace ){
+					println( "^~^~^ BUSTBODY loitered " + local.timer + "s inside " + local.rad + "u - cover blown" )
+					//[user 2026-08-11] CHALLENGE: Dead Men Tell Tales - caught by the investigation of a
+					//body you left. Also map-agnostic, same reason as the contain hook above.
+					thread coop_mod/challenges.scr::chal_body_blown
+					//[user 2026-08-10] "when the guard that is standing over the body does end up
+					//escalating to have him yell 'Alarm Alarm' in german (distance based)".
+					//The shout comes from the EXAMINER - the man actually standing over the body -
+					//so it originates at the corpse and carries with the alias's own 160/2100
+					//falloff, which is what makes it distance-based. `say` rather than `playsound`:
+					//these are dialog-channel lines with subtitles, and say is the dialogue path
+					//(aihandler.scr:1108 uses the same call for its spotted line).
+					local.yell = level.coop_bustEnt[ "m" + local.pnum ]
+					if( local.yell != NULL && local.yell != NIL ){
+						if( isAlive local.yell ){
+							if( ( randomint 2 ) == 0 ){
+								local.yell say coop_alarm_yell
+							}else{
+								local.yell say coop_alarm_yell2
+							}
+							println( "^~^~^ BUSTBODY " + local.yell.targetname + " raises the alarm" )
+						}
+					}
+					waitthread coop_bustBodyClearHud
+					waitthread coop_bustGoLoud "a player stayed with the body while it was being investigated"
+					end
+				}
+			}else{
+				//everyone got clear - the timer is a LEAVING timer, so it resets rather than pausing
+				if( local.shown == 1 ){ println "^~^~^ BUSTBODY area cleared - timer reset" }
+				local.shown = 0
+				local.timer = 0
+			}
+		}else{
+			//[bug-1738] Reachable at ANY time now, not just before the body is found: local.seers is a
+			//live count, so killing or losing every watcher stands the area down and the corpse becomes
+			//merely rediscoverable again. Stand the warning down rather than leaving it drawn:
+			//ihuddraw state persists on the client until overwritten (bug-1679).
+			//[bug-1792] UNCONDITIONAL. The shown==1 guard was an optimisation that could not pay for
+			//itself: clearing a slot that is already clear costs two ihuddraw calls, while missing a
+			//clear strands text on a player's HUD for the rest of the mission. Only the println stays
+			//latched, so a quiet body does not spam the log every half second.
+			if( local.shown == 1 ){
+				println "^~^~^ BUSTBODY nobody has eyes on the body any more"
+			}
+			local.shown = 0
+			local.timer = 0
+			waitthread coop_bustBodyClearHud
+		}
+
+		wait 0.5
+		local.age = local.age + 0.5
+	}
+
+	//[user 2026-08-12, bug-1743] RELEASE THE EXAMINER SLOT WHEN THIS BODY IS DONE WITH.
+	//level.coop_bustBodyMedic is the "somebody is already kneeling" guard, and it was set once at
+	//first discovery and never cleared ANYWHERE. It is a level flag, not a per-body one, so the
+	//FIRST corpse on the map consumed the only examiner slot in existence and every later body got
+	//starers and nobody who would kneel and investigate. On a map where the whole loop is
+	//kill-quietly-and-move-on, that means the investigation the player is being asked to avoid
+	//stops happening after body one - which reads as the AI ignoring corpses.
+	//Cleared here, on the single exit from the watch, so the slot is scoped to the body that took it.
+	level.coop_bustBodyMedic = 0
+	waitthread coop_bustBodyClearHud
+}end
+
+
+//=========================================================================
+// One spotter walks over and kneels on him. The rest just stare.
+//=========================================================================
+// [user 2026-08-10] "at least one of them should go over the body and stay in the medic animation
+// pose, if there is more than one they are the ones that investigate/get kinda suspicious."
+//
+// MOVEMENT SAFETY, which is not optional on this map - the log throws
+// "Path not found in Actor::MoveToPatrolCurrentNode" continuously:
+//   * `waittill movedone` is SAFE after a runto. CheckUnregister (actor.cpp:7793) fires it even on
+//     parm.movefail, so a runto that cannot path still returns.
+//   * `waittill turndone` is NOT. Unregister(STRING_TURNDONE) exists in exactly one place,
+//     Actor::IdleTurn (actor.cpp:5032), which no runner think reaches - so a failed runto pins the
+//     actor in THINK_RUNNER and that wait blocks FOREVER (docs/TRAPS.md T16). Never used here.
+//   * The bounded distance loop that usually accompanies this pattern is also omitted, for the same
+//     reason: `while (vector_length(...) > N)` after a runto is unbounded by construction.
+// So the walk cannot hang, and if he genuinely cannot reach the body he simply kneels where he is.
+//
+// The pose is <weapongroup>_pain_kneesidle - not invented: anim/pain.scr:205 loops exactly that
+// alias for a kneeling wounded actor, so it is defined for every weapongroup the game ships.
+//=========================================================================
+// Is this actor safe to pull out of what he is doing and park on his knees for a minute?
+//=========================================================================
+// [user 2026-08-10] "So is there no way to make them investigate the body?" There is - the previous
+// gate was simply far too broad. coop_isProtectedActor answers "should the AI-dynamics layer leave
+// this actor alone", and it says YES for the entire m2l2a cast: scene actors, anything named
+// ai_alarm (14 of them), anything with type_attack "alarm" or an alarmthread, and every papers
+// checker. Reused as "may this actor kneel", it vetoed everybody and no one ever investigated.
+//
+// Unpacked, only two of those reasons are real HERE:
+//   * a SCENE ACTOR is mid-authored-routine and interrupting it can break the map outright
+//   * a PAPERS CHECKER (officer/sentry/rover) has a think that must survive - rewriting it means he
+//     can never be shown papers again, which is a mission-critical mechanic on this map
+// The alarm-runner reasons do NOT apply: that exemption exists because PRONING an alarm actor stops
+// him ringing the alarm, and this neither prones him nor lasts (AI is handed back at the end).
+// Escalation also trips the alarm directly via $waittrigger_alarm_master rather than by sending an
+// actor to a switch, so one guard kneeling for a minute cannot block it.
+//=========================================================================
+//=========================================================================
+// Could this actor NOTICE something - as opposed to: is it safe to interrupt him?
+//=========================================================================
+// [user 2026-08-11] The narrow half of coop_isProtectedActor, for the witness question only.
+// Protection exists so the AI-dynamics layer does not prone or re-personality an actor that is
+// busy with something authored. None of that has any bearing on whether he has eyes.
+// Only two exclusions survive that reasoning:
+//   * a SCENE ACTOR is mid-authored-routine; the map may depend on him not reacting at all
+//   * an alarm RUNNER mid-errand is already committed to a scripted run to a switch
+// Everything else - saluters, papers checkers, ordinary infantry - can see you perfectly well
+// and should count. cansee (with the actor's own fov and sight) still does the real work.
+//=========================================================================
+coop_bustCanWitness local.actor:{
+//=========================================================================
+	if( local.actor == NULL || local.actor == NIL ){ end (0) }
+	if( local.actor.flags["coop_sceneActor"] == 1 ){ end (0) }
+	//[user 2026-08-12] MATCH m6l1c, the map that shares this one's design.
+	//Measured: an m2l2a contain has ZERO eligible witnesses - every one of its 51 actors is blinded
+	//by some clause of coop_isProtectedActor - because stealth there is mandatory and armed at map
+	//load, so the difficulty lives in the isolating, not the act. m6l1c is the right reference for
+	//an OPT-IN map, and it has ~33: its 29 type_disguise "none" actors plus 4 machinegunners.
+	//m6l2a ships ZERO "none" actors, which is why the witness pool had to be bought another way -
+	//we kept all 40 salutes rather than converting saluters and spending what makes the map feel
+	//alive. But counting EVERYONE also counted the officers and sentries, who are structurally busy
+	//running the disguise think and whom m6l1c's wide predicate blinds. Excluding those three roles
+	//lands m6l2a at ~40 eligible against m6l1c's ~33 - the same shape, sourced from saluters.
+	if( local.actor.type_disguise == "officer" ){ end (0) }
+	if( local.actor.type_disguise == "sentry" ){ end (0) }
+	if( local.actor.type_disguise == "rover" ){ end (0) }
+	if( level.coop_sceneActorNames != NIL ){
+		local.tn = local.actor.targetname
+		for( local.i = 1; local.i <= level.coop_sceneActorNames.size; local.i++ ){
+			if( local.tn == level.coop_sceneActorNames[local.i] ){ end (0) }
+		}
+	}
+}end (1)
+
+
+coop_bustCanKneel local.actor:{
+	if( local.actor == NULL || local.actor == NIL ){ end (0) }
+	if( local.actor.flags["coop_sceneActor"] == 1 ){ end (0) }
+	local.td = local.actor.type_disguise
+	if( local.td == "officer" ){ end (0) }
+	if( local.td == "sentry" ){ end (0) }
+	if( local.td == "rover" ){ end (0) }
+	if( level.coop_sceneActorNames != NIL ){
+		local.tn = local.actor.targetname
+		for( local.i = 1; local.i <= level.coop_sceneActorNames.size; local.i++ ){
+			if( local.tn == level.coop_sceneActorNames[local.i] ){ end (0) }
+		}
+	}
+}end (1)
+
+
+coop_bustBodyExamine local.pnum:{
+	local.medic = level.coop_bustEnt[ "m" + local.pnum ]
+	local.body  = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.medic == NULL || local.medic == NIL ){ end }
+	if( local.body  == NULL || local.body  == NIL ){ end }
+
+	//PROBE, because I have guessed at actor control twice tonight and been wrong twice (bug-1682,
+	//bug-1695). "They both walked past officers dead body" is consistent with at least three
+	//different failures and there is no way to tell them apart from the outside:
+	//  (a) the runto never pathed - this map throws "Path not found" continuously, and movedone
+	//      fires even on parm.movefail, so a failed walk is INDISTINGUISHABLE from a completed one
+	//      unless the distance is measured
+	//  (b) the runto worked but `anim` was immediately overridden (CURIOUS/PAIN outrank idle)
+	//  (c) he never left his patrol think at all
+	//Printing the think state and the distance at each step separates them in one run.
+	local.d0 = vector_length( local.medic.origin - local.body.origin )
+	println( "^~^~^ BUSTBODY " + local.medic.targetname + " examining: think=" + local.medic.thinkstate + " dist=" + local.d0 )
+	local.medic exec global/disable_ai.scr
+	local.medic runto local.body.origin
+	local.medic waittill movedone
+	if( local.medic == NULL ){ end }
+	local.d1 = vector_length( local.medic.origin - local.body.origin )
+	println( "^~^~^ BUSTBODY movedone: think=" + local.medic.thinkstate + " dist=" + local.d1 + " (was " + local.d0 + ")" )
+
+	//[user 2026-08-10] "the guard got glitched checking the body, he kept walking and got stuck
+	//between crouching to check while he was walking constantly."
+	//MY OWN bug-1682 MISTAKE, REPEATED. `disable_ai` is only `enableEnemy = 0` - it does NOT stop an
+	//actor's think, so his normal AI kept driving locomotion - and I was re-issuing a kneel MOTION
+	//anim every second on top of that. setmotionanim sets the legs layer WITHOUT owning the actor, so
+	//the two blended: walking and crouching at once, forever.
+	//
+	//`anim` is the think-owning call - Actor::PlayAnimation does SetThinkIdle(THINK_ANIM)
+	//(actor.cpp:10819) - so it takes the actor over rather than painting over him. Issued ONCE:
+	//re-issuing restarts the animation every tick, which is its own visible stutter.
+	//!! It only holds while he is genuinely IDLE. There is no THINKSTATE_ANIM, but CURIOUS / PAIN /
+	//GRENADE all outrank idle and will take him back - and a man who just found a corpse is a prime
+	//candidate for CURIOUS. So the loop below only watches: if the engine takes him off idle, the
+	//pose is abandoned rather than fought over, because fighting the think is exactly what produced
+	//the glitch. The `lookat` is safe either way and is what still reads as "he has noticed".
+	if( local.medic.weapongroup != NIL ){
+		local.medic anim ( local.medic.weapongroup + "_pain_kneesidle" )
+		waitframe
+		if( local.medic != NULL ){
+			println( "^~^~^ BUSTBODY posed: anim=" + local.medic.weapongroup + "_pain_kneesidle think=" + local.medic.thinkstate )
+		}
+	}else{
+		println "^~^~^ BUSTBODY posed: SKIPPED - weapongroup is NIL"
+	}
+
+	local.n = 0
+	while( local.n < 240 ){
+		//[bug-1743] BREAK, NOT END. These two were bare `end`s, which skipped the teardown below -
+		//and "the examiner is gone or dead" is not an edge case here, it is the single most likely
+		//way this loop finishes: the player contains the man kneeling on the body. Ending early
+		//leaked the examiner slot permanently.
+		if( local.medic == NULL ){ break }
+		if( !isAlive local.medic ){ break }
+		if( level.coop_bustLoud == 1 ){ break }
+		if( level.alarm ){ break }
+		local.medic lookat local.body
+		if( local.medic.thinkstate != "idle" ){
+			println( "^~^~^ BUSTBODY examiner left idle (" + local.medic.thinkstate + ") - pose released" )
+			break
+		}
+		wait 1
+		local.n = local.n + 1
+	}
+	//[user 2026-08-12, bug-1743] RELEASE THE EXAMINER SLOT ON EVERY EXIT PATH. level.coop_bustBodyMedic
+	//is the "someone is already kneeling" guard and nothing anywhere cleared it, so the FIRST corpse
+	//consumed the only examiner slot on the map and every later body got starers but nobody who would
+	//kneel and investigate. On a map whose whole loop is kill-quietly-and-move-on, that made the AI
+	//look like it stopped caring about corpses after the first one.
+	level.coop_bustBodyMedic = 0
+	//hand him back to his own AI rather than leaving him kneeling for the rest of the map
+	if( local.medic != NULL ){
+		if( isAlive local.medic ){ local.medic exec global/enable_ai.scr }
+	}
+}end
+
+
+//=========================================================================
+// Drop the investigation warning off every HUD. Re-walks $player for the bug-1679 reason.
+//=========================================================================
+coop_bustBodyClearHud:{
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			ihuddraw_alpha  local.p 254 0
+			ihuddraw_string local.p 254 ""
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// TEMPORARY DEV TRIGGER - remove once the real bust detection exists.
+//=========================================================================
+// The real trigger (deciding the moment a checker has genuinely committed) is the hard half of
+// bug-1652 and is deliberately still unbuilt. This lets the LOOP be felt and judged first, so the
+// trigger can be written against a behaviour we already know plays correctly.
+//
+// Usage, from the console or over rcon:   coop_bustTest 1
+// It self-resets to 0, picks the nearest live german to the first active player, and runs the full
+// bust: armed with the silenced pistol in hand, papers kept, kill him, and either "Situation
+// Contained" or loud depending on who can see the body.
+//
+// Inert unless the cvar is set, so it costs nothing while it sits here.
+//=========================================================================
+coop_bustTestPoll:{
+	if( level.coop_bustPoll == 1 ){ end }
+	level.coop_bustPoll = 1
+
+	while( 1 ){
+		local.want = int( getcvar( "coop_bustTest" ) )
+		if( local.want >= 1 ){
+			setcvar "coop_bustTest" "0"
+
+			//[user 2026-08-10] the CVAR VALUE IS THE PLAYER INDEX. It used to just take the first active
+			//player, which armed player 1 while the user was playing player 2 - the bust fired on an idle
+			//body 750 units away. `coop_bustTest 2` now busts $player[2].
+			//[user 2026-08-10] MATCH ON ENTNUM, not on the array index. $player[2] turned out NOT to be
+			//player 2 - the array is not ordered by connection - so indexing it busted player 1 twice in a
+			//row while the user was playing player 2. entnum is stable and is what the log already prints
+			//(e0/e1), so: coop_bustTest 1 -> e0, coop_bustTest 2 -> e1.
+			local.wantE = local.want - 1
+			local.tp = NULL
+			local.i = 1
+			while( local.i <= $player.size ){
+				local.cand = $player[local.i]
+				if( local.cand != NULL ){
+					if( isAlive local.cand && local.cand.entnum == local.wantE ){ local.tp = local.cand }
+				}
+				local.i++
+			}
+
+			if( local.tp == NULL ){
+				println "^~^~^ BUSTTEST no active player - spawn in first"
+			}else{
+				//nearest live german
+				local.best = NULL
+				local.bestd = 99999
+				local.arr = level.coop_actorArray["german"]
+				if( local.arr != NIL ){
+					local.n = local.arr.size
+					local.k = 1
+					while( local.k <= local.n ){
+						local.a = local.arr[local.k]
+						if( local.a != NULL && local.a != NIL ){
+							if( isAlive local.a ){
+								local.d = vector_length( local.a.origin - local.tp.origin )
+								if( local.d < local.bestd ){
+									local.bestd = local.d
+									local.best = local.a
+								}
+							}
+						}
+						local.k++
+					}
+				}
+				if( local.best == NULL ){
+					println "^~^~^ BUSTTEST no live german found"
+				}else{
+					println( "^~^~^ BUSTTEST player=" + local.tp.netname + " e" + local.tp.entnum + " target=" + local.best.targetname + " at " + local.bestd + "u" )
+					thread coop_bustMonitor local.tp local.best
+				}
+			}
+		}
+		wait 0.5
+	}
+}end
+
+
+//=========================================================================
+// THE REAL TRIGGER - PLAYER-INITIATED. The player pressed [USE] on a stopping officer.
+//=========================================================================
+// Called from coop_mod/itemhandler.scr::enableClickablePapers, which is already the "an officer has
+// stopped this player" loop and is where the prompt lives. This REPLACES coop_bustFromChecker, the
+// reactive trigger that tried to detect the officer's intent: it was placed three ways and every one
+// was wrong, the last being a race it could not win (bug-1674 - the officer's first shot trips the
+// global cover-blown before anything can arm you). Nothing has to beat the officer any more, because
+// the player moves first.
+//
+// ENTITIES ARRIVE BY NUMBER. A player or actor handed across a thread boundary has come back NIL
+// three times here (bugs 1624, 1632, 1665); numbers always bind. The caller parks both halves in
+// level.coop_bustEnt keyed by the player's entnum immediately before calling, and this re-reads them.
+// If that dict does not exist the indexed read throws, the statement is SKIPPED (verified 2026-08-06:
+// a Script Error skips the statement, it does not kill the thread), the local stays unset, and the
+// NIL guard below ends cleanly - so the failure mode is "nothing happens", never a corrupt bust.
+//
+// GATED by the caller on coop_stealthStart == 1; re-gated here so it cannot be reached another way.
+//=========================================================================
+coop_bustBash local.pnum:{
+	if( level.coop_stealthMap != 1 ){ end }
+	if( getcvar( "coop_stealthStart" ) == "0" ){ end }
+	local.player = level.coop_bustEnt[ "p" + local.pnum ]
+	local.guard  = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( local.guard  == NULL || local.guard  == NIL ){ end }
+	if( local.player.classname != "Player" ){ end }
+	if( !isAlive local.player || !isAlive local.guard ){ end }
+	if( local.player.flags["coop_busted"] == 1 ){ end }		//a bust is already running for this player
+	if( level.coop_bustLoud == 1 ){ end }					//already loud - nothing left to contain
+
+	println( "^~^~^ BUST bash e" + local.player.entnum + " -> " + local.guard.targetname )
+	//[user 2026-08-12] MARK HIM AS A CONTAIN VICTIM. aihandler.scr fires sentientIsSeen with fov
+	//360 on every player kill while disguises are live, which turns any german holding a sightline
+	//to the corpse instantly HOSTILE - even facing the other way. That judged a contain a second
+	//time, by a harsher rule than the contain's own witness sweeps, and made a clean kill
+	//punishable by a man staring at a wall. Cleared again if he survives the stun.
+	local.guard.coop_bustVictim = 1
+	//[user 2026-08-12] FLAG THE PLAYER NOW, not in coop_bustArm. coop_stealthBlocksAggro already
+	//suppresses aggro while coop_busted is set (aihandler.scr:1266) - but that flag was not set
+	//until the arm ran, and the bash lands first. In that gap the player is an undisguised man
+	//standing in the open and disguiseHandler broadcasts 'undisguised-player-seen', which is what
+	//aggro'd a guard some distance away who was not even facing him. coop_bustArm sets it again
+	//later; setting it twice is harmless.
+	local.player.flags["coop_busted"] = 1
+
+	local.st = getcvar "coop_bustStagger"
+	if( local.st == "" ){ local.st = "4.5" }
+	local.sec = float( local.st )
+	if( local.sec <= 0 ){ local.sec = 4.5 }
+
+	//---- 1. THE HIT -------------------------------------------------------------------------
+	//SCRIPTED, not engine melee - and that is the correct call, not a shortcut. Weapon::MeleeAttack
+	//(fgame/weapon.cpp:2151) is only reachable from the weapon's own fire path when the fire MODE is
+	//melee, nothing exposes it to script, and a real melee TRACES and can therefore MISS - which
+	//directly contradicts the spec ("a guaranteed bash as long as they are within range to hit Use").
+	//The prompt only appears inside USE range, so the range test has already been done.
+	//
+	//punch1/2/3 are RETAIL aliases pointing at sound/weapons/foley/PistolHit1..3.wav - literally the
+	//pistol-hit foley - channel "weapon", maps "m dm moh obj train" (m2l2a matches "m"). Found by
+	//reading the shipped ubersound rather than inventing an alias, per the fix methodology. Emitted
+	//BY THE OFFICER so it is a world sound with 3D falloff and the other player hears it; note
+	//coop_medkit_cloth is on the LOCAL channel and is inaudible to anyone else, which is the mistake
+	//this avoids.
+	local.r = randomint 3
+	if( local.r == 0 ){
+		local.guard playsound punch1
+	}else if( local.r == 1 ){
+		local.guard playsound punch2
+	}else{
+		local.guard playsound punch3
+	}
+
+	//---- 2. THE STAGGER ---------------------------------------------------------------------
+	//[user 2026-08-10, FIRST LIVE RUN] "I heard a bash noise, he started just walking away from me
+	//... and he took off running for alarm" - he was never stunned at all.
+	//
+	//WHY v1 DID NOTHING: `exec global/disable_ai.scr` is, in full, `self.enableEnemy = 0` (read out
+	//of the retail pak). It only stops him ACQUIRING enemies. It does not touch his think, his
+	//movement, or the authored challenge script already running on him - so he finished the papers
+	//routine and walked to the alarm exactly as if nothing had happened. `setmotionanim` lost the
+	//same argument: a motion anim issued at idle level is overridden by whatever think owns him.
+	//The allysquad precedent I copied works only because those actors have no competing script.
+	//
+	//WHAT ACTUALLY INTERRUPTS AN ACTOR IS DAMAGE - the vanilla mechanism, confirmed in engine
+	//source rather than assumed: Actor::EventPain (actor.cpp:5310-5318) runs the pain script and
+	//then SetThinkState(THINKSTATE_PAIN, THINKLEVEL_PAIN). THINKLEVEL_PAIN outranks the disguise
+	//and idle levels, so it preempts the challenge. `thinkstate` is EV_GETTER only (actor.cpp:1831)
+	//- there is no way to set a think state directly, which makes damage the ONLY lever script has.
+	//
+	//So the bash is now a real (small) hit, and self.painhandler is redirected to our own label for
+	//the duration so the pain lasts the whole window instead of one short anim.
+	local.guard.coop_bustOldPain = local.guard.painhandler
+	local.guard.painhandler = coop_mod/bust.scr::coop_bustStunPain
+	local.guard.coop_bustStunUntil = level.time + local.sec
+	//damage he can absorb: the PLAYER must get the kill, so this must never be lethal by itself.
+	local.dmg = int( getcvar "coop_bustBashDamage" )
+	if( local.dmg <= 0 ){ local.dmg = 15 }
+	if( local.guard.health <= ( local.dmg + 10 ) ){ local.dmg = 1 }	//never let the bash itself kill him
+	local.guard hurt local.dmg
+	thread coop_bustStaggerRecover local.pnum
+
+	//---- 3. LET THE PAIN LAND BEFORE THE DISGUISE DROPS -------------------------------------
+	//[user 2026-08-12, bug-1737] ORDER IS LOAD-BEARING, and it only became reachable when bug-1735
+	//brought coop_bustArm back from the dead. Arming the player draws a real weapon, which clears
+	//is_disguised THAT FRAME - and the `hurt` above has not been turned into a think-state yet,
+	//because the engine resolves it on the actor's next think. So the guard's next think saw an
+	//UNDISGUISED armed man instead of a disguised one and took the attack transition, which
+	//PassesTransitionConditions_Attack had been vetoing for him while the disguise held.
+	//The note at the top of this block is precise that THINKLEVEL_PAIN outranks the disguise and
+	//idle levels - it does NOT outrank attack. So attack won and there was no jolt at all: user
+	//reported "he started running towards the alarm... he didn't get jolted like he normally does",
+	//and it alerted the piano officer. Measured: BUSTSTUN think=attack for the whole window, where
+	//every earlier working run read think=pain, and BUSTWEAP t=0 flipped isDisg 1 -> 0.
+	//Condition-based, not a blind wait: poll until the pain state is actually up, bounded hard so a
+	//guard who never enters pain (already dead, pain disabled) still gets armed and never hangs.
+	local.pw = 0
+	while( local.pw < 12 ){
+		if( local.guard == NULL || local.guard == NIL ){ break }
+		if( !isAlive local.guard ){ break }
+		if( local.guard.thinkstate == "pain" ){ break }
+		waitframe
+		local.pw++
+	}
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		local.pst = "(gone)"
+		if( local.guard != NULL && local.guard != NIL ){ local.pst = local.guard.thinkstate }
+		println( "^~^~^ BUSTPAIN waited " + local.pw + " frames, think=" + local.pst )
+	}
+
+	//---- 4. ARM THE PLAYER, PISTOL FIRST ----------------------------------------------------
+	//coop_bustArm keeps the papers and the uniform and force-draws the silenced pistol over 5 frames
+	//via spawnWeaponAssert. CONFIRMED working in play - do not swap it for activatePlayerWeapon,
+	//which early-exits when coop_lastActiveWeapon is NULL and that is exactly the stealth start.
+	waitthread coop_mod/itemhandler.scr::coop_bustArm local.player
+
+	//---- 5. HAND OVER TO THE EXISTING STATE MACHINE -----------------------------------------
+	//coop_bustMonitor's own coop_bustArm call is a self-guarded no-op by now.
+	thread coop_bustMonitor local.player local.guard
+	thread coop_bustPistolHold local.pnum
+	thread coop_bustAssaultWatch local.pnum
+	thread coop_bustWeaponProbe local.pnum
+}end
+
+
+//=========================================================================
+// Did anyone see the ASSAULT ITSELF - the officer playing the stunned animation?
+//=========================================================================
+// [user 2026-08-10] "Another way to get to Situation Escalated (if someone actually sees the officer
+// playing the animation), that too should trigger the alarm scenario." Clarified: "The him getting
+// stunned animation."
+//
+// Until now the only witness test ran on the CORPSE, and only after he was already dead - so you
+// could pistol-whip an officer to his knees in front of an entire squad and, as long as you dragged
+// the timing right, still contain it. Watching the live stun closes that: the window in which he is
+// visibly on the floor is exactly the window in which being seen should cost you the mission.
+//
+// Reuses coop_bustWitnessed rather than duplicating the sweep - it is the same question asked of a
+// different subject, and it already skips scene/alarm actors via coop_isProtectedActor. The officer
+// himself MUST be excluded (the new local.ignore parameter): he is in the german array too, and
+// `cansee` on yourself is trivially true, so without it every bust would escalate on tick one.
+//=========================================================================
+coop_bustAssaultWatch local.pnum:{
+	local.guard = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.guard == NULL || local.guard == NIL ){ end }
+
+	local.st = getcvar "coop_bustStagger"
+	if( local.st == "" ){ local.st = "4.5" }
+	local.sec = float( local.st )
+	if( local.sec <= 0 ){ local.sec = 4.5 }
+
+	local.t = 0
+	while( local.t < local.sec ){
+		if( level.coop_bustLoud == 1 ){ end }		//already escalated by another route
+		if( local.guard == NULL ){ end }
+		if( !isAlive local.guard ){ end }			//he is down - the CORPSE sweep owns it from here
+		if( waitthread coop_bustWitnessed local.guard local.guard ){
+			waitthread coop_bustGoLoud "the assault was seen"
+			end
+		}
+		wait 0.5
+		local.t = local.t + 0.5
+	}
+}end
+
+
+//=========================================================================
+// Keep the silenced pistol IN HAND for the containment window.
+//=========================================================================
+// [user 2026-08-10, run 2] "it takes my handgun before hes killed". MEASURED by the BUSTWEAP probe
+// rather than reasoned about, and it is not a stripper at all - it is a RAISE RACE that the pistol
+// was losing:
+//     BUSTWEAP t=0   gun=models/weapons/silencedpistol.tik
+//     BUSTWEAP t=6   gun=(none)
+//     BUSTWEAP t=19  gun=models/weapons/m1_garand.tik
+// i.e. at 0s the pistol is up, by 1.5s the hand is empty, and by 4.75s the player is holding a
+// RIFLE. Nothing took the pistol away - coop_bustArm gives the player's whole loadout as spawned
+// PICKUP entities (the bug-897 mechanism), those land asynchronously over the next few seconds, and
+// the engine auto-raises the primary as it arrives, displacing the pistol that spawnWeaponAssert had
+// already correctly raised. spawnWeaponAssert only covers 5 frames plus one late check at 0.8s, and
+// its late check early-exits on level.coop_noWeapon - which coop_bustArm has deliberately restored
+// by then, so it was never going to win this.
+//
+// Note the seeded default loadout (bug-1678) made this MORE visible, not less: before it, a fresh
+// player often had no rifle to race. The seed did not cause the bug, it exposed it.
+//
+// The spec is explicit that the pistol "should be the first weapon that comes out (not the weapon
+// start kit)", so for the length of the window the pistol simply wins. The hold releases as soon as
+// the officer is dead, so the player is free to switch the moment the job is done.
+//=========================================================================
+coop_bustPistolHold local.pnum:{
+	local.player = level.coop_bustEnt[ "p" + local.pnum ]
+	local.guard  = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.player == NULL || local.player == NIL ){ end }
+
+	local.st = getcvar "coop_bustStagger"
+	if( local.st == "" ){ local.st = "4.5" }
+	local.hold = float( local.st ) + 1.5		//outlast the stun: the last pickups land after it
+	if( local.hold <= 0 ){ local.hold = 6.0 }
+
+	local.t = 0
+	while( local.t < local.hold ){
+		if( local.player == NULL ){ end }
+		if( !isAlive local.player ){ end }
+		if( local.player.flags["coop_busted"] != 1 ){ end }		//contained already - disarmed, let go
+		//job done: he is down, so stop fighting the player's weapon choice
+		if( local.guard == NULL ){ end }
+		if( !isAlive local.guard ){ end }
+
+		local.w = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.player
+		local.nm = "(none)"
+		if( local.w != NULL && local.w != NIL ){ local.nm = local.w.model }
+		if( local.nm != "models/weapons/silencedpistol.tik" ){
+			local.player use "models/weapons/silencedpistol.tik"
+			local.player activatenewweapon "dual"
+		}
+		wait 0.25
+		local.t = local.t + 0.25
+	}
+}end
+
+
+//=========================================================================
+// PROBE - "it takes my handgun before hes killed" (user, first live run).
+//=========================================================================
+// MEASURE, DO NOT GUESS. The pistol demonstrably arrives (log: KITGIVE, then SPEEDPROBE reporting
+// gun='Hi-Standard Silenced'), and then goes away before the player can use it - but nothing in the
+// log says what removed it, and reasoning about it has already cost one wrong answer this session.
+// So: sample the active weapon every 0.25s through the whole bust and print the state around it.
+// The first line where gun= changes names the frame, and the neighbouring fields say which
+// enforcement was live at that moment.
+//
+// Deliberately prints the four things that could plausibly be responsible, not just the symptom -
+// the bug-1665 lesson (eight attempts reasoning about which filter rejected the player; the ninth
+// printed every filter field and settled it immediately).
+//=========================================================================
+coop_bustWeaponProbe local.pnum:{
+	if( getcvar( "coop_aggroDebug" ) != "1" ){ end }
+	local.player = level.coop_bustEnt[ "p" + local.pnum ]
+	if( local.player == NULL || local.player == NIL ){ end }
+
+	local.last = "?"
+	local.i = 0
+	while( local.i < 60 && local.player != NULL && isAlive local.player ){
+		local.w = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.player
+		local.name = "(none)"
+		if( local.w != NULL && local.w != NIL ){ local.name = local.w.model }
+		if( local.name != local.last ){
+			local.last = local.name
+			local.bd = local.player.flags["coop_busted"]
+			if( local.bd == NIL ){ local.bd = -1 }
+			local.nw = level.coop_noWeapon
+			if( local.nw == NIL ){ local.nw = -1 }
+			local.fp = level.coop_forcePapersEquip
+			if( local.fp == NIL ){ local.fp = -1 }
+			local.cp = local.player.flags["coop_clickablePapersEnabled"]
+			if( local.cp == NIL ){ local.cp = -1 }
+			println( "^~^~^ BUSTWEAP t=" + local.i + " gun=" + local.name + " busted=" + local.bd + " noWeapon=" + local.nw + " forcePapers=" + local.fp + " clickPapers=" + local.cp + " isDisg=" + local.player.is_disguised )
+		}
+		wait 0.25
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// The officer gets back up if he is still alive when the window closes.
+//=========================================================================
+// If the player fails to finish him, he recovers and behaves normally - which on this map means he
+// raises it himself, and coop_bustMonitor's level.alarm check turns that into the loud outcome. That
+// is the spec's own fourth case ("If the guard isnt killed he will likely draw attention or raise an
+// alarm so the situation will not get contained").
+//=========================================================================
+coop_bustStaggerRecover local.pnum:{
+	local.guard = level.coop_bustEnt[ "g" + local.pnum ]
+	if( local.guard == NULL || local.guard == NIL ){ end }
+
+	local.st = getcvar "coop_bustStagger"
+	if( local.st == "" ){ local.st = "4.5" }
+	local.sec = float( local.st )
+	if( local.sec <= 0 ){ local.sec = 4.5 }
+
+	//RE-HURT WHILE HE ESCAPES THE STUN. One pain event holds him for one pain animation; the window
+	//has to outlast that or he is back on his feet before the pistol finishes coming up (measured on
+	//the first live run: the kit lands ~1s after the bash). Each tick checks the ENGINE's own
+	//thinkstate rather than assuming the pain stuck, and re-hits only when he has left pain - so on a
+	//long pain anim this costs nothing. Damage is capped hard: never below coop_bustBashFloor percent
+	//of his starting health, because the PLAYER has to be the one who kills him.
+	local.floor = int( getcvar "coop_bustBashFloor" )
+	if( local.floor <= 0 ){ local.floor = 40 }
+
+	//[user 2026-08-12] VULNERABLE WHILE STUNNED, RESTORED IF HE SURVIVES.
+	//"it took 3 shots to kill him (usually its 1, but he also had a helmet) - when they are
+	//vulnerable I think their health needs to be set low enough for one shot to kill them... if they
+	//dont get killed set it back to their default health."
+	//Three shots is three chances for a death cry, three chances to be seen standing over him, and
+	//three seconds he is not dead - which is most of how a clean contain turns into an alarm. It also
+	//routes around the helmet, which otherwise eats the first hit entirely (g_helmetlife).
+	//coop_bustVulnHealth is the ceiling; the silenced pistol does 50 in MP (silencedpistol.tik dm
+	//bulletdamage), so 25 dies to any hit that lands, helmet or not.
+	//Restored on the recovery path below, so a man you stun and then walk away from is exactly as
+	//tough as he was before you touched him.
+	local.vuln = int( getcvar "coop_bustVulnHealth" )
+	if( local.vuln <= 0 ){ local.vuln = 25 }
+
+	//[user 2026-08-12, bug-1734] DROP THE FIELD THAT ACTUALLY DECIDES DEATH.
+	//While the coop pain handler is attached to this actor, his ENGINE health is only the
+	//coop_aiBuffer pile and his real hp lives in coop_actorActualHealth - aihandler.scr::handlePain
+	//subtracts the damage from THAT and kills him when it reaches 0, and it restores engine health to
+	//the buffer after every hit. So writing coop_bustVulnHealth into local.guard.health does not make
+	//him fragile at all; it just dents a buffer the handler immediately refills, and the next round
+	//trips the handler's "health changed elsewhere" path instead of killing him. This only became
+	//reachable when bug-1733 stopped the handler detaching on every actor's first hit - before that,
+	//every guard was already detached and engine health WAS his real hp, which is why bug-1731 worked.
+	//Pick the governing field once and use it for the drop, the stun floor and the restore alike.
+	local.useReal = 0
+	local.realHp = local.guard.flags["coop_actorActualHealth"]
+	if( local.guard.flags["coop_actorStopPainHandler"] != 1 && local.realHp != NIL && local.realHp != NULL && local.realHp > 0 ){
+		local.useReal = 1
+	}
+
+	if( local.useReal == 1 ){
+		local.savedHp = local.realHp
+	}else{
+		local.savedHp = local.guard.health
+	}
+	local.wasDropped = 0
+	if( local.savedHp > local.vuln ){
+		local.wasDropped = 1
+		if( local.useReal == 1 ){
+			local.guard.flags["coop_actorActualHealth"] = local.vuln
+		}else{
+			local.guard.health = local.vuln
+		}
+		println( "^~^~^ BUST vulnerable: hp " + int( local.savedHp ) + " -> " + local.vuln + " real=" + local.useReal )
+	}
+
+	//floor off the governing field too. Reading engine health here while the handler is attached
+	//would compare against the buffer, which the handler pins at its full value every tick - so the
+	//test would never fail and the stun would `hurt 3` its way through his real hp and kill him
+	//itself. The player has to be the one who kills him.
+	//[user 2026-08-12, bug-1739] A PERCENTAGE FLOOR OF THE *VULNERABLE* HEALTH IS NO FLOOR AT ALL.
+	//coop_bustBashFloor is 40%, written when a stunned guard still had his authored ~115 hp, so the
+	//re-hit had ~46hp of headroom to work with. bug-1731 then drops him to coop_bustVulnHealth (25)
+	//so one silenced round finishes him - and 40% of 25 is 10, which is EXACTLY where the bash's own
+	//15 damage lands him. So `curHp > minHp` was false from the very first tick and the re-hit below
+	//has NEVER FIRED, in any run: BUSTSTUN prints a flat hp=10.000 for the whole window every time,
+	//including the runs that looked fine. The stun was riding entirely on the one initial pain
+	//animation, which is why it held sometimes and not others - the guard leaves pain the moment he
+	//can SEE the now-undisguised player (EnemyIsDisguised is hasDisguise && (isDisguised ||
+	//!CanSeeEnemy), so a guard facing away still cannot attack, one facing you can), and nothing
+	//pulled him back.
+	//A dropped guard is meant to die to the player's very next round either way, so holding him at
+	//>=10 rather than >=2 buys no safety and costs the whole re-assertion budget. Absolute floor of 2
+	//while he is dropped; the percentage still applies to a guard who was never dropped.
+	if( local.wasDropped == 1 ){
+		local.minHp = 2
+	}else if( local.useReal == 1 ){
+		local.minHp = ( local.guard.flags["coop_actorActualHealth"] * local.floor ) / 100
+	}else{
+		local.minHp = ( local.guard.health * local.floor ) / 100
+	}
+	local.t = 0
+	while( local.t < local.sec ){
+		if( local.guard == NULL ){ end }
+		if( !isAlive local.guard ){ end }		//the player got him - nothing to recover
+		if( local.useReal == 1 ){
+			local.curHp = local.guard.flags["coop_actorActualHealth"]
+		}else{
+			local.curHp = local.guard.health
+		}
+		if( local.curHp == NIL || local.curHp == NULL ){ local.curHp = local.guard.health }
+		if( local.guard.thinkstate != "pain" && local.curHp > local.minHp ){
+			local.guard hurt 3
+		}
+		if( getcvar( "coop_aggroDebug" ) == "1" ){
+			println( "^~^~^ BUSTSTUN t=" + local.t + " think=" + local.guard.thinkstate + " hp=" + local.curHp + " real=" + local.useReal )
+		}
+		wait 0.4
+		local.t = local.t + 0.4
+	}
+
+	if( local.guard == NULL ){ end }
+	if( !isAlive local.guard ){ end }		//the player got him - there is nothing to recover
+	//hand his own pain handler back, or he keeps re-entering our stun for the rest of the map
+	local.guard.coop_bustStunUntil = 0
+	//[user 2026-08-12] HE SURVIVED - give him his health back. The stun window drops him to
+	//coop_bustVulnHealth so a single silenced round finishes him; a man you stunned and then walked
+	//away from must not stay a one-hit kill for the rest of the mission.
+	//he lived - he is an ordinary german again, including for the death-propagation above
+	local.guard.coop_bustVictim = 0
+	//[bug-1734] restore the SAME field the drop above lowered, or the guard walks away permanently
+	//fragile (real hp still pinned at coop_bustVulnHealth) while a cosmetic buffer gets topped up.
+	if( local.useReal == 1 ){
+		if( local.savedHp != NIL && local.savedHp > local.guard.flags["coop_actorActualHealth"] ){
+			local.guard.flags["coop_actorActualHealth"] = local.savedHp
+			println( "^~^~^ BUST survived: hp restored to " + int( local.savedHp ) + " real=1" )
+		}
+	}else{
+		if( local.savedHp != NIL && local.savedHp > local.guard.health ){
+			local.guard.health = local.savedHp
+			println( "^~^~^ BUST survived: hp restored to " + int( local.savedHp ) + " real=0" )
+		}
+	}
+	if( local.guard.coop_bustOldPain != NIL ){ local.guard.painhandler = local.guard.coop_bustOldPain }
+
+	//[user 2026-08-12, bug-1736] RELEASE THE PLAYER ON THE FAILURE PATH TOO. coop_busted was cleared
+	//only by coop_bustDisarm, i.e. only when the contain SUCCEEDED. A guard who survives the stun
+	//left the player flagged busted for the rest of the mission, and everything gated on that flag
+	//stayed shut: no further contain offer, and - since bug-1732 - no papers either, because the
+	//papers-on-held-fire branch now (correctly) refuses to fire while coop_busted is up. User:
+	//"the second time I tried to contain someone my pistol didnt come out... and I also cant use my
+	//papers now". The BUSTANY healer at coop_bustAnyoneWatch only heals when the guard ENTITY is
+	//gone, and a recovered guard is very much still there, so it could never cover this.
+	//Clear at the source instead: the window is provably closed on this line.
+	//Do it by calling coop_bustDisarm rather than clearing the two flags by hand. Hand-clearing was
+	//the first version of this fix and it was WRONG: coop_bustArm TAKES the papers for the duration
+	//(itemhandler.scr ~3585) and coop_bustDisarm is the only thing that gives them back, so unflagging
+	//without disarming would have stranded the player with no papers - reintroducing the exact symptom
+	//this bug is about, by a second route. Disarm does all four jobs in the right order: it guards on
+	//coop_busted still being 1, clears it and coop_bustArmed, takes the pistol back, and re-gives the
+	//papers through main.scr::itemGetAll. Call it BEFORE touching the flags, since it early-exits once
+	//coop_busted is no longer 1.
+	local.player = level.coop_bustEnt[ "p" + local.pnum ]
+	if( local.player != NULL && local.player != NIL ){
+		if( local.player.flags["coop_busted"] == 1 ){
+			println( "^~^~^ BUST released e" + local.player.entnum + " - stun survived, window closed" )
+			waitthread coop_mod/itemhandler.scr::coop_bustDisarm local.player
+		}
+	}
+	println( "^~^~^ BUST officer recovered - the containment window closed" )
+}end
+
+
+//=========================================================================
+// Our pain handler for a bashed officer. self = the actor.
+//=========================================================================
+// Installed by coop_bustBash for the duration of the stun and handed back by
+// coop_bustStaggerRecover. The engine has ALREADY put him in THINKSTATE_PAIN at THINKLEVEL_PAIN by
+// the time this runs (actor.cpp:5310-5318); the job here is simply to occupy that state for longer
+// than a single pain animation would, and to look like a man who has just been pistol-whipped.
+//
+// NO `waittill animdone`, ever. If the alias is missing the event never arrives and the wait blocks
+// forever (docs/TRAPS.md T16) - and this label runs on an actor the mission depends on. A plain
+// timed wait cannot hang. The alias itself is safe: <weapongroup>_pain_standtoknees is defined for
+// all TEN weapongroups in models/human/animation/human_*.tik, verified against the retail paks.
+//=========================================================================
+coop_bustStunPain:{
+	if( self == NULL ){ end }
+	if( self.weapongroup != NIL ){
+		self setmotionanim ( self.weapongroup + "_pain_standtoknees" )
+	}
+	local.until = self.coop_bustStunUntil
+	if( local.until == NIL ){ end }
+	while( self != NULL && isAlive self && level.time < local.until ){
+		wait 0.2
+	}
+}end
+
+//=========================================================================
+// CONTAIN ANYONE - offers the contain on whoever you are standing next to.
+//
+// [user 2026-08-12] "scope it out to where you can contain any enemy in stealth; the risk is on
+// the player if they get spotted doing it or a body gets found."
+//
+// The mechanic itself never needed changing. What limited it was WHERE the prompt came from:
+// enableClickablePapers is called from anim/disguise_papers.scr, i.e. only ever by a man who has
+// stopped you. Saluters and workers never challenge, so they could never be offered however the
+// role gate was set. This raises it by PROXIMITY instead, the same way coop_m6l2aRadioGo does for
+// a distracted officer and coop_m6l2aSilentContainWatch does for a silenced patroller.
+//
+// ONE TARGET AT A TIME, latched per player. With 40+ candidates a naive sweep would fight over the
+// HUD line every time two men were in range. The latch also stops enableClickablePapers being
+// re-threaded onto the same guard, which is the bug-1709 shape - it fights coop_bustArm, which
+// clears coop_clickablePapersEnabled as a handshake, and puts the papers back into the hand that
+// is holding the pistol.
+//
+// Opt-in per map via level.coop_bustAnyone, so m2l2a and m6l1c keep the officer-only rule.
+//=========================================================================
+coop_bustAnyoneWatch:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	while( level.coop_bustAnyone != 1 ){ wait 2 }
+	println "^~^~^ BUSTANY armed - any isolated german can be contained"
+	local.rng = int( getcvar "coop_bustUseRange" )
+	if( local.rng <= 0 ){ local.rng = 112 }
+	//[user 2026-08-12] OFFER WIDE, ACT CLOSE. The first version offered at coop_bustUseRange + 56
+	//= 168u and the only offer ever logged was at d=166 - right on the boundary. Anyone walked past
+	//at ordinary spacing was never a candidate, which read as "it doesn't work on most of them".
+	//The USE range is unchanged at coop_bustUseRange: this only decides how early the prompt appears.
+	local.rng = 400
+
+	while( 1 ){
+		wait 0.4
+		if( level.coop_stealthMap != 1 ){ continue }
+		if( level.coop_bustLoud == 1 ){ continue }
+		if( level.alarm ){ continue }
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr == NIL ){ continue }
+
+		for( local.pi = 1; local.pi <= $player.size; local.pi++ ){
+			local.p = $player[local.pi]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			//[user 2026-08-12] STUCK-BUST SELF-HEAL. coop_busted is set by coop_bustArm and cleared by
+			//coop_bustDisarm when the contain RESOLVES. If that resolution is ever missed - the guard
+			//removed, the monitor thread lost, a contain that neither contained nor went loud - the flag
+			//stays set and the player can never be offered another contain for the rest of the mission.
+			//That is what "I'm at a guard I can't contain, it's the guy I contained last time" was: the
+			//offer was being made and canContain was 1, but enableClickablePapers refuses to draw the
+			//prompt while this flag is up.
+			//Heals only when there is provably no bust running: his parked guard is gone or dead, and the
+			//map is not loud. A live contain is untouched.
+			if( local.p.flags["coop_busted"] == 1 ){
+				local.bg = level.coop_bustEnt[ "g" + local.p.entnum ]
+				//[user 2026-08-12] ENTITY GONE, not merely dead. The first version healed on !isAlive,
+				//and a DEAD guard is exactly what a contain still resolving looks like - coop_bustMonitor
+				//runs its whole witness window over a corpse. It cleared the flag in the middle of a live
+				//contain, which re-opened the aggro suppression it exists to hold shut.
+				local.dead = 0
+				if( local.bg == NULL || local.bg == NIL ){ local.dead = 1 }
+				if( local.dead == 1 && level.coop_bustLoud != 1 ){
+					local.p.flags["coop_busted"] = 0
+					local.p.flags["coop_bustArmed"] = NIL		//[bug-1735] release the arming latch with it
+					println( "^~^~^ BUSTANY cleared a stuck coop_busted on e" + local.p.entnum )
+				}else{
+					continue
+				}
+			}
+
+			local.best  = NULL
+			local.bestd = 100000
+			for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+				local.a = local.arr[local.i]
+				if( local.a == NULL || local.a == NIL ){ continue }
+				if( !isAlive local.a ){ continue }
+				//[user 2026-08-12] ASK WHETHER HE IS FIGHTING, NOT WHETHER HE HAS AN ENEMY.
+				//This tested local.a.enemy, which excluded almost everybody: on a disguise map m_Enemy is
+				//how the whole system works - PassesTransitionConditions_Disguise (actor.cpp:9057) REQUIRES
+				//an enemy before an actor will salute or challenge at all. So every german who had merely
+				//noticed the player held him as m_Enemy and was skipped, which is why the offer only ever
+				//landed on men who happened not to have seen anyone yet.
+				//thinkstate is EV_GETTER (actor.cpp:1831) and returns void|idle|pain|killed|attack|curious|
+				//disguise|grenade. "attack" is the honest test for a man in a fight; a man in "disguise" is
+				//mid-salute or mid-challenge, which is precisely when you want to take him.
+				if( local.a.thinkstate == "attack" ){ continue }
+				local.dd = vector_length ( local.a.origin - local.p.origin )
+				if( local.dd < local.bestd ){
+					local.bestd = local.dd
+					local.best  = local.a
+				}
+			}
+
+			if( local.best == NULL || local.best == NIL || local.bestd > local.rng ){
+				//report the near-miss once so a silent watcher is distinguishable from an empty room
+				if( local.best != NULL && local.best != NIL ){
+					if( local.p.flags["coop_bustAnyMiss"] != int( local.bestd / 100 ) ){
+						local.p.flags["coop_bustAnyMiss"] = int( local.bestd / 100 )
+						println( "^~^~^ BUSTANY nearest out of range d=" + int( local.bestd ) )
+					}
+				}
+				local.p.flags["coop_bustAnyTarget"] = 0
+				continue
+			}
+			//[user 2026-08-12] RE-OFFER WHEN THE PROMPT IS GONE. Same man as last tick is normally a
+			//skip - the running enableClickablePapers loop still has him. But that loop exits whenever
+			//coop_clickablePapersEnabled is cleared, and coop_paperPassAll clears it for the WHOLE squad
+			//the moment a sentry accepts your papers (itemhandler.scr:1287). User: "I could contain him,
+			//but the second I show papers and he acknowledges I no longer can." Accepting your papers
+			//should not make a man un-killable.
+			//Safe against bug-1709 because a player mid-bash is skipped above on coop_busted: that flag
+			//is coop_bustArm's deliberate handshake and re-arming under it is what put the papers back
+			//into the hand holding the pistol.
+			local.live = 0
+			if( local.p.flags["coop_clickablePapersEnabled"] ){ local.live = 1 }
+			if( local.p.flags["coop_bustAnyTarget"] == local.best.entnum && local.live == 1 ){ continue }
+			//[user 2026-08-12] ONE LOOP PER PLAYER, ALWAYS. Each enableClickablePapers sets
+			//coop_clickablePapersEnabled true on entry, and coop_bustArm clears it ONCE as the handshake
+			//that shuts the papers loop down when a bash starts. Threading a fresh one per target change
+			//stacked them: the clear stopped the newest, the older ones kept running, and their
+			//force-equip branch fought spawnWeaponAssert for the hands - the pistol coming out, then
+			//papers stuck inside it, and no shot possible. That is bug-1709 arriving from a third
+			//direction; itemhandler.scr:3500 documents the first two.
+			//Clearing the flag and yielding a frame lets any live loop see it and exit before a new one
+			//is started, so there can never be two.
+			local.p.flags["coop_clickablePapersEnabled"] = game.false
+			waitframe
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.flags["coop_busted"] == 1 ){ continue }
+			local.p.flags["coop_bustAnyTarget"] = local.best.entnum
+			local.dtn = local.best.targetname
+			if( local.dtn == NIL || local.dtn == "" ){ local.dtn = "(unnamed)" }
+			local.dtd = local.best.type_disguise
+			if( local.dtd == NIL || local.dtd == "" ){ local.dtd = "(none set)" }
+			println( "^~^~^ BUSTANY offering on " + local.dtn + " disg=" + local.dtd + " d=" + int( local.bestd ) )
+			thread coop_mod/itemhandler.scr::enableClickablePapers local.best local.p
+		}
+	}
+}end

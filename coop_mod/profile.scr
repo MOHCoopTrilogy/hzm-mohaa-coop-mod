@@ -1,0 +1,71 @@
+//=========================================================================
+// HZM COOP - PER-PLAYER PROFILE MIRROR  (user decision 2026-08-10)
+//=========================================================================
+// DESIGN: "hybrid - server truth + client import". The server stays authoritative for progression,
+// exactly as it is today. In addition the CLIENT carries a mirror of its own profile, and when a
+// player joins a server that has NO record for their id, the server imports the client's mirror.
+// Result: your collection follows you between servers, but the server still arbitrates during play.
+//
+// Scope, once proven: blueprints (coop_bpF_*), XP (coop_xp_total), challenges (chal_serialize) and
+// unlocks (coop_chal_unlocks). All four share ONE identity already - coop_xp_id, falling back to
+// coop_guid and then "n_"+netname - so one blob covers them.
+//
+// THE TWO HALVES OF THE CHANNEL
+//
+//   server -> client : `stufftext "seta coop_pfN <chunk>"`. Proven; chal_ui_export has streamed
+//                      archived cvars this way for a long time. Watch bug-758: a QUOTED stufftext is
+//                      truncated on the wire, so send unquoted or via a shipped cfg. And watch
+//                      bug-1670: reliable commands are a 1024-deep ring, so PACE it.
+//
+//   client -> server : `coopprof <index> <chunk>` - a console command the client runs, which the
+//                      engine dispatches to Player::EventCoopProf (added 2026-08-10). That handler
+//                      concatenates the chunks and publishes them via Vars()->SetVariable, so script
+//                      reads them straight off the player as `.coop_profdata` - the identical
+//                      mechanism that already delivers coop_guid (g_client.cpp:818).
+//                      Index 0 resets the buffer; the engine caps the total at 8192 bytes.
+//
+// SECURITY POSTURE: coop_profdata is PLAYER-SUPPLIED. A player can type that command. It is imported
+// ONLY when the server has no record of its own for that id, and it must never be trusted to
+// overwrite a server-side total that already exists. That single rule is what keeps "your collection
+// travels with you" from becoming "type your own XP".
+//=========================================================================
+
+//=========================================================================
+// CHANNEL PROBE. Ships first, alone, on purpose: the whole design rests on the client->server hop
+// working, and that hop is new engine code. Prove the hop before building four systems on it.
+// Sends a known payload out and reads it back; one line of log settles it.
+//=========================================================================
+prof_channel_probe local.player:{
+	//ENTRY MARKER FIRST. Twice today a probe printed nothing and I could not tell "never called"
+	//from "called and died" - because the marker sat below a guard. Never again: this line is
+	//unconditional except for the NULL check the label cannot run without.
+	if( local.player == NULL ){ end }
+	println( "^~^~^ PROFCHAN enter e" + local.player.entnum + " cvar=" + getcvar( "coop_profProbe" ) )
+	if( getcvar( "coop_profProbe" ) != "1" ){ end }
+	if( local.player.flags["coop_profProbed"] == 1 ){ end }
+	local.player.flags["coop_profProbed"] = 1
+
+	//let the client finish connecting - a stufftext issued mid-load is discarded
+	local.w = 0
+	while( local.w < 100 && local.player != NULL ){
+		waitframe
+		local.w++
+	}
+	if( local.player == NULL ){ end }
+
+	//UNQUOTED on purpose (bug-758: quoted stufftext is truncated on the wire)
+	local.player stufftext ( "coopprof 0 HZMPROBE_A" )
+	local.player stufftext ( "coopprof 1 _B" )
+
+	//round trip: out to the client, executed there, back as a console command, into the entity vars
+	local.w = 0
+	while( local.w < 120 && local.player != NULL ){
+		waitframe
+		local.w++
+	}
+	if( local.player == NULL ){ end }
+
+	local.got = local.player.coop_profdata
+	if( local.got == NIL ){ local.got = "NIL" }
+	println( "^~^~^ PROFCHAN e" + local.player.entnum + " got=[" + local.got + "] expect=[HZMPROBE_A_B]" )
+}end

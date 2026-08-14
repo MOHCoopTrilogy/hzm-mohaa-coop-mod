@@ -829,6 +829,55 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 			ihuddraw_alpha  local.player 53 0
 			ihuddraw_string local.player 51 ""
 			ihuddraw_string local.player 53 ""
+
+			//[user 2026-08-10] "going into spectator makes messages like Hold Use to heal player get
+			//stuck on screen ... I am guessing that is the case for many other messages like that."
+			//Correct, and it is structural rather than one bug: every transient prompt in the mod is
+			//torn down by the LOOP that drew it, so any exit that loop does not own leaves the text on
+			//the client forever (ihuddraw state persists until overwritten). Going spectator is exactly
+			//such an exit - the owning loops key on isAlive / coop_dbno_active / proximity, none of
+			//which is "this player stopped playing".
+			//The individual owners are being fixed where the cause is understood (dbno.scr's revive
+			//prompt was the reported one), but this block is the BACKSTOP: on the one transition that
+			//provably ends all of them, wipe the whole fade-exempt transient band. Cheap, and it cannot
+			//mask a leak because the owning loop still clears its own slot on its own paths.
+			ihuddraw_alpha  local.player 135 0		//dbno revive-availability + reviver channel text
+			ihuddraw_string local.player 135 ""		// (also objectives.scr's NEW OBJECTIVE toast - see bug log, they collide)
+			ihuddraw_alpha  local.player 136 0
+			ihuddraw_alpha  local.player 137 0
+			ihuddraw_alpha  local.player 138 0		//dbno "You are being revived"
+			ihuddraw_string local.player 138 ""
+			ihuddraw_alpha  local.player 139 0
+			ihuddraw_alpha  local.player 140 0
+			ihuddraw_alpha  local.player 141 0		//blueprint pickup acknowledgement
+			ihuddraw_string local.player 141 ""
+			ihuddraw_alpha  local.player 142 0		//XP micro popups
+			ihuddraw_string local.player 142 ""
+			ihuddraw_alpha  local.player 143 0
+			ihuddraw_string local.player 143 ""
+			ihuddraw_alpha  local.player 144 0
+			ihuddraw_string local.player 144 ""
+			ihuddraw_alpha  local.player 148 0		//ammo box prompt
+			ihuddraw_string local.player 148 ""
+			ihuddraw_alpha  local.player 149 0		//Phase C outcome banner
+			ihuddraw_string local.player 149 ""
+			ihuddraw_alpha  local.player 250 0		//Phase C "Press [USE] to Contain The Situation"
+			ihuddraw_string local.player 250 ""
+			ihuddraw_alpha  local.player 254 0		//Phase C "Body Being Investigated"
+			ihuddraw_string local.player 254 ""
+			ihuddraw_alpha  local.player 216 0		//DBNO "<name> is down" top-centre banner
+			ihuddraw_string local.player 216 ""
+			ihuddraw_alpha  local.player 118 0		//m2l2a Naxos sabotage bar (lobby 118-125 otherwise)
+			ihuddraw_string local.player 118 ""
+			ihuddraw_alpha  local.player 119 0
+			ihuddraw_alpha  local.player 120 0
+			local.player.flags["coop_naxosBar"] = NIL
+			//and release the latches those prompts use, so they redraw correctly on the way back in
+			//rather than believing they are still on screen.
+			local.player.flags["coop_revivePrompt"] = NIL
+			local.player.flags["coop_xp_mp142"]     = NIL
+			local.player.flags["coop_xp_mp143"]     = NIL
+			local.player.flags["coop_xp_mp144"]     = NIL
 		}
 
 		//keep the objectives-toggle ('o' key) working after respawn. If the player
@@ -1078,6 +1127,18 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//HZM coop: a map can set level.coop_noDeployables (e.g. t2l2 vehicle ride) to remove the deployable
 	//sandbag cover + ammo box (HUD monitors + the deploy actions themselves are gated on the same flag).
 	if( level.coop_noDeployables != 1 ){
+		//[user 2026-08-10] profile-mirror channel probe. Gated on coop_profProbe, self-disarming, and
+		//it ships BEFORE any profile logic on purpose: the whole hybrid design rests on the new
+		//client-to-server hop working, and that hop is fresh engine code. Prove it, then build on it.
+		thread coop_mod/profile.scr::prof_channel_probe local.player
+		//[user 2026-08-10] TEMPORARY: dev trigger for the Phase C bust loop (coop_bustTest 1).
+		//Self-guards to one instance and does nothing at all unless the cvar is set. Remove together
+		//with coop_bustTestPoll once the real bust detection lands.
+		thread coop_mod/bust.scr::coop_bustTestPoll
+		//[user 2026-08-10] a brand-new player has NO armory picks, which made giveWeaponLoadout fall
+		//through to the map default kit. Seed the starting unlocks once; self-guards and never
+		//overwrites a real choice.
+		waitthread coop_mod/loadoutpick.scr::loadout_seedDefaults local.player
 		thread coop_mod/cover.scr::cover_hud_monitor local.player
 		thread coop_mod/cover.scr::cover_proximity_monitor local.player
 		thread coop_mod/ammobox.scr::ammobox_hud_monitor local.player

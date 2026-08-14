@@ -2262,3 +2262,64 @@ state LIMP_RIGHT
 		JUMP_FORWARD_RUN : +JUMP ONGROUND !DUCKED_VIEW_IN_WATER
 	}
 }
+
+// [user 2026-08-10] SELF-REVIVE GET-UP. Two states so the rise is staged the way the retail
+// animations were authored: struggle up onto the knees and HOLD there while the medkit is being
+// applied, then rise to the feet only when it actually completes.
+state DBNO_GETUP_KNEES
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_floortoknees : default
+	}
+
+	states
+	{
+		DBNO_GETUP_HOLD : ANIMDONE_LEGS
+	}
+}
+
+// Kneeling hold - loops for as long as the channel runs. The script forces the next state on
+// completion and forces DBNO_IDLE back if the player cancels or is knocked down again.
+state DBNO_GETUP_HOLD
+{
+	entrycommands
+	{
+		moveposflags "crouching"
+	}
+
+	legs
+	{
+		coop_dbno_kneesidle : default
+	}
+
+	states
+	{
+		DBNO_GETUP_HOLD : ANIMDONE_LEGS
+	}
+}
+
+// The actual rise. Exits to STAND on its own when the animation finishes, so the script does not
+// have to time it.
+state DBNO_GETUP_STAND
+{
+	entrycommands
+	{
+		moveposflags "standing"
+	}
+
+	legs
+	{
+		coop_dbno_kneestostand : default
+	}
+
+	states
+	{
+		STAND : ANIMDONE_LEGS
+	}
+}

@@ -306,6 +306,11 @@ main:{
 	//across the early frames; lazy first-play loads were synchronous disk hits mid-combat
 	//(user lag spikes). Async thread: adds no time to this single-frame init.
 	thread coop_mod/sndcache.scr::main
+	//[user 2026-08-12] dev-only actor probe, off unless coop_whoProbe is 1. Threaded, so it
+	//adds nothing to this single-frame init, and its own first line ends it when the cvar is off.
+	thread coop_mod/devprobe.scr::main
+	//self-gates on coop_enableDisguises; no cvar, so it reports during ordinary play too
+	thread coop_mod/devprobe.scr::stuckWatch
 
 	//[200] Smithy - used by waitForMainScript to check if main has loaded
 	level.coop_mainScriptLoaded = game.true
@@ -923,8 +928,77 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	//papers to be the active in-hand item on EVERY spawn (respawn / spectate-return) so players hold
 	//papers instead of empty hands and primaryfire still shows them. Also (re)set coop_hasPapers,
 	//which managePlayerInventory's coop_noWeapon early-exit skips - this covers late-joiners.
+	//[user 2026-08-11] SPLIT INTO TWO QUESTIONS, because they had been fused and the wrong one was
+	//load-bearing. "Do you HAVE papers" is not "must the papers be forced into your hands".
+	//
+	//THE BUG: coop_hasPapers was only ever granted by givePapersFlagToAll - i.e. to the players who
+	//happened to be connected at the instant the map ran add_item "papers_level1/2" - or by this
+	//block, which is gated on coop_forcePapersEquip, a flag ONLY m2l2a's stealth route sets. So on
+	//every other disguise map (e1l4, m2l2b, m6l1c) a player who joined after the pickup never got
+	//the flag, and therefore could never present papers to a checker that stopped them. User: "If
+	//the map is supposed to give you papers at intro we should get them."
+	//e1l4 gives them in the INTRO (maps/e1l4/Intro.scr:408,415 - it already has a proper coop
+	//branch), so on that map the window to miss it is the whole mission.
+	//
+	//The flag now follows the LEVEL fact - this map registered a papers item and runs the disguise
+	//system - rather than following the stealth route. The physical item already arrives on its own:
+	//global/items.scr registers it through replace.scr::item, and itemGetAll re-gives registered
+	//mission items on every spawn. Only the flag was missing.
+	//[user 2026-08-11] SPAWN-STATE PROBE for the m2l2b report ("we both get full loadout and can't
+	//show papers"). Prints every field the disguise + papers chain depends on, at the one moment it
+	//matters. Hypothesis to kill or confirm: on an ARMED disguise map the engine clears
+	//m_bIsDisguised for anyone holding a real Weapon (player.cpp:5525), so a full loadout makes the
+	//disguise impossible by construction, and coop_papersAnytime additionally refuses to present
+	//papers while a weapon is in hand. If eng_is=0 with eng_has=1 and a gun in hand, that is the
+	//whole story and it is a DESIGN question, not a defect. If eng_has=0 the uniform never landed.
+	if( getcvar( "coop_aggroDebug" ) == "1" && self != NULL && self.classname == "Player" ){
+		local.pw = self.flags["coop_activeWeapon"]
+		local.pwn = "(none)"
+		if( local.pw != NULL && local.pw != NIL ){ local.pwn = local.pw.model }
+		//SANITISE EVERY FIELD FIRST. The first cut of this probe concatenated the raw values and
+		//threw 33 Script Errors on its first m6l1c boot - an unset var reads 'none', and
+		//'none' + string throws (docs/TRAPS.md T17). m2l2b happened to have all of them set, so the
+		//probe looked fine there and only broke on the map it was written to investigate. A probe
+		//that errors instead of printing is worse than no probe: it produces noise where data
+		//should be, and on a map already under suspicion.
+		local.pip = level.coop_itemPapers
+		if( local.pip == NIL ){ local.pip = "(NIL)" }
+		local.dh = self.flags["coop_hasDisguise"]
+		if( local.dh == NIL ){ local.dh = "(NIL)" }
+		local.dp = self.flags["coop_hasPapers"]
+		if( local.dp == NIL ){ local.dp = "(NIL)" }
+		local.de = level.coop_enableDisguises
+		if( local.de == NIL ){ local.de = "(NIL)" }
+		local.du = level.coop_uniformOnSpawn
+		if( local.du == NIL ){ local.du = "(NIL)" }
+		local.dn = level.coop_noWeapon
+		if( local.dn == NIL ){ local.dn = "(NIL)" }
+		local.dhas = self.has_disguise
+		if( local.dhas == NIL ){ local.dhas = -1 }
+		local.dis = self.is_disguised
+		if( local.dis == NIL ){ local.dis = -1 }
+		println( "^~^~^ SPAWNDISG " + self.netname + " eng_has=" + local.dhas + " eng_is=" + local.dis + " modHas=" + local.dh + " modPapers=" + local.dp + " itemPapers=" + local.pip + " enableDisg=" + local.de + " uniOnSpawn=" + local.du + " noWeapon=" + local.dn + " gun=" + local.pwn )
+	}
+	if( level.coop_itemPapers != NIL && level.coop_enableDisguises && isAlive self && self.dmteam != "spectator" ){
+		if( self.flags["coop_busted"] != 1 ){		//a busted player is mid-gunfight, leave them alone
+			self.flags["coop_hasPapers"] = game.true
+			//[user 2026-08-11] AND START THE LISTENER. Setting the flag alone was MY OWN BUG and it
+			//is what produced "still no papers to show": coop_papersAnytime - the per-player loop that
+			//watches for primaryfire and presents the papers - is started by givePapersFlag, and
+			//itemhandler.scr:767 only calls that when the flag is NOT already set. By writing the flag
+			//here first I satisfied that test, so givePapersFlag never ran, the listener never
+			//started, and the player held a papers flag they could not act on. A fix that sets a
+			//state must also do whatever setting that state was supposed to trigger.
+			//Self-guarded on coop_papersAnyRun, so a second call is a no-op rather than a second loop.
+			thread coop_mod/itemhandler.scr::coop_papersAnytime self
+		}
+	}
+	//FORCING them into the hands stays exactly as it was - stealth-route only. That is a papers-ONLY
+	//loadout behaviour (you have no weapon, so you hold papers instead of empty hands); on an armed
+	//disguise map it would fight the player's weapon every spawn.
 	if( level.coop_forcePapersEquip && level.coop_itemPapers != NIL && isAlive self && self.dmteam != "spectator" ){
-		self.flags["coop_hasPapers"] = game.true
+		//busted players keep their weapon (see forcePapersInHand below)
+		if( self.flags["coop_busted"] == 1 ){ end }
 		self thread forcePapersInHand
 	}
 }end
@@ -1020,6 +1094,11 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 	wait game.ms
 	if( self == NULL || !isAlive self || self.dmteam == "spectator" ){ end }
 	if( !level.coop_forcePapersEquip || level.coop_itemPapers == NIL ){ end }
+	//[user 2026-08-10] a BUSTED player is exempt. coop_forcePapersEquip is level-wide, so restoring it
+	//after coop_bustArm re-armed this enforcement and it yanked the silenced pistol straight back out
+	//of their hands - user: "it immediately pulled my gun out and then forced me back to papers and i
+	//coudlnt change". The squad stays papers-only; the one player who was caught does not.
+	if( self.flags["coop_busted"] == 1 ){ end }
 	self use level.coop_itemPapers
 }end
 

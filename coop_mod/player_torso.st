@@ -3768,3 +3768,37 @@ state TURRET_IDLE
 		STAND					: !IS_USING_TURRET
 	}
 }
+
+// [user 2026-08-10] SELF-HEAL upper body. Deliberately a TORSO state, not a legs state: the user
+// asked "can we make it so the legs dont change" and this is how - `movetype legs` means the torso
+// follows whatever the legs are already doing, so the clip drives only the upper body. That also
+// neutralises the one flaw in the source animation, whose legs are authored dangling from a pole.
+// Exits on ANIMDONE_TORSO, and KILLED is listed first for the same reason every other state here
+// does it - dying must win over any pose.
+state COOP_SELFHEAL
+{
+	movetype legs
+
+	camera behind
+
+	entrycommands
+	{
+		viewmodelanim idle
+	}
+
+	action
+	{
+		coop_selfheal			: default
+	}
+
+	states
+	{
+		KILLED				: KILLED
+		//[user 2026-08-10] LOOP, do not exit. Self-transition on ANIMDONE_TORSO so the clip repeats for
+		//as long as the heal runs - the user: "it may need to be repeated for the length of the revive".
+		//Same pattern REVIVE_MEDIC uses in player_legs.st (REVIVE_MEDIC : ANIMDONE_LEGS).
+		//Safe against sticking: medkit_use forces STAND at ALL FOUR of its exits (completion, gone
+		//inactive, moved too far), and KILLED above outranks it.
+		COOP_SELFHEAL			: ANIMDONE_TORSO
+	}
+}

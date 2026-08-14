@@ -80,16 +80,34 @@ if(level.cMTE_coop_weaponstate){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		//so the behaviour no longer depends on a side effect that Phase C removes.
 		if (level.coop_enableDisguises && local.player.flags["coop_hasDisguise"] && local.player.has_disguise && level.coop_disgSuspended != 1 && !level.alarm){
 
+			//[user 2026-08-10] `Script Error : Field 'model' applied to NULL listener` here, once per
+			//occurrence, and it is NOT cosmetic - it silently blows stealth.
+			//coop_activeWeapon is a CACHED flag maintained by this same state machine, and during a
+			//Phase C bust the real weapon churns (the loadout arrives as async pickups, bug-1684) so
+			//the cache is NULL for the odd frame. Fire on exactly that frame and `local.item.model`
+			//throws. A thrown statement is SKIPPED, not fatal (verified 2026-08-06) - so the switch
+			//never runs, local.silentBullet stays unset, `if (!local.silentBullet)` is TRUE, and the
+			//shot is broadcast as an EXPLOSION at 1024u. i.e. a silenced-pistol round fired at the
+			//wrong moment was giving the whole squad away.
+			//Ask the ENGINE when the cache is empty rather than guessing: returnActiveWeapon reads
+			//the live weapon. If there is genuinely nothing in hand we cannot attribute the shot at
+			//all, so make no noise - inventing an explosion from a weapon that does not exist is the
+			//worse of the two errors on a stealth route.
 			local.item = local.player.flags["coop_activeWeapon"]
-
-			switch (local.item.model){
-				case "models/weapons/silencedpistol.tik":
-				case "models/weapons/it_w_carcano.tik": 	 	
-					local.silentBullet = game.true; break
-				default:
-					local.silentBullet = game.false
+			if (local.item == NULL || local.item == NIL){
+				local.item = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.player
 			}
-			
+			local.silentBullet = game.true
+			if (local.item != NULL && local.item != NIL){
+				switch (local.item.model){
+					case "models/weapons/silencedpistol.tik":
+					case "models/weapons/it_w_carcano.tik":
+						local.silentBullet = game.true; break
+					default:
+						local.silentBullet = game.false
+				}
+			}
+
 			if (!local.silentBullet){
 				//iprintlnbold_noloc("LOUD BULLET")
 				thread coop_mod/itemhandler.scr::broadcastSound local.player "explosion" 1024

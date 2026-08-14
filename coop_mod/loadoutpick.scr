@@ -30,7 +30,13 @@
 // one-per-class rule. The guard is held HERE around the waitthread so every
 // exit path of the body releases it.
 //=========================================================================
-loadout_set local.player local.slot local.data:{
+// [user 2026-08-10] local.quiet (optional, 1 = on): commit the pick WITHOUT the player-facing tail -
+// no "X equipped" iprint and no debounced kit re-issue. Everything that keeps state consistent
+// (validation, the slot flags, loadout_rebuild) still runs, because that is the whole point of
+// routing a server-side seed through this label instead of writing the array directly. Callers that
+// omit it leave local.quiet unset (NIL), which is falsy - so every existing call site is unchanged.
+//=========================================================================
+loadout_set local.player local.slot local.data local.quiet:{
 //=========================================================================
 if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread loadoutpick/loadout_set->"+level.cMTE+"" )}
 	if(local.player == NULL){ end }
@@ -41,12 +47,12 @@ if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		if(local.player == NULL){ end }
 	}
 	local.player.flags["coop_loSetBusy"] = 1
-	waitthread loadout_setBody local.player local.slot local.data
+	waitthread loadout_setBody local.player local.slot local.data local.quiet
 	if(local.player != NULL){ local.player.flags["coop_loSetBusy"] = NIL }
 }end
 
 //=========================================================================
-loadout_setBody local.player local.slot local.data:{
+loadout_setBody local.player local.slot local.data local.quiet:{
 //=========================================================================
 	if(local.player == NULL){ end }
 
@@ -132,6 +138,12 @@ loadout_setBody local.player local.slot local.data:{
 	local.player.flags["coop_loRevert" + local.slot] = NIL	//[user 07-17] valid pick landed - release the deny-revert loop guard
 
 	waitthread loadout_rebuild local.player
+
+	//[user 2026-08-10] QUIET COMMIT (loadout_seedDefaults). The state above is unconditional; only
+	//the player-facing tail below is skipped. A seed must not announce itself three times at spawn,
+	//and it must NOT trigger the debounced regive: that path runs managePlayerInventory, which on the
+	//m2l2a stealth start would hand weapons to a squad the map has deliberately left unarmed.
+	if(local.quiet == 1){ end }
 
 	local.player iprint ("Armory: " + local.r["name"] + " equipped")
 
@@ -613,3 +625,106 @@ loadout_isUnlocked local.player local.tik:{
 	local.hay = "|" + local.u + "|"
 	if(waitthread coop_mod/main.scr::containsText local.hay ("|" + local.tik + "|") 0){ end 1 }
 }end 0
+
+
+//=========================================================================
+// Seed a NEW player with the starting unlocks, so "no picks yet" is not "no loadout".
+//=========================================================================
+// User 2026-08-10: "anyone that starts new like Player1 and Player2 did, their default loadout should
+// just be whats unlocked already... M1 Garand, and Colt 45 and Grenade. When I checked my loadout it
+// was all empty. Thats why I was getting the guns you start with in the mission by default."
+//
+// Exactly right, and the cause is narrow: coop_loWeapons is ONLY ever written by loadout_commit
+// (:394) and cleared by loadout_clear (:358/:411). NOTHING seeds it, so a player who has never opened
+// the armory has an empty array - and giveWeaponLoadout then correctly falls through to the map
+// default kit. That is also why the cover-blown re-arm looked like it was handing out mission
+// weapons: it was, because there were no picks to honour.
+//
+// [user 2026-08-10 round 2] THE GUNS WERE RIGHT IN PLAY AND THE LOADOUT TAB STILL RENDERED EMPTY.
+// The first cut wrote flags["coop_loWeapons"] directly. That array is only ONE of the three things a
+// real pick maintains, and the other two are what the screen is actually made of:
+//   1. flags["coop_loWeapons"]        - the give-array the spawn path honours   (was set)
+//   2. flags["coop_loSlot<n>/Id<n>"]  - per-slot authority, read by DBNO (:248), spawnWeaponAssert's
+//                                       desired gun (itemhandler :1572) and loadout_ammoTopup (:510)
+//   3. the client's archived chip cvars (coop_lo<n>/coop_loN<n>/coop_loS<n>/coop_loA<n>) - the ONLY
+//                                       thing the armory UI draws from
+// So the fix is not "also set 2 and 3", it is "stop having a second way to commit a pick at all":
+// this now runs the SAME path a real click runs, and the three can no longer drift apart.
+//   server side -> loadout_set (quiet), which validates against the roster, writes the slot flags and
+//                  calls loadout_rebuild - the single writer of coop_loWeapons
+//   client side -> exec ui/loadout/w<id>_s<n>.cfg, the exact cfg the weapon tile execs. It setas the
+//                  chips AND the coop_loA<n> resend recipe, so the pick now survives to the next map
+//                  the same way a real one does. loadout_deny:165 already uses this to restore a chip,
+//                  so it is a proven server->client route, and ui/loadout/* exec is whitelisted past
+//                  cg_servercmds_filter (bug-597).
+// bug-758 is satisfied by construction: nothing here is a quoted stufftext. One unquoted `exec` per
+// stufftext, and every quote lives INSIDE the shipped cfg where it is local and cannot be truncated
+// on the wire.
+//
+// GRENADE - deliberately NOT seeded, and the bug-1675 scope note saying grenades "are not part of"
+// the pick system is WRONG: slot 4 IS the grenade slot (roster slot "g", ui/loadout/w64_s4.cfg,
+// honoured at loadout_rebuild:368, and m2frag is in loadout_isUnlocked's free-starter list). The real
+// reason is that seeding it would be a silent cross-map REGRESSION: loadout_rebuild uses a picked
+// grenade INSTEAD of the map's defaults, and maps ship TWO start grenades (loadout.scr:16-24 frag +
+// stielhandgranate/bomba, :68-69 mills + M18 smoke). Seeding "64" would quietly delete everybody's
+// second grenade type on every map. That is a design call for the user, not a fix to slip in.
+//=========================================================================
+loadout_seedDefaults local.player:{
+	if( local.player == NULL ){ end }
+	//coop_loSeeded is what separates "never opened the armory" (seed) from "pressed USE MAP DEFAULT"
+	//(loadout_clear wiped the picks ON PURPOSE - never undo that). Once per life, either way.
+	if( local.player.flags["coop_loSeeded"] == 1 ){ end }
+	local.player.flags["coop_loSeeded"] = 1
+
+	//NIL first: .size on an unset flag is not safe (replace.scr:1248 guards the same way)
+	if( local.player.flags["coop_loWeapons"] != NIL ){
+		if( local.player.flags["coop_loWeapons"].size > 0 ){ end }	//they already chose - never overwrite
+	}
+	//...and if any SLOT already holds a pick, the join-time resend volley got here first (it fires at
+	//t+4s, first spawn is usually ~t+10s). Honour exactly what they picked - now that the seed writes
+	//the slot flags too, a seeded slot 1 would otherwise survive a real pick that only filled slot 2.
+	if( local.player.flags["coop_loSlotId1"] != NIL ){ end }
+	if( local.player.flags["coop_loSlotId2"] != NIL ){ end }
+	if( local.player.flags["coop_loSlotId3"] != NIL ){ end }
+	if( local.player.flags["coop_loSlotId4"] != NIL ){ end }
+
+	//roster ids: "01" = M1 GARAND (slot p), "48" = COLT M1911 (slot s). Both are unconditional
+	//free starters in loadout_isUnlocked:604/606, so the unlock gate inside loadout_setBody passes
+	//for a brand-new profile with no unlock record at all.
+	waitthread loadout_set local.player 1 "01" 1
+	if( local.player == NULL ){ end }
+	waitthread loadout_set local.player 3 "48" 1
+	if( local.player == NULL ){ end }
+
+	thread loadout_seedPushUI local.player
+	println( "^~^~^ LOADOUT seeded defaults for e" + local.player.entnum + " (garand slot1 + colt45 slot3, via commit path)" )
+}end
+
+//=========================================================================
+// Push the seeded picks to the CLIENT's armory chips, so the loadout tab shows what the player has.
+//=========================================================================
+// TWO VOLLEYS, t+5s and t+16s, copied from loadout_resend's proven timing rather than invented:
+// server->client commands sent while the client is still LOADING the map are dropped silently
+// (bug-595 diagnosis run found zero client-side execs for the whole boot), and per-player setup runs
+// well before the client is active. Double delivery is harmless - loadout_setBody:75 early-exits on
+// an identical re-pick, so the token the cfg fires back is a no-op the second time.
+//
+// The exec'd cfg ends in `vstr coop_loA<n>`, i.e. it re-sends the pick through the normal name bus.
+// That is intentional: it is the same round trip a real click makes, so if this half lands and the
+// server half somehow did not, the client's own token repairs it.
+//=========================================================================
+loadout_seedPushUI local.player:{
+	wait 5
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_loSeeded"] != 1 ){ end }
+	local.player stufftext ( "exec ui/loadout/w01_s1.cfg" )
+	local.player stufftext ( "exec ui/loadout/w48_s3.cfg" )
+
+	wait 11
+	if( local.player == NULL ){ end }
+	//a real pick may have landed in between - do not overwrite the player's own chips with the seed
+	if( local.player.flags["coop_loSlotId1"] != "01" ){ end }
+	local.player stufftext ( "exec ui/loadout/w01_s1.cfg" )
+	local.player stufftext ( "exec ui/loadout/w48_s3.cfg" )
+	println( "^~^~^ LOADOUT seed UI pushed for e" + local.player.entnum )
+}end

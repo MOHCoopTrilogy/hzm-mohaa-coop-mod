@@ -154,6 +154,8 @@ medkit_use local.player:{
 	}
 
 	local.player.flags["coop_medkit_in_use"] = 1
+	//[user 2026-08-10] play the self-heal on the TORSO ONLY so the legs are untouched.
+	local.player forcetorsostate COOP_SELFHEAL
 	local.start_origin = local.player.origin
 	// [user 07-10] wake the faded HUD the INSTANT the heal starts (before health ticks) so the player
 	// can watch their health fill. The cgame HUD-fade watches coop_hudPoke for a change (cg_drawtools.cpp).
@@ -190,6 +192,7 @@ medkit_use local.player:{
 		if( local.player == NULL ){ end }
 		if( local.player.flags["coop_isActive"] != 1 ){
 			local.player.flags["coop_medkit_in_use"] = NIL
+			if( isAlive local.player ){ local.player forcetorsostate STAND }
 			end
 		}
 		if( vector_length(local.player.origin - local.start_origin) > 15 ){
@@ -198,6 +201,7 @@ medkit_use local.player:{
 			ihuddraw_alpha  local.player 35 0
 			ihuddraw_string local.player 33 ""
 			local.player.flags["coop_medkit_in_use"] = NIL
+			if( isAlive local.player ){ local.player forcetorsostate STAND }
 			end
 		}
 		if( local.player.health < local.prev_health - 5 ){
@@ -207,6 +211,7 @@ medkit_use local.player:{
 			ihuddraw_alpha  local.player 35 0
 			ihuddraw_string local.player 33 ""
 			local.player.flags["coop_medkit_in_use"] = NIL
+			if( isAlive local.player ){ local.player forcetorsostate STAND }
 			end
 		}
 		if( local.heal_frames == 1 || local.heal_frames == 50 ){
@@ -230,6 +235,7 @@ medkit_use local.player:{
 
 	wait 0.1
 	local.player.flags["coop_medkit_in_use"] = NIL
+	if( isAlive local.player ){ local.player forcetorsostate STAND }
 	local.player playsound coop_exhale1
 	local.player playsound med_kit
 	local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )	// restore world SFX after self-revive
@@ -306,6 +312,9 @@ dbno_selfrevive local.player:{
 			ihuddraw_alpha  local.player 38 0
 			ihuddraw_string local.player 38 ""
 
+			//[user 2026-08-10] start the get-up: struggle onto the knees and hold there while the
+			//medkit is applied. DBNO_GETUP_KNEES rolls into DBNO_GETUP_HOLD on its own.
+			local.player forcelegsstate DBNO_GETUP_KNEES
 			while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 && local.player.useheld == 1 && local.cancelled != 1 ){
 				if( vector_length(local.player.origin - local.start_origin) > 10 ){
 					ihuddraw_string local.player 38 "Cannot move while applying health kit"
@@ -353,7 +362,7 @@ dbno_selfrevive local.player:{
 					local.player stoploopsound coop_dbno_breath3
 
 					local.player modheight "stand"
-					local.player forcelegsstate STAND
+					local.player forcelegsstate DBNO_GETUP_STAND	//was STAND: rise to the feet, then it exits to STAND itself
 					local.player health level.coop_health
 					local.player gore_reset	// HZM coop - gore tier 1: revived+healed = clean uniform
 
@@ -427,6 +436,18 @@ dbno_selfrevive local.player:{
 					//never collides with the one-primary rule; a no-op when already held). noWrap=1 - already
 					//inside the gametype-0 window.
 					local.player waitthread coop_mod/itemhandler.scr::coop_giveSidearmPick local.player 1
+					//[user 2026-08-11] SILENCED PISTOL SURVIVES A DBNO TOO. dbno_enter does a takeall, and the restore
+					//tiers above are EXCLUSIVE - registered inv > picks > map default > failsafe - so on a disguise map
+					//the silenced pistol was lost on every revive: it is ADDITIVE (level.coop_silencedOnSpawn), not part
+					//of coop_loWeapons, and the map-default tier that does list it never runs once a player has picks -
+					//which, since bug-1675/1678 seeds every new player, is everyone. Exactly the shape of bug-1204 one
+					//line above, so it is fixed the same way: re-issued unconditionally on top. A pistol is a SECONDARY
+					//weapon class so it cannot collide with the one-primary rule, and a re-give of a held weapon is a
+					//no-op. Already inside the gametype-0 window here, same as the sidearm re-give.
+					if( level.coop_silencedOnSpawn == 1 ){
+						local.player item "models/weapons/silencedpistol.tik"
+						local.player ammo "pistol" 40
+					}
 					waitthread coop_mod/main.scr::changeGameType 2 0	//[user 07-19] bug-912: restore team gametype after the revive weapon re-give
 					}	//[user 07-19] end coop_noWeapon weapon-give guard (papers-only disguise)
 					//[user 07-16] bug-625 / [user 07-19] bug-893: mission-critical map gear (bug-620,
@@ -458,6 +479,17 @@ dbno_selfrevive local.player:{
 					end
 				}
 				waitframe
+			}
+			//[user 2026-08-10] DBNO_GETUP cancel restore. The user: "you get stuck wherever you are in
+			//the new anim". This loop has FOUR exits - moved too far, released USE, no longer downed, or
+			//disconnected - and only the SUCCESS path inside it changes legs state (to DBNO_GETUP_STAND).
+			//Every other exit left the player frozen in the half-risen kneel, because DBNO_GETUP_HOLD
+			//self-transitions forever by design and nothing was putting them back down.
+			//So: if the channel ended and they are STILL downed, put them back on the floor.
+			//Guarded on coop_dbno_active so a successful revive - which clears that flag before reaching
+			//here - is never dragged back down.
+			if( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
+				local.player forcelegsstate DBNO_IDLE
 			}
 
 			if( local.cancelled == 1 ){
