@@ -293,6 +293,7 @@ xp_init:{
 	level.coop_xp_paraN = 0
 
 	thread xp_autosave_loop
+	thread xp_cover_used_loop
 }end
 
 
@@ -764,6 +765,14 @@ xp_ai_killed local.victim local.killer:{
 		}
 		local.i++
 	}
+
+	//[user 2026-08-17] These pay ALONGSIDE the one-bonus-per-kill chain above, exactly as
+	//assists already do - they are event bonuses, not kill classifications, so they must not
+	//compete with Headshot/Savior/etc for the single slot.
+	thread xp_first_blood local.killer
+	thread xp_streak_kill local.killer
+	//stamp for 'Wave Broken' - xp_wave_watch pays whoever downed the last reinforcement
+	if( local.victim.coop_xpClass == "reinf" ){ level.coop_xp_lastReinfKiller = local.killer }
 }end
 
 
@@ -827,6 +836,321 @@ xp_vehicle_killed local.killer:{
 	thread xp_award local.killer 10 "kills" "Vehicle Destroyed"
 }end
 
+
+//=========================================================================
+// [user 2026-08-17] XP SOURCE PACK. Four requested sources ALREADY EXISTED and are not duplicated
+// here: MG Gunner, damage assists and Guardian (killing an enemy engaging a downed teammate) all
+// live in xp_ai_killed's priority chain, and ammo-box resupply already pays the box owner in
+// ammobox.scr. What follows is only what was genuinely missing.
+//=========================================================================
+
+// Sum of player deaths - no new counter, player.scr already keeps coop_deaths per player.
+xp_teamDeaths:{
+	local.n = 0
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		local.d = local.p.flags["coop_deaths"]
+		if( local.d == NIL ){ continue }
+		local.n = local.n + local.d
+	}
+	end local.n
+}end
+
+xp_playersAlive:{
+	local.n = 0
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+// FIRST BLOOD - once per map, to whoever opens the account.
+xp_first_blood local.killer:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.killer == NULL ){ end }
+	if( level.coop_xp_firstBlood == 1 ){ end }
+	level.coop_xp_firstBlood = 1
+	thread xp_award local.killer 15 "valor" "First Blood"
+}end
+
+// KILL STREAK - kills without being hurt, paid at milestones only (paying every kill would just be
+// a second kill award). Deliberately NO new damage subscription: the streak breaks when health is
+// LOWER than at the previous kill, or when the death count moves. That misses a hit healed off
+// between kills - an accepted trade for zero per-frame cost and no new hook.
+xp_streak_kill local.killer:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.killer == NULL ){ end }
+	local.hp = local.killer.health
+	local.dd = local.killer.flags["coop_deaths"]
+	if( local.dd == NIL ){ local.dd = 0 }
+	if( local.killer.coop_xp_streak == NIL ){ local.killer.coop_xp_streak = 0 }
+	if( local.killer.coop_xp_streakHp != NIL && local.hp < local.killer.coop_xp_streakHp ){
+		local.killer.coop_xp_streak = 0
+	}
+	if( local.killer.coop_xp_streakD != NIL && local.dd != local.killer.coop_xp_streakD ){
+		local.killer.coop_xp_streak = 0
+	}
+	local.killer.coop_xp_streakHp = local.hp
+	local.killer.coop_xp_streakD  = local.dd
+	local.killer.coop_xp_streak   = local.killer.coop_xp_streak + 1
+	local.n = local.killer.coop_xp_streak
+	if( local.n != 5 && local.n != 10 && local.n != 15 && local.n != 20 && local.n != 25 ){ end }
+	local.lbl = "Killstreak x" + local.n
+	thread xp_award local.killer local.n "valor" local.lbl
+}end
+
+// REVIVING UNDER FIRE - a multiplier on the existing revive award, not a replacement. Called from
+// dbno.scr alongside the flat +10; pays only when live enemies are close enough to be shooting.
+xp_revive_underfire local.reviver:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.reviver == NULL ){ end }
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end }
+	local.near = 0
+	local.i = 1
+	while( local.i <= local.arr.size ){
+		local.a = local.arr[local.i]
+		local.i = local.i + 1
+		if( local.a == NIL ){ continue }
+		if( local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		if( vector_length( local.a.origin - local.reviver.origin ) > 700 ){ continue }
+		local.near = local.near + 1
+		if( local.near >= 2 ){ break }
+	}
+	if( local.near < 2 ){ end }
+	thread xp_award local.reviver 15 "revive" "Revive Under Fire"
+}end
+
+// PLACED COVER USED BY TEAMMATES - pays the DEPLOYER when someone else fights from their sandbags.
+// xp_nearDeployedCover answers a different question (is the KILLER near any cover, for Cover Kill),
+// so this walks the registry on coop_cover_owner instead. Capped per map, and one payment per
+// owner/user pair, so a teammate parked behind a bag is not an income stream.
+xp_cover_used_loop:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	while( 1 ){
+		wait 6
+		if( level.coop_cover_count == NIL ){ continue }
+		if( level.coop_xp_coverPay == NIL ){ level.coop_xp_coverPay = 0 }
+		if( level.coop_xp_coverPay >= 8 ){ continue }
+		if( $player == NULL ){ continue }
+		local.pi = 1
+		while( local.pi <= $player.size ){
+			local.p = $player[local.pi]
+			local.pi = local.pi + 1
+			if( local.p == NIL ){ continue }
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ continue }
+			local.ci = 1
+			while( local.ci <= level.coop_cover_count ){
+				local.vis = level.coop_cover_visual[local.ci]
+				local.own = level.coop_cover_owner[local.ci]
+				local.ci = local.ci + 1
+				if( local.vis == NIL ){ continue }
+				if( local.vis == NULL ){ continue }
+				if( local.own == NIL ){ continue }
+				if( local.own == NULL ){ continue }
+				if( local.own == local.p ){ continue }
+				if( vector_length( local.p.origin - local.vis.origin ) > 96 ){ continue }
+				local.key = "" + local.own.entnum + "_" + local.p.entnum
+				if( level.coop_xp_coverSeen[local.key] == 1 ){ continue }
+				level.coop_xp_coverSeen[local.key] = 1
+				level.coop_xp_coverPay = level.coop_xp_coverPay + 1
+				thread xp_award local.own 10 "support" "Cover Used"
+			}
+		}
+	}
+}end
+
+// SQUAD BONUS - scaled by players ALIVE when an objective completes (user's call). A full squad
+// crossing the line together is worth more than one survivor dragging it over.
+xp_squad_bonus:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.alive = waitthread xp_playersAlive
+	if( local.alive < 1 ){ end }
+	local.b = local.alive * 5
+	local.lbl = "Squad Bonus x" + local.alive
+	waitthread xp_team_award local.b "objective" local.lbl
+}end
+
+// OFFICER WAVE WINDOW. officer.scr has no wave-boundary event by design - its own header notes the
+// waves "merge into the general population" - so one is created here: opened at dispatch, closed
+// when the reinf population that appeared has drained to zero. reinf actors are already tagged
+// coop_xpClass = "reinf" at spawn, so no new tagging is needed.
+xp_countReinf:{
+	local.n = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end local.n }
+	local.i = 1
+	while( local.i <= local.arr.size ){
+		local.a = local.arr[local.i]
+		local.i = local.i + 1
+		if( local.a == NIL ){ continue }
+		if( local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		if( local.a.coop_xpClass != "reinf" ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+xp_wave_begin:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( level.coop_xp_waveOpen == 1 ){ end }
+	level.coop_xp_waveOpen = 1
+	level.coop_xp_waveDeaths = waitthread xp_teamDeaths
+	level.coop_xp_lastReinfKiller = NULL
+	thread xp_wave_watch
+}end
+
+xp_wave_watch:{
+	// let the wave actually arrive before counting, or it "clears" instantly at zero
+	wait 10
+	local.seen = 0
+	local.t = 0
+	while( local.t < 420 ){
+		wait 3
+		local.t = local.t + 3
+		local.n = waitthread xp_countReinf
+		if( local.n > 0 ){ local.seen = 1 }
+		if( local.seen == 1 && local.n == 0 ){ break }
+	}
+	level.coop_xp_waveOpen = 0
+	if( local.seen != 1 ){ end }
+	if( level.coop_xp_lastReinfKiller != NULL && level.coop_xp_lastReinfKiller != NIL ){
+		thread xp_award level.coop_xp_lastReinfKiller 15 "valor" "Wave Broken"
+	}
+	local.d = waitthread xp_teamDeaths
+	if( local.d == level.coop_xp_waveDeaths ){
+		waitthread xp_team_award 20 "valor" "Flawless Wave"
+	}
+}end
+
+// MISSION-END BONUSES - called from xp_summary so they land on the debrief card with everything
+// else. Par time is opt-in per map via coop_xp_parTime (seconds); 0/unset = no par, no bonus.
+xp_mission_bonuses:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( level.coop_xp_missionPaid == 1 ){ end }
+	level.coop_xp_missionPaid = 1
+
+	local.d = waitthread xp_teamDeaths
+	if( local.d == 0 ){
+		waitthread xp_team_award 50 "mission" "No Casualties"
+	}
+	if( level.coop_xp_dbnoEver != 1 ){
+		waitthread xp_team_award 30 "mission" "Nobody Went Down"
+	}
+	if( level.coop_alarmEver != 1 ){
+		waitthread xp_team_award 30 "mission" "No Alarms Raised"
+	}
+	local.par = getcvar "coop_xp_parTime"
+	if( local.par != "" ){
+		local.par = int( local.par )
+		if( local.par > 0 && level.time < local.par ){
+			waitthread xp_team_award 40 "mission" "Ahead of Schedule"
+		}
+	}
+}end
+
+//=========================================================================
+// [user 2026-08-17] STEALTH / INFILTRATION AWARDS - deliberately ONE label, not five.
+// The user flagged that the system is already complicated, so these share a single entry point
+// with the amount and bucket selected by a kind string. Adding the sixth stealth act later is one
+// `else if` here plus one call at the site, not a new label and a new wiring decision.
+//
+// Call sites (all four already existed as detected events; none of them paid anything):
+//   "contain"   bust.scr::coop_bustContained        - a body hidden and nobody saw it
+//   "papers"    itemhandler.scr                     - a guard accepted the squad's papers
+//   "radio"     maps/m6l2a.scr::coop_m6l2aRadioPlay - a sentry pulled off his post by the radio
+//   "blueprint" collectible.scr                     - a hidden blueprint recovered
+//=========================================================================
+xp_stealth_act local.player local.kind:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	if( local.player == NULL ){ end }
+	local.b   = 10
+	local.bkt = "support"
+	local.lbl = "Infiltration"
+	if( local.kind == "contain" ){
+		local.b = 25
+		local.bkt = "valor"
+		local.lbl = "Situation Contained"
+	} else if( local.kind == "papers" ){
+		local.b = 20
+		local.bkt = "support"
+		local.lbl = "Papers Accepted"
+	} else if( local.kind == "radio" ){
+		local.b = 15
+		local.bkt = "support"
+		local.lbl = "Radio Distraction"
+	} else if( local.kind == "papers2" ){
+		local.b = 30
+		local.bkt = "objective"
+		local.lbl = "Level 2 Papers"
+	} else if( local.kind == "blueprint" ){
+		local.b = 20
+		local.bkt = "objective"
+		local.lbl = "Blueprint Recovered"
+	}
+	thread xp_award local.player local.b local.bkt local.lbl
+}end
+
+//=========================================================================
+// [user 2026-08-17] ATTRIBUTION FALLBACK. Kill credit hung entirely on self.fact, which is written
+// ONLY by actorPainHandler - the PAIN hook. A blow that kills without raising pain leaves fact
+// absent or holding the PREVIOUS attacker, and the kill silently pays nothing. Measured live: of 26
+// kills, 20 paid and 6 did not (4 attributed to an Actor, 1 to World, 1 with no fact at all).
+//
+// The cure needs no new bookkeeping: actorPainHandler ALREADY keeps a per-player damage ledger on
+// the victim (coop_xp_dmg[entnum] / coop_xp_dmgT[entnum], and coop_xp_hp0 = health before the first
+// ledgered hit) for the assist system. So when fact fails, ask the ledger who actually did the work.
+//
+// The 34% share gate is what stops this stealing credit: a genuine ally or world kill, where a
+// player merely grazed the target, still pays nothing. 10s recency matches the assist window.
+//=========================================================================
+xp_resolveKiller local.victim:{
+	local.best = NULL
+	if( local.victim == NULL ){ end local.best }
+	if( $player == NULL ){ end local.best }
+	local.bestDmg = 0
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		local.e = local.p.entnum
+		local.d = local.victim.coop_xp_dmg[local.e]
+		if( local.d == NIL ){ continue }
+		local.t = local.victim.coop_xp_dmgT[local.e]
+		if( local.t == NIL ){ continue }
+		if( (level.time - local.t) > 10 ){ continue }
+		if( local.d <= local.bestDmg ){ continue }
+		local.bestDmg = local.d
+		local.best = local.p
+	}
+	if( local.best == NULL ){ end local.best }
+	local.hp0 = local.victim.coop_xp_hp0
+	if( local.hp0 != NIL && local.hp0 > 0 ){
+		local.share = (local.bestDmg * 100) / local.hp0
+		if( local.share < 34 ){
+			local.best = NULL
+		}
+	}
+	end local.best
+}end
 
 //=========================================================================
 // [user 08-07] +5 per enemy killed by a player-called air strike. self = the dead actor,
@@ -909,6 +1233,8 @@ xp_primary_done local.index:{
 	if( level.coop_xp_objPaid[local.index] == 1 ){ end }
 	level.coop_xp_objPaid[local.index] = 1
 	waitthread xp_team_award 20 "objective" "Objective"		// [user 07-08] objectives are worth 20 XP
+	//[user 2026-08-17] squad bonus, scaled by who is still ON THEIR FEET at the moment it lands
+	waitthread xp_squad_bonus
 }end
 
 
@@ -1091,6 +1417,10 @@ xp_summary:{
 	// width flip-flopped between both animations every tick. One debrief per map, period.
 	if( level.coop_xp_summaryRun == 1 ){ end }
 	level.coop_xp_summaryRun = 1
+
+	//[user 2026-08-17] no-casualties / nobody-downed / no-alarms / par-time land BEFORE the card
+	//is built, so the debrief totals include them instead of showing a number that grows after.
+	waitthread xp_mission_bonuses
 	local.t = getcvar "coop_xpSummaryTime"
 	if( local.t == "" ){ local.t = 28 }		// [user 07-11] even longer - the bar should linger well after it fills to this map's XP (was 16/18)
 	local.t = int( local.t )

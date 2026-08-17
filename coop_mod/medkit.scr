@@ -243,6 +243,199 @@ medkit_use local.player:{
 }end
 
 
+//=========================================================================
+//[user 2026-08-17] HEAL A TEAMMATE. Until now medkit_use was self-ONLY - it takes one player,
+//tests that player's health and heals that same player - so "healing a teammate" was not an
+//unhooked action, it was a mechanic that did not exist. The user asked for it, and asked that it
+//cost YOUR OWN medkit: the sacrifice is the point, so medkits stop being a personal resource and
+//become a squad one.
+//
+//Recipe copied from the two features that already work rather than invented (CLAUDE.md): the
+//proximity -> [USE] -> act loop is ammobox.scr's, and the hold/cancel/progress body is
+//medkit_use's directly above.
+//
+//HUD slots 158-160. They MUST be >= 100: the engine multiplies alpha by s_hudFadeAlpha for every
+//slot below 100 once the player is calm (cg_drawtools.cpp:651-653), and standing next to a hurt
+//teammate IS calm - which is exactly how the cover prompt, the ammo box prompt and the DBNO revive
+//channel each got moved. That is the sixth instance of the same trap; 158-173 was the free band.
+//
+//A DOWNED teammate is deliberately excluded - dbno.scr owns that interaction on its own channel
+//(slots 135-140), and offering both prompts on one body would be two systems fighting for a USE.
+//=========================================================================
+medkit_teamheal_monitor local.player:{
+	local.hintstate = 0
+
+	ihuddraw_virtualsize local.player 158 1
+	ihuddraw_align       local.player 158 center bottom
+	ihuddraw_font        local.player 158 "verdana-14"
+	ihuddraw_color       local.player 158 1 1 1
+	ihuddraw_rect        local.player 158 0 -52 0 0
+	ihuddraw_alpha       local.player 158 0
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+		local.f = 0
+		while( local.f < 5 ){
+			waitframe
+			local.f++
+		}
+		if( local.player == NULL ){ end }
+		if( local.player.flags["coop_isActive"] != 1 ){ end }
+
+		local.target = NULL
+		if( isAlive local.player && local.player.flags["coop_dbno_active"] != 1 && local.player.flags["coop_medkit_in_use"] != 1 ){
+			local.target = waitthread medkit_teamheal_pick local.player
+		}
+
+		if( local.target == NULL ){
+			if( local.hintstate != 0 ){
+				ihuddraw_alpha  local.player 158 0
+				ihuddraw_string local.player 158 ""
+				local.hintstate = 0
+			}
+			continue
+		}
+
+		local.kits = local.player.flags["coop_medkits"]
+		if( local.kits == NIL ){ local.kits = 0 }
+
+		if( local.kits < 1 ){
+			if( local.hintstate != 2 ){
+				ihuddraw_string local.player 158 "No medkits - cannot patch up your squadmate"
+				ihuddraw_alpha  local.player 158 0.55
+				local.hintstate = 2
+			}
+			continue
+		}
+
+		if( local.hintstate != 1 ){
+			local.nm = local.target.netname
+			if( local.nm == NIL ){ local.nm = "your squadmate" }
+			local.msg = "[USE] Patch up " + local.nm
+			ihuddraw_string local.player 158 local.msg
+			ihuddraw_alpha  local.player 158 0.85
+			local.hintstate = 1
+		}
+
+		if( local.player.useheld == 1 ){
+			ihuddraw_alpha  local.player 158 0
+			ihuddraw_string local.player 158 ""
+			local.hintstate = 0
+			waitthread medkit_teamheal local.player local.target
+		}
+	}
+}end
+
+//nearest OTHER player who is up, hurt, and standing close enough to work on
+medkit_teamheal_pick local.player:{
+	local.best = NULL
+	if( $player == NULL ){ end local.best }
+	local.bestd = 96
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		if( local.p == local.player ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( local.p.flags["coop_dbno_active"] == 1 ){ continue }
+		if( local.p.health >= level.coop_health ){ continue }
+		local.d = vector_length( local.p.origin - local.player.origin )
+		if( local.d >= local.bestd ){ continue }
+		local.bestd = local.d
+		local.best = local.p
+	}
+	end local.best
+}end
+
+medkit_teamheal local.healer local.target:{
+	if( local.healer == NULL ){ end }
+	if( local.target == NULL ){ end }
+	if( local.healer.flags["coop_medkit_in_use"] == 1 ){ end }
+	local.kits = local.healer.flags["coop_medkits"]
+	if( local.kits == NIL ){ local.kits = 0 }
+	if( local.kits < 1 ){ end }
+
+	local.healer.flags["coop_medkit_in_use"] = 1
+	local.healer forcetorsostate COOP_SELFHEAL
+	local.start_origin = local.healer.origin
+	local.healer stufftext ( "seta coop_hudPoke " + level.time )
+
+	ihuddraw_virtualsize local.healer 159 1
+	ihuddraw_align       local.healer 159 left bottom
+	ihuddraw_shader      local.healer 159 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.healer 159 0.12 0.12 0.12
+	ihuddraw_rect        local.healer 159 270 -55 100 6
+	ihuddraw_alpha       local.healer 159 0.8
+
+	ihuddraw_virtualsize local.healer 160 1
+	ihuddraw_align       local.healer 160 left bottom
+	ihuddraw_shader      local.healer 160 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.healer 160 0.1 0.9 0.1
+	ihuddraw_rect        local.healer 160 270 -55 0 6
+	ihuddraw_alpha       local.healer 160 0.9
+
+	ihuddraw_virtualsize local.healer 158 1
+	ihuddraw_align       local.healer 158 center bottom
+	ihuddraw_font        local.healer 158 "verdana-14"
+	ihuddraw_color       local.healer 158 1 1 1
+	ihuddraw_rect        local.healer 158 0 -52 0 0
+	ihuddraw_string      local.healer 158 "Patching up squadmate..."
+	ihuddraw_alpha       local.healer 158 1
+
+	local.frames = 0
+	local.prev_health = local.healer.health
+
+	while( local.frames < 100 ){
+		if( local.healer == NULL ){ end }
+		if( !isAlive local.healer ){ waitthread medkit_teamheal_abort local.healer ""; end }
+		if( local.healer.flags["coop_isActive"] != 1 ){ waitthread medkit_teamheal_abort local.healer ""; end }
+		if( local.target == NULL ){ waitthread medkit_teamheal_abort local.healer "Lost your patient."; end }
+		if( !isAlive local.target ){ waitthread medkit_teamheal_abort local.healer "Lost your patient."; end }
+		if( local.target.flags["coop_dbno_active"] == 1 ){ waitthread medkit_teamheal_abort local.healer "They went down - revive them instead."; end }
+		if( vector_length( local.healer.origin - local.start_origin ) > 15 ){ waitthread medkit_teamheal_abort local.healer ""; end }
+		if( vector_length( local.healer.origin - local.target.origin ) > 128 ){ waitthread medkit_teamheal_abort local.healer "They moved out of reach."; end }
+		if( local.healer.health < local.prev_health - 5 ){ waitthread medkit_teamheal_abort local.healer "Patch-up interrupted!"; end }
+		if( local.frames == 1 || local.frames == 50 ){ local.healer playsound coop_medkit_cloth }
+		ihuddraw_rect local.healer 160 270 -55 local.frames 6
+		local.frames++
+		local.prev_health = local.healer.health
+		waitframe
+	}
+
+	//it is YOUR medkit that is spent - that is the whole point of the mechanic
+	local.healer.flags["coop_medkits"] = local.healer.flags["coop_medkits"] - 1
+	local.target health level.coop_health
+	local.target gore_reset
+
+	waitthread medkit_teamheal_abort local.healer ""
+	local.healer playsound coop_exhale1
+	local.target playsound med_kit
+	local.nm = local.target.netname
+	if( local.nm == NIL ){ local.nm = "your squadmate" }
+	local.msg = "You patched up " + local.nm + "."
+	local.healer iprint local.msg 1
+	local.hn = local.healer.netname
+	if( local.hn == NIL ){ local.hn = "A squadmate" }
+	local.msg2 = local.hn + " patched you up."
+	local.target iprint local.msg2 1
+	thread coop_mod/xp.scr::xp_award local.healer 12 "revive" "Patched a Squadmate"
+	thread coop_mod/xp.scr::xp_revive_underfire local.healer
+}end
+
+//shared teardown - every exit from the heal loop runs through here so no slot is ever left lit
+medkit_teamheal_abort local.healer local.msg:{
+	if( local.healer == NULL ){ end }
+	ihuddraw_alpha  local.healer 158 0
+	ihuddraw_string local.healer 158 ""
+	ihuddraw_alpha  local.healer 159 0
+	ihuddraw_alpha  local.healer 160 0
+	local.healer.flags["coop_medkit_in_use"] = NIL
+	if( isAlive local.healer ){ local.healer forcetorsostate STAND }
+	if( local.msg != "" ){ local.healer iprint local.msg 1 }
+}end
+
 dbno_selfrevive local.player:{
 	local.medkits = local.player.flags["coop_medkits"]
 	if( local.medkits == NIL ){ local.medkits = 0 }

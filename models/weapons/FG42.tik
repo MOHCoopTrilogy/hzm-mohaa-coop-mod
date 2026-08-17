@@ -8,7 +8,20 @@ setup
 	// HZM revive: the vanilla "fg42" shader is UNDEFINED (nothing named it) -> the mesh rendered
 	// INVISIBLE. Point the surface straight at its own texture so it draws. (svt_lens/fg42cull
 	// surfaces don't exist in fg42.skd - single "fg42" surface on one worldbone - so they no-op.)
-	surface fg42 shader models/weapons/fg42/fg42
+	//[user 2026-08-17] "still invisible in my hand". The retail shader file defines BOTH fg42 and
+	//fg42cull, so the mesh has more than one surface, and naming only "fg42" left any other surface
+	//with no shader at all. "surface all" assigns every surface regardless of its name - the same
+	//form coop_stump_neck.tik uses - so nothing can be missed because we guessed a name wrong.
+	//[user 2026-08-17] Surfaces now match DaRKaNGeL's RE-RIGGED mesh (moh-db.com/mods/17867),
+	//which replaces retail's unusable one. Retail fg42.skd has ONE bone and NO tags, so it could
+	//not be skinned or carry a muzzle/eject point - that is why it was invisible no matter what
+	//we did to the shader. His has origin / FG42 / tag_barrel / tag_eject and real animation.
+	//His mod ships as a SHOTGUN REPLACEMENT; we take only the geometry and anims, so our shotgun
+	//is untouched and this works on AA/SH/BT because it rides the coop pak, not his.
+	surface fg42base   shader fg42
+	surface fg42barrel shader fg42
+	surface fg42clip   shader fg42
+	surface fg42lens   shader lens
 }
 $define sounddir sound/weapons
 
@@ -21,7 +34,16 @@ init
 	//========================================//
 
 		classname		Weapon
-		weapontype		rifle
+		//[user 2026-08-17] rifle -> mg. The complete 1P arm set for this gun ALREADY SHIPS
+		//(models/player/base/fps_anims_mg.txt defines fg42_idle/fire/reload/pullout/putaway/
+		//disabled, all pointing at real anims) but was unreachable: the only fg42 state hook lives
+		//in RELOAD_MG, entered via IS_WEAPONCLASS_ACTIVE "mg", and the engine's "FG 42" lookup sits
+		//inside the WEAPON_CLASS_MG branch of CG_GetAnimPrefixFromWeapon. As a rifle it fell through
+		//to WPREFIX_GARAND - Garand hands doing a clip-eject reload, which is exactly the defect the
+		//one public SH mod documents as "my character miss the clip".
+		//This CANNOT affect the StG 44: animation sets are read-only shared. mp44.tik keeps its own
+		//weapontype/weapongroup and is not modified by anything here.
+		weapontype		mg
 		name			"FG 42"
 		rank			230 230
 
@@ -152,46 +174,109 @@ holsterScale			1.0
 
 animations
 {
+	//[user 2026-08-17] Rebuilt on DaRKaNGeL's animated fg42.skc. My first pass replaced this block
+	//with a bare 'entry shoot' + sound and so DROPPED the muzzle flash and shell ejection - that was
+	//my regression, reported as "we're missing ejection rounds and muzzle flash too".
+	//
+	//These FX are worth having ONLY NOW: they all hang off tag_barrel / tag_eject, and retail's mesh
+	//had NEITHER tag (one bone, no tags) - so in vanilla these commands pointed at nothing. His
+	//re-rigged mesh adds origin / FG42 / tag_barrel / tag_eject, which is what makes them possible.
+	//Emitter parameters are copied verbatim from mp44.tik, the closest working weapon, so the FG42
+	//flashes and ejects exactly like the StG 44 rather than to hand-guessed numbers.
+	idle		fg42.skc
 
-	idle	fg42.skc
-//	reload	fg42.skc
-	reload	fg42.skc // this is the start of the reloading sequence
-	{
-		client
-		{
-			entry sound springfield_snd_reload_start
-		}
-	}
-	reload_single fg42.skc // this is the reload loop that loads in a single shell
-	{
-		client
-		{
-			entry sound springfield_snd_reload_single
-		}
-	}
-	reload_end fg42.skc
+	fire		fg42.skc
 	{
 		server
 		{
-			last idle
+			entry shoot
 		}
 		client
 		{
-			entry sound springfield_snd_reload_end
-		}
-	}
-	rechamber	fg42.skc
-	{
-		client
-		{
-			entry sound springfield_snd_bolt item
-			20 tagspawn tag_eject 1024
+			entry stopaliaschannel fg42_snd_fire
+			entry sound fg42_snd_fire
+
+			entry viewkick 	    -2.1 -2.1    -0.2 0.05   3.4  "T"   12 0.2 2.2
+
+			entry tagdlight tag_barrel 0.25 0.2 0.15 150 0.11
+			entry tagspawnlinked tag_barrel
+			(
+				count 1
+				model models/fx/muzflash.tik
+				color 1.00 1.00 1.00
+				scale 0.60
+				life 0.05
+				offsetalongaxis -3 0 0
+				fade
+				randomroll
+			)
+
+			entry tagspawnlinked tag_barrel
+			(
+				count 1
+				model muzsprite.spr
+				alpha 0.70
+				color 1.00 1.00 1.00
+				scale 0.60
+				life 0.05
+				offsetalongaxis 1 0 0
+				fade
+				randomroll
+			)
+
+			entry tagspawnlinked tag_barrel
+			(
+				count 1
+				model corona_util.spr
+				color 1.00 1.00 1.00
+				scale 0.10
+				life 0.05
+				scalerate 11.00
+				fade
+				randomroll
+			)
+
+			entry commanddelay 0.01 tagspawn tag_eject
+			(
+				spawnrate 1
+				model vsssource.spr
+				alpha 0.30
+				color 0.50 0.50 0.50
+				spritegridlighting
+				scale 0.10
+				life 0.30
+				scalerate 10.00
+				velocity 60.00
+				randvel range 20 -60 crandom -40 range 20 -60
+				friction 5.00
+				fade
+				randomroll
+			)
+
+			entry tagspawn tag_barrel
+			(
+				spawnrate 1.00
+				model vsssource.spr
+				alpha 0.40
+				color .70 .70 .70
+				spritegridlighting
+				scale 0.45
+				life 0.20
+				scalerate 10.00
+				velocity 200.00
+				offsetalongaxis 10 0 0
+				friction 6.00
+				fade
+				randomroll
+			)
+
+			entry commanddelay 0.1 tagspawn tag_eject
 			(
 				spawnrange 2048
 				count 1
 				model models/ammo/rifleshell.tik
 				scale 1.0
-				velocity 70
+				velocity 50
 				randvel crandom 10 crandom 10 random 20
 				emitterangles 0 0 0
 				avelocity crandom 90 crandom 90 0
@@ -205,113 +290,23 @@ animations
 			)
 		}
 	}
-	fire	fg42.skc
+
+	//[user 2026-08-17] "there's also not a sound when pulling back the rail on reloading". The block
+	//only played one sound on entry, so the charging handle was silent. Frames 20/40 are where his
+	//animation hides and restores the magazine, so the rail pull sits around frame 30 - a bolt sound
+	//there lines up with the motion. Uses an existing alias; none of his .wav files were taken.
+	reload		fg42.skc
 	{
 		server
 		{
-			entry shoot
+			20 surface fg42clip +nodraw
+			40 surface fg42clip -nodraw
+			last idle
 		}
 		client
 		{
-			entry stopaliaschannel springfield_snd_fire
-			entry sound springfield_snd_fire
-
-			// By now, the server has already fired the weapon, so it's
-			// ok to apply the view kick apon entry to avoid problems
-			// with multiple application on single frame animations.
-
-			////////////////////////////////////////////////////////////////////////////////////////
-			// View Kicking
-			//
-			// View Kicking works based on the assumptions that every weapon has its own tendencies to kick in
-			// a paticular fashion. In MOH we call then scatter patterns. Currently we have 2 scatter patterns which
-			// will be explained.
-			// Scatter Patterns:
-			// "V" - the cone. The longer you shoot the more random your shots will be in the horizontal axis.
-			// "T" - the T shape. The gun has a tendancy to push in a paticular direction.
-			//
-			//
-			//             		+-------------------------------------------- Scatter Pitch Min
-			//              		|    +--------------------------------------- Scatter Pitch Max
-			//              		|    |       +------------------------------- Scatter Yaw Min
-			//             		|    |       |   +--------------------------- Scatter Yaw Max
-			//             		|    |       |   |     +--------------------- The Recentering speed in degrees per second
-			//              		|    |       |   |     |    +---------------- The Scatter Pattern
-			//              		|    |       |   |     |    |     +---------- The absolute pitch min/max
-			//              		|    |       |   |     |    |     |  +------- The absolute yaw min/max
-			//              		|    |       |   |     |    |     |  | +----- This is the pitch at which you loose all
-			//              		|    |       |   |     |    |     |  | |      control of the weapon and its behavior is
-			//             	 	|    |       |   |     |    |     |  | |      purely random.
-			//				V    V       V   V     V    V     V  V V
-			entry viewkick 	     -4.5 -5.0    -1.0 1.0   6  "T"     8  8 8
-
-
-//			entry viewkick -4.5 -5.0   -1.0 1.0 //original
-
-			// muzzle flash
-//			entry tagdlight tag_barrel 0.25 0.2 0.05 180 0.11
-			entry tagdlight tag_barrel 0.3 0.25 0.175 175 0.2 -1.0 -0.75 -0.2
-			entry tagspawnlinked tag_barrel
-			(
-				count 1
-				model models/fx/muzflash.tik
-				color 0.00 0.00 1.00
-				scale 0.07
-				life 0.01
-				velocity 300.00
-				offsetalongaxis 3 0 0
-				alignstretch 0.08
-				randomroll
-			)
-
-			entry tagspawnlinked tag_barrel
-			(
-				count 1
-				model muzsprite.spr
-				color 1.00 1.00 1.00
-				scale 0.09
-				life 0.04
-				offsetalongaxis 4 0 0
-			)
-
-			entry commanddelay 0.020 tagspawn tag_barrel
-			(
-				spawnrate 1.00
-				model vsssource.spr
-				count 1
-				alpha 0.10
-				color 1.00 1.00 1.00
-				spritegridlighting
-				scale 0.09
-				life .9
-				scalerate 23.00
-				velocity 429.00
-				accel 0.00 20.00 30.00
-				friction 2.00
-				fade
-				offsetalongaxis random 4 0 0
-			)
-
-			entry tagspawn tag_barrel
-			(
-				count 1
-				scale .7
-				model models/fx/snipesmoke.tik
-			)
-
-			// smoke puff
-//			entry commanddelay 0.05 tagspawn tag_barrel
-//			(
-//				volumetric
-//				model gun			// sets the type of smoke
-//				life 10				// amount of smoke
-//				scale 1.5			// radius
-//				alpha 0.4			// density
-//				color 0.7 0.7 0.7		// RBG color of the smoke
-//				velocity 2			// base velocity away from the surface
-//				randvelaxis random 6 0 0	// velocity offset
-//				offsetalongaxis random 4 0 0	// positional offset
-//			)
+			entry sound fg42_snd_reload
+			30 sound fg42_snd_bolt
 		}
 	}
 }
