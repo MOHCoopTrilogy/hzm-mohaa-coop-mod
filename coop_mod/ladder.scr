@@ -65,6 +65,41 @@ main local.origin local.angle local.height local.style:{
 	local.ladder.offset = 14	// hands-to-ladder distance; > 18 and players cannot climb (source note)
 	waitthread ladder_track local.idx local.ladder
 
+	//[bug-1839] THE CLIMB VOLUME. The beams above are only the LOOK. Vertical movement comes from
+	//PM_CLIMBWALL, and bg_pmove only drives it when a MASK_LADDER trace finds a real FuncLadder -
+	//player_conditionals.cpp:1598 does an unchecked downcast to FuncLadder after that trace, which
+	//is why nothing else may carry CONTENTS_LADDER. Without one the player latches on (the torso
+	//state and legs_state_using_ladder both set correctly) and then never rises: measured across
+	//four attempts as LADDERCLIMB peak == start, latchframes=0, with 128u of ladder above.
+	//
+	//bug-1412 already built the engine side for exactly this - EV_FuncLadder_CoopBox falls back to
+	//SOLID_BBOX when there is no inline brush model, since a script-spawned ladder never has one.
+	//That work and this script (bug-1415) were simply never joined up.
+	//
+	//The facing yaw must point OUT from the wall: CanUseLadder dots the user's facing against
+	//m_vFacingDir. local.angle is the yaw players face WHILE CLIMBING, i.e. into the wall, so the
+	//ladder's own facing is the opposite.
+	//[bug-1844] DEFAULT OFF. Adding this volume is what stopped build-mode ladders working:
+	//the user had one that climbed PERFECTLY, built by this script BEFORE bug-1839 added the
+	//func_ladder - their session's log carries exactly one climbvolume line, and it is the
+	//scripted ladder's. After the change: "Now I can't climb either of the two ladders", with
+	//the scripted one spawning at their exact position, yaw and height. A real FuncLadder makes
+	//the engine set m_pLadder and run its own PositionOnLadder/tweakladderpos every frame,
+	//which fights the placement this script does by hand. Known-good behaviour is WITHOUT it.
+	//coop_ladderVolume 1 re-enables it for A/B without a rebuild.
+	local.wantvol = getcvar( "coop_ladderVolume" )
+	local.face = local.angle + 180
+	while( local.face > 360 ){ local.face = local.face - 360 }
+	local.climb = NULL
+	if( local.wantvol == "1" ){ local.climb = spawn func_ladder }
+	if( local.climb != NULL ){
+		local.climb.origin = local.ladder.origin
+		local.climb setsize local.setsize1 local.setsize2
+		local.climb coop_ladderbox local.face
+		waitthread ladder_track local.idx local.climb
+		println( "^~^~^ LADDER climbvolume at " + local.climb.origin + " facing " + local.face )
+	}
+
 	// solid clip so the rails are not walked through where there is no wall behind them
 	local.clip = waitthread solidclip local.origin local.setsize1 local.setsize2 local.angle
 	waitthread ladder_track local.idx local.clip
@@ -142,11 +177,40 @@ ladder:{
 //=========================================================================
 status_check local.ladder:{
 	local.team = self.dmteam
+	//[bug-1835] measure the climb instead of guessing at it. Two ladder fixes have now been
+	//shipped on reasoning alone (yaw/height, then a 22u standoff) and the user still reports
+	//"I can start the climb up but then it wont climb any futher up". This prints where the
+	//climb actually stopped relative to the ladder's own base and top, which separates "never
+	//left the bottom" from "stalled mid-rung" from "reached the top and could not dismount".
+	local.z0 = self.origin[2]
+	local.zpeak = local.z0
+
+	//[bug-1836] WAIT FOR THE LATCH. The caller does "forcetorsostate GET_ON_LADDER" and starts this
+	//thread in the SAME frame, but legs_state_using_ladder is set by that state's entrycommands
+	//(player_Torso.st:3252 -> ladder_state.scr "ON_LADDER"), which do not run until the state
+	//actually applies. So the loop below evaluated the flag while it was still 0, exited on its
+	//FIRST test, and the cleanup immediately forced STAND - cancelling the climb the instant it
+	//began. Measured: LADDERCLIMB start=-336.759 peak=-336.759, i.e. not one unit of height across
+	//three attempts, with base=-328 top=-200. Anything timing-dependent like this also explains why
+	//the ladder appeared to work intermittently in the past.
+	local.wait = 0
+	while( self.legs_state_using_ladder != 1 && local.wait < 20 ){
+		local.wait = local.wait + 1
+		waitframe
+	}
+	if( self == NULL ){ end }
+
 	while( isalive self && self.dmteam == local.team && self.dead != 1 && self.legs_state_using_ladder == 1 ){
 		self.angle = local.ladder.angle
+		local.znow = self.origin[2]
+		if( local.znow > local.zpeak ){ local.zpeak = local.znow }
 		waitframe
 	}
 	if( self != NULL ){
+		local.zbase = local.ladder.origin[2]
+		local.ztop = local.zbase + local.ladder.height
+		local.zend = self.origin[2]
+		println( "^~^~^ LADDERCLIMB start=" + local.z0 + " peak=" + local.zpeak + " end=" + local.zend + " base=" + local.zbase + " top=" + local.ztop + " latchframes=" + local.wait )
 		self.climbing_ladder = 0
 		self.origin += ( 0 0 10 )	// hop off the top cleanly instead of re-grabbing (source)
 		if( isalive self && self.dmteam != "spectator" && self.dead != 1 ){ self forcetorsostate STAND }

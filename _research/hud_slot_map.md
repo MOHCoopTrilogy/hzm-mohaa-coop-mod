@@ -67,6 +67,7 @@ import struct.
 | 145-147 | **take-cover prompt** | cover.scr | moved from 40-44 (fade) |
 | 148 | **ammo box prompt** | ammobox.scr | moved from 45-47 (fade) |
 | 149 | **Phase C outcome banner** — "Situation Contained. / Situation Escalated. Leave the Area Immediately." | bust.scr | one banner, two texts; exactly one of them ever fires, so they share |
+| 175-178 | **church hold bar** (m3l3 objective #6) | maps/M3L3.scr | frame 175, track 176, fill 177, label 178. Moved off 128-130, which belong to xp.scr's debrief list |
 | 150-155 | challenge service-record chrome | challenges.scr | menu/lobby-time only |
 | 156-173 | challenge SR row names | challenges.scr | **computed** `156 + local.r` (:2465, :2568). Shares 156-173 with the mission-time objectives panel, never concurrent |
 | 174 | challenge SR footer | challenges.scr, lobbyui.scr | |

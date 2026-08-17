@@ -652,6 +652,11 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//actors that never come through actorHandler.
 	if( self.flags["coop_inActorArray"] == 1 ){ end }
 	self.flags["coop_inActorArray"] = 1
+	//[user 2026-08-14, bug-1810] When this actor entered the world, as coop sees it. Read by
+	//bust.scr::coop_bustWitnessed so a man who materialised DURING a contain cannot be counted as
+	//having watched it. Stamped at both registration sites so map actors and late spawns alike
+	//carry one; map actors register during init, so theirs is effectively zero.
+	self.coop_regT = level.time
 
 	local.index = level.coop_actorArray[group.team].size + 1
 	group.actor = self
@@ -675,6 +680,7 @@ coop_ensureInArray:{
 	local.t = self.team
 	if( local.t == NIL || local.t == "" ){ end }
 	self.flags["coop_inActorArray"] = 1
+	self.coop_regT = level.time		//[user 2026-08-14, bug-1810] see the stamp in actorHandler above
 	local.index = level.coop_actorArray[local.t].size + 1
 	level.coop_actorArray[local.t][local.index] = self
 	if( getcvar( "coop_aggroDebug" ) == "1" ){
@@ -1191,9 +1197,35 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//den_alarm_12a is real, retail, already scoped "m e t" (BT-compatible out of the box), has 11
 	//wav takes under sound/dialogue/Generic/G/sighted/ for natural variety, and is semantically the
 	//right category - an enemy voicing that it has spotted its target.
-	local.enemy say den_alarm_12a
-	local.enemy.enablePain = 1
+	//[user 2026-08-14, bug-1808] LATCH BEFORE SPEAKING, AND LET ONLY ONE MAN SHOUT.
+	//The spotted-callout used to fire here unconditionally, and the player heard German chatter
+	//every single time (397 in one session). Two causes, both fixed here:
+	// 1. RACE. coop_isAttacking was set on the line BELOW the say, and every aggro path reaches
+	//    this label via `thread`, so several callers could enter for the SAME actor in one frame,
+	//    all see an unset flag, and all shout. Latching first closes that window. It cannot be
+	//    latched at the top of the label instead - the stealth check above can still `end`, and
+	//    marking a blocked actor as attacking would be a real behaviour change.
+	// 2. CHORUS. Aggro propagates through sentientIsSeen/sentientIsHeard, so a whole squad
+	//    acquires together and every man announced it at once. One voice per few seconds reads as
+	//    a soldier calling contact; twelve at once reads as a bug. The global gate keeps the first
+	//    man's line and drops the echo.
+	//The latch is one-way for the actor's lifetime (nothing clears it anywhere), so an actor
+	//announces on first acquisition only - which is what the line means.
+	local.spoke = local.enemy.flags["coop_isAttacking"]
 	local.enemy.flags["coop_isAttacking"] = game.true
+
+	local.voOk = 0
+	if( local.spoke != game.true ){
+		local.voOk = 1
+		if( level.coop_spotVOt != NIL ){
+			if( ( level.time - level.coop_spotVOt ) < 3 ){ local.voOk = 0 }
+		}
+	}
+	if( local.voOk == 1 ){
+		level.coop_spotVOt = level.time
+		local.enemy say den_alarm_12a
+	}
+	local.enemy.enablePain = 1
 	//[user 2026-08-10] Step 3 item 4: attackENTITY when we have a real target. `attackplayer` calls
 	//Actor::ForceAttackPlayer, which sets m_bForceAttackPlayer - a ONE-WAY latch cleared only in the
 	//Actor constructor (actor.cpp:3092/:9339). EnemyIsDisguised() returns false unconditionally
@@ -1540,6 +1572,23 @@ addKillToPlayer:
 if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread aihandler/addKillToPlayer->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	waitframe
 	if (!self){ end }
+
+	//[user 2026-08-17] "i feel like im not getting xp for all of my kills". Kill credit hangs
+	//entirely on self.fact, and self.fact is written ONLY by actorPainHandler - the PAIN hook. A
+	//blow that kills without raising pain therefore leaves fact absent or holding the PREVIOUS
+	//attacker, and the kill silently pays nothing. This measures how often that happens and what
+	//the attribution actually was, so the fix is aimed rather than guessed. Unconditional on
+	//purpose: a cvar-gated probe has already cost two inconclusive runs this session (bug-1852).
+	local.dbgWho = "none"
+	if( self.fact ){
+		if( self.fact.attacker ){ local.dbgWho = self.fact.attacker.classname }
+		else { local.dbgWho = "fact-no-attacker" }
+	}
+	else { local.dbgWho = "no-fact" }
+	local.dbgMod = "n/a"
+	if( self.fact ){ local.dbgMod = self.fact.meansofdeath }
+	println( "^~^~^ XPKILL victim=" + self.targetname + " attributed=" + local.dbgWho + " mod=" + local.dbgMod )
+
 	if (self.fact && self.fact.attacker && self.fact.attacker.classname == "Player"){
 		self.fact.attacker addkills 1
 		//[user 07-17] DDA kill tap (own counter - coop_xp_teamkills is XP-gated; director.scr windows this)

@@ -21,6 +21,32 @@ main:{
 //=========================================================================
 	level.coop_aaMap = 1						//chrissstrahl - let global scripts know this is a AA level
 	waitthread coop_mod/main.scr::main 		//chrissstrahl - start coop mod extensions
+	//[user 2026-08-16, bug-1824] church defense: dev entry + the ladder marker. The phase is NOT
+	//on the objective chain yet - start it with `set coop_chStart 1` so it can be tested alone.
+	if( level.gametype != 0 ){ thread coop_churchWatch }
+	thread coop_baked_0816
+	//[bug-1832] BACK at map load. Moved to phase start on a misread of "the object over the barbed
+	//wire spawns in" - that object is coop_churchWireBoard, which was ALREADY phase-gated and sits
+	//1900u away at the wire; this marker is the wall crossing, 4016 -967, and hiding it left the
+	//user with no way over. The crossing has to be visible BEFORE the defense it leads to.
+	//[user 2026-08-16] The officer must NOT drop a signal smoke on this map: the smoke IS the
+	//objective item here, and a second one off the boss would read as the objective pickup and
+	//send players to the wrong place. Binoculars are untouched. He stays a SIDE objective, tied
+	//to nothing in the church chain.
+	level.coop_officer_smoke_drop = 0
+
+	//[user 2026-08-16] The ladder is retired as the crossing ("forget the ladder itself"). The
+	//route is now the baked heavy_pipe ramp at ( 3875 -1078 -277 ), which you walk up - so there is
+	//nothing to place and nothing to interact with, and the garrison has to be woken by ARRIVAL
+	//instead of by an interaction. coop_churchLadderMarker is left in the file but unthreaded.
+	if( level.gametype != 0 ){ thread coop_churchApproach }
+	if( level.gametype != 0 ){ thread coop_churchNoVis }
+	if( level.gametype != 0 ){ thread coop_churchSmokeMarker }
+	if( level.gametype != 0 ){ thread coop_churchExplosives }
+	if( level.gametype != 0 ){ thread coop_churchFlakSetup }
+	if( level.gametype != 0 ){ thread coop_churchProps }
+	if( level.gametype != 0 ){ thread coop_churchHoldLine }
+	if( level.gametype != 0 ){ thread coop_churchObjectives }
 	level.coop_weatherTheme = "rain"			//HZM coop - dynamic weather: Normandy town
 	level.coop_devTest = 0						//chrissstrahl - set to 0 once done testing
 	
@@ -303,8 +329,17 @@ main:{
 	//exactly, and the once-key m1 it sets keeps the later count re-adds quiet.
 	if( level.gametype != 0 ){ thread coop_objToastStart }
 	//===INITIALIZE OBJECTIVES
-	waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer1.origin
-	thread global/objectives.scr::current_objectives 1
+	//[user 2026-08-16, bug-1819] SEVEN-STAGE OBJECTIVE CHAIN (coop only).
+	//Retail ships ONE objective and pushes it ACTIVE at map init, so the compass points at the
+	//nebelwerfer finale from the first second of the mission - past the halftrack, the town, the
+	//Tiger and the church. In coop this now runs as a chain; SP is left byte-identical.
+	//[user 2026-08-17] "can we take slot 1 from retail? that should be the very last objective".
+	//SP keeps its map-init push; coop does NOT announce the Nebelwerfers here at all - the chain owns
+	//slots 1-5 and scene7_objective_assignment raises slot 6 when the finale actually begins.
+	if( level.gametype == 0 ){
+		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer1.origin
+		thread global/objectives.scr::current_objectives 1
+	}
 	thread scene0
 
 	//[200] Smithy - OK, make this work properly in coop
@@ -436,6 +471,11 @@ end
 
 //==="CHURCH BATTLE" ***//
 scene6:
+	//[user 2026-08-16] RE-ENTRY GUARD. This is now reachable from TWO places: the BSP trigger_once
+	//on the original approach, and the ladder crossing (coop_churchLadderMarker). Threading the
+	//initializers twice would double every spawn loop.
+	if( level.coop_scene6Started == 1 ){ end }
+	level.coop_scene6Started = 1
 //	centerprint "SCENE 6: The Church Battle (dev text)"
 	thread quick_farplane_far
 
@@ -662,6 +702,43 @@ halftrack_drive:
 end
 
 //=========================================================================
+// Move the halftrack's aim point around its target so bursts walk instead of tracking dead-on.
+// Range-scaled like the engine turret wander, and it follows the player so the gun still leads you.
+// coop_htAimOff = world units of error per 1000u of range; 0 pins it back on the man.
+halftrack_aim_wander local.wob local.player:{
+	local.off = 130
+	local.c = getcvar( "coop_htAimOff" )
+	if( local.c != "" ){
+		if( local.c != "0" ){ local.off = int( local.c ) }
+	}
+	while( local.wob != NULL ){
+		if( local.player == NULL || !isAlive local.player ){
+			local.player = exec coop_mod/replace.scr::player_closestTo local.wob
+		}
+		if( local.player != NULL && local.player != NIL ){
+			local.d = vector_length( local.player.origin - local.wob.origin )
+			local.rng = local.d / 1000
+			if( local.rng < 0.35 ){ local.rng = 0.35 }
+			local.sx = randomint 200
+			local.sy = randomint 200
+			local.sz = randomint 100
+			local.sx = local.sx - 100
+			local.sy = local.sy - 100
+			local.sz = local.sz - 50
+			local.ex = local.sx * local.off
+			local.ex = local.ex / 100
+			local.ey = local.sy * local.off
+			local.ey = local.ey / 100
+			local.ez = local.sz * local.off
+			local.ez = local.ez / 100
+			local.jit = ( local.ex local.ey local.ez )
+			local.jit = local.jit * local.rng
+			local.wob.origin = local.player.origin + local.jit
+		}
+		wait 0.9
+	}
+}end
+
 halftrack_mg_targeting:{
 //=========================================================================
 //===Make the mg42 target the script_origins bound to the player to simulate near-misses for some amount of time, then go for the player
@@ -708,12 +785,48 @@ halftrack_mg_targeting:{
 	}
 	
 	//println "Aiming for PLAYER!!!!!" 	//[200] chrissstrahl - stop console spam
-	self setaimtarget group.head 		//[200] Smithy - aim at head instead
+	//[user 2026-08-17] "halftracks accuracy is too high similar to mg42s". Widening the cone alone
+	//was already tried (40 -> 75) and is still not enough, for the same reason it was not enough on
+	//the church MG42s: SPREAD IS NOT ACCURACY. This mount aims at group.head - a head-tracking
+	//origin - so every burst is a cone centred on the player's skull no matter how wide it is.
+	//In coop aim at the MAN instead; SP keeps the authored head-tracking behaviour.
+	if( level.gametype != 0 ){
+		//[user 2026-08-17] "adjust the halftrack to work the same way i made mg42s work" - i.e. a
+		//WANDERING AIM POINT, not just a wider cone. This mount cannot use coop_mg42AiAimOff (that
+		//lives in the engine AI turret path; this one is script-driven via setaimtarget), so the
+		//same idea is built the way THIS map already does it: aim at a script_origin and move it.
+		//Retail invented that idiom right here - $playertarget_front1/2 are its deliberate SP
+		//"near miss" points - so this is the map's own recipe applied for the whole engagement
+		//instead of only the first two seconds.
+		local.wob = spawn script_origin
+		local.wob.origin = local.player.origin
+		self setaimtarget local.wob
+		thread halftrack_aim_wander local.wob local.player
+	} else {
+		self setaimtarget group.head 		//[200] Smithy - aim at head instead
+	}
 
 	//===*DIFFICULTY* SELECTOR
 	local.bulletdamage = 50
 	local.bulletspread = 40
-	
+
+	//[user 2026-08-14] COOP SAT ON THE *HARDEST* SETTING BY ACCIDENT.
+	//These two lines are the SP-hard profile; the skill branches below only ever run when
+	//gametype == 0, so coop silently inherited hard (spread 40) while SP medium gets 80 and SP
+	//easy 90. A coop squad was therefore facing a MORE accurate gunner than any single-player
+	//difficulty, from a mount that tracks group.head. Sit coop just inside SP-medium: still
+	//suppressive and still worth taking cover from, but it no longer out-shoots every SP skill.
+	//Tune here if it reads too soft in play - damage is deliberately left alone, the complaint
+	//was accuracy, and 750 max health already absorbs the per-bullet number.
+	if( level.gametype != 0 ){
+		local.bulletspread = 110
+		//live-tunable, same as the church guns: set coop_htSpread <n>
+		local.hs = getcvar( "coop_htSpread" )
+		if( local.hs != "" ){
+			if( local.hs != "0" ){ local.bulletspread = int( local.hs ) }
+		}
+	}
+
 	if(level.gametype == 0){ //chrissstrahl - do only in sp
 		if (level.skill == "1"){
 			local.bulletdamage = 30
@@ -757,9 +870,24 @@ halftrack_mg_targeting:{
 		
 		if (vector_within local.player $halftrack 1400){ //[200] Smithy - tweaked (original: 2300) so we can get closer and pick up zooka
 			//println "SUPER POWERFUL MODE" //[200] chrissstrahl - stop console spam
-			self bulletdamage 5000
-			self bulletspread 10 10
-		}else{			
+			//[user 2026-08-14] SP KEEPS ITS ONE-SHOT; COOP DOES NOT.
+			//This close-range branch fired bulletdamage 5000 / bulletspread 10 at group.head, i.e.
+			//a near-pinpoint headshot for ~7x a coop player's 750 max health, for EVERY player
+			//inside 1400 units. In single player that is the intended scripted panic moment and it
+			//is survivable because there is one of you behind cover. In coop it deletes the whole
+			//squad the instant anyone pushes toward the panzerschreck - which is exactly the
+			//approach the 2300->1400 tweak above was made to encourage.
+			//Widened rather than merely weakened: spread is the accuracy lever the gunner needed,
+			//and at close range a given spread converges on the target, so keeping the felt
+			//accuracy down means going WIDER here than at distance, not tighter.
+			if( level.gametype == 0 ){
+				self bulletdamage 5000
+				self bulletspread 10 10
+			}else{
+				self bulletdamage 60
+				self bulletspread 65 65
+			}
+		}else{
 			self bulletdamage local.bulletdamage
 			self bulletspread local.bulletspread local.bulletspread
 		}
@@ -1404,7 +1532,24 @@ end
 
 //============================================================//
 
+scene3_machineguns_cooptune:{
+	wait 2
+	waitthread coop_churchMgTune $scene3_mg1
+	waitthread coop_churchMgTune $scene3_mg2
+	waitthread coop_churchMgTune $scene3_mg3
+	waitthread coop_churchMgTune $scene3_mg4
+	waitthread coop_churchMgTune $scene3_mg5
+	println "^~^~^ CHMG town nests tuned"
+}end
+
 scene3_machineguns:
+	//[user 2026-08-17] "the mg42s in town also need the same treatment as the church mg42s too".
+	//These five run through mg42_active (a scripted nest with its own aim offsets) rather than the
+	//engine AI turret path, so coop_mg42AiAimOff never reached them - but their TIK damage and cone
+	//are the same problem the church guns had. Same tune, same live cvars (coop_chMgDmg /
+	//coop_chMgSpread), applied once the nests are up.
+	if( level.gametype != 0 ){ thread scene3_machineguns_cooptune }
+
 	//===Power up the machineguns along the main street
 	if (level.sysconfig == "0"){	
 		$scene3_mg1 thread global/mg42_active.scr::mg42 2200
@@ -2582,9 +2727,18 @@ scene4_tank_targeting:
 	//self is $scene4_tank
 	while (isAlive self){
 	
+		//[user 2026-08-15, bug-1817] THE TRIGGER INDEX WAS FROZEN AT 1.
+		//Retail tests a DIFFERENT volume per attack - tankshot1_trigger -> attack1, tankshot2 ->
+		//attack2, and so on to 5 - but the "make compact" rewrite kept the loop while leaving the
+		//entity reference hardcoded to $scene4_tankshot1_trigger. Consequences, both wrong:
+		//  * standing in volume 1 fired attacks 1-5 back to back, and
+		//  * volumes 2, 3, 4 and 5 were never tested at all, so approaching the tank down any
+		//    other line left it sitting there doing nothing - which is exactly how it was reported.
+		//All five volumes exist on the map (verified in the BSP entity list), and the loop directly
+		//below this one already builds its name dynamically - that is the pattern to match.
 		for (local.i = 1;local.i <= 5;local.i++){ //chrissstrahl - coop - make compact
-			if (exec coop_mod/replace.scr::istouching $scene4_tankshot1_trigger){ //chrissstrahl - coop
-//println "TOUCHING TRIGGER 1 - Targetpoint"
+			if (exec coop_mod/replace.scr::istouching $("scene4_tankshot"+local.i+"_trigger")){ //chrissstrahl - coop
+//println "TOUCHING TRIGGER n - Targetpoint"
 				self waitthread ("scene4_tank_attack"+local.i)
 
 				if !(isAlive self){ end }
@@ -3465,6 +3619,13 @@ scene6_spawner1_initialize:
 	}
 	level.scene6_spawn1_currentalive = 0	//initializes variable for number of enemies currently alive from this spawner
 	level.scene6_spawn1_currentalivemax = 3	//initializes constant for maximum number allowed to be alive at any given time from this spawner
+	//[user 2026-08-16] "These enemies should be spawning from multiple of their same spawn
+	//points at the same time". They already spawn as a WAVE OF THREE from spawner1/2/3 - the
+	//brake is the gate below, which reads (currentalive + currentalivemax) <= currentalivemax,
+	//i.e. currentalive <= 0: the next wave waits until ALL THREE of the last one are dead.
+	//Raising the ceiling in coop lets waves OVERLAP, so several spawn points are live at once
+	//instead of the church trickling three at a time. teamlimitmax (18) still caps the total.
+	if( level.gametype != 0 ){ level.scene6_spawn1_currentalivemax = 9 }
 	level.scene6_spawn1_loopwaittime = 1	//initializes constant for time between respawns
 	level.scene6_spawn1_deactivator = 0		//initializes variable for shutting down this loop's ability to spawn when the player is past this area
 
@@ -3480,7 +3641,7 @@ scene6_spawndetector1_control:
 	local.loopwaittime = 0.5	//original 0.2
 
 	//while ($player isTouching $scene6_spawndetector1) //chrissstrahl
-	while (exec coop_mod/replace.scr::istouching $scene6_spawndetector1){ //chrissstrahl - coop
+	while (waitthread coop_gate_scene6_spawndetector1){ //chrissstrahl - coop
 		//===3 at a time, use +3
 		//===Crazy fire and maneuver enemy attack, use nothing
 
@@ -3614,6 +3775,13 @@ scene6_spawner2_initialize:
 	level.scene6_spawn2_teamlimitmax = 12	//initializes constant for total number allowed to spawn
 	level.scene6_spawn2_currentalive = 0	//initializes variable for number of enemies currently alive from this spawner
 	level.scene6_spawn2_currentalivemax = 3	//initializes constant for maximum number allowed to be alive at any given time from this spawner
+	//[user 2026-08-16] "These enemies should be spawning from multiple of their same spawn
+	//points at the same time". They already spawn as a WAVE OF THREE from spawner1/2/3 - the
+	//brake is the gate below, which reads (currentalive + currentalivemax) <= currentalivemax,
+	//i.e. currentalive <= 0: the next wave waits until ALL THREE of the last one are dead.
+	//Raising the ceiling in coop lets waves OVERLAP, so several spawn points are live at once
+	//instead of the church trickling three at a time. teamlimitmax (18) still caps the total.
+	if( level.gametype != 0 ){ level.scene6_spawn2_currentalivemax = 9 }
 	level.scene6_spawn2_loopwaittime = 1	//initializes constant for time between respawns
 	level.scene6_spawn2_deactivator = 0		//initializes variable for shutting down this loop's ability to spawn when the player is past this area
 
@@ -3626,7 +3794,7 @@ scene6_spawndetector2_control:
 	if (level.scene6_spawn2_deactivator == 1){ end }
 	local.loopwaittime = 0.35	//original 0.2
 
-	while (exec coop_mod/replace.scr::istouching $scene6_spawndetector2){ //chrissstrahl - coop
+	while (waitthread coop_gate_scene6_spawndetector2){ //chrissstrahl - coop
 		//===3 at a time, use +3
 		//===Crazy fire and maneuver enemy attack, use nothing
 
@@ -3758,7 +3926,7 @@ scene6_mgspawndetector1_control:
 
 	local.loopwaittime = 3	//original 0.2
 
-	while (exec coop_mod/replace.scr::istouching  $scene6_mgspawndetector1){ //chrissstrahl - coop
+	while (waitthread coop_gate_scene6_mgspawndetector1){ //chrissstrahl - coop
 		if ((level.scene6_mgspawn1_currentalive + 1) <= level.scene6_mgspawn1_currentalivemax && level.scene6_mgspawn1_deactivator == 0 && level.scene6_mgspawn1_teamvalue < level.scene6_mgspawn1_teamlimitmax){
 //			centerprint(level.scene6_mgspawn1_currentalive + "<" + level.scene6_mgspawn1_currentalivemax + "\n" + level.scene6_mgspawn1_deactivator + "=" + level.scene6_mgspawn1_deactivator+ "\n" + level.scene6_mgspawn1_teamvalue + "<" + level.scene6_mgspawn1_teamlimitmax )
 
@@ -3804,8 +3972,10 @@ scene6_mgspawn1_ai_navigate1:
 
 	if !(isAlive self){ end }
 
+	println( "^~^~^ MGGUNNER 1 runto start " + self.targetname )
 	self exec global/runto.scr $scene6_mg1_gunner_path
 	self waittill movedone
+	println( "^~^~^ MGGUNNER 1 movedone " + self.targetname )
 	if !(isAlive self){ end }
 
 	//===Set properties of machinegunner
@@ -3818,6 +3988,17 @@ scene6_mgspawn1_ai_navigate1:
 	self health 100
 	self sight 4000
 	self turret $scene6_mg1
+	println( "^~^~^ MGGUNNER 1 MOUNTED " + self.targetname )
+	//[bug-1845] The gun fires only with targettype "auto": m_iTargetType defaults to 0, which
+	//routes AI_DoAiming to AI_DoTargetNone and clears m_iFiring every tick. global/mg42init.scr
+	//::gunner_think is the proven recipe (line 60) and sets exactly this plus threatbias; the
+	//retail scene6 gunner does every OTHER line of that recipe and omits these two.
+	//My first attempt threaded mg42_active.scr::mg42 here, which was wrong: that is a whole
+	//NEST system that spawns its own gunner and spotter from self.spawner_gunner/path_gunner,
+	//properties these turrets do not have - so it silently did nothing at all.
+	$scene6_mg1 targettype "auto"
+	self threatbias 300
+	waitthread coop_churchMgTune $scene6_mg1
 	self.flags["coopMG42_gunner"] = 1 //chrissstrahl - fix anim/attack.scr issue with ai having no weapon after exit of turret
 	self exec global/enable_ai.scr
 
@@ -3853,7 +4034,7 @@ scene6_mgspawndetector2_control:
 	
 	local.loopwaittime = 3	//original 0.2
 
-	while (exec coop_mod/replace.scr::istouching  $scene6_mgspawndetector2){ //chrissstrahl - coop
+	while (waitthread coop_gate_scene6_mgspawndetector2){ //chrissstrahl - coop
 		if ((level.scene6_mgspawn2_currentalive + 1) <= level.scene6_mgspawn2_currentalivemax && level.scene6_mgspawn2_deactivator == 0 && level.scene6_mgspawn2_teamvalue < level.scene6_mgspawn2_teamlimitmax){
 //			centerprint(level.scene6_mgspawn2_currentalive + "<" + level.scene6_mgspawn2_currentalivemax + "\n" + level.scene6_mgspawn2_deactivator + "=" + level.scene6_mgspawn2_deactivator+ "\n" + level.scene6_mgspawn2_teamvalue + "<" + level.scene6_mgspawn2_teamlimitmax )
 
@@ -3895,8 +4076,10 @@ scene6_mgspawn2_ai_navigate1:
 
 	if !(isAlive self){ end }
 
+	println( "^~^~^ MGGUNNER 2 runto start " + self.targetname )
 	self exec global/runto.scr $scene6_mg2_gunner_path
 	self waittill movedone
+	println( "^~^~^ MGGUNNER 2 movedone " + self.targetname )
 	if !(isAlive self){ end }
 
 	//===Set properties of machinegunner
@@ -3909,6 +4092,17 @@ scene6_mgspawn2_ai_navigate1:
 	self health 100
 	self sight 4000
 	self turret $scene6_mg2
+	println( "^~^~^ MGGUNNER 2 MOUNTED " + self.targetname )
+	//[bug-1845] The gun fires only with targettype "auto": m_iTargetType defaults to 0, which
+	//routes AI_DoAiming to AI_DoTargetNone and clears m_iFiring every tick. global/mg42init.scr
+	//::gunner_think is the proven recipe (line 60) and sets exactly this plus threatbias; the
+	//retail scene6 gunner does every OTHER line of that recipe and omits these two.
+	//My first attempt threaded mg42_active.scr::mg42 here, which was wrong: that is a whole
+	//NEST system that spawns its own gunner and spotter from self.spawner_gunner/path_gunner,
+	//properties these turrets do not have - so it silently did nothing at all.
+	$scene6_mg2 targettype "auto"
+	self threatbias 300
+	waitthread coop_churchMgTune $scene6_mg2
 	self.flags["coopMG42_gunner"] = 1 //chrissstrahl - fix anim/attack.scr issue with ai having no weapon after exit of turret
 	self exec global/enable_ai.scr
 
@@ -3942,7 +4136,7 @@ scene6_mgspawndetector3_control:
 
 	local.loopwaittime = 4	//original 0.2
 
-	while (exec coop_mod/replace.scr::istouching $scene6_mgspawndetector3){ //chrissstrahl - coop
+	while (waitthread coop_gate_scene6_mgspawndetector3){ //chrissstrahl - coop
 		if ((level.scene6_mgspawn3_currentalive + 1) <= level.scene6_mgspawn3_currentalivemax && level.scene6_mgspawn3_deactivator == 0 && level.scene6_mgspawn3_teamvalue < level.scene6_mgspawn3_teamlimitmax){
 //			centerprint(level.scene6_mgspawn3_currentalive + "<" + level.scene6_mgspawn3_currentalivemax + "\n" + level.scene6_mgspawn3_deactivator + "=" + level.scene6_mgspawn3_deactivator+ "\n" + level.scene6_mgspawn3_teamvalue + "<" + level.scene6_mgspawn3_teamlimitmax )
 
@@ -3984,8 +4178,10 @@ scene6_mgspawn3_ai_navigate1 local.scene6_mgspawn3_ai_name1:
 
 	if !(isAlive self){ end }
 
+	println( "^~^~^ MGGUNNER 3 runto start " + self.targetname )
 	self exec global/runto.scr $scene6_mg3_gunner_path
 	self waittill movedone
+	println( "^~^~^ MGGUNNER 3 movedone " + self.targetname )
 
 	if !(isAlive self){ end }
 
@@ -3999,6 +4195,17 @@ scene6_mgspawn3_ai_navigate1 local.scene6_mgspawn3_ai_name1:
 	self health 100
 	self sight 4000
 	self turret $scene6_mg3
+	println( "^~^~^ MGGUNNER 3 MOUNTED " + self.targetname )
+	//[bug-1845] The gun fires only with targettype "auto": m_iTargetType defaults to 0, which
+	//routes AI_DoAiming to AI_DoTargetNone and clears m_iFiring every tick. global/mg42init.scr
+	//::gunner_think is the proven recipe (line 60) and sets exactly this plus threatbias; the
+	//retail scene6 gunner does every OTHER line of that recipe and omits these two.
+	//My first attempt threaded mg42_active.scr::mg42 here, which was wrong: that is a whole
+	//NEST system that spawns its own gunner and spotter from self.spawner_gunner/path_gunner,
+	//properties these turrets do not have - so it silently did nothing at all.
+	$scene6_mg3 targettype "auto"
+	self threatbias 300
+	waitthread coop_churchMgTune $scene6_mg3
 	self.flags["coopMG42_gunner"] = 1 //chrissstrahl - fix anim/attack.scr issue with ai having no weapon after exit of turret
 	self exec global/enable_ai.scr
 
@@ -5384,7 +5591,11 @@ scene7_bombtracker:
 
 	//===When all the nebelwerfers are destroyed, update the objective to successful, and call the changelevel thread to conclude the mission.
 	if (level.scene7_bombcount == 0){
-		waitthread global/objectives.scr::add_objectives 1 3 "Locate and destroy the Nebelwerfers."
+		if( level.gametype == 0 ){
+			waitthread global/objectives.scr::add_objectives 1 3 "Locate and destroy the Nebelwerfers."
+		} else {
+			waitthread global/objectives.scr::add_objectives 6 3 "Locate and destroy the Nebelwerfers."
+		}
 		wait 1
 		thread m3l3_changelevel
 	}
@@ -5396,18 +5607,38 @@ scene7_objective_assignment:
 	//===Moves the compass waypoint indicator to the next intact nebelwerfer location
 
 	if (level.scene7_bombpoint1_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer1.origin
-		thread global/objectives.scr::current_objectives 1
+		if( level.gametype == 0 ){
+			waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer1.origin
+			thread global/objectives.scr::current_objectives 1
+		} else {
+			waitthread global/objectives.scr::add_objectives 6 2 level.locationchecktext $scene7_nebelwerfer1.origin
+			thread global/objectives.scr::current_objectives 6
+		}
 	}else if (level.scene7_bombpoint2_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer2.origin
-		thread global/objectives.scr::current_objectives 1
+		if( level.gametype == 0 ){
+			waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer2.origin
+			thread global/objectives.scr::current_objectives 1
+		} else {
+			waitthread global/objectives.scr::add_objectives 6 2 level.locationchecktext $scene7_nebelwerfer2.origin
+			thread global/objectives.scr::current_objectives 6
+		}
 	}else if (level.scene7_bombpoint3_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer3.origin
-		thread global/objectives.scr::current_objectives 1
+		if( level.gametype == 0 ){
+			waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer3.origin
+			thread global/objectives.scr::current_objectives 1
+		} else {
+			waitthread global/objectives.scr::add_objectives 6 2 level.locationchecktext $scene7_nebelwerfer3.origin
+			thread global/objectives.scr::current_objectives 6
+		}
 	}
 	else if (level.scene7_bombpoint4_status == 0){
-		waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer4.origin
-		thread global/objectives.scr::current_objectives 1
+		if( level.gametype == 0 ){
+			waitthread global/objectives.scr::add_objectives 1 2 level.locationchecktext $scene7_nebelwerfer4.origin
+			thread global/objectives.scr::current_objectives 1
+		} else {
+			waitthread global/objectives.scr::add_objectives 6 2 level.locationchecktext $scene7_nebelwerfer4.origin
+			thread global/objectives.scr::current_objectives 6
+		}
 	}
 end
 
@@ -6011,4 +6242,2388 @@ coop_objToastStart:{
 	waitthread coop_mod/replace.scr::waitForPlayer
 	wait 2
 	waitthread coop_mod/objectives.scr::coop_obj_toast_all 1 "Locate and destroy the Nebelwerfers.    [4 remaining]"
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] CHURCH ZONE HELPER (objective #6 groundwork).
+//
+// Horizontal distance from the church centre. CYLINDER, not sphere: the churchyard falls ~48u
+// across its span, and a sphere would report a player "outside" for standing on a step (T19 - a
+// radius is a sphere unless you make it otherwise).
+//
+// Zone radius level.coop_chZone = 1100, NOT 950. 950 was a guess and it put scene6_mg2 (995u
+// from centre) OUTSIDE the church that MG stands in, so a player manning it did not count as a
+// defender, and scene6_mg3 sat 3u inside the boundary. Measured against the three church MG42s
+// and the door reading, 1100 covers all four with margin. bug-1829.
+//
+// Church centre 1551 -2370, derived from the two ends the user walked (entrance 639 -2427, far
+// wall 2463 -2312, 1828u apart). Inner 950 (the three scene6 MG42s sit on the rim at 905/947/995,
+// so a tighter test would penalise a player for manning a gun). Outer 1827.
+//
+// Written after bug-1822 parse-killed this file: one operation per statement, no nested parens,
+// no bare negatives, no expression returns.
+//=========================================================================
+coop_churchDist local.pos:{
+	//[bug-1838] Rewritten onto vector_length, the idiom this codebase uses 149 times, after the
+	//hand-rolled version returned ~150 for EVERYTHING - a wave spawn 1252u from the centre
+	//reported dist=165. Adding parentheses to sqrt( ) did not fix it, so the fault was in the
+	//hand-rolled math, not the call form. Every zone reading before this was fiction.
+	//Still a CYLINDER: z is zeroed on both sides so the churchyard's ~48u drop does not count.
+	local.x = local.pos[0]
+	local.y = local.pos[1]
+	local.flat = ( local.x local.y 0 )
+	local.centre = ( 1551 0 - 2370 0 )
+	local.delta = local.flat - local.centre
+	local.d = vector_length( local.delta )
+	end local.d
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] ZONE COUNTERS (objective #6 groundwork).
+//
+// coop_churchGermans - live germans INSIDE the church (inner 950). This is the overrun measure:
+//   it counts a BREACH, not proximity, which is why it uses the inner zone and not the grounds.
+// coop_churchPlayersOut - live players OUTSIDE the grounds (outer 1827). Drives the leave penalty.
+//
+// Both walk their arrays defensively: an actor can die or be removed between ticks, and a player
+// can be spectator or dead. Same one-operation-per-statement discipline as coop_churchDist.
+//=========================================================================
+coop_churchGermans:{
+	local.n = 0
+
+	//[bug-1833] TWO radii, because the two questions are different. A german 900u out is not in the
+	//church - he is walking to it. A player 900u out may well be manning one of the church MG42s.
+	//coop_chZone = BREACH (attackers, tight). coop_chHold = DEFENDING (players, generous).
+	//One shared 1100 made wave spawns 1183u away read as a breach the moment they stepped off.
+	if( level.coop_chZone == NIL ){ level.coop_chZone = 500 }
+	local.s = ""
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end local.n }
+	local.i = 1
+	while( local.i <= local.arr.size ){
+		local.a = local.arr[local.i]
+		local.i = local.i + 1
+		if( local.a == NIL ){ continue }
+		if( local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		//[bug-1831] ONLY this phase's attackers. Counting every german by radius meant the retail
+		//scene6 survivors standing around the churchyard filled the bar with nobody attacking -
+		//"no one is in here, no one seems to be coming" and overrun in 13 s.
+		if( local.a.coop_chAttacker != 1 ){ continue }
+		local.d = waitthread coop_churchDist local.a.origin
+		if( local.d > level.coop_chZone ){ continue }
+		local.n = local.n + 1
+		local.s = local.s + " " + int( local.d )
+	}
+	level.coop_chDistList = local.s
+	end local.n
+}end
+
+coop_churchPlayersOut:{
+	local.n = 0
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.d = waitthread coop_churchDist local.p.origin
+		if( local.d <= 1827 ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+// live, non-spectator players - the divisor for the leave penalty and the fail threshold
+coop_churchPlayersAlive:{
+	local.n = 0
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] OVERRUN STATE (objective #6 groundwork).
+//
+// One tick of the defense: how full the church is, and how fast it is filling.
+//
+// coop_churchThreshold - germans inside that lose it. 2 + (2 x players): 4/6/8/10 for 1-4.
+//   Four loose in a church is already losing for one player; +2 each keeps a full squad honest
+//   without making it unloseable, since more players also means more doors covered.
+//
+// coop_churchRate - the SIGNED delta for this tick. Positive while germans hold ground inside,
+//   negative while the defenders do. It is a contested capture point, not a countdown: every
+//   player inside the zone cancels one german, so holding the door is what stops the bar, and
+//   leaving it unattended doubles the rate. Deliberately not a fail for stepping out - people get
+//   pushed out and chase stragglers, and a hard boundary would lose runs on a technicality.
+//   Scaled by 100 and kept integer: morlang has no reliable fractional accumulator here, so the
+//   bar counts in hundredths and the display divides.
+//=========================================================================
+coop_churchThreshold:{
+	local.pl = waitthread coop_churchPlayersAlive
+	if( local.pl < 1 ){ local.pl = 1 }
+	local.t = local.pl * 2
+	local.t = local.t + 2
+	end local.t
+}end
+
+coop_churchPlayersIn:{
+	local.n = 0
+	if( level.coop_chHold == NIL ){ level.coop_chHold = 1100 }
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NIL ){ continue }
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.d = waitthread coop_churchDist local.p.origin
+		if( local.d > level.coop_chHold ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+coop_churchRate:{
+	local.g = waitthread coop_churchGermans
+	local.p = waitthread coop_churchPlayersIn
+	level.coop_chG = local.g
+	level.coop_chP = local.p
+
+	if( level.coop_chAband == NIL ){ level.coop_chAband = 100 }
+
+	//[user] NOBODY HOLDING IT - the line slips whether or not anyone is attacking yet. An
+	//unattended church is a lost church; that is the entire objective. Previously an empty
+	//church with no germans DRAINED, so walking away was free.
+	if( local.p < 1 ){
+		local.rate = local.g * 60
+		local.rate = local.rate * 2
+		local.rate = local.rate + level.coop_chAband
+		end local.rate
+	}
+
+	//contested: each defender standing in the zone cancels one german
+	local.net = local.g - local.p
+	if( local.net > 0 ){
+		local.rate = local.net * 60
+		end local.rate
+	}
+
+	//held: the defenders match or outnumber what got in, so push them back out
+	local.hold = local.p - local.g
+	local.hold = local.hold * 125
+	local.hold = local.hold + level.coop_chDrain
+	local.d = 0 - local.hold
+	end local.d
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] OVERRUN BAR - top centre, per player.
+//
+// Shows how full the church is: germans inside vs the fail threshold. NOT a timer - the countdown
+// to the airborne is the native `stopwatch` command, which is a separate readout.
+//
+// SLOTS 128-130. Everything 100-155 is allocated and 156-249 is the computed challenge/objectives
+// block, so this borrows from the MISSION-END debrief list (127-134, xp.scr) - that panel can only
+// appear at debrief, and this bar only exists mid-firefight, so they are never co-displayable.
+// Same reasoning the slot map already uses for the SR/objectives overlap. All >= 100, so the
+// calm-player HUD fade cannot hide it (T18).
+//
+// Drawing follows the DBNO team-revive channel exactly (dbno.scr:704-722): a dark track and a
+// coloured fill sharing a rect, the fill's WIDTH driven by progress.
+//=========================================================================
+//[user 2026-08-16] Slots moved 128-130 -> 175-178. 128-133 belong to xp.scr's debrief list
+//(_research/hud_slot_map.md); 175-195 is the only free run. Also rebuilt visually: "The Church text
+//is not centered, and the bar itself is ugly".
+//
+//The centring bug was the LABEL's rect - it was 0-width, so "center" anchored the rect at the
+//screen centre and then drew the string RIGHTWARD from there, putting it half a word off. Every
+//element now shares one width and one x, so they cannot drift apart.
+//
+//Look: a dark outer frame, a near-black track inset inside it, and a fill that shifts green ->
+//amber -> red as the church slips, so the colour carries the reading as well as the length.
+coop_churchBarSetup local.p:{
+	if( local.p == NULL ){ end }
+
+	//frame
+	ihuddraw_virtualsize local.p 175 1
+	ihuddraw_align       local.p 175 center top
+	ihuddraw_shader      local.p 175 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 175 0.04 0.04 0.05
+	ihuddraw_rect        local.p 175 0 38 248 12
+	ihuddraw_alpha       local.p 175 0.85
+
+	//track
+	ihuddraw_virtualsize local.p 176 1
+	ihuddraw_align       local.p 176 center top
+	ihuddraw_shader      local.p 176 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 176 0.13 0.12 0.11
+	ihuddraw_rect        local.p 176 0 40 240 8
+	ihuddraw_alpha       local.p 176 1
+
+	//fill
+	ihuddraw_virtualsize local.p 177 1
+	ihuddraw_align       local.p 177 center top
+	ihuddraw_shader      local.p 177 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 177 0.35 0.7 0.3
+	ihuddraw_rect        local.p 177 0 40 0 8
+	ihuddraw_alpha       local.p 177 1
+
+	//label - same width and x as the bar, so it centres on the same axis
+	ihuddraw_virtualsize local.p 178 1
+	ihuddraw_align       local.p 178 center top
+	ihuddraw_font        local.p 178 "verdana-12"
+	ihuddraw_color       local.p 178 0.88 0.86 0.82
+	ihuddraw_rect        local.p 178 0 24 240 14
+	ihuddraw_string      local.p 178 "HOLD THE CHURCH"
+	ihuddraw_alpha       local.p 178 0.9
+}end
+
+// pct is 0..100
+coop_churchBarSet local.p local.pct:{
+	if( local.p == NULL ){ end }
+	local.w = local.pct * 240
+	local.w = local.w / 100
+	if( local.w < 0 ){ local.w = 0 }
+	if( local.w > 240 ){ local.w = 240 }
+	ihuddraw_rect local.p 177 0 40 local.w 8
+
+	//colour carries the danger as well as the length
+	if( local.pct < 50 ){
+		ihuddraw_color local.p 177 0.35 0.70 0.30
+	}
+	else{
+		if( local.pct < 80 ){
+			ihuddraw_color local.p 177 0.85 0.65 0.20
+		}
+		else{
+			ihuddraw_color local.p 177 0.85 0.18 0.15
+		}
+	}
+}end
+
+coop_churchBarClear local.p:{
+	if( local.p == NULL ){ end }
+	ihuddraw_alpha local.p 175 0
+	ihuddraw_alpha local.p 176 0
+	ihuddraw_alpha local.p 177 0
+	ihuddraw_alpha local.p 178 0
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] THE DEFENSE TICK.
+//
+// A capture bar, not a kill counter: it FILLS while germans hold ground inside the church and
+// drains when they do not, so the player's job is to keep clearing them rather than to avoid a
+// single bad moment. Full = the church is overrun.
+//
+// TUNABLES, all level vars so they can be changed without touching logic. Every one of these
+// wants a playtest; the numbers below are a starting point, not a claim.
+//   coop_chDur     - hold length in seconds (5 minutes as agreed)
+//   coop_chCap     - bar capacity in hundredths, scaled by the player-count threshold
+//   coop_chDrain   - how fast it recovers with the church clear
+// With threshold 4 (solo) and cap factor 6000, a steady 4 germans inside fills it in ~30s of
+// unopposed occupation. Expect to move this after one run.
+//=========================================================================
+coop_churchDefense:{
+	if( level.coop_chDur == NIL ){ level.coop_chDur = 300 }
+	if( level.coop_chCapF == NIL ){ level.coop_chCapF = 6000 }
+	if( level.coop_chDrain == NIL ){ level.coop_chDrain = 250 }
+
+	level.coop_chProg = 0
+	level.coop_chOver = 0
+	level.coop_chDone = 0
+
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NULL ){ continue }
+		waitthread coop_churchBarSetup local.p
+	}
+
+	local.tEnd = level.time + level.coop_chDur
+	//[user] no stopwatch. "the suspense is in defending for an amount of time you dont know."
+	//coop_chDur still bounds the phase, it is just no longer displayed.
+
+	while( level.time < local.tEnd ){
+		wait 0.5
+		if( level.coop_chDone == 1 ){ end }
+
+		//[bug-1833] live-tunable. Every radius so far was a guess corrected by a deploy; reading
+		//them per tick means "set coop_chZone 400" retunes the fight without leaving the server.
+		local.zc = getcvar( "coop_chZone" )
+		if( local.zc != "" ){
+			if( local.zc != "0" ){ level.coop_chZone = int( local.zc ) }
+		}
+		local.hc = getcvar( "coop_chHold" )
+		if( local.hc != "" ){
+			if( local.hc != "0" ){ level.coop_chHold = int( local.hc ) }
+		}
+		local.thr = waitthread coop_churchThreshold
+		local.cap = local.thr * level.coop_chCapF
+		local.rate = waitthread coop_churchRate
+
+		//[bug-1829] the rate is SIGNED now. The old branch could only ever ADD - the drain
+		//needed rate==0, meaning zero germans in a zone that spans the whole street, so the
+		//bar was a one-way ratchet and walking in only dropped a multiplier.
+		level.coop_chProg = level.coop_chProg + local.rate
+		if( level.coop_chProg < 0 ){ level.coop_chProg = 0 }
+
+		//[bug-1831] CVAR, not a level var. "set coop_chDebug 1" silently did nothing before,
+		//so a playtest that was meant to hand back numbers handed back nothing.
+		if( getcvar( "coop_chDebug" ) == "1" ){
+			println( "CHURCH g="+level.coop_chG+" in="+level.coop_chP+" rate="+local.rate+" prog="+level.coop_chProg+" cap="+local.cap+" zone="+level.coop_chZone+" hold="+level.coop_chHold+" at"+level.coop_chDistList )
+		}
+
+		local.pct = level.coop_chProg * 100
+		local.pct = local.pct / local.cap
+		if( local.pct > 100 ){ local.pct = 100 }
+
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			local.i = local.i + 1
+			if( local.p == NULL ){ continue }
+			waitthread coop_churchBarSet local.p local.pct
+		}
+
+		waitthread coop_churchNag
+
+		if( level.coop_chProg >= local.cap ){
+			level.coop_chOver = 1
+			level.coop_chDone = 1
+			end
+		}
+	}
+	level.coop_chDone = 1
+}end
+
+// Per-player, never a team banner: the players holding the line must not be nagged for the one
+// who left. Throttled so it states the problem once rather than every half second.
+coop_churchNag:{
+	if( level.coop_chHold == NIL ){ level.coop_chHold = 1100 }
+	if( $player == NULL ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.d = waitthread coop_churchDist local.p.origin
+		if( local.d <= level.coop_chHold ){
+			local.p.coop_chOutMsg = 0
+			continue
+		}
+		if( local.p.coop_chOutMsg == 1 ){ continue }
+		local.p.coop_chOutMsg = 1
+		local.p iprint "Get back inside the church - nobody is holding it." 1
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] WAVE DIRECTOR.
+//
+// Lanes, all user-walked and nav-verified (nearest pathnode <=148u, route midpoints covered):
+//   0 wire   2137 -1342 -343  yaw 192  - the primary, screened by ~50 placed bushes
+//   1 east   5445 -1100 -421  yaw 263
+//   2 west   5592 -2620 -431  yaw 103
+//   3 north  3465  -206 -335  yaw 250
+//   4 far NW -1220  -851 -240  yaw  25
+//
+// CADENCE IS PRESSURE-DRIVEN, NOT A TIMER. The lanes run 1023-3962u, i.e. 20-40s of travel, so a
+// fixed interval would let waves stack and arrive as one mob after a lull while the far lane went
+// dead. Instead: top up whenever fewer than the target are alive and inbound. Pressure stays
+// constant regardless of how long each approach takes.
+//
+// Squad size scales with player count through the SAME helper the officer battalions use
+// (coop_reinf_count), so this inherits tuning that has already been played.
+//=========================================================================
+coop_churchWaveLane local.lane local.count:{
+	local.pos = ( 2137 0 - 1342 0 - 343 )
+	local.ang = 192
+	if( local.lane == 1 ){ local.pos = ( 5445 0 - 1100 0 - 421 ); local.ang = 263 }
+	if( local.lane == 2 ){ local.pos = ( 5592 0 - 2620 0 - 431 ); local.ang = 103 }
+	if( local.lane == 3 ){ local.pos = ( 3465 0 - 206 0 - 335 ); local.ang = 250 }
+	if( local.lane == 4 ){ local.pos = ( 0 - 1220 0 - 851 0 - 240 ); local.ang = 25 }
+
+	local.n = 0
+	while( local.n < local.count ){
+		local.idx = local.n + local.lane
+		local.sp = exec coop_mod/officer.scr::coop_spread_pos local.pos local.idx
+		local.m = exec coop_mod/officer.scr::coop_model_for "infantry"
+		local.b = spawn local.m
+		local.b.coop_xpClass = "reinf"
+		local.b.origin = local.sp
+		local.b droptofloor
+		local.b.angles = ( 0 local.ang 0 )
+		local.b.health = 120
+		local.b.accuracy = 70
+		local.b.leash = 4096
+		local.b.enableEnemy = 1
+		local.b german
+		if( local.n == 0 ){ local.b gun "stg44" } else { local.b gun "mauser kar 98k" }
+		exec coop_mod/officer.scr::coop_reinf_scale local.b
+		local.b.flags["coop_role"] = "aggr"
+		local.b.nosurprise = 1
+		local.b.flags["coop_personality_set"] = 1
+		local.b.coop_lastKnown = ( 1551 0 - 2370 0 - 255 )
+		//[bug-1831] THE tag. Both the overrun count and the wave-replenish count key on this,
+		//so leftover retail scene6 germans can neither fill the bar nor suppress the waves.
+		local.b.coop_chAttacker = 1
+		local.b forceactivate
+		//[bug-1834] coop_lastKnown is a HINT, not an order - the wave stood at its spawn until a
+		//player walked into view. officer.scr's proven pattern is forceactivate + runto, re-issued
+		//only when genuinely stalled (officer.scr:1040-1045, :1100-1105).
+		local.b thread coop_chAdvance
+		//[bug-1837] the retail scene6 spawners sit 163-378u from the church centre - INSIDE the nave -
+		//so "they spawn in the church" has two possible authors. Print where MY wave actually lands
+		//so the two can never be confused again.
+		local.sd = waitthread coop_churchDist local.sp
+		local.dbx = local.sp[0]
+		local.dby = local.sp[1]
+		println( "^~^~^ CHWAVE lane=" + local.lane + " at " + local.sp + " dist=" + local.sd + " x=" + local.dbx + " y=" + local.dby )
+		level.coop_chSpawned = level.coop_chSpawned + 1
+		local.n = local.n + 1
+		wait 0.2
+	}
+}end
+
+coop_chAdvance:{
+	local.dest = ( 1551 0 - 2370 0 - 255 )
+	self forceactivate
+	self runto local.dest
+	local.prev = self.origin
+	while( level.coop_chDone != 1 ){
+		wait 3
+		if( self == NULL ){ end }
+		if( !isAlive self ){ end }
+		local.mv = vector_length( self.origin - local.prev )
+		local.prev = self.origin
+		if( local.mv > 24 ){ continue }
+		self forceactivate
+		self runto local.dest
+	}
+}end
+
+coop_churchWaves:{
+	level.coop_chSpawned = 0
+	local.lane = 0
+	local.target = exec coop_mod/officer.scr::coop_reinf_count 6 "coop_officerBattalionPer" 3 18
+
+	while( level.coop_chDone != 1 ){
+		wait 3
+		local.alive = 0
+		local.arr = level.coop_actorArray["german"]
+		if( local.arr != NIL ){
+			local.i = 1
+			while( local.i <= local.arr.size ){
+				local.a = local.arr[local.i]
+				local.i = local.i + 1
+				if( local.a == NIL ){ continue }
+				if( local.a == NULL ){ continue }
+				if( !isAlive local.a ){ continue }
+				//[bug-1831] same tag: without it the town's existing germans already exceeded the
+				//target, so "alive >= target" was true forever and no wave ever spawned.
+				if( local.a.coop_chAttacker != 1 ){ continue }
+				local.d = waitthread coop_churchDist local.a.origin
+				if( local.d > 4200 ){ continue }
+				local.alive = local.alive + 1
+			}
+		}
+		if( local.alive >= local.target ){ continue }
+
+		local.send = local.target - local.alive
+		if( local.send > 4 ){ local.send = 4 }
+		waitthread coop_churchWaveLane local.lane local.send
+
+		local.lane = local.lane + 1
+		if( local.lane > 4 ){ local.lane = 0 }
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] NEBELWERFER BARRAGE during the hold.
+//
+// The guns you are about to go destroy shell you while you hold - the finale is present as a
+// threat before you ever reach it. 18 user-walked impact points; 14 inside the grounds, 4 out to
+// 2268u. The outliers are KEPT: shells landing beyond the perimeter read as area fire rather than
+// a ring drawn around the player.
+//
+// Damage is weighted by how close the impact lands to the church, so "varying damage" comes from
+// the geometry rather than a bare random roll, and it is CAPPED - a random barrage that randomly
+// one-shots someone is not tense, it is unfair.
+//
+// GERMANS ARE EXEMPT. radiusdamage would otherwise clear the church for the player and IMPROVE the
+// overrun bar - the barrage would be fighting on their side.
+//=========================================================================
+coop_churchImpact local.n:{
+	local.p = ( 946 0 - 2667 0 - 207 )
+	if( local.n == 1 ){ local.p = ( 709 0 - 3141 0 - 432 ) }
+	if( local.n == 2 ){ local.p = ( 1189 0 - 4168 0 - 443 ) }
+	if( local.n == 3 ){ local.p = ( 2807 0 - 2640 0 - 451 ) }
+	if( local.n == 4 ){ local.p = ( 1010 0 - 2132 0 - 241 ) }
+	if( local.n == 5 ){ local.p = ( 1009 0 - 1844 0 - 312 ) }
+	if( local.n == 6 ){ local.p = ( 3694 0 - 2113 0 - 495 ) }
+	if( local.n == 7 ){ local.p = ( 1933 0 - 3008 0 - 333 ) }
+	if( local.n == 8 ){ local.p = ( 1455 0 - 2765 0 - 278 ) }
+	if( local.n == 9 ){ local.p = ( 2699 0 - 4165 0 - 479 ) }
+	if( local.n == 10 ){ local.p = ( 3736 0 - 3080 0 - 456 ) }
+	if( local.n == 11 ){ local.p = ( 1061 0 - 2399 0 - 253 ) }
+	if( local.n == 12 ){ local.p = ( 711 0 - 2193 0 - 279 ) }
+	if( local.n == 13 ){ local.p = ( 208 0 - 2558 0 - 343 ) }
+	if( local.n == 14 ){ local.p = ( 1729 0 - 3140 0 - 321 ) }
+	if( local.n == 15 ){ local.p = ( 2691 0 - 1901 0 - 296 ) }
+	if( local.n == 16 ){ local.p = ( 1985 0 - 1800 0 - 227 ) }
+	if( local.n == 17 ){ local.p = ( 787 0 - 1712 0 - 311 ) }
+	end local.p
+}end
+
+coop_churchBarrage:{
+	if( level.coop_chShellMin == NIL ){ level.coop_chShellMin = 4 }
+	if( level.coop_chShellMax == NIL ){ level.coop_chShellMax = 9 }
+	if( level.coop_chShellCap == NIL ){ level.coop_chShellCap = 260 }
+
+	while( level.coop_chDone != 1 ){
+		local.w = randomint 6
+		local.w = local.w + level.coop_chShellMin
+		wait local.w
+		if( level.coop_chDone == 1 ){ end }
+
+		local.n = randomint 18
+		local.pos = waitthread coop_churchImpact local.n
+
+		// telegraph, then land: damage out of nowhere reads as cheap
+		local.snd = spawn script_model
+		local.snd model "models/fx/dummy.tik"
+		local.snd.origin = local.pos
+		local.snd notsolid
+		//[user 2026-08-16] the SAME sound the map's own Nebelwerfers use at the finale
+		//(scene7_nebelwerfer_launch) - this barrage is supposed to BE those guns firing on the
+		//church, so it should not have its own audio identity.
+		//[bug-1834] previously mortar_incoming, which is aliascached maps "t2l3 " and never loads
+		//on m3l3, so the shell arrived in silence.
+		local.snd playsound nebelwerfer_launch
+		wait 1.6
+		if( local.snd != NULL ){ local.snd remove }
+
+		local.fx = spawn script_model
+		//[user] retail impact effect, straight from scene7_nebelwerfer_launch
+		local.fx model "models/emitters/mortar_dirt_nebelwerfer.tik"
+		local.fx.origin = local.pos
+		local.fx notsolid
+		local.fx anim start
+		//[bug-1834] there was no burst sound AT ALL - only a visual.
+		local.fx playsound explo_medium
+		//retail shakes the view on every rocket impact - same call, same values
+		exec global/earthquake.scr .03 .05 0 0
+
+		// closer to the church = heavier, capped so no shell is a one-shot
+		local.d = waitthread coop_churchDist local.pos
+		local.dmg = 1200 - local.d
+		local.dmg = local.dmg / 6
+		if( local.dmg < 40 ){ local.dmg = 40 }
+		if( local.dmg > level.coop_chShellCap ){ local.dmg = level.coop_chShellCap }
+		waitthread coop_churchShellHurt local.pos local.dmg
+
+		wait 4
+		if( local.fx != NULL ){ local.fx remove }
+	}
+}end
+
+// players only - see the header. Hand-rolled so germans can be skipped; radiusdamage cannot.
+coop_churchShellHurt local.pos local.dmg:{
+	if( $player == NULL ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.dx = local.p.origin[0] - local.pos[0]
+		local.dy = local.p.origin[1] - local.pos[1]
+		local.dz = local.p.origin[2] - local.pos[2]
+		local.a = local.dx * local.dx
+		local.b = local.dy * local.dy
+		local.c = local.dz * local.dz
+		local.s = local.a + local.b
+		local.s = local.s + local.c
+		local.dist = sqrt( local.s )
+		if( local.dist > 320 ){ continue }
+		local.f = 320 - local.dist
+		local.f = local.f * local.dmg
+		local.f = local.f / 320
+		if( local.f < 1 ){ continue }
+		local.p.health = local.p.health - local.f
+		if( local.p.health < 1 ){ local.p.health = 1 }
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] LADDER MARKER -> REAL LADDER.
+//
+// A flashing red marker at the wall; interact and it becomes a genuine climbable ladder. No fetch
+// step: in coop a fetch means one player wanders off while three wait.
+//
+// This is the ONLY crossing the engine supports for players. Actors cannot climb - PathNode::LadderTo
+// is declared (navigate.h:201) and never implemented, there is no AI_LADDER spawnflag, and every
+// MASK_LADDER trace lives in player_conditionals.cpp. That is fine BY DESIGN here: the ladder is for
+// players, and the waves path in from lanes that already have nodes.
+//
+// ladder.scr::main spawns a real func_ladder plus beam rails (bugs 1412/1415).
+//=========================================================================
+//=========================================================================
+//[user 2026-08-16] LADDER ROUTE = CHURCH GUARD TRIGGER.
+//
+// The retail garrison only spawns while a player TOUCHES $scene6_spawndetectorN, and those volumes
+// sit on the original approach. The ladder crossing bypasses them, so arriving that way gave an
+// empty church - the user had to block the old route with furniture to make the fight happen at all.
+// These wrappers keep the retail volume working and add the ladder as a second, equal trigger.
+//=========================================================================
+// Players inside the BREACH zone (coop_chZone), not the generous defend ring - "pushed into the
+// church" means the building, not the churchyard.
+coop_churchPlayersDeep:{
+	if( level.coop_chZone == NIL ){ level.coop_chZone = 500 }
+	local.n = 0
+	if( $player == NULL ){ end local.n }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.d = waitthread coop_churchDist local.p.origin
+		if( local.d > level.coop_chZone ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+coop_gate_scene6_spawndetector1:{
+	if( level.coop_chGuardsGo == 1 ){
+		//[user 2026-08-16] "enemies should continue to respawn until you push into the church".
+		//teamlimitmax (18) is a TOTAL-EVER cap, so the defence simply ran dry while players were
+		//still stuck outside. While nobody has actually breached, hold the running total below
+		//the cap so the spawner keeps feeding; the moment someone is inside, stop topping it up
+		//and the retail limit takes over and winds the fight down.
+		local.deep = waitthread coop_churchPlayersDeep
+		if( local.deep < 1 ){
+			if( level.scene6_spawn1_teamvalue > 12 ){ level.scene6_spawn1_teamvalue = 12 }
+		}
+		end 1
+	}
+	local.t = exec coop_mod/replace.scr::istouching $scene6_spawndetector1
+	end local.t
+}end
+
+coop_gate_scene6_spawndetector2:{
+	if( level.coop_chGuardsGo == 1 ){
+		//[user 2026-08-16] "enemies should continue to respawn until you push into the church".
+		//teamlimitmax (18) is a TOTAL-EVER cap, so the defence simply ran dry while players were
+		//still stuck outside. While nobody has actually breached, hold the running total below
+		//the cap so the spawner keeps feeding; the moment someone is inside, stop topping it up
+		//and the retail limit takes over and winds the fight down.
+		local.deep = waitthread coop_churchPlayersDeep
+		if( local.deep < 1 ){
+			if( level.scene6_spawn2_teamvalue > 12 ){ level.scene6_spawn2_teamvalue = 12 }
+		}
+		end 1
+	}
+	local.t = exec coop_mod/replace.scr::istouching $scene6_spawndetector2
+	end local.t
+}end
+
+coop_gate_scene6_mgspawndetector1:{
+	if( level.coop_chGuardsGo == 1 ){ end 1 }
+	local.t = exec coop_mod/replace.scr::istouching $scene6_mgspawndetector1
+	end local.t
+}end
+
+coop_gate_scene6_mgspawndetector2:{
+	if( level.coop_chGuardsGo == 1 ){ end 1 }
+	local.t = exec coop_mod/replace.scr::istouching $scene6_mgspawndetector2
+	end local.t
+}end
+
+coop_gate_scene6_mgspawndetector3:{
+	if( level.coop_chGuardsGo == 1 ){ end 1 }
+	local.t = exec coop_mod/replace.scr::istouching $scene6_mgspawndetector3
+	end local.t
+}end
+
+coop_churchLadderMarker:{
+	//[user 2026-08-16] POSITION FROM THE USER'S OWN WORKING PLACEMENT. They built a ladder in
+	//build mode that "works PERFECTLY... you can climb it all the way up and it gives you
+	//clearance to the wall", captured as origin ( 4010.860 -911.426 -334.536 ) angles ( 0 358 0 )
+	//h 128. Mine sat at ( 4015.875 -966.873 -327.909 ) - 55u off along Y and 6.6u high.
+	//
+	//The 22u standoff (bug-1831) is GONE. Build mode passes the captured position to
+	//ladder.scr::main verbatim and theirs climbs correctly, so the standoff was only ever
+	//compensating for a bad position - and it moved the trigger and the solidclip together, so it
+	//could not have fixed clearance anyway. Combined with the func_ladder climb volume (bug-1839),
+	//this is the placement that actually works.
+	local.pos = ( 4010.860 0 - 911.426 0 - 334.536 )
+	local.pulse = spawn script_model
+	local.pulse model "models/items/pulse_explosive.tik"
+	local.pulse.origin = local.pos
+	local.pulse notsolid
+	local.pulse anim start
+	level.coop_chLadderPulse = local.pulse
+
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.pos
+	local.glow light ( 1 0.15 0.15 )
+	local.glow lightRadius 150
+	local.glow lightOn
+	local.glow notsolid
+	level.coop_chLadderGlow = local.glow
+
+	local.t = spawn trigger_use
+	local.t.origin = local.pos
+	local.t solid
+	local.t setsize ( 0 - 40 0 - 40 0 ) ( 40 40 80 )
+
+	local.t waittill trigger
+	local.t remove
+	if( level.coop_chLadderPulse != NULL ){ level.coop_chLadderPulse remove }
+	if( level.coop_chLadderGlow != NULL ){ level.coop_chLadderGlow remove }
+
+	//[bug-1828] yaw 358 and height 128 come from the BUILD-MODE CAPTURE, not from a guess.
+	//I had 192/160 - a 166 degree error, so the ladder was built against the wrong face of the
+	//wall and could not be climbed. You place a ladder FACING INTO the wall, so yaw is not
+	//cosmetic: it decides which side the climb volume is on.
+	waitthread coop_mod/ladder.scr::main local.pos 358 128 "wood"
+	level.coop_chLadderUp = 1
+	//[user] "I nocliped up to top of the ladder and dropped down, no one spawning at church".
+	//Setting the gate flag was not enough: the spawn CONTROL LOOPS are threaded by scene6, and
+	//scene6 itself is called from a trigger_once in the BSP sitting on the original approach
+	//(see the note at the top of this file). Crossing by ladder never booted any of it, so there
+	//was nothing for the widened gate to widen. Start the church battle here, guarded above.
+	thread scene6
+	level.coop_chGuardsGo = 1
+	iprintlnbold "Ladder placed - get over the wall to the church."
+}end
+
+//=========================================================================
+// COSMETIC BOARD over the barbed wire, spawned when the defense begins.
+// It carries nobody. The waves path in from lanes that already have nodes; this exists purely so
+// the player can see HOW they got across. That separation - real pathing, visual fiction - is what
+// makes the whole approach work after destroying/bridging/laddering the wire all proved impossible.
+//=========================================================================
+//=========================================================================
+//[user 2026-08-16] RALLY THE SURVIVING ALLIES ON THE SIGNAL.
+//
+// "ensure that any spawned allies including captain ramsey that are still alive (actors) are
+// teleported here: (4375 -1077 -251) : -118". Anyone still following you from the town fight would
+// otherwise be scattered across half the map while the church is defended without them.
+//
+// Both routes are covered: the team array (aihandler.scr registers every actor under its own team,
+// so "american" is every ally that ever spawned) AND the three named leads, since a lead that was
+// never registered would otherwise be silently left behind. Double-covering costs nothing - the
+// second move is to the same place.
+//=========================================================================
+coop_churchRallyOne local.a local.pos local.ang:{
+	if( local.a == NIL ){ end }
+	if( local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	local.a.origin = local.pos
+	local.a.angles = local.ang
+	local.a droptofloor
+}end
+
+coop_churchRallyAllies:{
+	local.ang = ( 0 -118 0 )
+	local.n = 0
+	local.arr = level.coop_actorArray["american"]
+	if( local.arr != NIL ){
+		local.i = 1
+		while( local.i <= local.arr.size ){
+			local.a = local.arr[local.i]
+			local.i = local.i + 1
+			if( local.a == NIL ){ continue }
+			if( local.a == NULL ){ continue }
+			if( !isAlive local.a ){ continue }
+			//fan them out along the wall instead of stacking every man on one point
+			local.off = local.n * 44
+			local.pos = ( 4375 -1077 -251 )
+			local.pos = local.pos + ( 0 local.off 0 )
+			local.a.origin = local.pos
+			local.a.angles = local.ang
+			local.a droptofloor
+			local.n = local.n + 1
+		}
+	}
+
+	local.lead = ( 4375 -1077 -251 )
+	waitthread coop_churchRallyOne level.ramsey local.lead local.ang
+	waitthread coop_churchRallyOne level.harrison local.lead local.ang
+	waitthread coop_churchRallyOne level.tomlin local.lead local.ang
+	println( "^~^~^ CHRALLY moved " + local.n + " allied actors to the church side" )
+}end
+
+coop_churchWireBoard:{
+	//[user 2026-08-16] "the pipe over the barbed wire is supposed to only spawn in after the signal
+	//grenade [is] interacted with", and the plank pile this used to spawn "shouldnt have stayed
+	//baked in". So the crossing IS the user's own heavy_pipe, captured in build mode at
+	//( 2528.151 -1265.588 -293.875 ) angles ( 340 171 0 ), pulled OUT of coop_baked_0816 so it is
+	//absent until the signal is thrown - and it is solid, so unlike the old cosmetic plank you can
+	//actually walk it.
+	//Solidified from the model's true bounds after a frame, same recipe as the bake and e1l2.
+	local.b = spawn script_model
+	local.b model "models/fx/heavy_pipe.tik"
+	local.b.origin = ( 2528.151 0 - 1265.588 0 - 293.875 )
+	local.b.angles = ( 340 171 0 )
+	waitframe
+	if( local.b == NULL ){ end }
+	local.mn = local.b.getmins
+	local.mx = local.b.getmaxs
+	local.b solid
+	if( local.mx[2] - local.mn[2] > 0 ){ local.b setsize local.mn local.mx }
+	level.coop_chWireBoard = local.b
+	println( "^~^~^ CHWIRE pipe placed at " + local.b.origin )
+}end
+
+//=========================================================================
+// The airborne arrive. Five user-walked landing points, all nav-verified (nearest node 64-116u).
+// coop_paradrop_main owns the C-47 flight and the descent; this only says WHERE.
+//=========================================================================
+coop_churchDrop:{
+	iprintlnbold "The airborne are on their way - hold the church!"
+	level.coop_paradrop_armed = 1
+	waitthread coop_mod/paradrop.scr::coop_paradrop_main ( 4269 0 - 2217 0 - 334 )
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1824] THE PHASE - orchestration.
+// Board + waves + barrage + clock, then the drop. Started by coop_churchWatch on `coop_chStart 1`
+// so it can be exercised in isolation before it is committed to the objective chain.
+//=========================================================================
+// ANY live german in the church, retail or ours. coop_churchGermans counts only tagged attackers
+// (bug-1831) which is right for the overrun bar but useless for "is the church clear yet".
+coop_churchAnyGermans:{
+	if( level.coop_chZone == NIL ){ level.coop_chZone = 500 }
+	local.n = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end local.n }
+	local.i = 1
+	while( local.i <= local.arr.size ){
+		local.a = local.arr[local.i]
+		local.i = local.i + 1
+		if( local.a == NIL ){ continue }
+		if( local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.d = waitthread coop_churchDist local.a.origin
+		if( local.d > level.coop_chZone ){ continue }
+		local.n = local.n + 1
+	}
+	end local.n
+}end
+
+//=========================================================================
+//[user 2026-08-16] WAKE THE CHURCH ON ARRIVAL, NOT ON A ROUTE.
+//
+// "make sure the church enemies are wired for dropping to the other side of that wall" and "the
+// downside is the map doesnt spawn in over there until you drop down". scene6 - which threads
+// every church spawner - is called from a trigger_once in the BSP sitting on the ORIGINAL
+// approach, so any crossing over the wall (ladder, pipe ramp, noclip) arrived at a dead church.
+//
+// Distance to the church centre, so it cannot be bypassed by choosing a different way in. 2500u
+// sits between the wall crossing (the pipe is 2659u out) and the church itself, so it fires just
+// after the drop. scene6 carries its own re-entry guard, so the BSP trigger firing later is safe.
+//=========================================================================
+//=========================================================================
+//[user 2026-08-16] CHURCH MG42 TUNING. "these cats are way too accurate and too way too much
+//damage, how do we mitigate on this map?"
+//
+// Two engine levers already exist and are GLOBAL: coop_mg42AiDamage (percent of TIK damage an AI
+// turret deals, default 40) and coop_mg42AiSpread (additive cone bonus on AI shots, default 180).
+// Softening those would soften every MG42 in the trilogy, so this sets the church guns' own TIK
+// baselines instead - per-turret, so it cannot leak into another map. The engine still applies the
+// global percent and cone bonus on top, exactly as it does for a player-manned gun's restore path.
+//
+// Live-tunable while you play: set coop_chMgDmg / coop_chMgSpread, then remount or let the next
+// gunner spawn pick them up.
+//=========================================================================
+coop_churchMgTune local.mg:{
+	if( local.mg == NULL ){ end }
+	local.dmg = 20
+	local.spr = 100
+	local.c = getcvar( "coop_chMgDmg" )
+	if( local.c != "" ){
+		if( local.c != "0" ){ local.dmg = int( local.c ) }
+	}
+	local.c = getcvar( "coop_chMgSpread" )
+	if( local.c != "" ){
+		if( local.c != "0" ){ local.spr = int( local.c ) }
+	}
+	local.mg bulletdamage local.dmg
+	local.mg bulletspread local.spr local.spr
+	println( "^~^~^ CHMG tuned " + local.mg.targetname + " dmg=" + local.dmg + " spread=" + local.spr )
+}end
+
+//=========================================================================
+//[user 2026-08-16] PVS BYPASS FOR THIS MAP. bug-1849: m3l3's vis was compiled for the SP route, so
+//crossing the churchyard wall drops the player into a cluster whose visible set never included the
+//far terrain - ground swaps in and out and the overcast sky shows through as flat white. There is
+//no .map source to re-vis, so the only lever is to stop culling by PVS. Confirmed by the user:
+//"r_novis 1 worked".
+//
+//Pushed per player rather than left to a config, so nobody has to know the cvar exists. One
+//unquoted statement per stufftext (readygate.scr:284), plain `set`, and r_novis is whitelisted in
+//cg_servercmds_filter.cpp next to r_fastsky. Re-sent on a slow loop because a stufftext to a client
+//that is still loading is silently dropped (readygate.scr:30).
+//=========================================================================
+coop_churchNoVis:{
+	waitthread coop_mod/replace.scr::waitForPlayer
+	local.n = 0
+	while( local.n < 40 ){
+		local.n = local.n + 1
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			local.i = local.i + 1
+			if( local.p == NULL ){ continue }
+			if( local.p.coop_chNoVisSent == 1 ){ continue }
+			local.p.coop_chNoVisSent = 1
+			local.p stufftext "set r_novis 1"
+		}
+		wait 5
+	}
+}end
+
+coop_churchApproach:{
+	waitthread coop_mod/replace.scr::waitForPlayer
+	while( level.coop_scene6Started != 1 ){
+		wait 1
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			local.i = local.i + 1
+			if( local.p == NULL ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			local.d = waitthread coop_churchDist local.p.origin
+			if( local.d > 2500 ){ continue }
+			println( "^~^~^ CHAPPROACH scene6 started, player at " + local.d + "u" )
+			//[user] farplane raise REVERTED: "The only thing you did by trying to fix the map from
+			//not loading in was made the shadows obbnoxiously worse." It also did not address the
+			//real symptom - untextured/white geometry beyond the wall - so it was cost with no
+			//benefit. The map's own scene farplane ramp is left alone.
+			thread scene6
+			level.coop_chGuardsGo = 1
+			end
+		}
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-16] OBJECTIVE CHAIN BETWEEN THE CHURCH AND THE SIGNAL.
+//
+// "New objectives added before we signal... after we take the church. Acquire the explosives >
+// Destroy the remaining flak so reinforcements can land safely > signal. 15 second stopwatch timer
+// and use the exploded flak model after it blows up."
+//
+// All three props are the user's own build-mode placements, pulled out of coop_baked_0816 so each
+// appears when its step begins rather than sitting in the world from map load.
+//=========================================================================
+//[user 2026-08-16] "those objects should all be there (including the smoke and bomb) you just cant
+//pick them up until each respective objective clears". So the props are placed at map load exactly
+//where the user built them; what is gated is the PICKUP and the flashing, not the object's
+//existence. Spawning them on demand meant an objective told you to find something that was not in
+//the world yet.
+coop_churchHoldLine:{
+	//[user 2026-08-16] PLAYER-ONLY HOLD LINE. "this invisible wall should stop players from leaving
+	//the area and should stay there until the paratroopers drop. Enemy AI should be able to pass thru
+	//that area fine." coop_playerclip is exactly that contract (entity.cpp:655): CONTENTS_PLAYERCLIP
+	//is in MASK_PLAYERSOLID but NOT in MASK_MONSTERSOLID / MASK_SHOT / MASK_PROJECTILE, so players
+	//collide while AI, bullets and grenades pass through.
+	//
+	//Built from the five viewpos readings the user walked, resampled every 40u and extended 60u past
+	//each tip so it cannot be rounded. A .tik bbox is AXIS-ALIGNED and does not rotate, so a diagonal
+	//line has to be a run of overlapping boxes rather than one long one.
+	//viewpos reports EYE height, so 82 is taken off for the feet (DEFAULT_VIEWHEIGHT).
+	local.n = 0
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( -46.0 -976.4 -314.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( -15.0 -925.0 -314.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 8.5 -886.0 -312.5 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 32.0 -847.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 55.0 -809.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 78.0 -771.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 102.0 -731.5 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 126.0 -692.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 147.5 -656.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 169.0 -620.0 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	local.c = spawn script_model
+	local.c model "models/fx/dummy.tik"
+	local.c.origin = ( 199.8 -568.5 -311.0 )
+	local.c setsize ( -34 -34 -16 ) ( 34 34 210 )
+	local.c coop_playerclip 1
+	level.coop_chHoldClip[local.n] = local.c
+	local.n++
+	level.coop_chHoldClipN = local.n
+	println( "^~^~^ CHHOLD line up, " + local.n + " player-only clips" )
+
+	while( level.coop_paradrop_dropped != 1 ){
+		wait 1
+	}
+
+	local.i = 0
+	while( local.i < level.coop_chHoldClipN ){
+		local.c = level.coop_chHoldClip[local.i]
+		if( local.c != NULL ){ local.c coop_playerclip 0 ; local.c remove }
+		local.i++
+	}
+	println "^~^~^ CHHOLD line down - paratroopers away"
+}end
+//=========================================================================
+//[user 2026-08-16] MISSION OBJECTIVE PANEL - wired ONE AT A TIME, verified per dedicated boot.
+//
+// SLOTS 1 AND 2 ARE NOT AVAILABLE: objectives.scr::coop_obj_register claims them on every map for
+// the officer and radio SIDE objectives. Mission objectives therefore live in 3-8 - six slots, not
+// the eight the plan assumed.
+//
+// This label owns slot 4 only. The rest follow one per boot.
+//=========================================================================
+coop_churchObjectives:{
+	waitthread coop_mod/replace.scr::waitForPlayer
+
+	//SLOT 3 - take the town. The King Tiger is folded in as its set-piece finale (agreed merge), so
+	//the objective completes when the tank dies rather than on some fuzzy "town is clear" test.
+	//scene3 is labelled TOWN ENTRANCE AND MAIN STREET in this file; scene4 is the tank.
+	waitthread global/objectives.scr::add_objectives 1 2 "Take the town and destroy the King Tiger"
+	waitthread global/objectives.scr::current_objectives 1
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 1 "Take the town and destroy the King Tiger"
+	println "^~^~^ CHOBJ 3 active - take the town"
+
+	//the tank is a BSP entity so it exists from map load, but guard anyway - a missing targetname
+	//here would strand the whole chain at objective one.
+	local.tank = $scene4_tank
+	if( local.tank != NULL && local.tank != NIL ){
+		while( isAlive local.tank ){
+			wait 1
+			local.tank = $scene4_tank
+			if( local.tank == NULL || local.tank == NIL ){ break }
+		}
+	}
+	waitthread global/objectives.scr::add_objectives 1 3 "Take the town and destroy the King Tiger"
+	println "^~^~^ CHOBJ 3 complete - tiger down"
+
+	//SLOT 4 - cross the wall, handed on by slot 3 completing.
+	waitthread global/objectives.scr::add_objectives 2 2 "Cross the wall into the churchyard"
+	waitthread global/objectives.scr::current_objectives 2
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 2 "Cross the wall into the churchyard"
+	println "^~^~^ CHOBJ 4 active - cross the wall"
+
+	//completed by coop_churchApproach, which is what threads scene6
+	while( level.coop_scene6Started != 1 ){
+		wait 1
+	}
+	waitthread global/objectives.scr::add_objectives 2 3 "Cross the wall into the churchyard"
+	println "^~^~^ CHOBJ 4 complete"
+
+	//SLOT 5 - clear the church. Activated by slot 4 completing, which is the chain working as it
+	//should: each objective is handed on by the one before it rather than timed or guessed.
+	waitthread global/objectives.scr::add_objectives 3 2 "Clear the church"
+	waitthread global/objectives.scr::current_objectives 3
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 3 "Clear the church"
+	println "^~^~^ CHOBJ 5 active - clear the church"
+
+	while( level.coop_chChurchClear != 1 ){
+		wait 1
+	}
+	waitthread global/objectives.scr::add_objectives 3 3 "Clear the church"
+	println "^~^~^ CHOBJ 5 complete"
+
+	//SLOT 6 - the flak. Named for the WHY, not the mechanic: the gun is what stops the drop landing
+	//safely, and the explosives are a step on the way rather than an objective in their own right
+	//(agreed merge - it is a 20 second fetch and the toast already calls it out).
+	waitthread global/objectives.scr::add_objectives 4 2 "Destroy the flak gun covering the drop zone"
+	waitthread global/objectives.scr::current_objectives 4
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 4 "Destroy the flak gun covering the drop zone"
+	println "^~^~^ CHOBJ 6 active - destroy the flak"
+
+	while( level.coop_chFlakDown != 1 ){
+		wait 1
+	}
+	waitthread global/objectives.scr::add_objectives 4 3 "Destroy the flak gun covering the drop zone"
+	println "^~^~^ CHOBJ 6 complete"
+
+	//SLOT 7 - signal AND hold, one objective (agreed merge). They are a single beat: you throw the
+	//smoke and then survive until it pays off, and splitting them would spend a slot on an action
+	//that takes one keypress. The text changes when the smoke goes up so the panel still tracks
+	//which half you are in.
+	waitthread global/objectives.scr::add_objectives 5 2 "Signal the drop zone and hold the church"
+	waitthread global/objectives.scr::current_objectives 5
+	waitthread coop_mod/objectives.scr::coop_obj_toast_all 5 "Signal the drop zone and hold the church"
+	println "^~^~^ CHOBJ 7 active - signal and hold"
+
+	while( level.coop_chSmokeUsed != 1 ){
+		wait 1
+	}
+	waitthread global/objectives.scr::add_objectives 5 2 "Hold the church until the airborne land"
+
+	//coop_chDone is set on BOTH outcomes; coop_chOver distinguishes them, so a lost church must not
+	//report the objective complete.
+	while( level.coop_chDone != 1 ){
+		wait 1
+	}
+	if( level.coop_chOver == 1 ){
+		println "^~^~^ CHOBJ 7 FAILED - church overrun"
+		end
+	}
+	waitthread global/objectives.scr::add_objectives 5 3 "Hold the church until the airborne land"
+	println "^~^~^ CHOBJ 7 complete"
+}end
+
+coop_churchProps:{
+	local.ex = spawn script_model
+	local.ex model "models/items/explosive.tik"
+	local.ex.origin = ( 3207.525 -2901.617 -351.875 )
+	local.ex.angles = ( 0 -118 0 )
+	local.ex notsolid
+	level.coop_chExEnt = local.ex
+
+	local.sm = spawn script_model
+	local.sm model "models/weapons/m18_smoke_grenade.tik"
+	local.sm.origin = ( 3267.192 -2913.540 -290.256 )
+	local.sm.angles = ( 208 -109 0 )
+	local.sm notsolid
+	level.coop_chSmokeEnt = local.sm
+
+	local.mk = spawn script_model
+	local.mk model "models/items/pulse_explosive.tik"
+	local.mk.origin = ( 1914.083 -3730.235 -277.675 )
+	local.mk.angles = ( 0 -118 0 )
+	local.mk notsolid
+	level.coop_chPlantMk = local.mk
+	println "^~^~^ CHPROPS explosives, signal grenade and plant marker placed"
+}end
+
+coop_churchExplosives:{
+	waitthread coop_mod/replace.scr::waitForPlayer
+
+	//step 1 gate: the church has to be CLEAR and someone standing in it (see coop_churchSmokeMarker's
+	//old gate - requiring a player present covers the run where the retail volumes never fired).
+	local.armed = 0
+	while( local.armed == 0 ){
+		wait 2
+		local.g = waitthread coop_churchAnyGermans
+		if( local.g > 0 ){ continue }
+		local.pin = waitthread coop_churchPlayersIn
+		if( local.pin < 1 ){ continue }
+		local.armed = 1
+	}
+	level.coop_chChurchClear = 1
+	iprintlnbold "Church clear. Grab the explosives."
+
+	local.pos = ( 3207.525 -2901.617 -351.875 )
+	local.ex = level.coop_chExEnt
+
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.pos
+	local.glow light ( 1 0.15 0.15 )
+	local.glow lightRadius 120
+	local.glow lightOn
+	local.glow notsolid
+
+	thread coop_churchExFlash local.ex local.glow
+
+	local.t = spawn trigger_use
+	local.t.origin = local.pos
+	local.t solid
+	local.t setsize ( -48 -48 0 ) ( 48 48 80 )
+	local.t waittill trigger
+	local.t remove
+	level.coop_chHasExplosives = 1
+	//[user] "no sound for planting the bomb" - and none for picking it up either. m1l2a:3210 and
+	//m2l2b:286 are the proven aliases for both halves.
+	exec coop_mod/replace.scr::playsound pickup_explosives
+	if( local.ex != NULL ){ local.ex remove }
+	if( local.glow != NULL ){ local.glow remove }
+
+	iprintlnbold "Explosives set. Destroy the flak gun so the drop can come in safely."
+	thread coop_churchFlak
+}end
+
+// The explosives crate pulses like the signal grenade does. Deliberately NOT generic: passing the
+// flag name and doing level.[local.name] is not an idiom this codebase uses anywhere, and an
+// unverified expression form is exactly what parse-kills a whole file (T1).
+coop_churchExFlash local.ent local.glow:{
+	while( local.ent != NULL ){
+		if( level.coop_chHasExplosives == 1 ){ end }
+		local.ent rendereffects "+fullbright"
+		if( local.glow != NULL ){ local.glow lightRadius 150 }
+		wait 0.35
+		if( local.ent == NULL ){ end }
+		if( level.coop_chHasExplosives == 1 ){ end }
+		local.ent rendereffects "-fullbright"
+		if( local.glow != NULL ){ local.glow lightRadius 45 }
+		wait 0.45
+	}
+}end
+
+// The GUN stands from map load - it is a real emplacement the user placed, and hiding it until the
+// explosives are in hand meant the objective target did not exist while you were being told to find
+// it ("the flak cannon doesnt seem spawned in"). Only the PLANT MARKER is gated.
+coop_churchFlakSetup:{
+	local.gun = spawn script_model
+	local.gun model "models/statweapons/p_aagun_cannon.tik"
+	local.gun.origin = ( 1874.017 -3725.714 -306.286 )
+	local.gun.angles = ( 0 -118 0 )
+	waitframe
+	if( local.gun == NULL ){ end }
+	local.mn = local.gun.getmins
+	local.mx = local.gun.getmaxs
+	local.gun solid
+	if( local.mx[2] - local.mn[2] > 0 ){ local.gun setsize local.mn local.mx }
+	level.coop_chFlakEnt = local.gun
+	println( "^~^~^ CHFLAK gun placed at " + local.gun.origin )
+}end
+
+coop_churchFlak:{
+	local.pos = ( 1874.017 -3725.714 -306.286 )
+	local.ang = ( 0 -118 0 )
+	local.gun = level.coop_chFlakEnt
+
+	//the user placed a pulse_explosive right beside the gun - that IS the plant marker
+	local.mk = level.coop_chPlantMk
+	if( local.mk != NULL ){ local.mk anim start }
+
+	local.t = spawn trigger_use
+	local.t.origin = ( 1914.083 -3730.235 -277.675 )
+	local.t solid
+	local.t setsize ( -56 -56 0 ) ( 56 56 96 )
+	local.t waittill trigger
+	local.t remove
+	if( local.mk != NULL ){ local.mk remove }
+
+	iprintlnbold "Charge set - clear the area!"
+	exec coop_mod/replace.scr::playsound plantbomb
+	exec coop_mod/replace.scr::stopwatch 15
+
+	//[user] "the sound of the stopwatch isnt on" - the engine stopwatch draws, it does not tick.
+	//Tick it from the charge itself so the sound comes from the gun you are running away from.
+	local.tk = spawn script_model
+	local.tk model "models/fx/dummy.tik"
+	local.tk.origin = ( 1914.083 -3730.235 -277.675 )
+	local.tk notsolid
+	local.n = 0
+	while( local.n < 15 ){
+		local.n = local.n + 1
+		if( local.tk != NULL ){ local.tk playsound bombtick }
+		wait 1
+	}
+	if( local.tk != NULL ){ local.tk remove }
+
+	local.fx = spawn script_model
+	local.fx model "models/emitters/explosion_bombwall.tik"
+	local.fx.origin = local.pos
+	local.fx notsolid
+	local.fx anim start
+	local.fx playsound explo_large
+
+	//[user] "use the exploded flak model after it blows up"
+	if( local.gun != NULL ){ local.gun remove }
+	local.wreck = spawn script_model
+	local.wreck model "models/statweapons/p_aagun_d.tik"
+	local.wreck.origin = local.pos
+	local.wreck.angles = local.ang
+	waitframe
+	if( local.wreck != NULL ){
+		local.mn = local.wreck.getmins
+		local.mx = local.wreck.getmaxs
+		local.wreck solid
+		if( local.mx[2] - local.mn[2] > 0 ){ local.wreck setsize local.mn local.mx }
+	}
+	level.coop_chFlakEnt = local.wreck
+
+	wait 4
+	if( local.fx != NULL ){ local.fx remove }
+
+	level.coop_chFlakDown = 1
+	iprintlnbold "Flak gun destroyed. Signal the drop zone."
+	println "^~^~^ CHFLAK destroyed, signal unlocked"
+}end
+
+coop_churchSmokeMarker:{
+	//[user 2026-08-16] OBJECTIVE ORDER. "there should be an objective to clear the church and then
+	//signal the drop/defend the church." So the signal is not offered until the church is actually
+	//clear AND someone is standing in it. Gating on "germans were seen then died" alone would
+	//soft-lock any run where the retail scene6 trigger_once volumes never fired; requiring a player
+	//present in an empty church covers both the cleared case and the never-spawned case.
+	waitthread coop_mod/replace.scr::waitForPlayer
+
+	//[user 2026-08-16] NO OFFICER GATE. An earlier reading of "we should gate the officer dropping
+	//the signal smoke" was built as "the officer must die before the smoke arms" - which quietly
+	//promoted a SIDE objective into a mandatory one, and sent the player 5932u back across the map
+	//between clearing the church and signalling. The user's correction: "The officer has always been
+	//a side objective and should remain that way". The signal is gated on the CHURCH only.
+	//[user 2026-08-16] the signal is now the END of the chain: church clear -> explosives ->
+	//flak destroyed -> signal. coop_churchExplosives owns the first two steps and sets this flag.
+	while( level.coop_chFlakDown != 1 ){
+		wait 1
+	}
+
+	//[user 2026-08-16] BACK ON THE PLACED GRENADE. I had moved it to a reading of ( 1212 -2265 -269 )
+	//taken as "the closed off exit", which put the marker INSIDE the church - "Your smoke plant maker
+	//is now inside the church its supposed to be wher the placed smoke grenade is?". The signal
+	//belongs on the m18 the user actually placed in build mode, baked at this position.
+	local.pos = ( 3267.192 0 - 2913.540 0 - 290.256 )
+	local.nade = level.coop_chSmokeEnt
+
+	//[user 2026-08-16] "instead of the bomb red flashing icon can we not make the grenade itself
+	//flash like that?" - the pulse_explosive prop is gone; the grenade IS the marker now. It pulses
+	//via its own render flag and a red light that breathes with it, so the thing you walk up to and
+	//use is the thing that was flashing at you.
+	local.glow = spawn script_model
+	local.glow model "models/fx/dummy.tik"
+	local.glow.origin = local.pos
+	local.glow light ( 1 0.15 0.15 )
+	local.glow lightRadius 120
+	local.glow lightOn
+	local.glow notsolid
+	level.coop_chSmokeGlow = local.glow
+	level.coop_chSmokePulse = local.nade
+	thread coop_churchSmokeFlash local.nade local.glow
+
+	local.t = spawn trigger_use
+	local.t.origin = local.pos
+	local.t solid
+	local.t setsize ( 0 - 48 0 - 48 0 ) ( 48 48 80 )
+
+	local.t waittill trigger
+	local.t remove
+	level.coop_chSmokeUsed = 1
+	if( level.coop_chSmokePulse != NULL ){ level.coop_chSmokePulse remove }
+	if( level.coop_chSmokeGlow != NULL ){ level.coop_chSmokeGlow remove }
+
+	//smoke burns for the WHOLE hold and is cleared by coop_churchPhase when the drop lands
+	local.sm = spawn script_model
+	//[user] the SAME smoke the signal drop already uses (paradrop.scr:58 dzmark), not ddaysmoke -
+	//"the smoke you are using is also obnoxious". Burns until the airborne arrive, then cleared by
+	//coop_churchPhase.
+	local.sm model "models/emitters/planesmokeplumeyellow.tik"
+	local.sm.origin = local.pos
+	local.sm notsolid
+	level.coop_chSmoke = local.sm
+	//[user] "smoke grenade also doesnt continuously smoke" - one "anim start" plays the emitter
+	//once and stops. Re-issue it on a loop until the phase clears the entity, so the signal burns
+	//for the whole hold as designed.
+	thread coop_churchSmokeBurn local.sm
+
+	iprintlnbold "Smoke out - airborne inbound. Get to the church and hold it!"
+	thread coop_churchPhase
+}end
+
+coop_churchSmokeBurn local.sm:{
+	while( local.sm != NULL ){
+		if( level.coop_chSmoke == NIL ){ end }
+		local.sm anim start
+		wait 2
+	}
+}end
+
+// Pulse the grenade itself: fullbright on/off against a breathing red light. Ends the moment
+// coop_chSmokeUsed is set, so the loop cannot outlive the pickup.
+coop_churchSmokeFlash local.nade local.glow:{
+	while( local.nade != NULL ){
+		if( level.coop_chSmokeUsed == 1 ){ end }
+		local.nade rendereffects "+fullbright"
+		if( local.glow != NULL ){ local.glow lightRadius 150 }
+		wait 0.35
+		if( local.nade == NULL ){ end }
+		if( level.coop_chSmokeUsed == 1 ){ end }
+		local.nade rendereffects "-fullbright"
+		if( local.glow != NULL ){ local.glow lightRadius 45 }
+		wait 0.45
+	}
+}end
+
+coop_churchSmokeClear:{
+	if( level.coop_chSmoke == NIL ){ end }
+	if( level.coop_chSmoke == NULL ){ end }
+	level.coop_chSmoke remove
+	level.coop_chSmoke = NIL
+}end
+
+coop_churchPhase:{
+	if( level.coop_chRunning == 1 ){ end }
+	level.coop_chRunning = 1
+
+	iprintlnbold "Hold the church until the airborne arrive!"
+	if( level.coop_chMgAmmo == NIL ){ level.coop_chMgAmmo = 500 }
+	waitthread coop_churchMgBelts level.coop_chMgAmmo
+	waitthread coop_churchWireBoard
+	waitthread coop_churchRallyAllies
+	thread coop_churchWaves
+	thread coop_churchBarrage
+	waitthread coop_churchDefense
+
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i = local.i + 1
+		if( local.p == NULL ){ continue }
+		waitthread coop_churchBarClear local.p
+	}
+
+	if( level.coop_chOver == 1 ){
+		iprintlnbold "The church has been overrun."
+		waitthread coop_churchSmokeClear
+		level.coop_chRunning = 0
+		end
+	}
+
+	waitthread coop_churchMgUnlimited
+	iprintlnbold "The church holds - C-47 inbound!"
+	waitthread coop_churchDrop
+	waitthread coop_churchSmokeClear
+	level.coop_chRunning = 0
+}end
+
+coop_churchWatch:{
+	while( 1 ){
+		wait 2
+		if( getcvar( "coop_chStart" ) == "1" ){
+			setcvar "coop_chStart" "0"
+			thread coop_churchPhase
+		}
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1825] MG42 BELTS for the church defense.
+//
+// The three scene6 guns are ammo-gated for the hold: a fixed MG in a defended building otherwise
+// trivialises a five-minute siege. 500 rounds each - note an MG42 fires ~20/sec, so that is ~25
+// SECONDS of continuous fire, not a generous allowance. Expect to tune coop_chMgAmmo.
+//
+// Engine side: TurretGun carries m_iCoopAmmo, -1 = unlimited (the retail default, so no other map
+// changes), decremented per shot in the same firing branches as the overheat model, and the gun
+// goes dead with a "BELT EMPTY" centerprint at zero. Resupply just sets it again, which is how the
+// ammo box tops it back up - and the boxes are INSIDE the church, so resupplying is a reason to
+// stay rather than a reason to wander.
+//=========================================================================
+coop_churchMgBelts local.rounds:{
+	if( local.rounds == NIL ){ local.rounds = 500 }
+	if( $scene6_mg1 != NULL ){ $scene6_mg1 coopammo local.rounds }
+	if( $scene6_mg2 != NULL ){ $scene6_mg2 coopammo local.rounds }
+	if( $scene6_mg3 != NULL ){ $scene6_mg3 coopammo local.rounds }
+}end
+
+// Restore unlimited belts once the phase is over, so the guns behave normally for the rest of the
+// mission (and for anyone who walks back past them on the way to the nebelwerfers).
+coop_churchMgUnlimited:{
+	//[bug-1826] arithmetic in a COMMAND ARGUMENT position is a parse killer - `coopammo 0 - 1`
+	//killed the whole file (121 'not properly loaded'). Compute it into a local first.
+	local.unl = 0 - 1
+	if( $scene6_mg1 != NULL ){ $scene6_mg1 coopammo local.unl }
+	if( $scene6_mg2 != NULL ){ $scene6_mg2 coopammo local.unl }
+	if( $scene6_mg3 != NULL ){ $scene6_mg3 coopammo local.unl }
+}end
+
+//=========================================================================
+//[user 2026-08-16, bug-1827] BAKED BUILD-MODE PLACEMENTS.
+//
+// 77 props captured with build mode. Build mode is a CAPTURE tool - nothing loads
+// coop_mod/save/build_m3l3.dat at runtime (bug-1554), so these existed only until the next map
+// reload until they were baked here.
+//
+// Mostly screening for the church defense: ~50 bushes hiding the barbed-wire spawn so the waves do
+// not visibly pop in, plus rocks, wrecks, bodies and furniture as cover and dressing.
+//
+// DELIBERATELY NOT BAKED:
+//   * 3 x bangalore_pulsating - the demolition idiom was withdrawn when the wire proved
+//     unremovable (baked geometry, no entity). Objective #4 is a ladder now.
+//   * ladder_wood marker - already scripted as coop_churchLadderMarker, which spawns the pulse,
+//     the glow and the trigger. Baking the prop too would double it.
+//
+// Origins, angles, scale and solidity exactly as captured.
+//=========================================================================
+coop_baked_0816:{
+	//[user 2026-08-16] Rebuilt from the current build save. Objective-owned props are NOT baked -
+	//each is spawned by the logic that owns it so it can appear at the right moment and be swapped:
+	//the m18 signal grenade, the WIRE heavy_pipe at 2528 (spawns on the signal - the WALL ramp at
+	//3874 stays baked, it is the route in), explosive.tik, and p_aagun_cannon + its plant marker.
+	//Retired ladders and the withdrawn bangalores are excluded too.
+	//Clipping follows coop_placements.scr::e1l2 - spawn all, one shared waitframe, then solidify
+	//from true bounds. getmins/getmaxs need PROPERTY syntax (bug-910).
+	local.bn = 0
+
+	local.e = spawn script_model
+	local.e model "models/static/bighutch.tik"
+	local.e.origin = ( 4379.833 -617.526 -343.875 )
+	local.e.angles = ( 0 305 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/ornaterectable_d.tik"
+	local.e.origin = ( 4379.412 -662.440 -351.875 )
+	local.e.angles = ( 317 89 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/wardrobe_damaged.tik"
+	local.e.origin = ( 4325.581 -712.165 -352.130 )
+	local.e.angles = ( 317 81 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/simpledesk_ns.tik"
+	local.e.origin = ( 4323.173 -711.270 -307.801 )
+	local.e.angles = ( 358 8 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/wardrobe_damaged.tik"
+	local.e.origin = ( 4272.293 -769.848 -353.268 )
+	local.e.angles = ( 358 8 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -2325.015 2543.062 -109.218 )
+	local.e.angles = ( 0 48 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -3014.683 3275.884 -70.200 )
+	local.e.angles = ( 0 343 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -1996.676 2912.809 -115.063 )
+	local.e.angles = ( 359 307 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -2217.534 2507.660 -125.875 )
+	local.e.angles = ( 359 264 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -2337.844 2690.220 -128.151 )
+	local.e.angles = ( 359 264 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -1641.367 2942.373 -123.753 )
+	local.e.angles = ( 359 264 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_medium.tik"
+	local.e.origin = ( -2711.306 3845.612 -95.865 )
+	local.e.angles = ( 0 197 0 )
+	local.e scale 2.800
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 2.800
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_large.tik"
+	local.e.origin = ( -2884.984 3441.921 -112.737 )
+	local.e.angles = ( 0 197 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_large.tik"
+	local.e.origin = ( -1518.134 2824.869 -119.367 )
+	local.e.angles = ( 0 197 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_large.tik"
+	local.e.origin = ( -1802.934 3215.122 -136.558 )
+	local.e.angles = ( 0 197 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/rock_large.tik"
+	local.e.origin = ( -2778.781 3124.200 -146.548 )
+	local.e.angles = ( 0 197 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/1_1-parachute-barn.tik"
+	local.e.origin = ( -1263.164 3685.411 218.493 )
+	local.e.angles = ( 0 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/1_1-parachute-barn.tik"
+	local.e.origin = ( -643.160 3490.178 166.523 )
+	local.e.angles = ( 0 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/vehicles/sdkfz_green_d.tik"
+	local.e.origin = ( 1872.424 -1479.882 -340.889 )
+	local.e.angles = ( 3 162 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/vehicles/panzer_destroyed_lowpoly_base.tik"
+	local.e.origin = ( 1403.148 -1334.255 -331.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1945.597 -834.114 -332.204 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2132.821 -721.499 -329.619 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2340.393 -603.790 -324.738 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2277.119 -793.717 -337.482 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2078.302 -815.865 -333.751 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1962.016 -697.208 -319.400 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2225.577 -600.148 -326.630 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2261.366 -687.337 -330.166 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2387.151 -651.742 -324.242 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1765.620 -841.436 -331.053 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1621.308 -828.620 -327.769 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2149.754 -1494.345 -345.177 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1799.867 -1650.652 -318.880 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1538.731 -1539.612 -323.450 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1350.909 -1553.103 -320.271 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1088.299 -1440.238 -325.869 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 668.694 -1378.263 -319.526 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 262.996 -1239.243 -334.630 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 405.018 -1613.169 -328.041 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 469.221 -2642.211 -334.359 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( -13.293 -3821.834 -349.841 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 826.238 -4088.780 -356.055 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1350.108 -3621.775 -355.055 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1291.973 -3284.275 -355.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1989.104 -3197.881 -353.968 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1666.453 -4121.353 -357.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2657.093 -3636.782 -388.496 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 257.997 -2282.055 -361.813 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2264.703 -1775.056 -366.792 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 3190.324 -1650.591 -376.177 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5183.260 -1533.844 -387.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5184.495 -2016.058 -387.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5163.708 -2363.605 -385.378 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5087.281 -2921.843 -386.160 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4893.001 -3014.389 -384.981 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4614.892 -2647.617 -349.968 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4867.566 -1371.395 -423.379 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5033.119 -988.673 -385.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4345.067 -1181.151 -362.313 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4231.380 -2250.541 -365.784 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4341.006 -3384.046 -414.562 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 3142.087 -3479.850 -390.322 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 2675.462 -3009.716 -385.483 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 1969.840 -1722.429 -347.432 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 925.557 -1632.623 -346.799 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 123.454 -1445.858 -398.325 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 349.430 -3328.359 -410.839 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 3603.593 -1686.884 -336.080 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 4368.780 -1538.091 -383.676 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/bush_full_heavyweather.tik"
+	local.e.origin = ( 5312.265 -2070.681 -391.250 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_usvest04.tik"
+	local.e.origin = ( 3365.628 -2822.290 -350.699 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_us04.tik"
+	local.e.origin = ( 3219.825 -3092.474 -351.875 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_usvest02.tik"
+	local.e.origin = ( 4112.844 -1870.724 -313.742 )
+	local.e.angles = ( 3 180 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_us03.tik"
+	local.e.origin = ( 4535.875 -2274.696 -293.334 )
+	local.e.angles = ( 344 171 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_usvest06.tik"
+	local.e.origin = ( 3188.543 -2939.249 -351.875 )
+	local.e.angles = ( 357 125 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 0
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/statweapons/p_aagun_d.tik"
+	local.e.origin = ( 3926.095 -2596.356 -320.190 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_small_semicircle.tik"
+	local.e.origin = ( 4010.506 -2550.198 -348.242 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 3889.242 -1728.425 -310.801 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 3136.354 -3220.832 -361.509 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 3315.408 -1976.115 -346.749 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 4800.343 -2221.695 -376.514 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 4937.751 -2764.099 -340.348 )
+	local.e.angles = ( 0 13 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/sandbag_large_semicircle.tik"
+	local.e.origin = ( 347.446 -1955.283 -338.815 )
+	local.e.angles = ( 0 49 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/fx/heavy_pipe.tik"
+	local.e.origin = ( 3874.997 -1077.998 -276.573 )
+	local.e.angles = ( 327 0 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_us05.tik"
+	local.e.origin = ( 4112.156 -1632.794 -312.348 )
+	local.e.angles = ( 0 -118 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	local.e = spawn script_model
+	local.e model "models/static/body_us06.tik"
+	local.e.origin = ( 3766.509 -2538.545 -317.809 )
+	local.e.angles = ( 0 -118 0 )
+	local.bm[local.bn] = local.e
+	local.bscl[local.bn] = 1.0
+	local.bsol[local.bn] = 1
+	local.bn++
+
+	waitframe
+
+	local.i = 0
+	while( local.i < local.bn ){
+		local.e = local.bm[local.i]
+		if( local.bsol[local.i] == 1 ){
+			local.mn = local.e.getmins
+			local.mx = local.e.getmaxs
+			local.mn = local.mn * local.bscl[local.i]
+			local.mx = local.mx * local.bscl[local.i]
+			local.e solid
+			if( local.mx[2] - local.mn[2] > 0 ){ local.e setsize local.mn local.mx }
+		}
+		else{ local.e notsolid }
+		local.i++
+	}
 }end

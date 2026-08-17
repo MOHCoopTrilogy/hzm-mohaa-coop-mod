@@ -38,6 +38,10 @@ main:{
 		local.dbgE = 0					// engaged clusters
 		local.dbgA = 0					// members alerted
 		local.dbgS = 0					// search moves issued
+		local.dbgB = 0					// bounding-overwatch relocation grants
+		//[bug-1815] flip the starting parity every tick so the half that moved now covers next.
+		if( level.coop_boundPhase == NIL ){ level.coop_boundPhase = 0 }
+		if( level.coop_boundPhase == 1 ){ level.coop_boundPhase = 0 } else { level.coop_boundPhase = 1 }
 
 		// reset the per-actor "already clustered this tick" marker
 		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
@@ -89,6 +93,49 @@ main:{
 			if( local.threat == NULL ){ continue }		// whole cluster idle - nothing to do
 
 			local.dbgE++
+
+			// ---- SB3: BOUNDING OVERWATCH - decide WHO of this cluster may reposition ----
+			//[user 2026-08-15, bug-1815] The engine can now relocate a cover-think actor between
+			//cover nodes (bug-1813), but on a per-actor timer stamped whenever that actor happened
+			//to claim its node - so the phases across a squad are effectively random. Two bad
+			//shapes fall out of that: the whole cluster comes out of cover in the same second and
+			//the player gets a free lull with nobody shooting, or one man crosses the player's
+			//line while every squadmate is also moving and simply dies for nothing.
+			//Fire and movement means somebody is always shooting. So grant the relocation window
+			//to every OTHER engaged member, alternating the starting parity each tick, which keeps
+			//roughly half the cluster firing while the other half moves and swaps them over on the
+			//next pass. The engine still requires its own timer to be due, so this only ever
+			//REMOVES opportunities to move - it can never make an actor move more often than the
+			//unbounded version, which is what makes it safe to leave on.
+			//A lone engaged actor is granted unconditionally: bounding a squad of one just pins
+			//him for half the time and reads as a bug rather than as tactics.
+			if( getcvar( "coop_aiBound" ) == "1" ){
+				local.engN = 0
+				for( local.k = 1; local.k <= local.memN; local.k++ ){
+					local.m = local.mem[local.k]
+					if( local.m == NULL || local.m == NIL ){ continue }
+					if( !isAlive local.m ){ continue }
+					if( local.m.enemy == NULL || local.m.enemy == NIL ){ continue }
+					local.engN = local.engN + 1
+					local.engM[local.engN] = local.m
+				}
+				if( local.engN == 1 ){
+					local.engM[1] coop_relocateok 2.5
+					local.dbgB = local.dbgB + 1
+				}
+				if( local.engN > 1 ){
+					local.grant = level.coop_boundPhase
+					for( local.k = 1; local.k <= local.engN; local.k++ ){
+						if( local.grant == 1 ){
+							local.engM[local.k] coop_relocateok 2.5
+							local.dbgB = local.dbgB + 1
+							local.grant = 0
+						} else {
+							local.grant = 1
+						}
+					}
+				}
+			}
 
 			// ---- SB2: alert the un-engaged members of an engaged cluster ----
 			for( local.k = 1; local.k <= local.memN; local.k++ ){
@@ -192,7 +239,7 @@ main:{
 		}
 
 		if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
-			println( "^~^~^ SQUAD clusters=" + local.dbgC + " engaged=" + local.dbgE + " alerts=" + local.dbgA + " search=" + local.dbgS )
+			println( "^~^~^ SQUAD clusters=" + local.dbgC + " engaged=" + local.dbgE + " alerts=" + local.dbgA + " search=" + local.dbgS + " bound=" + local.dbgB )
 		}
 	}
 }end

@@ -50,8 +50,42 @@ coop_paradrop_main local.smoke_pos:{
 	// inflating it erases all map fog. Instead we fly a HIGHER but still close pass that
 	// stays inside the map's native far-clip (m4l3 = 1500) for normal throws, so fog is
 	// preserved; far throws simply let the plane fade into the haze.
-	local.drop_z = local.base_z + 1050
-	local.chute_start_z = local.base_z + 950
+	//[user 2026-08-16] "make it higher and it should go for a long time across the map... make it
+	//fly the entire span of the map if you have to". Was 1050 up and 2200 units end to end at
+	//230 u/s - a 9 second hop. m3l3 spans roughly 11400 x 10150, so 16000 units of run gives a
+	//genuine cross-map pass. Speed raised with it: 230 u/s is a crawl for a transport, and at 700
+	//the whole traverse still takes ~23s, which is a long time to watch a plane.
+	//[user 2026-08-16] "needs to fly for way longer... give it a solid 30 seconds after the drop
+	//its only going to go off map so it doesnt matter. If possible bump it even higher."
+	//Out = 30s x speed, so the aircraft keeps going long after the sticks are away and leaves the
+	//map under its own power instead of blinking out overhead. Approach stays 10s.
+	//[user 2026-08-16] 2600 was too high - 2200 keeps it clearly overhead without becoming a speck.
+	//All four are cvar-tunable now so the altitude can be dialled in during a flight instead of
+	//costing a rebuild per guess: coop_c47Alt / coop_c47Run / coop_c47Out / coop_c47Speed.
+	if( level.coop_c47Alt == NIL ){ level.coop_c47Alt = 2200 }
+	if( level.coop_c47Run == NIL ){ level.coop_c47Run = 7000 }
+	if( level.coop_c47Out == NIL ){ level.coop_c47Out = 21000 }
+	if( level.coop_c47Speed == NIL ){ level.coop_c47Speed = 700 }
+
+	local.cv = getcvar( "coop_c47Alt" )
+	if( local.cv != "" ){
+		if( local.cv != "0" ){ level.coop_c47Alt = int( local.cv ) }
+	}
+	local.cv = getcvar( "coop_c47Out" )
+	if( local.cv != "" ){
+		if( local.cv != "0" ){ level.coop_c47Out = int( local.cv ) }
+	}
+	local.cv = getcvar( "coop_c47Speed" )
+	if( local.cv != "" ){
+		if( local.cv != "0" ){ level.coop_c47Speed = int( local.cv ) }
+	}
+	//descent scales with the altitude, so the rate goes up with it - 175 was tuned for a 950u drop
+	//and would leave troopers hanging for 15s from 2600.
+	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 220 }
+
+	local.drop_z = local.base_z + level.coop_c47Alt
+	//leave the aircraft just under it, rather than materialising 1000u below
+	local.chute_start_z = local.drop_z - 100
 
 	// Persistent YELLOW drop-zone marker, parked at the (clamped) ground so it isn't
 	// buried under the map if the smoke clipped low.
@@ -67,17 +101,23 @@ coop_paradrop_main local.smoke_pos:{
 	local.fwd_ang = (0 (randomint 360) 0)
 	local.fwd = angles_toforward local.fwd_ang
 
-	local.neg_runin = 0 - 1100
+	local.neg_runin = 0 - level.coop_c47Run
 	local.c47_start = local.smoke_pos + (vector_scale local.fwd local.neg_runin)
 	local.c47_start[2] = local.drop_z
-	local.c47_end = local.smoke_pos + (vector_scale local.fwd 1100)
+	local.c47_end = local.smoke_pos + (vector_scale local.fwd level.coop_c47Out)
 	local.c47_end[2] = local.drop_z
 
 	// Fly C-47
 	thread coop_paradrop_c47 local.c47_start local.c47_end local.fwd
 
-	// Wait until plane is roughly overhead before dropping
-	wait 6
+	// Wait until plane is roughly overhead before dropping. Derived from the run-in and speed now,
+	// not a hardcoded 6 - with a 7000u approach a fixed wait would drop the sticks miles short.
+	local.overhead = level.coop_c47Run / level.coop_c47Speed
+	wait local.overhead
+
+	//[user 2026-08-16] the sticks are away HERE, which is what "until the paratroopers drop" means -
+	//not when the aircraft spawned. m3l3's hold line keys on this.
+	level.coop_paradrop_dropped = 1
 
 	// Drop 5 paratroopers staggered along the flight path
 	level.coop_paradrop_squad[1] = NIL
@@ -120,7 +160,8 @@ coop_paradrop_c47 local.startpos local.endpos local.fwd:{
 	// position directly -- the proven-reliable mover (same as the marker tracker).
 	local.full = local.endpos - local.startpos
 	local.dist = vector_length local.full
-	local.step = 230 * 0.05
+	if( level.coop_c47Speed == NIL ){ level.coop_c47Speed = 700 }
+	local.step = level.coop_c47Speed * 0.05
 	local.delta = vector_scale local.full (local.step / local.dist)
 	local.trav = 0
 	while( local.c47 != NULL && local.trav < local.dist ){
@@ -190,7 +231,8 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 	local.cfull = local.chute_end - local.drop_pos
 	local.cdist = vector_length local.cfull
 	if( local.cdist < 1 ){ local.cdist = 1 }
-	local.cstep = 175 * 0.05
+	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 220 }
+	local.cstep = level.coop_c47Chute * 0.05
 	local.cdelta = vector_scale local.cfull (local.cstep / local.cdist)
 	local.ctrav = 0
 	while( local.chute != NULL && local.ctrav < local.cdist ){
@@ -266,6 +308,14 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 	// HZM coop - ensure the ALLIED team so the AI threat system treats them as friends fighting the germans
 	// (without an explicit team a freshly-spawned actor can end up team-less and never engage / never be engaged).
 	local.actor.team = "american"
+
+	//[user 2026-08-16] TAG: these are OUR off-map reinforcements - the ones we call in, from this
+	//objective or from an officer's signal grenade. aisquad and aimaneuver key on this flag so the
+	//paratroopers get the same cover/squad brain the axis runs, WITHOUT sweeping in scripted allies
+	//(the SAS escort, Grillo, Ramsey), whose set-piece behaviour a cover-seeking brain would break.
+	//An explicit flag rather than inferring from coop_personality_set, which today happens to mean
+	//the same thing only because aihandler.scr:109 gates personality to germans.
+	local.actor.flags["coop_offmapPara"] = 1
 
 	//[user 08-02] GIVE PARATROOPERS A BRAIN. They were reported as rushing blindly, never taking
 	//cover and never getting knocked down - and that was deterministic, not flaky. Every custom AI

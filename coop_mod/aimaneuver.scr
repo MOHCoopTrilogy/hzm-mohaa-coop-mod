@@ -13,10 +13,19 @@
 //====================================================================
 // re-enable the enemy-seeking think after a short reposition move, so the trooper re-engages from its
 // new angle. Kept short (~1.6s) so troopers are only briefly "not shooting" while they relocate.
-aimaneuver_reengage local.e:{
+aimaneuver_reengage local.e local.sx local.sy local.want:{
 	// Ship#4: adaptive re-engage. A flat 1.6s left a stalled / early-arrived trooper standing blind (can't
 	// move, can't return fire) for the whole window - a free kill. Poll instead: after ~0.4s, if it has
 	// stopped (arrived or path-failed) re-engage at once; otherwise let a genuine long arc run up to 2.2s.
+	//
+	//[user 2026-08-15, bug-1812] OUTCOME INSTRUMENTATION. A controlled A/B measured 270 runto orders
+	//producing ZERO net extra ground covered (totalDist 8899 with the layer on vs 9087 with it off),
+	//while per-engaged movement HALVED. So the orders are being issued and then going nowhere - but
+	//"issued" was the only thing this layer counted, which cannot distinguish the three very
+	//different causes: the actor never moves (bad destination / no path), it moves and arrives (the
+	//order was simply tiny), or it is still moving when the window closes (leash too short). Those
+	//need opposite fixes, so measure which one it is instead of guessing.
+	local.cut = 1
 	local.waited = 0
 	while( local.waited < 2.2 ){
 		wait 0.2
@@ -26,11 +35,50 @@ aimaneuver_reengage local.e:{
 		if( local.waited >= 0.4 ){
 			local.v = local.e.velocity
 			local.sp = ( local.v[0] * local.v[0] ) + ( local.v[1] * local.v[1] )
-			if( local.sp < 100 ){ break }
+			if( local.sp < 100 ){ local.cut = 0; break }
 		}
 	}
 	if( local.e == NULL || local.e == NIL ){ end }
 	if( !isAlive local.e ){ end }
+
+	//[user 2026-08-17] GUARD. This label was throwing ~500 script errors per session - every one of
+	//them here, on lines 45-60, because local.sx / local.sy / local.want arrive as 'none' and every
+	//arithmetic step below then fails in turn ('-' float/none, '*' none/none, cast none to float).
+	//It is pure INSTRUMENTATION (bug-1812's outcome counters), so a missing start position must skip
+	//the measurement, never spam the log: the layer's actual behaviour does not depend on any of it.
+	//Root cause of the none-args is still open - the call site at :259-262 assigns all three - but
+	//the errors are unacceptable either way and the guard is correct regardless of the answer.
+	//[user 2026-08-17] "Some of these enemies just stand and stare at me". THE RESTORE COMES FIRST.
+	//The maneuver layer sets enableEnemy = 0 so the actor obeys runto; this label is what turns it
+	//back on. Anything that leaves early - my own NIL guard below, and before that the ~500 script
+	//errors which aborted the thread at the same point - strands the actor with its enemy-seeking
+	//think switched OFF. It stands there, alive and blind, for the rest of the map.
+	//Re-engaging is the label's JOB; the measurement is a passenger, so it can never come first.
+	local.e.enableEnemy = 1
+	local.e forceactivate
+
+	if( local.sx == NIL || local.sy == NIL || local.want == NIL ){ end }
+
+	// how far it ACTUALLY got, horizontally, versus what we asked for
+	local.ex = local.e.origin[0] - local.sx
+	local.ey = local.e.origin[1] - local.sy
+	local.got = sqrt( ( local.ex * local.ex ) + ( local.ey * local.ey ) )
+	if( level.coop_manN == NIL ){
+		level.coop_manN = 0; level.coop_manStall = 0; level.coop_manShort = 0
+		level.coop_manArrive = 0; level.coop_manCut = 0; level.coop_manGot = 0; level.coop_manWant = 0
+	}
+	level.coop_manN++
+	level.coop_manGot  = level.coop_manGot + local.got
+	level.coop_manWant = level.coop_manWant + local.want
+	if( local.cut == 1 ){ level.coop_manCut++ }
+	if( local.got < 16 ){
+		level.coop_manStall++			// never left the spot: no path, or the order was refused
+	} else {
+		local.hit = local.want * 0.75
+		if( local.got >= local.hit ){ level.coop_manArrive++ } else { level.coop_manShort++ }
+	}
+
+	//(idempotent - the authoritative restore now happens at the top, before any early exit)
 	local.e.enableEnemy = 1
 	local.e forceactivate
 }end
@@ -44,6 +92,7 @@ main:{
 		local.dbg_eng = 0
 		local.dbg_cand = 0
 		local.dbg_issued = 0
+		local.dbg_cover = 0
 		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
 			local.e = local.arr[local.i]
 			if( local.e == NIL || local.e == NULL ){ continue }
@@ -63,6 +112,51 @@ main:{
 				if( local.role != "aggr" || local.allowAggr == 0 ){ continue }
 			}
 			local.dbg_cand++
+
+			//[user 2026-08-15, bug-1812] HAND COVER/FLANK ACTORS TO THE ENGINE'S OWN COVER AI.
+			//Measured: of 167 script-issued runto orders, 85% STALLED - the actor never moved at
+			//all - and the layer delivered 5% of the distance it asked for (1,173 of 22,382).
+			//The destination picker validated its offsets with `traced`, which proves LINE OF SIGHT
+			//is clear but not that a PATH exists; actors navigate on pathnodes, so an arbitrary
+			//point in open space is usually unreachable. Worse, each order set enableEnemy 0 for up
+			//to 2.2s, so a failed order STOPPED an actor that was already moving natively - which is
+			//why the layer measurably REDUCED per-enemy movement instead of adding to it.
+			//
+			//`type_attack cover` sets THINKSTATE_ATTACK to THINK_COVER (actor.cpp EventSetTypeAttack),
+			//handing destination choice, validity and pathing to actor_cover.cpp - the retail cover
+			//system, which moves between REAL cover pathnodes (m3l3 has 398, t2l1 152) and is
+			//therefore reachable by construction. The engine already does exactly this transition
+			//under fire (coop_aiSuppressCover), so this is the same proven move made deliberate
+			//rather than only as a reaction to being shot at.
+			//
+			//Excludes the same think types the engine's own hook excludes, or mounted MGs and
+			//scripted specials would be yanked out of their authored behaviour.
+			//[user 2026-08-15, bug-1814] CHECK PROTECTION HERE, not just upstream.
+			//Scene actors, alarm runners, prone shooters and the officer are excluded from role
+			//assignment by coop_apply_personality, so in principle none of them can reach this
+			//code. But that is an INVARIANT HELD ELSEWHERE, and converting an actor's type_attack
+			//is permanent for the map - if the upstream filter ever loosens, a scripted actor
+			//silently loses its authored attack behaviour and the symptom appears somewhere else
+			//entirely. Two guards in this project have already stopped applying without anyone
+			//noticing (the disguise gates in bug-1631, coop_stealthArmOnHurt's dead caller), so
+			//re-test the thing we actually care about at the point where the damage would be done.
+			if( waitthread coop_mod/officer.scr::coop_isProtectedActor local.e ){ continue }
+
+			if( getcvar( "coop_aiCoverThink" ) != "0" ){
+				if( local.role == "flank" || local.role == "cover" ){
+					if( local.e.flags["coop_coverThink"] != 1 ){
+						local.cur = local.e.type_attack		//EV_GETTER: property syntax, never command syntax
+						if( local.cur != "cover" && local.cur != "machinegunner" && local.cur != "weaponless" && local.cur != "dog_attack" && local.cur != "alarm" ){
+							local.e type_attack "cover"
+							local.dbg_cover++
+						}
+						local.e.flags["coop_coverThink"] = 1
+					}
+					//engine owns this actor's combat movement now - do NOT also issue a runto,
+					//which is what was suspending its think and stalling it.
+					continue
+				}
+			}
 			// per-actor throttle: at most one reposition every 4s. Ship#3 - the stamp is now set only when a
 			// move is actually ISSUED (just before the runto below), so a candidate rejected by the target/
 			// distance gates retries on the next 2s loop instead of burning a full 4s cooldown for nothing.
@@ -146,13 +240,22 @@ main:{
 			local.e.coop_manNext = level.time + local.thr
 			local.e.movedoneradius = 96
 			local.e.enableEnemy = 0
+			//[user 2026-08-15, bug-1812] capture where it started and how far we asked, so the
+			//re-engage watcher can classify the outcome rather than only counting the order.
+			local.sx = local.e.origin[0]
+			local.sy = local.e.origin[1]
+			local.want = sqrt( ( local.selX * local.selX ) + ( local.selY * local.selY ) )
 			local.e runto local.dest
 			local.e forceactivate
-			thread aimaneuver_reengage local.e
+			thread aimaneuver_reengage local.e local.sx local.sy local.want
 			local.dbg_issued++
 		}
 		if( getcvar( "coop_aiBehav" ) != "0" && getcvar( "coop_aiBehav" ) != "" ){
-			println( "^~^~^ MANEUVER attackState=" + local.dbg_eng + " candidates=" + local.dbg_cand + " runtoIssued=" + local.dbg_issued )
+			println( "^~^~^ MANEUVER attackState=" + local.dbg_eng + " candidates=" + local.dbg_cand + " runtoIssued=" + local.dbg_issued + " coverThink=" + local.dbg_cover )
+			//[user 2026-08-15, bug-1812] cumulative outcome split for the orders issued so far.
+			if( level.coop_manN != NIL ){
+				println( "^~^~^ MANEUVER2 done=" + level.coop_manN + " stall=" + level.coop_manStall + " short=" + level.coop_manShort + " arrive=" + level.coop_manArrive + " cut=" + level.coop_manCut + " gotSum=" + level.coop_manGot + " wantSum=" + level.coop_manWant )
+			}
 		}
 	}
 }end

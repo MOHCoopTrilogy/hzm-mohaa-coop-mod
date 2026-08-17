@@ -680,7 +680,18 @@ coop_spawn_bodyguard local.pos local.idx:{
 		if( local.bgdz < 0 ){ local.bgdz = 0 - local.bgdz }
 		if( local.bgdz > 128 ){ local.gnd = NIL }
 	}
-	if( local.gnd == NIL ){ local.gnd = local.pos }
+	//[user 2026-08-17] "officers bodyguard spawned under the map again". The old fallback used
+	//local.pos - the very position the ground trace had just REJECTED - and leaned on droptofloor,
+	//which does nothing when there is no floor beneath. That is how a guard ends up under the world.
+	//Fall back to the OFFICER's own position instead: he is standing on ground that demonstrably
+	//exists. Note coop_voidWatch cannot save this case - it kills actors that FALL 2500u below their
+	//spawn, and one that spawns under the map never descends any further.
+	if( local.gnd == NIL ){
+		local.gnd = local.pos
+		if( level.coop_officer != NIL && level.coop_officer != NULL ){
+			local.gnd = level.coop_officer.origin
+		}
+	}
 	local.gmodel = exec coop_mod/officer.scr::coop_model_for "infantry"
 	local.guard = spawn local.gmodel
 	local.guard.coop_xpClass = "guard"	// [302] HZM XP - kill-class bonus tag
@@ -1617,7 +1628,44 @@ coop_reinf_count local.base local.pername local.perdef local.cap:{
 // two systems never double-scale. coop_waveActor=1 also excludes officer troops from the generic
 // per-spawn cloner (aihandler::coop_tryDuplicateActor) - coop_reinf_count is the single count
 // authority for officer content.
+// [user 2026-08-17] VOID GUARD. "If any officer reinforcements ever fall under the map how can we
+// ensure they just get killed?" A reinforcement that drops through geometry keeps falling forever:
+// it stays ALIVE, so the wave's alive-count never frees up and no replacement spawns - the fight
+// quietly thins out and the officer stops reinforcing.
+//
+// Killed, not removed, and killed the proven way (allysquad.scr:244-248: takedamage -> health 1 ->
+// kill) so every death monitor and counter that is waiting on it actually fires. 'remove' would
+// leave those latches hanging, which is the bug this is meant to prevent.
+//
+// The test is relative to where the actor SPAWNED, so it needs no per-map floor: nothing legitimately
+// descends coop_voidDrop (2500u default) below its own spawn point. Cliff maps stay safe.
+coop_voidWatch local.actor:{
+	if( local.actor == NULL || local.actor == NIL ){ end }
+	local.drop = 2500
+	local.c = getcvar( "coop_voidDrop" )
+	if( local.c != "" ){
+		if( local.c != "0" ){ local.drop = int( local.c ) }
+	}
+	local.z0 = local.actor.origin[2]
+	local.floor = local.z0 - local.drop
+
+	while( local.actor != NULL ){
+		wait 2
+		if( local.actor == NULL ){ end }
+		if( !isAlive local.actor ){ end }
+		local.z = local.actor.origin[2]
+		if( local.z < local.floor ){
+			println( "^~^~^ VOIDKILL " + local.actor.targetname + " fell to " + local.z + " from " + local.z0 )
+			local.actor takedamage
+			local.actor.health = 1
+			local.actor kill
+			end
+		}
+	}
+}end
+
 coop_reinf_scale local.actor:{
+	thread coop_voidWatch local.actor
 	if( local.actor == NULL ){ end }
 	local.actor.flags["coop_waveActor"] = 1
 	if( getcvar "coop_officerScale" == "0" ){ end }
@@ -1812,7 +1860,18 @@ coop_apply_personality local.actor:{
 	// generic have none -> they fall through to a normal role). Crash-safe: a cosmetic scripted prone
 	// pose + a decoupled gun entity for the real bullets; the actor never runs the attack.scr prone
 	// loop that crashes the server.
-	if( local.roll >= 88 ){
+	//[bug-1852] TUNABLE PRONE SHARE. Measured this session: the prone path works end to end - role
+	//assigned, protection passed (protect=0), pose issued, and mp40_prone_shoot / rifle_prone_shoot
+	//both exist in the game data. What was wrong was the BELIEF that it was broken: AIBEHAV reports
+	//prone=0 even in the same second a trace shows "posing wg=mp40 role=prone", and bug-1103 was
+	//declared verified on that counter. The user simply never sees it because 12% is rare and a
+	//poser stands again after ~4s without a visible target.
+	//coop_aiProneChance is the percentage; 0 disables prone entirely.
+	local.pchance = 12
+	local.pc = getcvar( "coop_aiProneChance" )
+	if( local.pc != "" ){ local.pchance = int( local.pc ) }
+	local.pthresh = 100 - local.pchance
+	if( local.roll >= local.pthresh && local.pchance > 0 ){
 		// PRONE SHOOTER (~12%). Do NOT gate the DECISION on a live weapongroup read at this spawn frame -
 		// the active MAIN weapon slot is usually still empty here (weapongroup reads "unarmed"), so the old
 		// group test failed, the roll degraded to the flank else-branch, and the coop_personality_set latch
@@ -3698,6 +3757,20 @@ coop_radio_init local.pos:{
 	local.table notsolid
 	level.coop_radio_table = local.table
 	local.radio = spawn script_model
+	//[user 2026-08-15, bug-1816] PUBLISH THE RADIO. This spawned the model and then dropped the
+	//reference on the floor - level.coop_radio was read in a dozen places and assigned in NONE, so
+	//it was NIL for the whole map. Every consumer guards on `!= NIL && != NULL` and therefore did
+	//nothing, silently:
+	//  * coop_radio_bomb_enable ends at its first line, so after the officer dies there is no red
+	//    pulse marker and no trigger_use - the player is told "plant explosives on the radio" and
+	//    given nothing to plant on. That is the reported symptom.
+	//  * the officer's own retreat-to-radio and the bodyguard-at-radio positioning (this file at
+	//    :704, :723, :870, :1095) never ran either.
+	//  * coop_radio_bomb_destroy reads level.coop_radio to blow it up, so the objective could not
+	//    have completed even if a charge had somehow been planted.
+	//The destroy path already sets it back to NULL, which is what makes the omission obvious in
+	//hindsight: the clear was written, the assign was not.
+	level.coop_radio = local.radio
 	local.radio model "models/miscobj/radio_military.tik"
 	local.radio.origin = local.table_gnd + (26 0 50)	//[user 2026-08-07] Occasional German traffic over the set. Rebuilt after the first version
 	//flooded the console - three separate faults, all mine:
@@ -3766,6 +3839,9 @@ coop_officer_death_drops local.dead_pos:{
 	// HZM COOP: per-map disable of the officer's SMOKE reward ONLY (the paradrop SYSTEM stays
 	// active so a tutorial/placed smoke still works). m1l2a sets this 0 - smoke is taught at the
 	// hostage tutorial instead, so the officer shouldn't also drop one.
+	//[user 2026-08-17] the gate is verifiably in the shipped pk3 and the drop fired anyway, so print
+	//what the flag actually holds at death. Unconditional - this has to answer in one run.
+	println( "^~^~^ OFFDROP smoke_drop=" + level.coop_officer_smoke_drop + " feature_para=" + level.coop_feature_paradrop )
 	if( level.coop_officer_smoke_drop == 0 ){ local.do_para = 0 }
 	local.do_binoc = 1
 	if( level.coop_feature_binoc == 0 ){ local.do_binoc = 0 }
