@@ -1838,6 +1838,9 @@ coop_isProtectedActor local.actor:{
 	//player's fire cracks near this AI (weaputils.cpp) - this monitor turns that into a visible
 	//dive-to-crouch, or a prone drop for long-range riflemen.
 	thread coop_suppress_react local.actor
+	//[user 2026-08-18] "if they are the last soldier in their squad they should surrender":
+	//snapshot the spawn-time cohort now, watch it die.
+	thread coop_squad_surrender local.actor
 }end (0)
 
 coop_apply_personality local.actor:{
@@ -4810,5 +4813,60 @@ coop_suppress_react local.actor:{
 		local.actor.enableEnemy = 0
 		local.actor.enableEnemy = 1
 		local.actor forceactivate
+	}
+}end
+
+//[user 2026-08-18] LAST MAN OF THE SQUAD SURRENDERS. The squad is the actor's spawn-time
+//cohort: same-team soldiers within 700u at personality time, at least two of them, so a lone
+//spawn never counts as a massacre survivor. When every mate is dead and he still stands, one
+//roll of coop_aiSurrenderChance decides it: he holsters (the anim is the scientist's - empty
+//raised hands read right, a waved rifle would not), plays scientist_surrender - the trilogy's
+//only hands-up anim, shipped unused - re-asserted like the prone poser so the engine cannot
+//drift him out of it, and goes permanently non-hostile. Shooting him still kills him; the
+//deathhandler is untouched. Personality-attached only, so scene actors are exempt.
+coop_squad_surrender local.actor:{
+	if( local.actor == NULL ){ end }
+	wait 2	//let the wave finish spawning so the cohort is complete
+	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.n = 0
+	local.maxent = int(getcvar "maxentities")
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	local.ei = 0
+	while( local.ei < local.maxent && local.n < 6 ){
+		local.e = getentbyentnum local.ei
+		if( local.e != NULL && local.e != local.actor ){
+			if( local.e.classname == "Actor" && isAlive local.e && local.e.team == local.actor.team ){
+				if( vector_length( local.e.origin - local.actor.origin ) < 700 ){
+					local.n++
+					local.mate[local.n] = local.e
+				}
+			}
+		}
+		local.ei++
+	}
+	if( local.n < 2 ){ end }	//no squad, no surrender
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 1
+		if( local.actor == NULL ){ end }
+		local.alive = 0
+		local.i = 1
+		while( local.i <= local.n ){
+			if( local.mate[local.i] != NULL && isAlive local.mate[local.i] ){ local.alive++ }
+			local.i++
+		}
+		if( local.alive == 0 ){
+			if( (randomint 100) >= (int(getcvar "coop_aiSurrenderChance") + 0) ){ end }
+			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
+			local.actor.flags["coop_surrendered"] = 1
+			local.actor.enableEnemy = 0
+			local.actor holster
+			wait 0.8
+			if( local.actor == NULL || !isAlive local.actor ){ end }
+			while( local.actor != NULL && isAlive local.actor ){
+				local.actor anim_scripted scientist_surrender
+				wait 2.5
+			}
+			end
+		}
 	}
 }end
