@@ -8452,294 +8452,6 @@ coop_skin_p38_camo_desert
 	}
 }
 
-coop_skin_panzerfaust_gold_1
-{
-	qer_editorimage textures/coop_panzerfaust/pschreck.tga
-	{
-		map textures/coop_panzerfaust/pschreck.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 1.00 0.78 0.30
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.40 0.31 0.12
-	}
-}
-
-coop_skin_panzerfaust_gold_2
-{
-	qer_editorimage textures/coop_panzerfaust/pzrshell.tga
-	{
-		map textures/coop_panzerfaust/pzrshell.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 1.00 0.78 0.30
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.40 0.31 0.12
-	}
-}
-
-coop_skin_panzerfaust_gold_0
-{
-	qer_editorimage textures/coop_panzerfaust/panzerrim.tga
-	{
-		map textures/coop_panzerfaust/panzerrim.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 1.00 0.78 0.30
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.40 0.31 0.12
-	}
-}
-
-coop_skin_panzerfaust_chrome_1
-{
-	qer_editorimage textures/coop_panzerfaust/pschreck.tga
-	{
-		map textures/coop_panzerfaust/pschreck.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.88 0.92 0.98
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.55 0.58 0.64
-	}
-}
-
-coop_skin_panzerfaust_chrome_2
-{
-	qer_editorimage textures/coop_panzerfaust/pzrshell.tga
-	{
-		map textures/coop_panzerfaust/pzrshell.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.88 0.92 0.98
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.55 0.58 0.64
-	}
-}
-
-coop_skin_panzerfaust_chrome_0
-{
-	qer_editorimage textures/coop_panzerfaust/panzerrim.tga
-	{
-		map textures/coop_panzerfaust/panzerrim.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.88 0.92 0.98
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.55 0.58 0.64
-	}
-}
-
-coop_skin_panzerfaust_blued_1
-{
-	qer_editorimage textures/coop_panzerfaust/pschreck.tga
-	{
-		map textures/coop_panzerfaust/pschreck.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.44 0.48 0.64
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.10 0.12 0.20
-	}
-}
-
-coop_skin_panzerfaust_blued_2
-{
-	qer_editorimage textures/coop_panzerfaust/pzrshell.tga
-	{
-		map textures/coop_panzerfaust/pzrshell.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.44 0.48 0.64
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.10 0.12 0.20
-	}
-}
-
-coop_skin_panzerfaust_blued_0
-{
-	qer_editorimage textures/coop_panzerfaust/panzerrim.tga
-	{
-		map textures/coop_panzerfaust/panzerrim.tga
-		rgbGen lightingSpherical
-	}
-	{
-		map $whiteimage
-		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const 0.44 0.48 0.64
-	}
-	{
-		map textures/coop_skins/env_sheen.tga
-		blendFunc add
-		tcGen environment
-		rgbGen const 0.10 0.12 0.20
-	}
-}
-
-coop_skin_panzerfaust_bloody_1
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pschreck_bloody.jpg
-	{
-		map textures/coop_skins/panzerfaust/pschreck_bloody.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_bloody_2
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pzrshell_bloody.jpg
-	{
-		map textures/coop_skins/panzerfaust/pzrshell_bloody.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_bloody_0
-{
-	qer_editorimage textures/coop_skins/panzerfaust/panzerrim_bloody.jpg
-	{
-		map textures/coop_skins/panzerfaust/panzerrim_bloody.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_woodland_1
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pschreck_camo_woodland.jpg
-	{
-		map textures/coop_skins/panzerfaust/pschreck_camo_woodland.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_woodland_2
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pzrshell_camo_woodland.jpg
-	{
-		map textures/coop_skins/panzerfaust/pzrshell_camo_woodland.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_woodland_0
-{
-	qer_editorimage textures/coop_skins/panzerfaust/panzerrim_camo_woodland.jpg
-	{
-		map textures/coop_skins/panzerfaust/panzerrim_camo_woodland.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_winter_1
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pschreck_camo_winter.jpg
-	{
-		map textures/coop_skins/panzerfaust/pschreck_camo_winter.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_winter_2
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pzrshell_camo_winter.jpg
-	{
-		map textures/coop_skins/panzerfaust/pzrshell_camo_winter.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_winter_0
-{
-	qer_editorimage textures/coop_skins/panzerfaust/panzerrim_camo_winter.jpg
-	{
-		map textures/coop_skins/panzerfaust/panzerrim_camo_winter.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_desert_1
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pschreck_camo_desert.jpg
-	{
-		map textures/coop_skins/panzerfaust/pschreck_camo_desert.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_desert_2
-{
-	qer_editorimage textures/coop_skins/panzerfaust/pzrshell_camo_desert.jpg
-	{
-		map textures/coop_skins/panzerfaust/pzrshell_camo_desert.jpg
-		rgbGen lightingSpherical
-	}
-}
-
-coop_skin_panzerfaust_camo_desert_0
-{
-	qer_editorimage textures/coop_skins/panzerfaust/panzerrim_camo_desert.jpg
-	{
-		map textures/coop_skins/panzerfaust/panzerrim_camo_desert.jpg
-		rgbGen lightingSpherical
-	}
-}
-
 coop_skin_panzerschreck_gold
 {
 	qer_editorimage textures/models/weapons/panzerschreck/pschreck.tga
@@ -9412,7 +9124,7 @@ coop_skin_svt_rifle_camo_desert
 	}
 }
 
-coop_skin_thompsonsmg_gold
+coop_skin_thompsonsmg_gold_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
@@ -9432,7 +9144,27 @@ coop_skin_thompsonsmg_gold
 	}
 }
 
-coop_skin_thompsonsmg_chrome
+coop_skin_thompsonsmg_gold_0
+{
+	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
+	{
+		map textures/models/weapons/thompsonsmg/thompsite.tga
+		rgbGen lightingSpherical
+	}
+	{
+		map $whiteimage
+		blendFunc GL_DST_COLOR GL_ZERO
+		rgbGen const 1.00 0.78 0.30
+	}
+	{
+		map textures/coop_skins/env_sheen.tga
+		blendFunc add
+		tcGen environment
+		rgbGen const 0.40 0.31 0.12
+	}
+}
+
+coop_skin_thompsonsmg_chrome_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
@@ -9452,7 +9184,27 @@ coop_skin_thompsonsmg_chrome
 	}
 }
 
-coop_skin_thompsonsmg_blued
+coop_skin_thompsonsmg_chrome_0
+{
+	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
+	{
+		map textures/models/weapons/thompsonsmg/thompsite.tga
+		rgbGen lightingSpherical
+	}
+	{
+		map $whiteimage
+		blendFunc GL_DST_COLOR GL_ZERO
+		rgbGen const 0.88 0.92 0.98
+	}
+	{
+		map textures/coop_skins/env_sheen.tga
+		blendFunc add
+		tcGen environment
+		rgbGen const 0.55 0.58 0.64
+	}
+}
+
+coop_skin_thompsonsmg_blued_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
@@ -9472,7 +9224,27 @@ coop_skin_thompsonsmg_blued
 	}
 }
 
-coop_skin_thompsonsmg_bloody
+coop_skin_thompsonsmg_blued_0
+{
+	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
+	{
+		map textures/models/weapons/thompsonsmg/thompsite.tga
+		rgbGen lightingSpherical
+	}
+	{
+		map $whiteimage
+		blendFunc GL_DST_COLOR GL_ZERO
+		rgbGen const 0.44 0.48 0.64
+	}
+	{
+		map textures/coop_skins/env_sheen.tga
+		blendFunc add
+		tcGen environment
+		rgbGen const 0.10 0.12 0.20
+	}
+}
+
+coop_skin_thompsonsmg_bloody_1
 {
 	qer_editorimage textures/coop_skins/thompsonsmg/thompsonsmg_bloody.jpg
 	{
@@ -9481,7 +9253,16 @@ coop_skin_thompsonsmg_bloody
 	}
 }
 
-coop_skin_thompsonsmg_camo_woodland
+coop_skin_thompsonsmg_bloody_0
+{
+	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_bloody.jpg
+	{
+		map textures/coop_skins/thompsonsmg/thompsite_bloody.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_skin_thompsonsmg_camo_woodland_1
 {
 	qer_editorimage textures/coop_skins/thompsonsmg/thompsonsmg_camo_woodland.jpg
 	{
@@ -9490,7 +9271,16 @@ coop_skin_thompsonsmg_camo_woodland
 	}
 }
 
-coop_skin_thompsonsmg_camo_winter
+coop_skin_thompsonsmg_camo_woodland_0
+{
+	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_woodland.jpg
+	{
+		map textures/coop_skins/thompsonsmg/thompsite_camo_woodland.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_skin_thompsonsmg_camo_winter_1
 {
 	qer_editorimage textures/coop_skins/thompsonsmg/thompsonsmg_camo_winter.jpg
 	{
@@ -9499,11 +9289,29 @@ coop_skin_thompsonsmg_camo_winter
 	}
 }
 
-coop_skin_thompsonsmg_camo_desert
+coop_skin_thompsonsmg_camo_winter_0
+{
+	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_winter.jpg
+	{
+		map textures/coop_skins/thompsonsmg/thompsite_camo_winter.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_skin_thompsonsmg_camo_desert_1
 {
 	qer_editorimage textures/coop_skins/thompsonsmg/thompsonsmg_camo_desert.jpg
 	{
 		map textures/coop_skins/thompsonsmg/thompsonsmg_camo_desert.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_skin_thompsonsmg_camo_desert_0
+{
+	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_desert.jpg
+	{
+		map textures/coop_skins/thompsonsmg/thompsite_camo_desert.jpg
 		rgbGen lightingSpherical
 	}
 }
