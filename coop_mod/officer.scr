@@ -1834,6 +1834,10 @@ coop_isProtectedActor local.actor:{
 	if( (randomint 100) < (int(getcvar "coop_aiSlideChance") + 0) ){
 		thread coop_arrival_slide local.actor
 	}
+	//[user 2026-08-18] suppression reaction: the engine stamps self.coop_suppressedAt when the
+	//player's fire cracks near this AI (weaputils.cpp) - this monitor turns that into a visible
+	//dive-to-crouch, or a prone drop for long-range riflemen.
+	thread coop_suppress_react local.actor
 }end (0)
 
 coop_apply_personality local.actor:{
@@ -4768,5 +4772,43 @@ coop_arrival_slide local.actor:{
 			local.actor forceactivate
 			end
 		}
+	}
+}end
+
+//[user 2026-08-18] Suppression-reactive pose. Polls the engine's near-miss stamp; a fresh one
+//rolls coop_aiSuppressReact (percent): the actor throws the standtocrouch dive (0.87s, shipped
+//unused) and stays low, or - rifleman with a far enemy - drops into the proven prone-shooter.
+//Per-actor cooldown so sustained fire cannot chain-stagger him. Personality-attached only, so
+//scene actors and alarm runners are already exempt.
+coop_suppress_react local.actor:{
+	if( local.actor == NULL ){ end }
+	local.wg = local.actor.weapongroup
+	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" && local.wg != "sten" ){ end }
+	local.next = 0
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 0.3
+		if( local.actor == NULL ){ end }
+		local.at = local.actor.coop_suppressedAt
+		if( local.at == NIL || local.at == NULL ){ continue }
+		if( level.time - local.at > 0.45 ){ continue }
+		if( level.time < local.next ){ continue }
+		local.next = level.time + 9
+		if( (randomint 100) >= (int(getcvar "coop_aiSuppressReact") + 0) ){ continue }
+		//long-range rifleman: go prone and shoot back through the proven poser
+		if( local.wg == "rifle" && local.actor.enemy != NULL && local.actor.enemy != NIL ){
+			if( vector_length( local.actor.enemy.origin - local.actor.origin ) > 800 ){
+				thread coop_prone_shooter local.actor
+				end
+			}
+		}
+		//everyone else: dive low and stay crouched
+		local.actor anim_scripted (local.wg + "_standtocrouch_dive")
+		wait 1.0
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		local.actor anim "idle"
+		local.actor.position = "crouch"
+		local.actor.enableEnemy = 0
+		local.actor.enableEnemy = 1
+		local.actor forceactivate
 	}
 }end
