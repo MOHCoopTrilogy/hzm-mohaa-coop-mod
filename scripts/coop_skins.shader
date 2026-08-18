@@ -14,13 +14,13 @@ coop_skin_thompsonsmg_gold
 	{
 		map $whiteimage
 		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const ( 1.00 0.78 0.30 )
+		rgbGen const 1.00 0.78 0.30
 	}
 	{
 		map textures/coop_skins/env_sheen.tga
 		blendFunc add
 		tcGen environment
-		rgbGen const ( 0.40 0.31 0.12 )
+		rgbGen const 0.40 0.31 0.12
 	}
 }
 
@@ -34,13 +34,13 @@ coop_skin_thompsonsmg_chrome
 	{
 		map $whiteimage
 		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const ( 0.88 0.92 0.98 )
+		rgbGen const 0.88 0.92 0.98
 	}
 	{
 		map textures/coop_skins/env_sheen.tga
 		blendFunc add
 		tcGen environment
-		rgbGen const ( 0.55 0.58 0.64 )
+		rgbGen const 0.55 0.58 0.64
 	}
 }
 
@@ -54,13 +54,13 @@ coop_skin_thompsonsmg_blued
 	{
 		map $whiteimage
 		blendFunc GL_DST_COLOR GL_ZERO
-		rgbGen const ( 0.44 0.48 0.64 )
+		rgbGen const 0.44 0.48 0.64
 	}
 	{
 		map textures/coop_skins/env_sheen.tga
 		blendFunc add
 		tcGen environment
-		rgbGen const ( 0.10 0.12 0.20 )
+		rgbGen const 0.10 0.12 0.20
 	}
 }
 
