@@ -1829,6 +1829,11 @@ coop_isProtectedActor local.actor:{
 			if( local.tn == level.coop_sceneActorNames[local.i] ){ end (1) }
 		}
 	}
+	//[user 2026-08-18] arrival slide: some movers throw a baseball slide into their first
+	//stop (misc/takecover_slide - 885u of travel retail never played). One-shot monitor.
+	if( (randomint 100) < (int(getcvar "coop_aiSlideChance") + 0) ){
+		thread coop_arrival_slide local.actor
+	}
 }end (0)
 
 coop_apply_personality local.actor:{
@@ -1943,7 +1948,7 @@ coop_prone_shooter local.actor:{
 	}
 	// Only groups with a real <wg>_prone_shoot anim can pose; anything else (bazooka/grenade/mg42/
 	// generic) or still-unarmed after the wait -> a moving cover role (never a broken anim_scripted).
-	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" && local.wg != "vickers" && local.wg != "pistol" ){
+	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" && local.wg != "vickers" && local.wg != "pistol" && local.wg != "sten" ){
 		local.actor.flags["coop_role"] = "cover"
 		local.actor type_attack "cover"
 		end
@@ -2004,7 +2009,7 @@ coop_prone_shooter local.actor:{
 		} else {
 			local.gun off
 			local.lostsight++
-			if( local.lostsight >= 5 ){ break }	// no visible target ~4s -> stand up and re-engage
+			if( local.lostsight >= 10 ){ break }	// [user 2026-08-18] ~8s (was ~4s): posers were too fleeting to ever be SEEN prone
 			wait 0.75
 		}
 	}
@@ -2014,7 +2019,9 @@ coop_prone_shooter local.actor:{
 	local.gun remove
 	if( local.actor != NULL && isAlive local.actor ){
 		local.actor anim "idle"
-		local.actor.position = "stand"
+		//[user 2026-08-18] exit to CROUCH, not stand - a poser who loses sight sinks to a knee
+		//instead of popping bolt upright, which reads far more natural and keeps him lower
+		local.actor.position = "crouch"
 		local.actor.enableEnemy = 0
 		local.actor.enableEnemy = 1
 		local.actor forceactivate
@@ -4729,4 +4736,37 @@ coop_radio_chatter:{
 		level.coop_radio playsound local.pool[local.i]
 	}
 	level.coop_radio_chatting = 0
+}end
+
+//[user 2026-08-18] Wait for this actor's first real stop after having actually travelled,
+//then play the takecover slide (aliased <wg>_diveongrenade - retail's name, it is the
+//sprint-and-slide) and hand back to the brain via the proven medic-kneel exit. Bounded:
+//gives up after 20s or death. coop_aiSlideChance gates the roll at personality time.
+coop_arrival_slide local.actor:{
+	if( local.actor == NULL ){ end }
+	local.wg = local.actor.weapongroup
+	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" ){ end }
+	local.moved = 0
+	local.prev = local.actor.origin
+	local.t = 0
+	while( local.actor != NULL && isAlive local.actor && local.t < 40 ){
+		wait 0.5
+		local.t++
+		if( local.actor == NULL ){ end }
+		local.d = vector_length( local.actor.origin - local.prev )
+		local.prev = local.actor.origin
+		local.moved = local.moved + local.d
+		if( local.moved > 350 && local.d < 8 ){
+			//travelled, now stopped: slide into the spot
+			local.actor anim_scripted (local.wg + "_diveongrenade")
+			wait 2.1
+			if( local.actor == NULL || !isAlive local.actor ){ end }
+			local.actor anim "idle"
+			local.actor.position = "crouch"
+			local.actor.enableEnemy = 0
+			local.actor.enableEnemy = 1
+			local.actor forceactivate
+			end
+		}
+	}
 }end
