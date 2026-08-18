@@ -193,6 +193,18 @@ chal_init:{
 	waitthread chal_def "kt_head_e"     "combat" "Kopfjager"     "Get 100 headshot kills"                         "headshot"   100 "models/coop_helmets/coop_helmet_net.tik"
 	waitthread chal_def "kt_melee"      "combat" "Cold Steel" "Get 15 melee kills"                             "melee"      15  "perk_quickbash"
 	waitthread chal_def "kt_melee_e"    "combat" "Knuckle and Blade"  "Get 45 melee kills"                             "melee"      45  "models/weapons/welrod.tik"
+
+	//[user 2026-08-18] WEAPON FINISHES - each unlocks a skin finish ACCOUNT-WIDE (the reward
+	//string lands in the same pipe store as weapon unlocks; the armory strip and the spawn
+	//resolver both probe it). Applying a finish to a G U N additionally needs that gun's own
+	//wpn_ kill challenge complete - no extra challenges for that, by design.
+	waitthread chal_def "fin_gold" "finishes" "Midas Touch" "Get 2500 kills to unlock the GOLD finish" "kill" 2500 "finish_gold"
+	waitthread chal_def "fin_chrome" "finishes" "Untouchable" "Complete a mission with no deaths to unlock CHROME" "nodeath" 1 "finish_chrome"
+	waitthread chal_def "fin_blued" "finishes" "Gun Blue" "Get 500 headshots to unlock the BLUED finish" "headshot" 500 "finish_blued"
+	waitthread chal_def "fin_bloody" "finishes" "Red Right Hand" "Get 250 melee kills to unlock the BLOODY finish" "melee" 250 "finish_bloody"
+	waitthread chal_def "fin_woodland" "finishes" "Home Front" "Get 300 kills in the US campaign to unlock WOODLAND" "kill_us" 300 "finish_camo_woodland"
+	waitthread chal_def "fin_winter" "finishes" "Cold Snap" "Get 300 kills on snow maps to unlock WINTER" "kill_snow" 300 "finish_camo_winter"
+	waitthread chal_def "fin_desert" "finishes" "Scorched Sand" "Get 300 kills in North Africa to unlock DESERT" "kill_desert" 300 "finish_camo_desert"
 	waitthread chal_def "kt_barrel"     "combat" "Scripted Havoc"     "Kill 2 or more enemies with a single exploding barrel" "scripted_havoc" 1 "perk_demolition"
 	waitthread chal_def "kt_wallbang"   "combat" "Through the Bocage"   "Kill 10 enemies with a wallbang shot"           "wallbang"   10  "perk_penetrator"
 	waitthread chal_def "kt_long"       "combat" "Kentucky Windage"   "Get 25 long-range kills (over 2000 units)"      "longshot"   25  "models/player/allied_Airborne_101E_Lt_Speirs.tik"
@@ -1237,6 +1249,18 @@ chal_weaponId local.player:{
 	local.m = local.w.model
 	if( local.m == NIL || local.m == "" ){ end "" }
 
+	local.wid = waitthread chal_widFromModel local.m
+}end(local.wid)
+
+//=========================================================================
+//[user 2026-08-18] The model->wid chain, callable with a MODEL PATH. Moved verbatim out of
+//chal_weaponId so the finish strip's mastery gate keys on exactly the same mapping as the
+//kill-stat writers - a finish can never gate on a different spelling than the challenge
+//that counts its kills. chal_weaponId now derives the model and calls this.
+//=========================================================================
+chal_widFromModel local.m:{
+	local.wid = ""
+	if( local.m == NIL || local.m == "" ){ end "" }
 	//[user 2026-08-17] East imports. Placed at the TOP of the chain deliberately: this is an
 	//ordered substring match, so an entry added at the bottom can be pre-empted by any earlier
 	//token that happens to appear in the path. Verified neither path contains any of the other
@@ -1374,6 +1398,15 @@ chal_ai_killed local.victim local.killer:{
 	if( local.victim.team != "german" ){ end }
 
 	waitthread chal_bump local.killer "kill" 1
+	//[user 2026-08-18] theater kill stats for the camo finishes. Map sets, by prefix:
+	//US campaign = the whole AA m-series; snow = Norway (m2), Ardennes (m5, t2);
+	//North Africa = Arzew (m1) and Kasserine (e1). A map can pay more than one lane
+	//(m2 pays both US and snow) - that is intended, they are separate stats.
+	if( waitthread coop_mod/main.scr::containsText level.coop_mapname "m" 0 ){
+		if( level.coop_aaMap == 1 ){ waitthread chal_bump local.killer "kill_us" 1 }
+	}
+	if( (waitthread coop_mod/main.scr::containsText level.coop_mapname "m2" 1) || (waitthread coop_mod/main.scr::containsText level.coop_mapname "m5" 1) || (waitthread coop_mod/main.scr::containsText level.coop_mapname "t2" 1) ){ waitthread chal_bump local.killer "kill_snow" 1 }
+	if( (waitthread coop_mod/main.scr::containsText level.coop_mapname "m1" 1) || (waitthread coop_mod/main.scr::containsText level.coop_mapname "e1" 1) ){ waitthread chal_bump local.killer "kill_desert" 1 }
 
 	//[user 2026-08-04] bug-1346 - AXIS FACTION tracking, classified from the victim model
 	local.fac = waitthread chal_factionOf local.victim.model
@@ -1952,6 +1985,19 @@ chal_mission_complete local.mapname:{
 		waitthread chal_team_bump ( "map_" + local.mapname ) 1
 	}
 	waitthread chal_team_bump "missions" 1
+
+	//[user 2026-08-18] CHROME finish: per-player deathless mission. coop_wentDownMap is
+	//stamped with the map name by player.scr on death AND dbno.scr on going down - the same
+	//source the no-down feat below trusts - so surviving upright end-to-end is exactly
+	//"its stamp is not this map".
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		local.p = $player[local.pi]
+		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 && local.p.coop_wentDownMap != level.coop_mapname ){
+			waitthread chal_bump local.p "nodeath" 1
+		}
+		local.pi++
+	}
 
 	//[user 2026-08-14] "The Quiet Type" - finish a mission without the alarm ever being raised.
 	//Counted here because this is the one point that already knows a REAL mission just ended:

@@ -374,6 +374,14 @@ if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	local.sc = local.player.flags["coop_loSlot3"]
 	local.gr = local.player.flags["coop_loSlot4"]
 
+	//[user 2026-08-18] FINISH STRIP: swap each slot's give for its finished variant when one
+	//is picked AND still earned - loadout_finResolve re-runs both unlock gates, so this is
+	//the authority; the client cvars are cosmetic. Falls back to the base gun untouched.
+	if(local.p1 != NIL){ local.p1 = waitthread loadout_finResolve local.player 1 local.p1 }
+	if(local.p2 != NIL){ local.p2 = waitthread loadout_finResolve local.player 2 local.p2 }
+	if(local.sc != NIL){ local.sc = waitthread loadout_finResolve local.player 3 local.sc }
+	if(local.gr != NIL){ local.gr = waitthread loadout_finResolve local.player 4 local.gr }
+
 	if(local.p1 == NIL && local.p2 == NIL){ end }
 
 	local.n = 0
@@ -608,6 +616,33 @@ loadout_ui_exportUnlocks local.player:{
 		}
 		local.i++
 	}
+	//[user 2026-08-18] FINISH STRIP locks - same archived-seta + diff-guard pattern as the gun
+	//padlocks above (bug-758 rules: unquoted stufftext, multi-word value arrives via Cmd_ArgsFrom).
+	//coop_loLkF<fid>  = "set coop_loLkFV<fid> 0|1"            (the padlock)
+	//coop_loFcmtA<fid> = "set coop_loFcmt<fid> vstr coop_loFgo<fid>|coop_loDeny"  (the commit gate)
+	waitthread coop_mod/loadoutskins.scr::skin_init
+	local.f = 1
+	while(local.f <= 7){
+		local.flk = 0
+		if(local.gateOn){
+			if(!(waitthread loadout_finUnlocked local.player local.f)){ local.flk = 1 }
+		}
+		if(local.player == NULL){ end }
+		if(local.player.flags["coop_loLkFLast" + local.f] != local.flk){
+			local.player.flags["coop_loLkFLast" + local.f] = local.flk
+			local.player stufftext ( "seta coop_loLkF" + local.f + " set coop_loLkFV" + local.f + " " + local.flk )
+			if(local.flk == 0){
+				local.player stufftext ( "seta coop_loFcmtA" + local.f + " set coop_loFcmt" + local.f + " vstr coop_loFgo" + local.f )
+			} else {
+				local.player stufftext ( "seta coop_loFcmtA" + local.f + " set coop_loFcmt" + local.f + " vstr coop_loDeny" )
+			}
+			//apply immediately in the open menu too, not only on the next lkfin replay
+			local.player stufftext ( "vstr coop_loLkF" + local.f )
+			local.player stufftext ( "vstr coop_loFcmtA" + local.f )
+		}
+		local.f++
+	}
+
 }end
 
 loadout_isUnlocked local.player local.tik:{
@@ -728,3 +763,120 @@ loadout_seedPushUI local.player:{
 	local.player stufftext ( "exec ui/loadout/w48_s3.cfg" )
 	println( "^~^~^ LOADOUT seed UI pushed for e" + local.player.entnum )
 }end
+
+//=========================================================================
+//[user 2026-08-18] FINISH STRIP - apply a skin finish to a committed slot.
+// Fired by the ,f<slot><fid> name-bus token from ui/loadout/fin<fid>_s<slot>.cfg.
+// Two gates, both server-side: the finish must be UNLOCKED (its challenge's reward string
+// "finish_<key>" is in the pipe store - same probe as loadout_isUnlocked), and the slot's gun
+// must be MASTERED (its base per-weapon challenge "wpn_<wid>" is complete; a gun with no such
+// challenge is ungated). The client cvars are convenience for the cold main menu - the same two
+// checks run again at spawn in loadout_finResolve, so a spoofed cvar gives nothing.
+//=========================================================================
+loadout_finish local.player local.slot local.fid:{
+//=========================================================================
+if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread loadoutpick/loadout_finish->"+level.cMTE+"" )}
+	if(local.player == NULL){ end }
+	if(local.fid == NIL || local.fid == ""){ end }
+	local.fid = int(local.fid)
+	if(local.fid < 0 || local.fid > 7){ end }
+	waitthread coop_mod/loadoutskins.scr::skin_init
+
+	// standard = clear the finish; always allowed
+	if(local.fid == 0){
+		local.player.flags["coop_loFin" + local.slot] = 0
+		local.player stufftext ( "seta coop_loS" + local.slot + "F 0" )
+		end
+	}
+
+	local.id = local.player.flags["coop_loSlotId" + local.slot]
+	if(local.id == NIL){
+		local.player stufftext "vstr coop_loDeny"
+		local.player iprint "Pick a weapon for that slot first"
+		end
+	}
+	local.r = waitthread coop_mod/loadoutroster.scr::roster_get local.id
+	local.give = local.r["give"]
+	local.variant = level.coop_skinGive[local.give][local.fid]
+	if(local.variant == NIL || local.variant == ""){
+		local.player stufftext "vstr coop_loDeny"
+		local.player iprint ( "No " + level.coop_skinFinName[local.fid] + " finish for this weapon" )
+		end
+	}
+
+	// gate 1: the finish itself
+	if(!(waitthread loadout_finUnlocked local.player local.fid)){
+		local.player stufftext "vstr coop_loDeny"
+		local.player iprint ( level.coop_skinFinName[local.fid] + " is locked - see CHALLENGES" )
+		end
+	}
+	// gate 2: mastery of this gun
+	if(!(waitthread loadout_finMastered local.player local.give)){
+		local.player stufftext "vstr coop_loDeny"
+		local.player iprint "Master this weapon first (its kill challenge)"
+		end
+	}
+
+	local.player.flags["coop_loFin" + local.slot] = local.fid
+	local.player stufftext ( "seta coop_loS" + local.slot + "F " + local.fid )
+	//swap the inspect preview to the finished gun so the pick is visible immediately
+	local.player stufftext ( "set coop_loPrev " + local.variant )
+	local.player stufftext "vstr coop_loOpenInspect"
+	local.player iprint ( level.coop_skinFinName[local.fid] + " finish applied" )
+}end
+
+//=========================================================================
+// Finish unlocked = its challenge's reward string sits in the same pipe store every weapon
+// unlock uses (player.flags["coop_chal_unlocks"], probed exactly like loadout_isUnlocked).
+//=========================================================================
+loadout_finUnlocked local.player local.fid:{
+//=========================================================================
+	if(getcvar("coop_lockLoadout") != "1"){ end 1 }
+	waitthread coop_mod/challenges.scr::chal_ensure local.player
+	if(local.player == NULL){ end 0 }
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if(local.u == NIL || local.u == ""){ end 0 }
+	local.hay = "|" + local.u + "|"
+	if(waitthread coop_mod/main.scr::containsText local.hay ("|" + level.coop_skinFinStat[local.fid] + "|") 0){ end 1 }
+}end 0
+
+//=========================================================================
+// Mastered = the gun's base per-weapon challenge is COMPLETE (flags coop_chalD_wpn_<wid>).
+// The wid comes from the same model->wid resolver every kill-stat writer uses, so a finish
+// can never gate on a different spelling than the challenge that unlocks it. A gun whose wid
+// has no wpn_ challenge is ungated (grenades, specials).
+//=========================================================================
+loadout_finMastered local.player local.give:{
+//=========================================================================
+	if(getcvar("coop_lockLoadout") != "1"){ end 1 }
+	local.wid = waitthread coop_mod/challenges.scr::chal_widFromModel local.give
+	if(local.wid == NIL || local.wid == ""){ end 1 }
+	local.cid = "wpn_" + local.wid
+	//does that challenge exist at all?
+	local.found = 0
+	local.i = 0
+	while(local.i < level.coop_chal_count){
+		if(level.coop_chal_id[local.i] == local.cid){ local.found = 1; break }
+		local.i++
+	}
+	if(local.found == 0){ end 1 }
+	waitthread coop_mod/challenges.scr::chal_ensure local.player
+	if(local.player == NULL){ end 0 }
+	if(local.player.flags["coop_chalD_" + local.cid] == 1){ end 1 }
+}end 0
+
+//=========================================================================
+// Spawn-time resolution: the ONLY authority. Returns the tik to actually give for a slot -
+// the variant when a finish is picked, exists and both gates still hold; the base otherwise.
+//=========================================================================
+loadout_finResolve local.player local.slot local.give:{
+//=========================================================================
+	local.fid = local.player.flags["coop_loFin" + local.slot]
+	if(local.fid == NIL || local.fid == 0){ end local.give }
+	waitthread coop_mod/loadoutskins.scr::skin_init
+	local.variant = level.coop_skinGive[local.give][local.fid]
+	if(local.variant == NIL || local.variant == ""){ end local.give }
+	if(!(waitthread loadout_finUnlocked local.player local.fid)){ end local.give }
+	if(!(waitthread loadout_finMastered local.player local.give)){ end local.give }
+}end local.variant
+
