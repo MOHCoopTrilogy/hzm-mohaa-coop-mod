@@ -437,6 +437,7 @@ scene0:{
 //***Called from the bsp just before the halftrack clearing by player/monster passing through a trigger_once
 
 scene1:
+	thread coop_scene2Prompt	//[user 2026-08-18] coop: the conversation must not hang on the BSP trigger or a straggler
 	thread halftrack_ambush
 	thread scene1_ai_wave1
 	thread scene1_captain_takecover
@@ -1241,6 +1242,34 @@ end
 
 //============================================================//
 
+coop_scene2Prompt:
+	//[user 2026-08-18] "sometimes captain ramsey is delayed to chat with the paratroopers -
+	//ensure that script always gets triggered immediately after the halftrack is destroyed."
+	//Retail gates the conversation behind a BSP proximity trigger AND a wait for every wave
+	//enemy to die - in coop a spread-out team can miss the trigger line, and one stuck
+	//straggler stalls the wait forever. This path keys on the map's own death signal
+	//(halftrack_final_collision sets level.halftrack_alive = 0): stop the wave, give the
+	//mop-up a short grace, then force the reveal + conversation. The one-shot guard in
+	//scene2_npc_blocking makes all three entry paths safe.
+	if (level.gametype == 0){ end }
+	while (level.halftrack_alive == 1){
+		wait 0.5
+	}
+	level.scene1_waveterminate = 1
+	local.deadline = level.time + 12
+	while (level.time < local.deadline && level.scene1_currentalive > 0){
+		wait 0.5
+	}
+	if (level.coop_scene2Started == 1){ end }
+	if (level.scene1_waveterminate_trigger_used != 1){
+		level.scene1_waveterminate_trigger_used = 1
+		level.harrison say dfr_M3L3_352c	//"Hold your fire! 101st Airborne coming out!"
+	}
+	thread scene2_npc_blocking
+end
+
+//============================================================//
+
 scene1_airborne_cleanup_enemy:
 	//===Direct the Airborne guys to initial nodes with their AI enabled
 
@@ -1267,6 +1296,11 @@ end
 //==============================================================================================================================================//
 
 scene2_npc_blocking:
+	//[user 2026-08-18] ONE-SHOT: three paths can start the conversation now (the BSP trigger's
+	//happy path, the straggler-cleanup wait, and the coop halftrack-death prompt below) -
+	//whichever arrives first wins, the rest are no-ops.
+	if (level.coop_scene2Started == 1){ end }
+	level.coop_scene2Started = 1
 	//NPCs no longer follow the player for this cutscene
 		level.ramsey.friendtype = -1
 		level.harrison.friendtype = -1
