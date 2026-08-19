@@ -1726,7 +1726,7 @@ state EMOTE_LOBBY_SELECT
 // HZM coop - SPRINT [212]
 //
 // Entered from RUN_FORWARD while the engine sprint state is active (COOP_SPRINTING =
-// m_bCoopSprinting from TickSprint). Plays the real AI sprint cycle (alert_sprint.skc,
+// m_bCoopSprinting from TickSprint). One-handed classes play the AI sprint cycle (alert_sprint.skc,
 // aliased coop_sprint_forward in models/player/base/anims_shared.txt). Falls back to
 // RUN_FORWARD the moment sprint ends; jump/crouch/fall/stop exit like the run state.
 //
@@ -1742,7 +1742,13 @@ state SPRINT_FORWARD
 
 	legs
 	{
-		coop_sprint_forward : default
+		// [user 2026-08-18] "the thompson sprint should be used for all two handed weapons":
+		// one-handed classes keep the alert dash, everything else (rifle/smg/mg/heavy/items)
+		// runs the Omaha Thompson beach charge (coop_sprint_2h). Condition syntax copied
+		// verbatim from the STAND idle block - .st errors ERR_DROP the server at first spawn.
+		coop_sprint_forward : IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
+		coop_sprint_forward : IS_WEAPONCLASS_ACTIVE "mainhand" "grenade"
+		coop_sprint_2h : default
 	}
 
 	states
