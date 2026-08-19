@@ -89,3 +89,21 @@ coop_stump
 		rgbGen identity
 	}
 }
+
+// HZM coop [user 2026-08-19] gore chunk set (decap head gib + dangling eyeball)
+coop_headgib
+{
+	cull none
+	{
+		map textures/models/human/faces/coop_headgib.jpg
+		rgbGen lightingSpherical
+	}
+}
+coop_eyegib
+{
+	cull none
+	{
+		map textures/coop_gore/eyegib.tga
+		rgbGen lightingSpherical
+	}
+}
