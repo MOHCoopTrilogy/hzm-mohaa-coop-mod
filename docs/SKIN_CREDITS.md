@@ -6,3 +6,5 @@
 - DirtyHarry (.RRA./-=MwM=-): Springfield camos x4 (desert/digital/tiger/winter), Flecktarn G43, SS StG44, black+chrome tactical shotguns, camo L42A1. Readmes: credit convention. Shotgun pack firing sound by Apocalypse (sound NOT imported).
 - DEFERRED: grenade skins (Hobbs axis nades w/ Sgt.Slaughter + Wolfman-permission original, Guanshire Stielhandgranate) - projectile/view tik pair work. Hobbs "Hittler" nade skin EXCLUDED outright (content).
 - **LEON: EXCLUDED - every readme carries "[Do not distribute or remix my files without written permission.]"** All Leon items (13 singles + Team Tactics 17-gun pack incl. the only MG42/Panzerschreck skins found) are on the CONTACT-FIRST list with East. Downloaded copies retained locally for evaluation only; nothing shipped.
+
+- tommy28 (M1928) authorship RESOLVED 2026-08-19: sT@t!c reskin of Dr.Deleto's model (mohaaaa crawl, FF:28424) - credit added to armory label.
