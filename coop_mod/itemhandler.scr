@@ -697,6 +697,7 @@ managePlayerInventory:{
 if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/managePlayerInventory->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	group.player = self
 	group.thread["managePlayerInventory"] = local
+	group.player.flags["coop_loRegiveQueued"] = NIL	//[user 2026-08-18] a full (re)spawn give supersedes any queued revive re-kick
 
 	//set some default flags for unused weapon offset calcs
 	group.player.flags["coop_spawnEventTime"] 	= level.time
@@ -1695,7 +1696,16 @@ coop_armOnBlown:{
 			//Desired gun chosen exactly the way giveWeaponLoadout:1571-1573 chooses it, so the armory
 			//pick comes up rather than whatever the engine grabs first.
 			local.desired = local.p.flags["coop_loSlot1"]
-			if (local.desired == NIL){ local.desired = local.p.flags["coop_loSlot2"] }
+			local.coop_dslot = 1
+			if (local.desired == NIL){
+				local.desired = local.p.flags["coop_loSlot2"]
+				local.coop_dslot = 2
+			}
+			//[user 2026-08-18] apply-trace F1: raise the RESOLVED tik - with a finish/variant applied
+			//the kit holds only the variant, and use on a non-owned gun is a silent engine no-op.
+			if (local.desired != NIL){
+				local.desired = waitthread coop_mod/loadoutpick.scr::loadout_finResolve local.p local.coop_dslot local.desired
+			}
 			if (level.coop_loadoutLocked == 1){ local.desired = NIL }
 			thread spawnWeaponAssert local.p local.desired
 			//[user 2026-08-10] "...with one mag". giveInventory DOES call loadout_ammoTopup
@@ -1860,7 +1870,18 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		}
 		if (local.desired == NIL && group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1){
 			local.desired = group.player.flags["coop_loSlot1"]
-			if (local.desired == NIL){ local.desired = group.player.flags["coop_loSlot2"] }
+			local.coop_dslot = 1
+			if (local.desired == NIL){
+				local.desired = group.player.flags["coop_loSlot2"]
+				local.coop_dslot = 2
+			}
+			//[user 2026-08-18] apply-trace F1: raise the RESOLVED tik, not the base - after a
+			//finish/variant regive only the variant is in the kit and use on a non-owned gun
+			//silently no-ops; the player stood empty-handed (or with the engine auto-pick)
+			//while the toast said applied. THE core of "my hands never change".
+			if (local.desired != NIL){
+				local.desired = waitthread coop_mod/loadoutpick.scr::loadout_finResolve group.player local.coop_dslot local.desired
+			}
 		}
 		if (isAlive group.player){
 			if (local.desired != NIL){
@@ -3221,6 +3242,15 @@ getAmmoType local.model:{
 //=========================================================================
 if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread itemhandler/getAmmoType->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
 	local.model = waitthread makeWeaponStringValid local.model
+
+	//[user 2026-08-18] apply-trace F2: classify a FINISHED/VARIANT gun as its BASE. The switch
+	//below knows only base tiks, so a variant classified "unknown", failed coop_isPrimaryClass,
+	//and the second-primary backfill silently skipped it - a finished primary that lost the
+	//engine pickup race was gone for that life. The reverse map is generated from the skin
+	//table on every build (gen_skinbase.py); keys are lowercase like makeWeaponStringValid output.
+	if( level.coop_skinBaseInit != 1 ){ waitthread coop_mod/loadoutskins_base.scr::main }
+	local.coop_bs = level.coop_skinBase[local.model]
+	if( local.coop_bs != NIL && local.coop_bs != "" ){ local.model = local.coop_bs }
 
 	switch (local.model){
 		case "models/weapons/colt45.tik":
