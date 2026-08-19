@@ -398,6 +398,17 @@ coop_woundedFleeAway local.actor:{
 	local.crawls = getcvar "coop_woundedCrawlChance"
 	if( local.crawls == "" ){ local.crawls = "40" }
 	local.crawlch = int( local.crawls )
+	//[user 2026-08-18] cut-content: sometimes the wound is mortal - collapse, drag yourself a
+	//moment, die where you fall (<wg>_pain_crawltofloor -> floorcrawl -> crawltodeath, all
+	//census-verified per group). Beats the same limp-away every time.
+	local.cd = getcvar "coop_aiCrawlDeathChance"
+	if( local.cd == "" ){ local.cd = "30" }
+	if( (randomint 100) < int(local.cd) ){
+		if( waitthread coop_woundedCrawlDeath local.actor ){
+			waitthread coop_woundedRelease
+			end
+		}
+	}
 	if( (randomint 100) < local.crawlch ){
 		waitthread coop_woundedFleeCrawl local.actor local.dest
 	} else {
@@ -530,3 +541,61 @@ coop_woundedRelease:{
 	level.coop_limperCount = level.coop_limperCount - 1
 	if( level.coop_limperCount < 0 ){ level.coop_limperCount = 0 }
 }end
+
+//-------------------------------------------------------------------------
+//[user 2026-08-18] Mortal-wound theater. Census coverage: crawltofloor/crawltodeath ship for
+//10 groups (all but shotgun); the middle floorcrawl drag only for 7. Whitelisted exactly;
+//the death keeps the collapsed pose via a stub deathhandler (no engine death anim on top).
+//-------------------------------------------------------------------------
+coop_woundedCrawlDeath local.actor:{
+	if( local.actor == NULL || !(isAlive local.actor) ){ end 0 }
+	local.wg = local.actor.weapongroup
+	switch( local.wg ){
+	case rifle:
+	case pistol:
+	case mp40:
+	case mp44:
+	case bar:
+	case thompson:
+	case sten:
+	case vickers:
+	case grenade:
+	case unarmed:
+		break
+	default:
+		end 0
+	}
+	local.actor.deathhandler = coop_mod/wounded.scr::coop_crawlDeathDone
+	local.actor.blendtime = 0.3
+	local.actor setmotionanim (local.wg + "_pain_crawltofloor")
+	local.actor waittill flaggedanimdone
+	if( local.actor == NULL || !(isAlive local.actor) ){ end 1 }
+	local.mid = 0
+	switch( local.wg ){
+	case pistol:
+	case mp40:
+	case mp44:
+	case bar:
+	case thompson:
+	case sten:
+	case vickers:
+		local.mid = 1
+		break
+	default:
+		break
+	}
+	if( local.mid == 1 ){
+		local.actor setmotionanim (local.wg + "_pain_floorcrawl")
+		local.actor waittill flaggedanimdone
+		if( local.actor == NULL || !(isAlive local.actor) ){ end 1 }
+	}
+	local.actor setmotionanim (local.wg + "_pain_crawltodeath")
+	local.actor waittill flaggedanimdone
+	if( local.actor != NULL && isAlive local.actor ){
+		local.actor damage local.actor 150000 local.actor local.actor.origin ( 0 0 1 ) ( 0 0 1 ) 0 0 7 0
+	}
+}end 1
+
+coop_crawlDeathDone:
+	self.position = "dead"
+end
