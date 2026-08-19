@@ -1,0 +1,70 @@
+//=========================================================================
+// HZM coop - SURRENDER CONVERSION [user 2026-08-19]: "when a german surrenders can you
+// hold use at them to convert them to fight on your side?"
+//
+// Hold USE within arm's reach of a surrendered german for ~0.9s and he joins the allies:
+// the scripted surrender pose is released with the officer-poser SAFE EXIT pattern
+// (anim idle + enableEnemy bounce + forceactivate - the proven medic-kneel recipe), his
+// gun comes back out, team flips to american and the engine AI takes it from there - he
+// engages his old friends on his own. One-shot per actor (coop_converted latch, which the
+// officer.scr surrender loop also honors so the pose loop stops re-asserting).
+//
+// USE detection = the dbno.scr revive idiom: poll player.useheld (the only use signal
+// vanilla scripts get), FORGIVING - the counter decays instead of resetting, because
+// useheld measurably flickers 0 for single frames mid-hold (dbno lesson).
+//
+// coop_surrenderRecruit 0 disables. Odometer: behav_bump "convert".
+//=========================================================================
+
+recruitable local.actor:{
+//=========================================================================
+	if( local.actor == NULL ){ end }
+	if( int( getcvar( "coop_surrenderRecruit" ) ) == 0 ){ end }
+	if( local.actor.coop_recruitLoop == 1 ){ end }
+	local.actor.coop_recruitLoop = 1
+
+	local.held = 0
+	while( local.actor != NULL && isAlive local.actor && local.actor.coop_converted != 1 ){
+		local.p = waitthread coop_mod/replace.scr::player_closestTo local.actor
+		local.near = 0
+		if( local.p != NULL && isAlive local.p && local.p.flags["coop_dbno_active"] != 1 && local.p.useheld == 1 ){
+			if( vector_length( local.p.origin - local.actor.origin ) < 110 ){
+				local.near = 1
+			}
+		}
+		if( local.near == 1 ){
+			local.held = local.held + 1
+		} else {
+			if( local.held > 0 ){ local.held = local.held - 1 }
+		}
+		if( local.held >= 6 ){
+			waitthread convert local.actor local.p
+			end
+		}
+		wait 0.15
+	}
+}end
+
+
+convert local.actor local.player:{
+//=========================================================================
+	if( local.actor == NULL || !(isAlive local.actor) ){ end }
+	if( local.actor.coop_converted == 1 ){ end }
+	local.actor.coop_converted = 1
+
+	//release the scripted surrender pose - proven poser SAFE EXIT (officer.scr)
+	local.actor anim "idle"
+	local.actor.position = "stand"
+	local.actor unholster
+	local.actor.enableEnemy = 0
+	local.actor.enableEnemy = 1
+	local.actor forceactivate
+
+	//side swap - the engine AI handles the rest (he acquires german enemies on his own)
+	local.actor.team = "american"
+
+	thread coop_mod/aibehav.scr::behav_bump "convert"
+	if( local.player != NULL ){ local.player iprint "Recruited - he fights for you now" }
+	//a german line on the way up reads as him talking himself into it
+	thread coop_mod/aivoice.scr::aivoice_request local.actor "banter" 8
+}end
