@@ -2,9 +2,11 @@
 // HZM coop - HIDDEN BLUEPRINT COLLECTIBLES
 //
 // [user 2026-08-08] Hidden pickups placed by hand in build mode across the trilogy. Finding one
-// counts toward a running total; every 5 found awards a random unlock at the debrief screen, with
-// higher totals drawing from higher tiers. An item unlocked this way is unlocked OUTRIGHT - it does
-// not also need its rank or its challenge.
+// counts toward a running total; [user 2026-08-18] every 5 found FLIPS A COIN (50/50) on a random
+// unlock of ANY type - the pool is every challenge reward plus every rank-gated gun the finder does
+// not own yet (coop_bp_coinflip). An item unlocked this way is unlocked OUTRIGHT - it does not also
+// need its rank or its challenge. A tails still announces itself: a silent coin is an invisible
+// mechanic.
 //
 // THEY ARE HIDDEN. No overhead marker, no spin, no glow. The models the user places are "pulse"
 // variants that flash on their own, which is a close-range tell and is all the help intended.
@@ -316,6 +318,12 @@ coop_bp_collect local.player local.key local.n:{
 	//[user 2026-08-17] the challenge already counted it; now it pays XP as well
 	thread coop_mod/xp.scr::xp_stealth_act local.player "blueprint"
 
+	//[user 2026-08-18] "for every 5 blueprints a player collects it flips a coin on an unlock
+	//of any type". Subtract-multiply instead of % - the operator has zero uses in this codebase
+	//and an unverified operator is not worth the parse risk.
+	local.rem = local.t - ((int(local.t / 5)) * 5)
+	if( local.rem == 0 ){ thread coop_bp_coinflip local.player local.t }
+
 	local.player playsound coop_bp_pickup
 
 	//[user 2026-08-10] "make it the same DBNO Text ... Blueprint x / x Found", x/x being THIS
@@ -372,4 +380,64 @@ coop_bp_hudClear:{
 	if( self == NULL || self == NIL ){ end }
 	ihuddraw_alpha  self 141 0
 	ihuddraw_string self 141 ""
+}end
+
+//=========================================================================
+// [user 2026-08-18] Every 5th blueprint: flip a coin on a random unlock of ANY type.
+// Pool = every chal_def reward + every rank-table gun the finder does not own yet, granted
+// OUTRIGHT through chal_add_unlock so the store, the debrief NEW UNLOCKS card and the lobby
+// list all come free. Duplicate entries across the two tables just weight the draw slightly.
+//=========================================================================
+coop_bp_coinflip local.player local.total:{
+//=========================================================================
+	if( local.player == NULL ){ end }
+	if( (randomint 2) != 0 ){
+		local.player iprint ( "Blueprint cache " + local.total + ": the coin lands TAILS - nothing this time" ) 1
+		end
+	}
+	waitthread coop_mod/challenges.scr::chal_ensure local.player
+	if( local.player == NULL ){ end }
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if( local.u == NIL ){ local.u = "" }
+	local.hay = "|" + local.u + "|"
+	local.n = 0
+	local.i = 0
+	while( local.i < level.coop_chal_count ){
+		local.r = level.coop_chal_reward[local.i]
+		if( local.r != NIL && local.r != "" ){
+			if( !(waitthread coop_mod/main.scr::containsText local.hay ("|" + local.r + "|") 0) ){
+				local.pool[local.n] = local.r
+				local.n++
+			}
+		}
+		local.i++
+	}
+	if( level.coop_xp_rankMax != NIL ){
+		local.rk = 0
+		while( local.rk <= level.coop_xp_rankMax ){
+			local.c = level.coop_xp_rankUnlockCnt[local.rk]
+			if( local.c == NIL ){ local.c = 0 }
+			local.k = 0
+			while( local.k < local.c ){
+				local.r = level.coop_xp_rankUnlock[local.rk][local.k]
+				if( local.r != NIL && local.r != "" ){
+					if( !(waitthread coop_mod/main.scr::containsText local.hay ("|" + local.r + "|") 0) ){
+						local.pool[local.n] = local.r
+						local.n++
+					}
+				}
+				local.k++
+			}
+			local.rk++
+		}
+	}
+	if( local.n <= 0 ){
+		local.player iprint ( "Blueprint cache " + local.total + ": HEADS - but you already own everything" ) 1
+		end
+	}
+	local.pick = local.pool[randomint local.n]
+	waitthread coop_mod/challenges.scr::chal_add_unlock local.player local.pick
+	local.nm = waitthread coop_mod/challenges.scr::chal_unlock_displayName local.pick
+	if( local.nm == NIL || local.nm == "" ){ local.nm = local.pick }
+	local.player iprint ( "Blueprint cache " + local.total + ": HEADS! Unlocked: " + local.nm ) 1
 }end
