@@ -409,3 +409,245 @@ coop_v3_dhl42camo_uk_w_l42a1
 		rgbGen lightingSpherical
 	}
 }
+
+// --- Leon wave (shipped per user decision 2026-08-19: credit + remove-on-request) ---
+
+coop_v3_lv_ttenfield_enfield
+{
+	qer_editorimage textures/coop_v3/lv_ttenfield/enfield.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttenfield/enfield.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttg43_g43
+{
+	qer_editorimage textures/coop_v3/lv_ttg43/g43.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttg43/g43.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttmosin_mosin_nagant
+{
+	qer_editorimage textures/coop_v3/lv_ttmosin/mosin_nagant.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttmosin/mosin_nagant.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttberetta_it_w_beretta
+{
+	qer_editorimage textures/coop_v3/lv_ttberetta/It_W_Beretta.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttberetta/It_W_Beretta.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttcarcano_it_w_carcano
+{
+	qer_editorimage textures/coop_v3/lv_ttcarcano/It_W_Carcano.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttcarcano/It_W_Carcano.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttcolt_colt45
+{
+	qer_editorimage textures/coop_v3/lv_ttcolt/colt45.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttcolt/colt45.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttdelisle_delisle
+{
+	qer_editorimage textures/coop_v3/lv_ttdelisle/delisle.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttdelisle/delisle.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttkar98_kar98
+{
+	qer_editorimage textures/coop_v3/lv_ttkar98/KAR98.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttkar98/KAR98.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttkar98sn_kar98
+{
+	qer_editorimage textures/coop_v3/lv_ttkar98sn/KAR98.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttkar98sn/KAR98.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttkar98sn_k98scope
+{
+	qer_editorimage textures/coop_v3/lv_ttkar98sn/k98scope.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttkar98sn/k98scope.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttgarand_garand
+{
+	qer_editorimage textures/coop_v3/lv_ttgarand/Garand.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttgarand/Garand.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttp38_p38
+{
+	qer_editorimage textures/coop_v3/lv_ttp38/P38.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttp38/P38.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_tttommy_thompsonsmg
+{
+	qer_editorimage textures/coop_v3/lv_tttommy/ThompsonSMG.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_tttommy/ThompsonSMG.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttmp44_mp44
+{
+	qer_editorimage textures/coop_v3/lv_ttmp44/mp44.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttmp44/mp44.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttmp44_mp44clip
+{
+	qer_editorimage textures/coop_v3/lv_ttmp44/mp44clip.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttmp44/mp44clip.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttspring_springfield
+{
+	qer_editorimage textures/coop_v3/lv_ttspring/springfield.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttspring/springfield.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttwebley_webley
+{
+	qer_editorimage textures/coop_v3/lv_ttwebley/webley.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttwebley/webley.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ttshotgun_shotgun
+{
+	qer_editorimage textures/coop_v3/lv_ttshotgun/shotgun.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_ttshotgun/shotgun.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_ofenrohr_panzerschreck
+{
+	qer_editorimage textures/coop_v3/lv_ofenrohr/panzerschreck.tga
+	cull none
+	{
+		map textures/coop_v3/lv_ofenrohr/panzerschreck.tga
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_98ks_kar98
+{
+	qer_editorimage textures/coop_v3/lv_98ks/KAR98.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_98ks/KAR98.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_98ks_k98scope
+{
+	qer_editorimage textures/coop_v3/lv_98ks/k98scope.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_98ks/k98scope.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_wdelisle_delisle
+{
+	qer_editorimage textures/coop_v3/lv_wdelisle/delisle.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_wdelisle/delisle.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_famastommy_thompsonsmg
+{
+	qer_editorimage textures/coop_v3/lv_famastommy/ThompsonSMG.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_famastommy/ThompsonSMG.jpg
+		rgbGen lightingSpherical
+	}
+}
+
+coop_v3_lv_mp75_mp40
+{
+	qer_editorimage textures/coop_v3/lv_mp75/MP40.jpg
+	cull none
+	{
+		map textures/coop_v3/lv_mp75/MP40.jpg
+		rgbGen lightingSpherical
+	}
+}
