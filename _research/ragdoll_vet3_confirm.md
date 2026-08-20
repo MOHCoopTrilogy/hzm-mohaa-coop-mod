@@ -7,9 +7,15 @@ code spot-checks against `openmohaa-hzm/code/` (this session, 2026-08-19). Tags 
 trusted: every [Cn]/[int Fn] claim was checked against the demand text, and the two most
 load-bearing NEW claims were checked against the engine source.
 
-## VERDICT: **FAIL** — one item still open (integration F6, two one-clause textual residues).
-Zero new contradictions. Both code spot-checks PASS. Everything else is closed. The fix is
-two sentences in §4; a re-confirm after that edit is a formality.
+## VERDICT: **PASS** — all 13 completeness items and all 11 integration items CLOSED, zero
+new contradictions, both code spot-checks PASS. Implementation is green-lit.
+
+> History: the first pass of this confirmation (earlier this session) returned FAIL on one
+> item — integration F6 carried two textual residues ("on BOTH sides" eType qualifier; the
+> HeadGib/Helmet never-EF_DEAD sentence). Both were added to §4 and re-verified against the
+> amended text (and the eType-not-in-interpolate rationale re-checked against
+> cg_snapshot.c:326-327). F6's updated verdict is below; everything else was already closed
+> on the first pass and was not re-litigated.
 
 ---
 
@@ -128,28 +134,28 @@ corpses are shootable and re-fire the whole gore block (decap included) after de
 
 ### F5 (DBNO confirmation) — no change was required; v3 consistent (players never ragdoll, §1).
 
-### F6 (arm guard vs body-queue/ghosts) — **STILL OPEN** (two textual residues)
-Delivered: EF_DEAD rising between currentState and nextState; *"`cent->interpolate == qtrue`
-at that transition (the engine's own continuity test — false on snapshot absence,
-EF_TELEPORT_BIT flip, parent change, modelindex change, cg_snapshot.c:326-335) [int F6]"*
-(code-accurate — see spot-check b); `entityNumber >= cgs.maxclients`; the [C7] clientNum
-reject; and the out-of-PVS documentation sentence [C10].
+### F6 (arm guard vs body-queue/ghosts) — **CLOSED** (on re-confirm after the §4 amendment)
+All components of the REQUIRED CHANGE are now present in §4:
+- eType, both sides: *"`eType == ET_MODELANIM` **on BOTH currentState and nextState** (an
+  eType change does NOT clear `interpolate` — verified cg_snapshot.c:326-327 — so the
+  interpolate clause alone cannot cover a same-slot eType swap) [int F6]"* — the demanded
+  qualifier, with a rationale that matches this session's code verification exactly (eType is
+  absent from the interpolate condition; see spot-check b).
+- EF_DEAD rising between currentState and nextState — present.
+- *"`cent->interpolate == qtrue` at that transition (the engine's own continuity test — false
+  on snapshot absence, EF_TELEPORT_BIT flip, parent change, modelindex change,
+  cg_snapshot.c:326-335) [int F6]"* — code-accurate (spot-check b).
+- `entityNumber >= cgs.maxclients` + the [C7] clientNum reject — present.
+- Out-of-PVS documentation sentence — present [C10].
+- The "state that too" sentence: *"HeadGibObject/HelmetObject props never carry EF_DEAD
+  (verified: zero EF_DEAD writes in fgame/object.cpp), so gib/helmet entities were never at
+  risk of arming [int F6]."* — present, and re-verified true this session (zero `EF_DEAD`
+  occurrences in fgame/object.cpp).
 
-Missing against the REQUIRED CHANGE text:
-1. **"eType == ET_MODELANIM on BOTH sides"** — v3 states only *"`eType == ET_MODELANIM`"*
-   with the side unspecified. This is NOT subsumed by the interpolate clause: verified this
-   session that the engine's condition (cg_snapshot.c:326-327) tests only
-   currentValid/EF_TELEPORT_BIT/parent/modelindex — **eType change does not clear
-   `interpolate`**, so a same-slot, same-modelindex reuse that morphs eType can present
-   `interpolate == qtrue`. (Mitigation, for honesty: with the [C7] clientNum reject in place,
-   every reachable arm through the one-sided predicate lands on a genuinely freshly-dead
-   ET_MODELANIM actor — the residual risk is near-inert. But the demand enumerates the
-   qualifier, the clause it would ride on does not deliver it, and this confirmation's bar is
-   the demand text.) Fix: append "on both currentState and nextState" to the eType clause.
-2. **The demanded "state that too" sentence is absent**: *"HeadGibObject/HelmetObject never
-   carry EF_DEAD (object.cpp) so they were never at risk."* Re-verified this session: zero
-   `EF_DEAD` occurrences in fgame/object.cpp — the sentence is true; it just isn't in v3.
-   Fix: one sentence in §4.
+The first pass of this confirmation flagged the two now-delivered items as F6's only
+residues; the amendment introduces no side effects — the clear/re-arm signal list, eviction
+ladder, and arm-rate bound in §4 are untouched, and the new parenthetical rationales are
+consistent with the verified engine code.
 
 ### F7 (Hook A idempotency contract a-d + mirror test) — **CLOSED** (notes)
 (a) verbatim: v3 §0 *"outside the cull-gated copy `if` (between tr_model.cpp:845 and :847) —
@@ -199,7 +205,8 @@ All eight plus both P-early items present. (Minor: F11-iii's "consumes no slot
 (r_ragdollDebug slot dump)" detail is compressed to "player Body never ragdolls" — the slot
 dump is the natural way to verify it and r_ragdollDebug exists in §4; not blocking.)
 
-**Matrix 2 result: 10/11 closed (F5 needed nothing); F6 STILL OPEN on two one-clause residues.**
+**Matrix 2 result: 11/11 CLOSED (F5 needed nothing; F6 closed on re-confirm after the §4
+amendment).**
 
 ---
 
@@ -273,13 +280,17 @@ tiki_shared.h:76.)
 
 ---
 
-## Required to flip this to PASS (the complete list)
+## Final disposition
 
-Two clauses in §4, nothing else:
-1. Arm guard first clause becomes: `eType == ET_MODELANIM` **on both currentState and
-   nextState**.
-2. Add one sentence: "HeadGibObject/HelmetObject never carry EF_DEAD (fgame/object.cpp — zero
-   setters), so gib/helmet entities can never arm."
+The first pass demanded two clauses in §4 (the "on BOTH sides" eType qualifier; the
+HeadGib/Helmet never-EF_DEAD sentence). Both were added and re-verified against the amended
+§4 text this session. With that, the tallies are: **completeness 13/13 CLOSED, integration
+11/11 CLOSED, zero new contradictions, both code spot-checks PASS.**
 
-No other edit is demanded. On those two, this reviewer's re-confirm is pre-granted in
-substance; a one-line verification of the edited §4 suffices.
+**Verdict: PASS. Implementation of ragdoll_plan.md v3 is green-lit.**
+
+Non-blocking notes carried forward for the implementer (no plan re-spin required): N1 — make
+the P0 channel-count ceiling script measure `TIKI_GetNumChannels` per TIK (the union), not
+per-skd bone counts, since the per-SKD `TIKI_MAX_BONES 100` does not mathematically bound the
+union (the capture assert backstops either way); N2 — read §0's "guard window" as the
+death-edge→BecomeCorpse window; N3 — typo "uncimplementable" in §0.
