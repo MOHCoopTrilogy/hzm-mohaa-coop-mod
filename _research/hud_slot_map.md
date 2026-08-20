@@ -92,7 +92,7 @@ spares and all were claimed on 2026-08-10 by Phase C and the Naxos rework.
 Below 100, **measured 2026-08-10** by `hudslots.py` (the previous hand-written list advertised
 88-99, but 88-94 is `fogmode.scr` and 95-97 is the arena curtain + holdout — check, don't trust):
 
-`0-19 · 21-26 · 42-44 · 47-49 · 60 · 74-75 · 79-83 · 98-99` — 42 slots, but they **fade**, so they
+`0-19 · 21-26 · 42-44 · 48-49 · 60 · 74-75 · 79-83 · 98-99` *(47 claimed 2026-08-19: grenade-kick KICK icon, engine player.cpp Postthink - fades correctly, combat-only use)* — 42 slots, but they **fade**, so they
 are usable only for something a *moving* player reads. A stationary player will not see them.
 `40-49` is the cleanest contiguous block: cover and ammobox vacated it, and the only remaining
 writes are `player.scr`'s teardown clearing what used to live there.
