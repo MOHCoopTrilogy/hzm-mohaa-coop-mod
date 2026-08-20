@@ -1,142 +1,162 @@
-# Client-Side Ragdoll — Implementation Plan **v2** (post round-1 vetting)
+# Client-Side Ragdoll — Implementation Plan **v3** (post round-2 vetting)
 
-**Status: PLAN — no code. v1 was adversarially vetted by 3 independent agents
-(architecture / stability / engine-facts, findings in `ragdoll_vet1_*.md`); all 15 blocking
-findings are folded in below and marked [F:source]. Round 2 vetting must confirm every
-numbered round-1 finding is addressed before implementation begins (user directive).**
+**Status: PLAN — no code. Vetting history: v1 -> 3 agents (15 blocking) -> v2 -> 2 agents
+(completeness: 12 partial + 2 dropped + 5 new defects; integration: 5 blocking + 8 acceptance
+items). v3 folds in ALL of it (changelog inline as [Cn]/[Fn] tags = the vet2 fix-list ids).
+Round 3 = one confirmation agent re-running both matrices against this text; implementation
+starts only on its pass (user directive).**
 
-## 0. Settled by round 1 (do not relitigate)
+## 0. Settled — do not relitigate
 
-- **Renderer-side override is the ONLY safe layer.** The skeletor objects are shared with the
-  server game DLL on a listen host (tiki_cache.cpp:305; fgame poses/reads via gi.TIKI_*Internal,
-  g_main.cpp:904/915; LBD hit traces cm_trace_lbd.cpp:486). A skeletor-layer override would
-  corrupt SERVER hit detection. Recorded here + to be copied to docs/DECISIONS.md at ship so a
-  later session doesn't "simplify" it back. [arch F7]
-- Hook A site (exact): inside `R_AddSkelSurfaces`, immediately after the bone-cache copy loop
-  (tr_model.cpp:844), keyed by `ent->e.entityNumber`, running on EVERY fill (the pool is
-  per-view, recycled per scene — never "apply once"). [arch F1]
-- Hook B (mandatory v1, not deferred): patch `RE_TIKI_Orientation` (tr_model.cpp:1797) — the
-  single funnel for all client tag consumers (attachments incl. helmets/wound props/eyeball).
-  Also `RE_TIKI_IsOnGround` if corpse foot-shadows remain enabled. [arch F5, facts 10]
-- All v1 file:line citations verified byte-exact; all 17 Bip01 bone names verified in the LBD
-  table AND parsed skds across AA/SH/BT/imported bodies; ONE refEntity + one bone block spans
-  body+head+hands skds; LOD cannot break indexing (vertex collapse only; r_uselod 0 default).
-  These leave the P0 unknowns list. [facts 1-7]
-- The gore UV mesh tracer reads post-skinning tess.xyz, so stamps FOLLOW the override for
-  free; but server bullet-stop PLACEMENT lands at the invisible anim pose. v1 decision:
-  **(b) honest remap** — Hook A keeps a copy of the anim-pose matrices for flagged entities;
-  the gore funnel remaps the segment end by the nearest bone's anim→sim delta. [arch F8]
+- **Renderer-side override only.** Skeletor objects are shared with the server game DLL on a
+  listen host (tiki_cache.cpp:305; g_main.cpp:904/915; cm_trace_lbd.cpp:486): a skeletor-layer
+  override corrupts SERVER hit detection, and the skeletor layer offers no caller gating —
+  there is no way to distinguish a render read from a server read at that level [C13]. Copy
+  this rationale to docs/DECISIONS.md at ship.
+- Hook A: in `R_AddSkelSurfaces`, **outside the cull-gated copy `if` (between tr_model.cpp:845
+  and :847)** — for flagged ents it writes ALL channels unconditionally, so a skipped vanilla
+  copy can never leak stale pool garbage (the drift-on-screen/server-pose-off-frustum case
+  takes exactly that path). Hook A is a **pure reader** of the table: no edge latches, no
+  counters, no capture-on-first-call — with N fills per frame (mirrors, portals, wrap-frames)
+  all state transitions live in cgame's push. [int F7]
+- Hook A also copies `newFrame->bones` into the slot's anim-pose block each fill — that is the
+  ONE producer of the anim-pose matrices the gore remap consumes; the bridge does NOT carry an
+  animMat[] parameter (cgame has no GetFrame export — v2's signature was uncimplementable).
+  [int F10]
+- Hook B: patch `RE_TIKI_Orientation` (tr_model.cpp:1797) — closed consumer set. Correct
+  attribution [int F1]: the WORN helmet is a model SURFACE and rides the head via **Hook A**;
+  the neck stump, dangling eyeball, wound props, drip emitter, decap chunks-on-head and
+  holstered weapons-on-back ride via **Hook B**. `RE_TIKI_IsOnGround` also consults the table
+  (RF_SHADOW stays on until BecomeCorpse — the foot-shadow window is exactly the guard window).
+- Facts carried from round 1: all citations verified; 17 Bip01 names byte-exact across
+  AA/SH/BT/imported skds; one refEntity spans body+head+hands; LOD harmless; gore UV stamps
+  READ the overridden mesh (tess.xyz) — placement uses the [int F10] remap.
 
-## 1. Goal & non-goals (unchanged from v1)
+## 1. Goal & non-goals (unchanged)
 
-Cosmetic client-side ragdoll for dead AI actors; server corpse/hitboxes untouched; players
-never ragdoll; no networking; gl1 first (gl2 = clean no-op, NOT a crash — see §5); ships dark
-behind `coop_ragdoll 0` until playtest verdict. Delimb enabler later.
+Cosmetic client-side ragdoll for dead AI actors. Server corpse/hitboxes untouched; players and
+player body-queue corpses never ragdoll; no networking; gl1 first; ships dark behind
+`coop_ragdoll 0`; **supported minimum framerate ~31 fps — below that, corpse motion slows;
+above it, never** [C2]. Delimb enabler later.
 
-## 2. Data model & spaces [arch F3, facts 8-9; stability F5]
+## 2. Data model, spaces, capture
 
-- **Table shape (gore's shape, not dense):** `byte slotPlusOne[MAX_GENTITIES]` index +
-  `MAX_RAGDOLLS(8)` payload slots. Slot: entnum, the entity's `dtiki_t*` (row ignored when it
-  mismatches `ent->e.tiki` — belt for slot reuse), channel count, per-CHANNEL 3x4 matrices
-  (array sized to an asserted engine cap ~112), the anim-pose matrix copy (for gore remap),
-  sim AABB, state. MAX_GENTITIES=2048 in this fork — dense was 2.45 MiB for a 10 KB need.
-- **Space:** table stores **skeletor-space (model-local, unscaled) 3x4s** — exactly what
-  `skeletor_c::GetFrame` emits. cgame sims in world space and converts each push:
-  `local_pos = (transpose(ent.axis) * (world_pos - ent.origin)) / (ent.scale * tiki->load_scale) - tiki->load_origin`;
-  `local_axis = world_axis * transpose(ent.axis)`. Hook A writes raw; Hook B applies the
-  tiki_tag.cpp:108-111 formula. The corpse refEntity keeps its server origin/axis (no pinning
-  — rejected: pinning breaks PVS/culling assumptions elsewhere).
-- **One index space everywhere:** tiki bone-list channel indices — the space Tag_NumForName
-  returns, GetFrame writes, GetBoneFrame reads. Capture, Hook A, Hook B all use it.
-- **Full-skeleton coverage:** the cache is absolute per-channel (no inheritance) — a partial
-  override tears the mesh (fingers/face freeze mid-air). cgame emits EVERY channel: at capture,
-  record each channel's matrix relative to its governing simmed anchor
-  (`rel_b = inv(M_anchor_capture) * M_b_capture`); per frame emit `M_b = M_anchor_sim * rel_b`.
-  Anchor assignment: hardcoded Bip01 hierarchy for the 15 sim bones + known descendants;
-  unknown gear bones -> nearest-capture-position anchor. (cgi exposes no bone-parent API —
-  accepted; no new export in v1.) [facts 9, arch F4]
+- **Table:** `byte slotPlusOne[MAX_GENTITIES]` + `MAX_RAGDOLLS(8)` slots (constant, not cvar —
+  intentional change from v1 [C13]). Slot: entnum, `dtiki_t*` (rows ignored on mismatch),
+  channel count (per-model, bounded by the engine-real per-SKD `TIKI_MAX_BONES 100` [C12] —
+  asserted at capture), per-channel 3x4s, the Hook-A-owned anim-pose block, sim AABB, state.
+  Every entnum index into any ragdoll array is bounds-checked against MAX_GENTITIES,
+  gore-precedent style [C11]. Rows tolerate being pushed but never consumed (cull-out, bone-
+  pool overflow skipping the model) — no consumption asserts [C12].
+- **Space:** skeletor-space (model-local, unscaled) 3x4s. Per push:
+  `local_pos = (transpose(ent.axis) * (world_pos - ent.origin)) / (ent.scale * tiki->load_scale) - tiki->load_origin`,
+  `local_axis = world_axis * transpose(ent.axis)` — always against the **current frame's**
+  entity placement, never the death-frame transform [C13]. One index space everywhere: tiki
+  channel indices (Tag_NumForName's space).
+- **Capture procedure [C1]:** build the capture refEntity from the same cent fields
+  CG_ModelAnim submits (tiki, CURRENT interpolated frameInfo, scale, entityNumber,
+  origin/axis); one `cgi.ForceUpdatePose` — **warning: this stamps tr.skel_index[entnum], so
+  wrong frameInfo poisons that frame's real render**; then per-channel `cgi.TIKI_Orientation`.
+  Always the cent's own tiki handle (TIKI_GetSkeletor caches only 2 skeletors per entnum,
+  delete-on-evict). P2 acceptance: captured pose verified non-bind.
+- **Full-skeleton slaving:** every channel emitted; non-simmed channels ride their governing
+  simmed anchor via capture-time relatives (`rel_b = inv(M_anchor_cap) * M_b_cap`); anchors
+  from the hardcoded Bip01 hierarchy, nearest-capture-position for unknown gear bones.
 
-## 3. Simulation [stability F1, F3; facts 11]
+## 3. Simulation
 
-- 15 points / 14 links / 6 braces / 6 relaxation iterations (unchanged from v1).
-- **Timestep (exact spec):** `if (cg.frametime <= 0) return;`
-  `accumMs += min(cg.frametime, 200); while (accumMs >= 8 && steps < 3) { step(8ms); }`
-  `accumMs = min(accumMs, 8*3)` — discard excess after stepping: a hitch costs one
-  fast-forwarded frame, never a backlog, never slow-mo on low-fps clients.
-- **Collision (exact spec):** per moving point, **world-only** `CG_Trace(cliptoentities=qfalse)`
-  (2u box) — NEVER the entity-clip loop (24k traces/frame on a horde, no preculling,
-  cg_predict.c:130-184). Movers/doors/elevators: **one `CG_GetBrushEntitiesInBounds`
-  (cg_predict.c:87) per body per frame** over the inflated body AABB, then clip moving points
-  against that candidate list (typically 0-4 bmodels) via transformed box traces. Never clip
-  against bbox entities (actors/players/other corpses). Trace ceiling 240/frame; past it,
-  points glide one frame.
-- **Init velocity:** actors never network pos.trDelta [facts 11] — seed from snapshot origin
-  differencing at the EF_DEAD rising edge: `(current.origin - previous.origin) / snapshot_dt`,
-  and add the wound kick along that vector. P0 logging task confirms magnitude quality on
-  grenade kills; fallback = a tiny server->client event carrying the impulse (only if
-  differencing proves too coarse — decide at P2 exit).
-- Sleep rules unchanged (point sleep, body sleep <4 u/s for 1s, coop_ragdollLife 6s force-sleep).
+- 15 points / 14 links / 6 braces / 6 iterations (unchanged).
+- **Timestep [C2]:** `if (cg.frametime <= 0) return;` — the TABLE persists and Hook A keeps
+  applying the last push while paused/hitching (table lifetime belongs to §4 lifecycle, never
+  the stepper) [int F9]. `accumMs += min(cg.frametime, 200); while (accumMs >= 8 && steps < 4)
+  step(8ms); accumMs = min(accumMs, 32)` — discard excess after stepping. Timescale follows
+  cg.frametime naturally; demo fast-forward hits the 200ms clamp.
+- **Collision [C4]:** world-only `CG_Trace(..., cliptoentities = qfalse)` with a
+  **MASK_SOLID-class content mask**, 2u box; movers via ONE `CG_GetBrushEntitiesInBounds`
+  (cg_predict.c:87 — signature confirmed [P0-a done]) per body per frame over the inflated
+  AABB, clipping moving points against that bmodel list only. Never bbox entities. Trace
+  ceiling 240/frame.
+- **Velocity seed [int F8]:** arm on the EF_DEAD edge, **hold the sim one snapshot, then
+  difference the first 1-2 post-edge snapshot origins forward** — the death impulse lands the
+  same server frame and moves the origin only on FOLLOWING snapshots; differencing at the edge
+  seeds ~zero on stationary kills. Wound kick added along the seed vector.
+- Sleep rules unchanged; `coop_ragdollLife 6` force-sleep.
 
-## 4. Lifecycle & identity [stability F7; arch F9; facts 3, 7]
+## 4. Lifecycle & identity
 
-- **Arm guard:** `eType == ET_MODELANIM` + `eFlags & EF_DEAD` RISING edge + `entityNumber >=
-  cgs.maxclients` (never a live player slot). Body-queue player corpses (ET_MODELANIM+EF_DEAD):
-  EXCLUDED v1 (revisit after playtest). Edge detection mirrors the gore template at
-  `CG_TransitionEntity` (cg_snapshot.c:113-136).
-- **All ragdoll state lives in cg_ragdoll.c's own array** — never centity clientFlags (zeroed
-  on PVS re-entry, cg_snapshot.c:65).
-- **Clear/re-arm signal set** (all of): EF_DEAD falling edge; EF_TELEPORT_BIT toggle;
-  modelindex change; eType change; parent change (mirror cg_snapshot.c:326); entity absent
-  from snapshot then re-present WITH origin discontinuity (>64u) — the corpse->corpse slot
-  reuse hole. Renderer belt: row ignored when stored tiki != ent->e.tiki.
-- **Eviction (mirrors R_GoreAcquireInstance):** new death takes (a) a free slot, else (b) an
-  ASLEEP slot (prefer out-of-PVS). If none: the new death does NOT arm — corpse keeps the
-  server death anim (today's look). **Never evict an awake sim** (upright-statue failure —
-  the bug-856 shape). [stability F4]
+- **Arm guard (ALL of):** `eType == ET_MODELANIM` **on BOTH currentState and nextState**
+  (an eType change does NOT clear `interpolate` — verified cg_snapshot.c:326-327 — so the
+  interpolate clause alone cannot cover a same-slot eType swap) [int F6]; EF_DEAD rising
+  between currentState and nextState; **`cent->interpolate == qtrue` at that transition**
+  (the engine's own continuity test — false on snapshot absence, EF_TELEPORT_BIT flip,
+  parent change, modelindex change, cg_snapshot.c:326-335) [int F6];
+  `entityNumber >= cgs.maxclients`; **reject any ET_MODELANIM corpse carrying a valid
+  s.clientNum** (player body-queue corpses are born ET_MODELANIM+EF_DEAD and must never arm)
+  [C7]. HeadGibObject/HelmetObject props never carry EF_DEAD (verified: zero EF_DEAD writes
+  in fgame/object.cpp), so gib/helmet entities were never at risk of arming [int F6].
+- Corpses FIRST SEEN with EF_DEAD already set (off-screen deaths, late join, post-restart)
+  never arm — they keep the anim pose; accepted [C10].
+- **Post-death damage events are EXPECTED on armed corpses and must not clear** — corpses are
+  shootable and re-fire the whole gore block (decap included) after death [int F4].
+- All ragdoll state in cg_ragdoll.c's own array (clientFlags is zeroed on PVS re-entry).
+  Clear/re-arm signals: EF_DEAD falling edge; EF_TELEPORT_BIT toggle; modelindex change;
+  eType change; parent change; snapshot absence -> re-present with origin discontinuity >64u.
+  Renderer belt: tiki mismatch rows ignored.
+- Eviction: free slot, else ASLEEP slot (prefer out-of-PVS), else the death does not arm.
+  Never evict an awake sim. **Arm-rate bound [C3]: max 4 arms/frame; the remainder queue for
+  1-2 frames (capture cost stays bounded on horde grenades); r_ragdollDebug counts
+  `arms refused` and `arms queued`.**
 
-## 5. Renderer, bridge, failure ladder [stability F6; arch F2]
+## 5. Renderer, bridge, controls, quirk ledger
 
-- Hook A also **overrides culling** for flagged entities: cgame pushes the sim AABB with the
-  matrices; the renderer treats flagged ents as CULL_IN within that AABB (anim-pose bounds at
-  the entity origin would pop a drifted body or skin garbage). P1 acceptance item.
-- Bridge: `R_SetRagdollPose(entnum, tiki, count, mat[], animMat[], aabb)`, `R_ClearRagdoll(entnum)`,
-  `R_ClearAllRagdolls()` via the gore-precedent refexport/cgi pairing. **cgame NULL-checks
-  every bridge pointer** (gl2 provides none in v1 -> feature silently off under gl2, no crash —
-  the `if (cgi.R_GoreReset)` precedent, cg_snapshot.c:121).
-- `R_ClearAllRagdolls` called at CG_Init and CG_ServerRestarted. vid_restart kills cgame and
-  renderer TOGETHER (cl_main.cpp:1624): sims are lost, corpses snap back to the anim pose —
-  accepted + documented (reachable via the mod's own display-mode selector).
-- Failure ladder unchanged (NaN / |pos|>65536 / repeated startsolid -> Clear + never re-arm
-  that corpse). Kill switch coop_ragdoll 0 -> ClearAll.
-- Quirk ledger (accepted v1): corpses on moving platforms may lag one frame behind the mover;
-  shadow decals follow feet via Hook B (verify at P4); UV wound placement uses the F8 remap.
+- Culling override: cgame pushes the sim AABB; flagged ents render CULL_IN within it.
+- Bridge: `R_SetRagdollPose(entnum, tiki, count, mat[], aabb)`, `R_ClearRagdoll(entnum)`,
+  `R_ClearAllRagdolls()`. cgame NULL-checks every pointer; **gl2 ships stub exports that
+  no-op** (belt) AND cgame NULL-checks anyway (braces) [C5]. ClearAll at CG_Init +
+  CG_ServerRestarted. vid_restart kills cgame+renderer together -> snap-back to anim pose,
+  accepted (reachable via the mod's own display-mode selector).
+- **Cvar discipline [C9]:** `r_ragdollDebug` is never CVAR_ARCHIVE (CVAR_TEMP, not CVAR_CHEAT);
+  before the P5 default flip, `coop_ragdoll` gets pre-registered in G_InitGame (the T7 /
+  bug-1669 getcvar trap).
+- Failure ladder unchanged (NaN / |pos|>65536 / repeated startsolid -> Clear + never re-arm).
+- **Quirk ledger (accepted v1, each with its bound):**
+  - Post-death decap/helmet-pop chunks spawn at the SERVER pose; offset bounded by ragdoll
+    drift [int F2].
+  - The growing blood pool is a world decal at the server-pose floor point; strands with drift
+    [int F3].
+  - Corpse shadow DECAL plants at model->origin and does not follow the body (cg_shadows
+    default 0; the shipped Phase-A decal never reads tags) [C6 — corrected wording].
+  - `CL_TraceDeep` is a latent client-side LBD consumer that reads the skeletor, not the
+    table; cross-comment both sites referencing the ragdoll table as insurance [C8].
+  - Corpses on movers lag a frame; fade-out (coop_corpseLife alpha) applies to the ragdolled
+    mesh normally.
+  - **Unifying drift bound: r_ragdollDebug logs settle distance from server origin per corpse;
+    if the MEDIAN settle exceeds ~48u (a body half-length), retune seed/damping before P5 —
+    pools, aim-at-corpse and gib spawn coherence all degrade with drift** [int F3].
 
-## 6. Phases (each gated on its acceptance test)
+## 6. Phases & acceptance (round-2 additions folded)
 
-- **P0** — log trDelta/origin-differencing quality on actor deaths (one session with
-  r_ragdollDebug prints); confirm channel-count ceiling across the model roster (script over
-  skds: max channels — sizes the slot array); confirm CG_GetBrushEntitiesInBounds signature.
-- **P1** — bridge proof: test pose (+32u) on one corpse; culling override verified by walking
-  away/back; gl2 launch shows normal corpses (NULL bridge), no crash.
-- **P2** — capture + constraints + timestep, no collision (falls through floor); full-channel
-  slaving verified (fingers/face move with limbs, nothing frozen mid-air); velocity seeding
-  verdict (differencing vs server event).
-- **P3** — collision: settles on ground; grenade fling; elevator/door bmodel clip test on m2l2a
-  lift; horde grenade with r_ragdollDebug (budget + eviction: no upright statues, deaths past
-  budget keep anim pose).
-- **P4** — quality: orientation stability, attachment coherence (helmet/eyeball ride the
-  ragdoll via Hook B), gore-stamp remap spot check, sleep verification, NaN bail drill
-  (inject NaN via debug cvar).
-- **P5** — user playtest; tune; only then default-on.
+- **P0** — seed-vs-server-kick comparison specifically on **stationary-target grenade kills**
+  (PASS = seeded direction/magnitude match) [P0-b]; channel-count ceiling script over the skd
+  roster.
+- **P1** — bridge test pose; **drift-cull drill**: debug-push a pose >= anim radius away, aim
+  the camera so the server pose is off-frustum — body must render (culling override) with no
+  garbage [P1-a]; gl2 launch clean via stubs.
+- **P2** — capture (non-bind verified), constraints, timestep; full-channel slaving (fingers/
+  face move with limbs); velocity-seed verdict.
+- **P3/P4** — collision + settle; grenade fling; m2l2a lift bmodel test; horde grenade budget/
+  eviction (no statues, refusals counted); plus [int F11]:
+  (i) mirror/portal kill — body coherent in both views; (ii) post-death gore drill — shotgun +
+  grenade a settled ragdoll until decap fires, nothing clears, chunks within drift bound;
+  (iii) die as a player among actor corpses — player Body never ragdolls; (iv) coop_corpseLife
+  5 fade drill; (v) helmeted-actor kill — worn helmet surface rides the head (Hook A), stump/
+  eyeball/props ride Hook B; (vi) timescale 0.5/2 + pause drill — no accum burst on resume;
+  (vii) drift measurement across a session (median < 48u); (viii) balcony-death actor — server
+  body keeps falling post-edge, sim tracks the seed sanely.
+- **P5** — user playtest; pre-register cvar; tune; only then default-on.
 
-## 7. Round-2 vetting brief
+## 7. Round-3 brief
 
-Two fresh agents: (1) COMPLETENESS — verify every numbered finding in ragdoll_vet1_*.md is
-addressed by this v2 text, no regression of v1's correct content; (2) INTEGRATION — hunt
-interactions v2 misses against the mod's own systems: helmet pop (HelmetObject is its own
-entity, not an attachment?), corpse despawn (coop_corpseLife), DBNO revive of a ragdolling
-teammate (excluded: players never ragdoll — verify DBNO players are ET_PLAYER not
-ET_MODELANIM), lobby mannequins, anim_scripted scene corpses, count-scaling replicas,
-freecam/spectator views (per-view fill = multiple fills/frame — Hook A must be idempotent),
-gore chunks/decap interplay (decapped corpse ragdolls with hidden head — stump attachment via
-Hook B), and the P0-P5 protocol's adequacy.
+One confirmation agent: re-run BOTH round-2 matrices (completeness 13-item fix list; integration
+F1-F11) against this v3 text — verdict per item, plus a fresh sweep for new internal
+contradictions. Implementation begins only on an all-clear.
