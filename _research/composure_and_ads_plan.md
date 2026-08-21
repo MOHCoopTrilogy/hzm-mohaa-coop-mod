@@ -473,3 +473,142 @@ Ships with PART A: same subsystem, same deploy, one ADS verification pass for th
   when the idle timer arms, then hold that value.
 - **PART G lean: no roll under sights.** "stay in the same exact ads from a camera/gun standpoint but
   just lean left or right" - confirms G2, keep the lateral peek, zero the roll and the viewmodel drop.
+
+---
+---
+
+# REVISION after three independent reviews (2026-08-20)
+
+Three reviewers with different lenses - engine correctness, adversarial edge cases, and this
+project's own recorded history. Every one of them found something the plan would otherwise have
+shipped. Findings are recorded as CONFIRMED only where verified directly against source.
+
+## PART A - BUILT AND COMMITTED (9e71d739)
+
+**The plan was wrong about which snap mattered.** All three reviewers independently found a FOURTH
+source the plan had assumed was already handled: the crouch rotation at `cg_modelanim.c:1729-1750`
+was never multiplied by `s_fAdsPose` at all. Values reach `cYaw = -38.5` (Garand), `-34.5` (KAR98),
+`-43.0` (shotgun) - applied at full strength for the whole ~0.73 s ease-out, then gone in one frame.
+That is the user's "way to the right aiming up", and it explains why crouched was worse. The user
+later confirmed the jolt happens on "basically all weapons", which is the second source below.
+
+**The plan's reasoning for source 2 (the renderer gate) was wrong.** Working the algebra from real
+defaults (`cg_adsZoom 0.70`, `cg_adsGunZoom 0.5`, fov 90), the 0.05-degree gate is crossed at factor
+~0.0037 - so once the shift is scaled by the factor, what vanishes at the crossing is 0.4% of the
+shift, sub-pixel. **A1 was therefore NOT built**, which also avoids its real hazards:
+
+- `r_weaponshifty` defaults to `-0.05`, so `shift != 0` is true on a clean profile and the widened
+  gate would never close again.
+- `%g` of an eased float prints `1e-05` long before it prints `0`, so an exact float compare latches.
+- The weapon near plane is `r_weaponznear 1` vs `r_znear 4` **always**, so at shift 0 the weapon
+  projection is NOT identical to the world projection. Widening the gate trades a translation pop for
+  geometry popping in and out near the camera. Any future attempt must ease `wzNear` by the same
+  factor via a flags-0 `r_weaponznearfrac`, and must also account for the other `RF_DEPTHHACK`
+  consumers: muzzle-flash sprites (bug-108), vehicle turret guns, and script-set entities.
+
+**Shipped instead:** scale the shift by the same factor (safe, cgame-only), ease the crouch blend,
+hoist the factor out of the first-person weapon-tag branch (it froze in 3P / cover / cutscene /
+dead), skip zero-dt frames rather than snapping, and drop `CVAR_ARCHIVE` from `r_weaponshiftx/y`
+(they now change every frame of every transition, and `Com_Frame` calls `Com_WriteConfiguration()`
+every frame - a whole-config disk write per frame).
+
+**Correction to the plan's text:** there are at least a dozen ADS-derived consumers, not three. The
+claim "the ONLY ADS ease in the codebase" was false; `s_adsShoulderEnv` and `s_adsFpEnv` still keep
+their own. They drive the 3P camera rather than the gun, and were deliberately left alone.
+
+## PARTS B / D / F - the plan proposed building things that ALREADY EXIST
+
+- **A stress scalar is already designed.** `_research/weapon_feel_r1_variation.md` section 3 defines
+  `CoopWFeelStress()` with the *same five inputs*, with magnitudes and cited sources - written
+  earlier the same evening. **Extend or rename that; do not create a second scalar.** Note also a
+  naming clash: an AI **morale** system already ships (`coop_moraleEnable`, `coop_mod/morale.scr`).
+- **Injury shake already ships.** `coop_injurySway` / `coop_injuryStart` / `coop_dbnoSwayMult`
+  (`cg_view.c:2765-2812`), health-ramped, since 2026-08-02 - and **with no ADS damping at all**. The
+  addendum's premise ("every existing perturbation damps hard under sights, so injury needs its own
+  high ADS multiplier") is therefore backwards. **Strengthen the existing system**; a second injury
+  oscillator would stack two wobbles at two frequencies in the one state that needs precision.
+- **Sprint-lower already exists**: `cg_sprintLower*`, `cg_view.c:1671-1711`. Part D is a modulation
+  of it, not a new system. Confirmed cosmetic-only by the user.
+- **Recoil settle**: `viewkick` is per-gun TIKI data, already randomised per shot. The prior analysis
+  records the rule as **"Modulate, do not replace"** - Part F's "wider settle after recoil" must obey
+  it or recoil double-applies.
+
+## PART B - the health input is not what the plan assumed
+
+- **`STAT_HEALTH` is a PERCENTAGE (0..100), not HP** (`player.cpp:8402`). At `coop_health 750`, one
+  integer step is 7.5 HP, so the "recent damage delta" term is quantised to 1%.
+- **Vehicles hijack it**: `player.cpp:8404-8408` reports the VEHICLE's health as the player's while
+  riding. This mod has rides on m1l3a / m1l3b / t2l2, so boarding a damaged halftrack reads as an
+  instant near-death and dismounting as an instant heal.
+- **DBNO reads as FULL health**: `dbno.scr:49` sets `healthonly 9999`. A bleeding-out player would
+  get maximum composure - the exact inverse of intent. The codebase already works around this twice
+  via the explicit `coop_dbnoView` marker; composure must do the same.
+- **There is an existing shipped unit bug to fix first**: the suppression spike at `cg_view.c:2402`
+  divides a 0..100 percentage by `coop_health` (750), making the severity term ~7.5x too weak and
+  effectively dead. Part B was about to build on exactly that term.
+
+## PART C - two blocking constraints
+
+- **There is no channel that rotates hands and gun together.** The FPS arms and the gun are separate
+  render entities; every existing feel layer writes `pREnt->origin` only, and the ADS tune is the
+  only rotation - applied to the **gun alone**, capped near 12 degrees precisely because more
+  visibly detaches it from the hand. An inspect that rotates the weapon at inspect-scale angles
+  pulls the gun out of the hands. **The inspect must be translation-only**, or the arms entity needs
+  a rotation of its own with the attach proven to still resolve. This also explains why the ADS
+  translation had to be smuggled through the renderer as a screen shift in the first place: it is
+  the only channel that moves hands and gun as one (bug-105).
+- **"Abort instantly on reload" is not achievable.** `reload` is a server console command
+  (`gamecmds.cpp:104`), not a usercmd bit - the client's only signal is `iViewModelAnim` arriving in
+  a snapshot, i.e. RTT plus one snapshot interval, 100-300 ms on a remote server. Damage is equally
+  late (`STAT_HEALTH` is snapshot data). Fire, ADS, sprint and weapon switch ARE same-frame and safe.
+  Either hook `reload` client-side before forwarding it, or drop it from the "instant" list and say
+  so. A one-frame-late abort means the player pulls the trigger with the gun pointed at their face.
+- **Idle is already defined elsewhere**: the HUD fade computes a richer "calm" set
+  (`cg_drawtools.cpp:1975-1995`). Reuse it rather than inventing a second, disagreeing clock - and
+  make sure the inspect never calls `CG_HudFadeTouch()`, or the HUD pops back on at every fidget.
+- **User decision recorded**: 15 seconds, randomised. Roll the interval ONCE when the idle timer
+  arms and hold it; a per-frame re-roll makes the interval jitter and a hitch re-rolls it.
+
+## PART E - one line that would have broken it outright
+
+`STAT_CLIPAMMO` is **-1** for clipless weapons (`weapon.cpp:3946-3957`) and `STAT_MAXCLIPAMMO` is 0,
+so "clip <= 22% of max" evaluates to `-1 <= 0` = **true**: grenades, knife, binoculars and the mine
+detector would idle with a permanent maximum low-ammo tell. The shipped recoil code already guards
+this with an `s_lastClip >= 0` gate - copy it. Manning a turret also overwrites `STAT_CLIPAMMO` and
+`activeItems[1]`, which breaks the per-gun table lookup Part C uses as well.
+
+## State and timing rules for everything that follows
+
+- **cgame statics DO reset on map change** - the DLL is genuinely unloaded and reloaded. The plan's
+  worry there was misplaced. The real gap is **within** a map.
+- **`CG_TransitionPlayerState` is an empty stub** (`cg_playerstate.c:38`) - there is no respawn /
+  death / spectate hook in cgame at all. Either add one, or gate every new static on the `bAlive`
+  predicate bug-1306 had to introduce:
+  `h > 0 && snap && !(pm_flags & (PMF_SPECTATING|PMF_INTERMISSION))`. Never `h <= 0` alone -
+  `Player::Spectator()` leaves health at max, so that guard never fires for a spectator.
+- **A zero-length frame must be SKIPPED, not snapped.** The idiom `(cg.frametime > 0) ? dt*rate : 1.0f`
+  jumps straight to target when dt is 0, and dt is 0 whenever `CL_AdjustTimeDelta` nudges server time
+  backwards - exactly the packet-loss jitter where a snap is worst.
+- **Clamp dt in every phase integrator.** `cg.frametime` clamps at 5000 ms for a client of a remote
+  server; an unclamped 5 s hitch advances a phase ~20 radians, reintroducing the very teleport the
+  integrators exist to prevent. (Fixed in 9e71d739 for the two shipped integrators.)
+- **Two-sided eases have no floor to rescue them.** The existing one-sided decays survive `k >> 1`
+  because of their `< 0.002 -> 0` floors. A composure ease toward a target in [0,1] does not; it
+  needs the `if (k > 1) k = 1` clamp unconditionally, or it overshoots and oscillates divergently.
+- **`coop_composure` must be flags 0**, not merely non-archived, and must be added to the explicit
+  clear-list in `CG_Init` (`cg_main.c:815-836`) - published cvars otherwise keep their last value
+  forever when the connection drops. A `CVAR_USERINFO` value changing every frame would send a
+  userinfo packet every frame.
+- **`CG_AimingDownSights()` has a spectator hole** (`cg_view.c:1886-1901`): it checks health,
+  `STAT_INZOOM` and `PMF_CAMERA_VIEW` but not `PMF_SPECTATING`, and a spectator reads full health.
+  Worth confirming before it becomes the single input driving everything.
+- **The map tester** (`coop_maptest 2`) runs multi-hour teleporting patrols and will exercise idle
+  timers and recovery clocks in ways no human session reaches. Give them an off-switch under it.
+
+## Build order (revised)
+
+1. ~~Part A~~ - **done, committed 9e71d739**, awaiting deploy and the user's verdict.
+2. Fix the `STAT_HEALTH` unit bug at `cg_view.c:2402` (an existing shipped defect, and Part B's input).
+3. Part B as an EXTENSION of `CoopWFeelStress()`, with the vehicle / DBNO / spectator gates above.
+4. Parts C / D / E one at a time, each behind its own cvar.
+5. Part F last, strengthening `coop_injurySway` rather than paralleling it.
