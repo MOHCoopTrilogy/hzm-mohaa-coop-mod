@@ -276,6 +276,17 @@ coop_spawnReplica local.model local.gun local.acc local.health local.origin loca
 	if( local.hs != NIL && local.hs != "" ){ local.r.headskin = local.hs }
 	local.r.origin = local.gnd
 	local.r droptofloor
+	//[user 2026-08-21] REPLICA ENTNUM PROBE. The console log showed 1852 pathfinding failures from
+	//just 20 actors on m3l3 - one named map-spawner actor and SIX UNNAMED ones bunched inside a
+	//~430x510 unit patch, each retrying about 200 times toward a patrol node ~6800 units away.
+	//Unnamed + high entnum + tight cluster is the signature of these replicas, but neither a replica
+	//nor a map-spawned actor carries a name in that log line, so the two cannot be told apart after
+	//the fact. This prints the entnum at birth so the failures can be joined back to their source.
+	//
+	//Cross-reference with: python docs/tools/replica_pathjoin.py
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ REPLICA ent=" + local.r.entnum + " idx=" + local.idx + " at " + local.r.origin[0] + " " + local.r.origin[1] + " " + local.r.origin[2] + " anchor " + local.origin[0] + " " + local.origin[1] + " " + local.origin[2] )
+	}
 	local.r.angles = local.angles
 	local.r.health = local.health
 	if( local.acc != NIL ){ local.r.accuracy = local.acc }
@@ -1857,6 +1868,21 @@ coop_hitReact:{
 	//ever played. Corner/wall fighters need no guard: their custom painhandler replaces the
 	//coop one outright, so they never route through here while wall-fighting.)
 	if( self.position == "prone" ){ end }
+	//[user 2026-08-21] "Some of these enemies go into prone and then get right back up over and
+	//over and over again and wont shoot once while in prone."
+	//
+	//The guard above tests the ENGINE position state, but officer.scr::coop_prone_shooter does not
+	//use it - it holds the pose with anim_scripted "<wg>_prone_shoot" and sets enableEnemy 0. To
+	//the engine that actor is still standing, so this guard missed him completely: the flinch
+	//animation cancelled the scripted pose, the poser loop re-issued it on its next refresh, and
+	//the man popped up and down. He also never appeared to fire, because his shots come from a
+	//separate script_aimedstrafinggunfire entity that is only on in short windows while the pose
+	//was being interrupted.
+	//
+	//Latent until tonight: the hitloc table was shifted AND mirrored so reactions rarely played,
+	//and coop_aiHitReactWait was read once per map so the throttle could not be lowered. Fixing
+	//both made a pre-existing conflict fire constantly.
+	if( self.flags["coop_role"] == "prone" ){ end }
 	//throttle: one flinch per man per coop_aiHitReactWait seconds (was a hard-coded 1.2 - now
 	//tunable, because judging this feature needs to see it fire more than once a fight)
 	if( level.coop_hitReactWait == NIL ){
