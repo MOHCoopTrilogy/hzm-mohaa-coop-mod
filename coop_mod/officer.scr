@@ -1937,6 +1937,7 @@ coop_prone_shooter local.actor:{
 //=========================================================================
 	wait 0.5
 	if( local.actor == NULL || !isAlive local.actor ){ end }
+	if( local.actor.flags["coop_surrendered"] == 1 ){ end }	//[user 2026-08-20] never pull a surrendered (holstered) man back into a combat pose
 	// Wait for the active MAIN weapon slot to populate. weapongroup reads "unarmed" until the engine
 	// finishes assigning/drawing the weapon (Holster does NOT clear the slot), so a single read at spawn
 	// is unreliable - retry ~2s before deciding. This is what makes the prone role actually appear.
@@ -2872,7 +2873,13 @@ coop_stuka_attack local.target_pos:{
 	local.fwd = angles_toforward level.coop_officer.angles
 	//[209] 8.2s audible approach leg + 1 = officer area-denial bomb scatter. The engine drone
 	//starts ~10.2s before the first impact (dive adds ~2s), per the 10s-warning requirement.
-	waitthread coop_air_bombing_run local.target_pos local.fwd 1 "models/vehicles/stuka_strafe.tik" 8.2 1
+	// [user 2026-08-20] "we need to hear the plane coming at least 10 seconds before those bombs
+	// hit, the sound should be pretty loud too as a warning". Was 8.2s of approach leg. The bombs
+	// release once the plane is overhead, part-way through the dive, so the TOTAL warning is the
+	// lead-in plus roughly half the dive - but 8.2 was short enough that players reported being
+	// surprised. 12s puts the audible warning comfortably past 10 even if the dive is clipped
+	// short by terrain. The drone alias was also made louder and longer-ranged (ubersound.scr).
+	waitthread coop_air_bombing_run local.target_pos local.fwd 1 "models/vehicles/stuka_strafe.tik" 12 1
 }end
 
 
@@ -4139,7 +4146,12 @@ coop_bombing_run_sequence local.target:{
 	//    Altitude/approach auto-scale from the map farplane so it stays inside the fog (fog preserved)
 	//    and is visible on every map. Allied plane, no MG strafe (strafe=0).
 	local.fwd = angles_toforward ( 0 (randomint 360) 0 )
-	waitthread coop_air_bombing_run local.target local.fwd 0 "models/vehicles/p47fly.tik"	// P-47 - same plane this mission's own bombing run uses
+	// [user 2026-08-20] this call passed NO lead-in, so it defaulted to 0 and the player-called
+	// strike arrived with no audible approach whatsoever - the bombs simply appeared. Shorter
+	// than the German Stuka lead-in on purpose: this one is friendly and the caller already knows
+	// it is coming, so the warning exists for everyone ELSE on the team rather than as a threat
+	// cue, and a long delay would just make calling it feel unresponsive.
+	waitthread coop_air_bombing_run local.target local.fwd 0 "models/vehicles/p47fly.tik" 5	// P-47 - same plane this mission's own bombing run uses
 
 	if( local.marker != NULL ){ local.marker delete }
 }end
@@ -4751,6 +4763,7 @@ coop_radio_chatter:{
 //gives up after 20s or death. coop_aiSlideChance gates the roll at personality time.
 coop_arrival_slide local.actor:{
 	if( local.actor == NULL ){ end }
+	if( local.actor.flags["coop_surrendered"] == 1 ){ end }	//[user 2026-08-20] never pull a surrendered (holstered) man back into a combat pose
 	local.wg = local.actor.weapongroup
 	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" ){ end }
 	local.moved = 0
@@ -4832,6 +4845,7 @@ coop_suppress_flavor local.actor:{
 
 coop_suppress_react local.actor:{
 	if( local.actor == NULL ){ end }
+	if( local.actor.flags["coop_surrendered"] == 1 ){ end }	//[user 2026-08-20] never pull a surrendered (holstered) man back into a combat pose
 	local.wg = local.actor.weapongroup
 	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" && local.wg != "thompson" && local.wg != "sten" ){ end }
 	local.next = 0
@@ -4877,8 +4891,15 @@ coop_suppress_react local.actor:{
 //deathhandler is untouched. Personality-attached only, so scene actors are exempt.
 coop_squad_surrender local.actor:{
 	if( local.actor == NULL ){ end }
+	//[user 2026-08-20] THE OFFICER NEVER SURRENDERS. He is the wave boss - the man the players
+	//are hunting, with the eagle marker over his head and his own reinforcement waves - and a
+	//boss who throws his hands up ends the encounter with a whimper instead of a fight. The
+	//check is repeated after the wait because level.coop_officer is assigned during the spawn
+	//window this label deliberately sleeps through.
+	if( level.coop_officer != NULL && local.actor == level.coop_officer ){ end }
 	wait 2	//let the wave finish spawning so the cohort is complete
 	if( local.actor == NULL || !isAlive local.actor ){ end }
+	if( level.coop_officer != NULL && local.actor == level.coop_officer ){ end }
 	local.n = 0
 	local.maxent = int(getcvar "maxentities")
 	if( local.maxent <= 0 ){ local.maxent = 1024 }
@@ -4906,6 +4927,28 @@ coop_squad_surrender local.actor:{
 			local.i++
 		}
 		if( local.alive == 0 ){
+			//[user 2026-08-20] "sometimes these germans will also randomly surrender". The cohort
+			//is a SNAPSHOT taken 2s after spawn and never updated, so a man who has since walked
+			//across the map surrenders the moment those particular three die - even while he is
+			//standing in the middle of a fresh squad. Re-check that he is ACTUALLY alone right
+			//now before giving up, which is what "last soldier in his squad" was always meant to
+			//mean. If company has arrived, keep watching instead of surrendering.
+			local.near = 0
+			local.ni = 0
+			while( local.ni < local.maxent && local.near < 1 ){
+				local.ne = getentbyentnum local.ni
+				if( local.ne != NULL && local.ne != local.actor ){
+					if( local.ne.classname == "Actor" && isAlive local.ne && local.ne.team == local.actor.team ){
+						if( local.ne.flags["coop_surrendered"] != 1 ){
+							if( vector_length( local.ne.origin - local.actor.origin ) < 700 ){
+								local.near = 1
+							}
+						}
+					}
+				}
+				local.ni++
+			}
+			if( local.near == 1 ){ continue }
 			if( (randomint 100) >= (int(getcvar "coop_aiSurrenderChance") + 0) ){ end }
 			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 			local.actor.flags["coop_surrendered"] = 1
@@ -4920,6 +4963,17 @@ coop_squad_surrender local.actor:{
 			//[user 2026-08-19] hold USE at him to recruit him (coop_mod/surrender.scr)
 			thread coop_mod/surrender.scr::recruitable local.actor
 			while( local.actor != NULL && isAlive local.actor && local.actor.coop_converted != 1 ){
+				//[user 2026-08-20] HOLSTERED COMBATANT. Nothing outside this label honors
+				//flags["coop_surrendered"], and three long-lived per-actor threads
+				//(coop_suppress_react, coop_arrival_slide, coop_prone_shooter) all exit with the
+				//enableEnemy 0->1 + forceactivate bounce that exists to break an actor OUT of a
+				//scripted anim. Bounced while surrendered he keeps the holster, and the engine's
+				//armed-attack test is an INVENTORY test, so he gets the NORMAL attack think with
+				//an empty hand: runs at the player, frozen in his last armed pose (attack.scr
+				//bails on weapongroup "unarmed") and never fires. anim_scripted alone cannot heal
+				//it - it only rewrites the IDLE-level think - so re-assert non-hostility FIRST,
+				//which drops him back to idle where the scripted anim actually takes.
+				local.actor.enableEnemy = 0
 				local.actor anim_scripted scientist_surrender
 				thread coop_mod/aibehav.scr::behav_bump "surrender"
 				wait 2.5
