@@ -328,3 +328,100 @@ prb_playerSnap local.p:{
 	local.x = local.x + " wp=" + local.v
 	waitthread prb "player.snap" local.p local.x
 }end
+
+//=========================================================================
+// PART 2 - ON-DEMAND ENTITY DUMP  (restored; predates the bus)
+//=========================================================================
+// [user 2026-08-03] bug-1311 - for the e2l1 "statue" enemy and any future can-not-explain
+// entity. Driven entirely over rcon so the tester never gets debug homework
+// (docs/21-user-preferences.md):
+//
+//     rcon set coop_probe list    <- dump every actor-ish entity within 500u of any player
+//     rcon set coop_probe hurt    <- same dump PLUS a hurt-1 test
+//
+// [2026-08-22] This label was accidentally overwritten when the bus was added and is restored
+// here. main.scr:168 threads ::boot, so losing it would have thrown on the next map load.
+// Both interfaces share the coop_probe cvar without colliding: a NUMERIC value is the bus
+// mask, a WORD is a one-shot command. The command restores the previous mask when it is done
+// instead of hard-setting 0, so firing a dump no longer silently switches the bus off.
+//=========================================================================
+boot:{
+//=========================================================================
+	while(1){
+		local.cmd = getcvar("coop_probe")
+		if(local.cmd == "list" || local.cmd == "hurt"){
+			local.restore = level.coop_prbMask
+			if( local.restore == NIL ){ local.restore = 0 }
+			setcvar "coop_probe" ("" + local.restore)
+			waitthread coop_probe_dump local.cmd
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+coop_probe_dump local.cmd:{
+//=========================================================================
+	println("^~^~^ PROBE START mode=" + local.cmd + " map=" + getcvar("mapname"))
+	local.maxentities = int(getcvar("maxentities"))
+	local.found = 0
+
+	for(local.i = 0; local.i < local.maxentities; local.i++){
+		local.ent = getentbyentnum local.i
+
+		if(local.ent != NULL && local.ent.model != NIL && local.ent.health != NIL){
+			//skip the players themselves
+			local.isplayer = 0
+			for(local.p = 1; local.p <= $player.size; local.p++){
+				if($player[local.p] && local.ent.entnum == $player[local.p].entnum){
+					local.isplayer = 1
+				}
+			}
+
+			if(local.isplayer == 0 && waitthread coop_mod/replace.scr::withinDistanceOf local.ent 500){
+				local.found++
+				local.vec = local.ent.origin
+				local.msg = "^~^~^ PROBE ent=" + local.ent.entnum + " tn='" + local.ent.targetname + "' class=" + local.ent.classname
+				local.msg = local.msg + " model=" + local.ent.model + " hp=" + local.ent.health
+				//[user 2026-08-22] REAL hp too. The coop pain system buffers every german's
+				//ENGINE health to coop_aiBuffer (1000) and moves his authored hp into
+				//coop_actorActualHealth, restoring the buffer as damage lands - so `.health`
+				//alone reads 1000 whether he is healthy, nearly dead, or genuinely immune. On
+				//m1l1 that made intro_papers and intro_papers2 both report a flat 1000 and both
+				//be scored "damage-proof" when only the pain-handler state could say.
+				local.real = local.ent.flags["coop_actorActualHealth"]
+				if( local.real == NIL ){ local.real = "-" }
+				local.msg = local.msg + " hpReal=" + local.real
+				local.msg = local.msg + " @ " + int(local.vec[0]) + " " + int(local.vec[1]) + " " + int(local.vec[2])
+				println(local.msg)
+
+				if(local.cmd == "hurt" && local.ent.health > 0){
+					local.before = local.ent.health
+					local.rbefore = local.ent.flags["coop_actorActualHealth"]
+					local.ent hurt 1
+					waitframe
+					if(local.ent != NULL && local.ent != NIL){
+						local.rafter = local.ent.flags["coop_actorActualHealth"]
+						//A BUFFERED actor absorbs the hit in coop_actualHealth while .health is
+						//restored, so judge on whichever field is actually tracking him.
+						if( local.rbefore != NIL && local.rafter != NIL ){
+							if( local.rafter >= local.rbefore ){
+								println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: NO DAMAGE TAKEN (buffered, hpReal " + local.rbefore + " -> " + local.rafter + ") <-- damage-proof, pain handler not decrementing")
+							}else{
+								println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: damage ok (buffered, hpReal " + local.rbefore + " -> " + local.rafter + ")")
+							}
+						}else if(local.ent.health >= local.before){
+							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: NO DAMAGE TAKEN (hp " + local.before + " -> " + local.ent.health + ") <-- damage-proof")
+						}else{
+							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: damage ok (hp " + local.before + " -> " + local.ent.health + ")")
+						}
+					}else{
+						println("^~^~^ PROBE HURT-1 RESULT: entity died/removed from 1 damage")
+					}
+				}
+			}
+		}
+	}
+
+	println("^~^~^ PROBE END found=" + local.found)
+}end
