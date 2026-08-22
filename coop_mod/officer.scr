@@ -1886,19 +1886,54 @@ coop_isProtectedActor local.actor:{
 			if( local.tn == level.coop_sceneActorNames[local.i] ){ end (1) }
 		}
 	}
-	//[user 2026-08-18] arrival slide: some movers throw a baseball slide into their first
-	//stop (misc/takecover_slide - 885u of travel retail never played). One-shot monitor.
+}end (0)
+
+//=========================================================================
+coop_attach_dynamics local.actor:{
+//=========================================================================
+// [user 2026-08-22, bug-2045] The three AI-dynamics monitors used to be threaded from the
+// FALL-THROUGH of coop_isProtectedActor, which made a PREDICATE attach behaviour. Asking
+// "is this actor protected?" armed him. That predicate has NINE callers and only the
+// personality one wanted the attachment, so seven others were silently arming actors:
+//   * coop_variantRoll (aihandler.scr) runs on EVERY actor with no team gate - which is how
+//     an ALLY ended up flagged surrendered with a "hold USE to convert enemy" prompt over him
+//     (16 census rows, tm=american surr=1, 2026-08-22 capture).
+//   * aimaneuver.scr:92 sweeps every german every 2 SECONDS FOREVER, so this spawned three
+//     fresh threads per german per sweep - one of them an unbounded while(alive) loop holding
+//     two full maxentities walks. That is a thread leak, and the likeliest cause of the
+//     "atrocious" lag the user reported, which I had wrongly blamed on the probe.
+//   * wounded.scr threads it on every SURVIVED pain hit - three more per non-lethal bullet.
+//
+// Now attachment is explicit, happens exactly once per actor, and keeps the protection
+// semantics it always had: protected actors are still skipped, because this label asks the
+// predicate itself.
+//
+// DELIBERATELY NOT TEAM-GATED, and this is not an oversight. coop_suppress_react and
+// coop_arrival_slide whitelist bar/thompson/sten (officer.scr, ~4845/4930) - ALLIED weapon
+// groups - so they are meant to run on allies, and paradrop.scr:338 calls the personality
+// path on deliberately-allied actors (paradrop.scr:306-310 explains why). A blanket german
+// gate here would silently reverse both. The one behaviour that genuinely must never touch an
+// ally - surrendering to the player - is gated inside coop_squad_surrender instead.
+//
+// ALSO NOT gated on coop_aiDynamic: these three carry their own cvars (coop_aiSlideChance,
+// coop_aiSurrenderChance), and making independently-configured features depend on a fourth
+// switch is the silent-veto shape in TRAPS T3.
+	if( local.actor == NULL || local.actor == NIL ){ end }
+	if( local.actor.flags["coop_dynAttached"] == 1 ){ end }
+	local.actor.flags["coop_dynAttached"] = 1
+	if( waitthread coop_isProtectedActor local.actor ){ end }
+
+	//arrival slide: some movers throw a baseball slide into their first stop
+	//(misc/takecover_slide - 885u of travel retail never played). One-shot monitor.
 	if( (randomint 100) < (int(getcvar "coop_aiSlideChance") + 0) ){
 		thread coop_arrival_slide local.actor
 	}
-	//[user 2026-08-18] suppression reaction: the engine stamps self.coop_suppressedAt when the
-	//player's fire cracks near this AI (weaputils.cpp) - this monitor turns that into a visible
-	//dive-to-crouch, or a prone drop for long-range riflemen.
+	//suppression reaction: the engine stamps self.coop_suppressedAt when the player's fire
+	//cracks near this AI (weaputils.cpp) - turns that into a visible dive-to-crouch.
 	thread coop_suppress_react local.actor
-	//[user 2026-08-18] "if they are the last soldier in their squad they should surrender":
-	//snapshot the spawn-time cohort now, watch it die.
+	//"if they are the last soldier in their squad they should surrender"
 	thread coop_squad_surrender local.actor
-}end (0)
+}end
 
 coop_apply_personality local.actor:{
 //=========================================================================
@@ -4975,6 +5010,12 @@ coop_suppress_react local.actor:{
 //deathhandler is untouched. Personality-attached only, so scene actors are exempt.
 coop_squad_surrender local.actor:{
 	if( local.actor == NULL ){ end }
+	//[user 2026-08-22, bug-2045] GERMANS ONLY. Nothing here ever checked team, so any path
+	//that reached this label could surrender an ALLY - putting "Hold [USE] to convert enemy"
+	//over a friendly soldier who is already on your side. Confirmed live: 16 census rows with
+	//tm=american surr=1. This is the narrow gate that belongs here; the broad one does not
+	//belong in coop_attach_dynamics, see the note there.
+	if( local.actor.team != "german" ){ end }
 	//[user 2026-08-20] THE OFFICER NEVER SURRENDERS. He is the wave boss - the man the players
 	//are hunting, with the eagle marker over his head and his own reinforcement waves - and a
 	//boss who throws his hands up ends the encounter with a whimper instead of a fight. The
