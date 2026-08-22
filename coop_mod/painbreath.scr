@@ -1,0 +1,69 @@
+// HZM coop - WOUNDED BREATHING.
+//
+// [user 2026-08-21] "I dont think im getting pain noises when I get hit" led to the alias-level fix
+// (coop_pain.scr, which restored the retail grunts and un-broke them on the whole Spearhead
+// campaign). This is the second half the user then asked for: a TIERED reaction rather than one
+// flat grunt per hit.
+//
+// WHY IT IS BREATHING RATHER THAN MORE GRUNTS. The retail pain pool is 24 takes of roughly equal
+// intensity, and they are IMA-ADPCM encoded, so they cannot even be measured to sort them into
+// tiers - reshuffling them would be arbitrary and would not sound tiered. What actually
+// communicates "you are badly hurt" is a state that PERSISTS between hits, which the game has
+// never had outside DBNO. So severity is expressed as a sustained layer, not as a different grunt.
+//
+// Modelled directly on dbno.scr::dbno_heartbeat, which is the proven pattern here:
+//   playlocalsound <alias> 1   = a 2D PER-CLIENT LOOP. Only this player hears it. An entity
+//                                loopsound would be 3D and audible to teammates, which is wrong for
+//                                someone's own breathing.
+//   stoplocalsound <alias>     = stop by name; every exit path must stop every alias it started,
+//                                or the loop outlives the state that owns it.
+//
+// GATED OFF DBNO. dbno_heartbeat runs its own breath stages, and two breathing loops layered on one
+// player phase against each other. While downed, this yields entirely.
+
+wounded_monitor local.player:{
+//=========================================================================
+	local.stage = 0
+
+	while( local.player != NULL && local.player.flags["coop_isActive"] == 1 ){
+
+		local.want = 0
+
+		// Only while genuinely alive and NOT downed - dbno_heartbeat owns the audio in that state.
+		if( isAlive local.player && local.player.flags["coop_dbno_active"] != 1 ){
+			local.max = local.player.max_health
+			if( local.max == NIL || local.max <= 0 ){ local.max = 100 }
+
+			local.frac = local.player.health * 1.0 / local.max
+
+			// Two stages only. A third would be splitting hairs on three source takes, and the
+			// point is a clear "hurt" and a clear "nearly gone", not a continuous readout.
+			if( local.frac <= 0.22 ){ local.want = 2 }
+			else if( local.frac <= 0.45 ){ local.want = 1 }
+		}
+
+		if( local.want != local.stage ){
+			// Always stop BOTH before starting one. Escalating without stopping the previous stage
+			// leaves two loops running for the rest of the life - the same failure the dbno stages
+			// avoid by stopping the earlier alias on every transition.
+			local.player stoplocalsound coop_wound_breath1
+			local.player stoplocalsound coop_wound_breath2
+
+			if( local.want == 1 ){
+				local.player playlocalsound coop_wound_breath1 1
+			}
+			else if( local.want == 2 ){
+				local.player playlocalsound coop_wound_breath2 1
+			}
+			local.stage = local.want
+		}
+
+		waitframe
+	}
+
+	// Cleanup: a disconnect or a map change must not leave a loop playing on the client.
+	if( local.player != NULL ){
+		local.player stoplocalsound coop_wound_breath1
+		local.player stoplocalsound coop_wound_breath2
+	}
+}end
