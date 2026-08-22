@@ -21,11 +21,19 @@
 //-------------------------------------------------------------------------
 // USING IT
 //-------------------------------------------------------------------------
-//   coop_probe <mask>        bitmask, 0 = off (the default). Live - no map restart.
+//   coop_probe <mask>        bitmask. DEFAULT 129 - it starts on its own, no console needed.
+//                            Live: change it mid-map and the next poll picks it up.
+//                            coop_probe 0 turns it off.
 //   coop_probe 1             actors only
 //   coop_probe 255           everything
+//   coop_probe 0             off
+//
+// SELF-STARTING. coop_defaults.cfg seeds 129 (actor + census) with a 10s census, so a normal
+// session - and every bug report a player sends - carries full per-entity context with no
+// setup. The census is the only part with a real cost (one entity-table walk plus a record
+// per living actor); 10s is cheap, 2s is what a live repro wants.
 //   coop_probeInterval <s>   census period, default 5
-//   coop_probeFilter <str>   only entities whose targetname/model contain <str>
+//   coop_probeFilter <str>   only entities whose targetname/model CONTAIN <str> (substring)
 //
 //   CHANNELS          bit   what it records
 //     actor             1   spawn, personality, variant roll, surrender, convert, death,
@@ -68,6 +76,19 @@
 prb_init:{
 //=========================================================================
 // Called from main.scr::main, which must complete in ONE FRAME - so no wait/waitframe here.
+//
+// SELF-START, AND WHY IT IS DONE HERE RATHER THAN ONLY IN THE CFG. coop_defaults.cfg is
+// exec'd by the CLIENT before its saved config - so on a DEDICATED server it never runs at
+// all, and the probe stayed dark there while working fine on a listen server. Listen-only is
+// a defect in this project by standing rule, and a diagnostic that is absent from dedicated
+// servers is absent from exactly the runs nobody is watching.
+// Seeding the value here covers both, because main.scr::main runs on every host. An explicit
+// choice always wins: only an EMPTY value is replaced, so `coop_probe 0` stays 0 and any
+// number the user set stays theirs. (Reading an unregistered cvar creates it empty - bug-1669
+// - which is precisely the state being repaired one line later.)
+	if( getcvar( "coop_probe" ) == "" ){ setcvar "coop_probe" "129" }
+	if( getcvar( "coop_probeInterval" ) == "" ){ setcvar "coop_probeInterval" "10" }
+
 	level.coop_prbActor   = 0
 	level.coop_prbAnim    = 0
 	level.coop_prbWeapon  = 0
@@ -79,6 +100,12 @@ prb_init:{
 	level.coop_prbAny     = 0
 	level.coop_prbFilter  = ""
 	level.coop_prbSeq     = 0
+	//[P3] prb_poll compares the freshly-read mask against this on its FIRST pass. Leaving it
+	//unset relies on an int-vs-unset compare behaving; if that ever throws, the Script Error
+	//SKIPS the statement, the body never runs, and the bus silently never arms - the exact
+	//silent-veto shape this tool exists to catch, inside the tool itself. 0-1 can never be a
+	//real mask, so the first poll always differs and always arms.
+	level.coop_prbMask    = 0 - 1
 	thread prb_poll
 }end
 
@@ -167,11 +194,11 @@ prb_pass local.e:{
 	if( local.e == NULL || local.e == NIL ){ end (0) }
 	local.tn = local.e.targetname
 	if( local.tn != NIL && local.tn != "" ){
-		if( local.tn == level.coop_prbFilter ){ end (1) }
+		if( waitthread coop_mod/main.scr::containsText local.tn level.coop_prbFilter 0 ){ end (1) }
 	}
 	local.md = local.e.model
 	if( local.md != NIL && local.md != "" ){
-		if( local.md == level.coop_prbFilter ){ end (1) }
+		if( waitthread coop_mod/main.scr::containsText local.md level.coop_prbFilter 0 ){ end (1) }
 	}
 	end (0)
 }end
@@ -221,12 +248,30 @@ prb_actorSnap local.a:{
 	local.v = local.a.coop_converted
 	if( local.v == NIL ){ local.v = 0 }
 	local.x = local.x + " conv=" + local.v
-	local.v = local.a.coop_personality
-	if( local.v == NIL ){ local.v = "-" }
-	local.x = local.x + " pers=" + local.v
-	local.v = local.a.coop_actorActualHealth
+	//[P2] coop_personality is written NOWHERE in the mod (0 sites). The personality roll
+	//stores its result in flags["coop_role"] (17 sites, officer.scr) with a separate latch.
+	local.v = local.a.flags["coop_role"]
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " role=" + local.v
+	local.v = local.a.flags["coop_personality_set"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " persSet=" + local.v
+	//[P1] flags["..."], NOT a direct property. coop_actorActualHealth is written as a FLAG at
+	//8 sites and as a property at ZERO, so the property read returned NIL and hpReal printed
+	//-1 for every actor on every census - the one field the m1l1 hunt actually needed. Caught
+	//because the headless run showed hpReal=-1 on 110 consecutive rows; Part 2 of this same
+	//file had the correct form all along.
+	local.v = local.a.flags["coop_actorActualHealth"]
 	if( local.v == NIL ){ local.v = 0 - 1 }
 	local.x = local.x + " hpReal=" + int( local.v )
+	local.v = local.a.flags["coop_actorStopPainHandler"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " stopPain=" + local.v
+	//.nolongpain and an absent pain handler are the two gates that strand a buffered actor at
+	//full engine health - the documented bullet sponge (aihandler.scr:350).
+	local.v = local.a.nolongpain
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " noLongPain=" + local.v
 	local.v = local.a.max_health
 	if( local.v == NIL ){ local.v = 0 - 1 }
 	local.x = local.x + " hpMax=" + int( local.v )
