@@ -2146,6 +2146,31 @@ coop_prone_shooter local.actor:{
 			local.refresh = 0
 		}
 		local.target = waitthread coop_mod/replace.scr::player_closestTargetable local.actor
+		//[user 2026-08-22, bug-2057] DEFER TO THE DISGUISE, like every other aggro path does.
+		//This label spawns a REAL gun (script_aimedstrafinggunfire, above) and picks its target
+		//with player_closestTargetable - which checks line of sight and NOTHING ELSE. It does not
+		//consult the disguise, and its own fallback is player_closestTo, i.e. nearest player with
+		//no LOS test at all. So a prone shooter opens fire on a disguised player, needing no
+		//.enemy and no provocation, and the resulting gunfire wakes the whole garrison through the
+		//engine's noticed-shot path. One actor starts it; the cascade does the rest.
+		//MEASURED on m1l1's scripted truck ride, three conditions, same map:
+		//   coop_aiDynamic 1 + coop_aiProneChance 45 -> first engagement t=30s, user: "Chaos"
+		//   coop_aiDynamic 0                          -> engaging=0, but the AI goes static
+		//   coop_aiDynamic 1 + coop_aiProneChance 0   -> engaging=0 AND roles still assigned
+		//                                                (flank=14 cover=14, then aggr=12 cover=12)
+		//Two clean runs of the third. That isolates it: the personality roll is innocent - nothing
+		//it writes can even cause enemy acquisition (type_attack is a think remap, leash is two
+		//floats) - and coop_aiDynamic merely gates BOTH, which is why disabling it looked like a
+		//fix and sent me after the wrong half for hours.
+		//coop_stealthBlocksAggro is the single shared implementation of the deference rule
+		//(aihandler.scr:1390), already consulted by aihandler:327/1229/1541, aisquad:161/196 and
+		//morale:71. Using it rather than a private test is the point - see TRAPS, "one shared
+		//scene test, never a private one per pass".
+		if( local.target != NULL ){
+			if( waitthread coop_mod/aihandler.scr::coop_stealthBlocksAggro local.target ){
+				local.target = NULL
+			}
+		}
 		if( local.target != NULL && (local.actor cansee local.target) ){
 			local.lostsight = 0
 			local.gun aimtarget local.target
