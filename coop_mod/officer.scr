@@ -2060,6 +2060,8 @@ coop_prone_shooter local.actor:{
 		//[user 2026-08-18] exit to CROUCH, not stand - a poser who loses sight sinks to a knee
 		//instead of popping bolt upright, which reads far more natural and keeps him lower
 		local.actor.position = "crouch"
+		//[user 2026-08-21, bug-2024] never bounce a surrendered man back to live AI
+		if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 		local.actor.enableEnemy = 0
 		local.actor.enableEnemy = 1
 		local.actor forceactivate
@@ -3607,7 +3609,16 @@ coop_officer_combat_music:{
 		// music. Many maps play e.g. mus_<map>_DeadOfficer via tmstart the instant the officer dies; since tmstart
 		// now records level.coop_music_track, a mismatch here means the map owns the music -> restarting the old
 		// track on top of it was the "music loops over and over after the officer dies" bug. Defer to the map.
-		if( level.coop_music_saved != NIL && level.coop_music_track == level.coop_music_saved ){
+		//[user 2026-08-21, bug-2023] "music never really kicks back on after the officer music
+		//finishes." It could not: this guard compared coop_music_track against coop_music_SAVED
+		//(the pre-fight base track) - but our own tmsegue routes through tmstartloop, which
+		//records coop_music_track = THE COMBAT TRACK. The two differ BY CONSTRUCTION, so the
+		//restore was unreachable on the death path, every time. The map-owns-music intent needs
+		//the comparison the sight-loss fadeout already uses: is the LAST-STARTED track still OUR
+		//combat track? Yes -> nothing else took over -> restore. No -> a map script started its
+		//own post-death music -> defer. (tmstop clears coop_musicCommand, not coop_music_track,
+		//so the value survives the fade/stop above.)
+		if( level.coop_music_saved != NIL && level.coop_music_track == level.coop_officer_combat_track ){
 			waitthread coop_mod/replace.scr::tmvolume 0
 			waitthread coop_mod/replace.scr::tmstartloop level.coop_music_saved
 			waitthread coop_mod/replace.scr::tmfade 0 1 1.5	// ease the base/ambient track back in
@@ -4909,6 +4920,8 @@ coop_suppress_react local.actor:{
 		if( local.actor == NULL || !isAlive local.actor ){ end }
 		local.actor anim "idle"
 		local.actor.position = "crouch"
+		//[user 2026-08-21, bug-2024] never bounce a surrendered man back to live AI
+		if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 		local.actor.enableEnemy = 0
 		local.actor.enableEnemy = 1
 		local.actor forceactivate
@@ -4986,6 +4999,15 @@ coop_squad_surrender local.actor:{
 			if( (randomint 100) >= (int(getcvar "coop_aiSurrenderChance") + 0) ){ end }
 			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 			local.actor.flags["coop_surrendered"] = 1
+			//[user 2026-08-21] "Still need the allied icon to pop up (same as paratroopers) over
+			//their head once they surrender and it should stay until they die." Same wire trick
+			//as the officer eagle: +coopboss turns the overhead icon ON, and
+			//+lightstyledynamiclight (visually inert without an attached dlight; only ever used
+			//on map light entities, never actors) tells cgame "draw the ALLIED STAR even though
+			//EF_AXIS is still set" - he is still team german until converted, so without the
+			//override he would get the swastika. cgame clears the icon itself on EF_DEAD, which
+			//is exactly "stays until they die".
+			local.actor rendereffects "+coopboss +lightstyledynamiclight"
 			local.actor.enableEnemy = 0
 			//[bug-1958] remember his real gun BEFORE the holster - holstering can leave
 			//binoculars as the active item, so a later unholster restores the WRONG thing;
@@ -5007,10 +5029,23 @@ coop_squad_surrender local.actor:{
 				//bails on weapongroup "unarmed") and never fires. anim_scripted alone cannot heal
 				//it - it only rewrites the IDLE-level think - so re-assert non-hostility FIRST,
 				//which drops him back to idle where the scripted anim actually takes.
+				//[user 2026-08-21, bug-2024] COMMITMENT. The old loop re-asserted every 2.5s,
+				//so any ungated re-arm bought him up to 2.4 SECONDS of live AI - long enough to
+				//run, draw his gun or throw a grenade before being yanked back to hands-up,
+				//which is exactly the flicker the user described. The known re-arm sites are now
+				//gated at the source, and this loop is the backstop: enableEnemy is re-asserted
+				//every 0.5s so anything unforeseen gets half a second, not two and a half. The
+				//anim re-assert stays at its old 2.5s cadence (every 5th pass) - restarting
+				//anim_scripted 2Hz would visibly pop the pose.
 				local.actor.enableEnemy = 0
-				local.actor anim_scripted scientist_surrender
-				thread coop_mod/aibehav.scr::behav_bump "surrender"
-				wait 2.5
+				if( local.reassert == NIL ){ local.reassert = 0 }
+				if( local.reassert == 0 ){
+					local.actor anim_scripted scientist_surrender
+					thread coop_mod/aibehav.scr::behav_bump "surrender"
+				}
+				local.reassert = local.reassert + 1
+				if( local.reassert >= 5 ){ local.reassert = 0 }
+				wait 0.5
 			}
 			end
 		}

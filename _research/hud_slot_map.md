@@ -68,7 +68,7 @@ import struct.
 | 148 | **ammo box prompt** | ammobox.scr | moved from 45-47 (fade) |
 | 149 | **Phase C outcome banner** — "Situation Contained. / Situation Escalated. Leave the Area Immediately." | bust.scr | one banner, two texts; exactly one of them ever fires, so they share |
 | 175-178 | **church hold bar** (m3l3 objective #6) | maps/M3L3.scr | frame 175, track 176, fill 177, label 178. Moved off 128-130, which belong to xp.scr's debrief list |
-| 150-155 | challenge service-record chrome | challenges.scr | menu/lobby-time only |
+| 150-155 | challenge service-record chrome | challenges.scr | menu/lobby-time only. **152 is additionally claimed by the surrender convert prompt** (surrender.scr, mission-time, 2026-08-21) - the 216-style never-concurrent reuse: chrome draws only in menu/lobby, the prompt only in play |
 | 156-173 | challenge SR row names | challenges.scr | **computed** `156 + local.r` (:2465, :2568). Shares 156-173 with the mission-time objectives panel, never concurrent |
 | 174 | challenge SR footer | challenges.scr, lobbyui.scr | |
 | 156-165, 175-215 | **script-drawn objectives panel** | objectives.scr | `coop_objPanel 1`; plates 156-165, title 175, checkboxes 176-183, wrapped text 184-215; clear loop from `local.s = 156` (:496). MISSION-time only |
