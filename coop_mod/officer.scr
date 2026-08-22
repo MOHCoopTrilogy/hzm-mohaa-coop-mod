@@ -1282,9 +1282,28 @@ coop_reinf_call_wave_gated local.officer:{
 
 
 coop_find_ground local.pos:{
+	//[user 2026-08-21] REINFORCEMENTS WERE ENDING UP UNDER THE MAP. Screenshot: two officer
+	//reinforcements floating in the void below the world, which is also why m3l3 logged 347
+	//pathfinding failures - an actor beneath the geometry can never reach a patrol node.
+	//
+	//This traced straight down 512u and accepted whatever it hit, with no check that the START
+	//point was even in open space. A scatter candidate landing inside a wall, inside a crate, or
+	//just past a ledge would still report a "floor": either the underside of the geometry it was
+	//already embedded in, or a surface hundreds of units below. The actor then spawned inside solid,
+	//the engine pushed it out, and it fell through the world.
+	//
+	//Three rejects now, all cheap:
+	//  startSolid/allSolid - the candidate is embedded in geometry, so there is no valid ground here
+	//  fraction >= 1       - nothing below at all (unchanged; this was the only guard before)
+	//  a 300u drop cap     - a floor further down than that is a different storey or the void, not
+	//                        the spot we were asked to scatter around
 	local.tr = traced (local.pos + (0 0 4)) (local.pos + (0 0 -512))
+	if( local.tr["startSolid"] == 1 ){ end NIL }
+	if( local.tr["allSolid"] == 1 ){ end NIL }
 	if( local.tr["fraction"] >= 1.0 ){ end NIL }
-	end local.tr["endpos"]
+	local.gp = local.tr["endpos"]
+	if( (local.pos[2] - local.gp[2]) > 300 ){ end NIL }
+	end local.gp
 }end
 
 
@@ -1743,7 +1762,18 @@ coop_spread_pos local.anchor local.i:{
 		if( local.gnd != NIL ){
 			local.zd = local.gnd[2] - local.anchor[2]
 			if( local.zd < 0 ){ local.zd = 0 - local.zd }
-			if( local.zd <= 180 ){ end local.gnd }	// good spot on roughly the same floor
+			//[user 2026-08-21] REACHABILITY, not just floor height. A candidate can sit on perfectly
+			//good ground and still be on the far side of a wall from the anchor - which is how a
+			//reinforcement ends up somewhere it can never path out of. The anchor is known navigable,
+			//so require clear line of sight from it (chest height, both ends) before accepting.
+			if( local.zd <= 180 ){
+				//assign first, then test - every other sighttrace/traced call in the project takes
+				//this shape and an inline call in a condition is not worth the parse risk.
+				local.clear = sighttrace (local.anchor + (0 0 40)) (local.gnd + (0 0 40)) 1
+				if( local.clear ){
+					end local.gnd
+				}
+			}
 		}
 		local.try++
 	}

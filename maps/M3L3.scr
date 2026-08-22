@@ -6737,6 +6737,17 @@ coop_churchDefense:{
 			local.p = $player[local.i]
 			local.i = local.i + 1
 			if( local.p == NULL ){ continue }
+			//[user 2026-08-21] "the hold the church bar is gone... it worked for a while this round".
+			//coop_churchBarSetup ran ONCE, for the players present when the phase began. ihuddraw
+			//slots are per-player and are wiped on respawn, so a player who died during the hold lost
+			//the bar permanently while this loop went on cheerfully writing slot 177 for a HUD that
+			//no longer had it - and a player who joined mid-phase never had one at all. Neither
+			//outcome message had fired, which is what told us the phase was still running.
+			//
+			//Re-assert the setup every tick. It is only ihuddraw calls, it is idempotent, and at one
+			//pass per half second the cost is nothing - but it makes the bar self-healing across
+			//respawns and late joins instead of a one-shot that can never recover.
+			waitthread coop_churchBarSetup local.p
 			waitthread coop_churchBarSet local.p local.pct
 		}
 
@@ -7027,6 +7038,11 @@ coop_churchShell local.n:{
 	local.fx anim start
 	//[bug-1834] there was no burst sound AT ALL - only a visual.
 	local.fx playsound explo_medium
+	//[2026-08-21] the user reports shelling "at the church after the paratroopers dropped".
+	//The barrage loop IS gated on coop_chDone and the drop only runs after it is set, so on a
+	//reading of the code this cannot happen - which is exactly the kind of claim to MEASURE
+	//rather than argue. One line per impact, with the phase flags, settles it from the log.
+	println( "^~^~^ CHSHELL t=" + level.time + " done=" + level.coop_chDone + " over=" + level.coop_chOver )
 	//retail shakes the view on every rocket impact - same call, same values
 	exec global/earthquake.scr .03 .05 0 0
 
@@ -7096,8 +7112,34 @@ coop_churchShellHurt local.pos local.dmg:{
 		local.f = local.f * local.dmg
 		local.f = local.f / 320
 		if( local.f < 1 ){ continue }
-		local.p.health = local.p.health - local.f
-		if( local.p.health < 1 ){ local.p.health = 1 }
+		//[user 2026-08-21, bug-2015] "any idea why I am randomly getting damaged".
+		//This was a RAW health subtraction: local.p.health = local.p.health - local.f. That
+		//bypasses Sentient::Damage completely, so NONE of the feedback a player reads fired -
+		//no pain sound, no hit flash, no hitreact, and critically no STAT_DAMAGEDIR, which is
+		//the only field coop_dmgIndicator reads (cg_drawtools.cpp:2427). The barrage was
+		//therefore unattributable BY CONSTRUCTION: health fell with nothing on screen saying
+		//why or from where. Routed through the real damage event.
+		//Direction is blast -> player, matching what a bullet passes (attacker -> victim), so
+		//player.cpp:3705 damage_yaw = dir.toYaw() puts the on-screen arc on the blast.
+		//The non-lethal guarantee survives, but as a clamp on the AMOUNT instead of a clamp on
+		//health afterwards - shells pressure the hold, they never end it.
+		//[user 2026-08-21] "it took damage away multiple times until it killed me." The old
+		//floor was health=1, which is the worst of both worlds: the barrage could never land
+		//the kill itself, but it ground you down to a single hit point and PINNED you there,
+		//so the next stray rifle round did. That reads as the shelling killing you, because
+		//it did - just laundered through someone else's bullet. Floor is now a real share of
+		//max health, so the barrage applies pressure you can survive and recover from.
+		local.floor = 150
+		if( local.p.max_health != NIL ){
+			local.floor = local.p.max_health / 4
+			if( local.floor < 60 ){ local.floor = 60 }
+		}
+		if( level.coop_chShellFloor != NIL ){ local.floor = level.coop_chShellFloor }
+		local.room = local.p.health - local.floor
+		if( local.room < 1 ){ continue }
+		if( local.f > local.room ){ local.f = local.room }
+		local.dir = vector_normalize( local.p.origin - local.pos )
+		local.p damage $world local.f $world local.pos local.dir ( 0 0 1 ) 0 0 9 0
 	}
 }end
 
