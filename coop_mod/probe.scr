@@ -1,74 +1,330 @@
-// probe.scr
-//
-// [user 2026-08-03] bug-1311 - ON-DEMAND ENTITY PROBE, for the e2l1 "statue" enemy (takes no
-// damage, does not react) and any future can-not-explain entity. Driven entirely over rcon so
-// the tester never gets debug homework (docs/21-user-preferences.md):
-//
-//     rcon set coop_probe list        <- dump every actor-ish entity within 500u of any player
-//     rcon set coop_probe hurt        <- same dump, PLUS a hurt-1 test: health before/after.
-//                                        unchanged health on a live actor = damage-proof
-//                                        (nodamage or an immunity), which is the whole question
-//
-// Output goes to the server console -> qconsole.log with the machine-parseable ^~^~^ PROBE
-// prefix. Iteration recipe copied from developer.scr::showtouch (getentbyentnum loop). The
-// hurt test uses EV_Hurt, which per its own help text only lands "if the entity is damageable".
 //=========================================================================
-boot:{
+// COOP PROBE BUS - one diagnostic channel for everything this mod added.
 //=========================================================================
-	while(1){
-		local.cmd = getcvar("coop_probe")
-		if(local.cmd == "list" || local.cmd == "hurt"){
-			setcvar "coop_probe" "0"
-			waitthread coop_probe_dump local.cmd
+// [user 2026-08-22] "I would also build an extremely comprehensive probing system we can
+// start turning on and off easily... it should probably cover everything we have added in
+// this game that is not vanilla... We need it to be able to understand extreme context of
+// every situation."
+//
+// WHY THIS EXISTS. The m1l1 investigation stalled on a tracker that could not answer the
+// only question that mattered. coop_aiBehav reported `surrender=21` for a session in which
+// the user saw nobody surrender - but behav_bump is a GLOBAL EVENT COUNTER with no actor
+// identity, and the surrender loop bumps it every 2.5s per surrendered man. 21 bumps is one
+// actor sitting there for ~52 seconds, and there was no way to tell that from the log. Of
+// the 14 probe kinds in a 1.3 MB session log, exactly two carried an entity number.
+//
+// THE RULE THIS ENCODES: an aggregate counter tells you a number changed. It never tells you
+// WHICH, WHEN, or IN WHAT STATE - and those are the only three things a diagnosis needs.
+// Every record here carries identity and time. Counters are derived by the reader
+// (docs/tools/probe_read.py), never by the emitter.
+//
+//-------------------------------------------------------------------------
+// USING IT
+//-------------------------------------------------------------------------
+//   coop_probe <mask>        bitmask, 0 = off (the default). Live - no map restart.
+//   coop_probe 1             actors only
+//   coop_probe 255           everything
+//   coop_probeInterval <s>   census period, default 5
+//   coop_probeFilter <str>   only entities whose targetname/model contain <str>
+//
+//   CHANNELS          bit   what it records
+//     actor             1   spawn, personality, variant roll, surrender, convert, death,
+//                           team flips, scene-marker detection, re-arm bounces
+//     anim              2   anim_scripted / motion anim requests and refusals
+//     weapon            4   give / holster / unholster / variant / ammo
+//     sound             8   alias plays and misses
+//     script           16   map script events, coop callbacks, scene gates
+//     player           32   spawn, loadout, health, dbno, state transitions
+//     feature          64   cover, ADS, sprint, ragdoll and the rest of the feel work
+//    census           128   periodic FULL-WORLD snapshot - every actor, every field
+//
+// The census is the one to reach for first. It answers "which enemies are flagged
+// surrendered / disabled / engaging, right now" without needing the event that caused it to
+// have been instrumented in advance - which is the failure mode that cost this investigation
+// a day.
+//
+//-------------------------------------------------------------------------
+// RECORD FORMAT - parse with docs/tools/probe_read.py
+//-------------------------------------------------------------------------
+//   ^~^~^ PRB <chan>.<event> t=<levelTime> ent=<n> tn=<targetname> tm=<team> hp=<health> ...
+//
+// Keeps the established ^~^~^ prefix so maptest_monitor.ps1 and the existing watchers still
+// see it. Strictly key=value after the event name, so a reader never has to guess.
+//
+// TRAPS HONOURED HERE:
+//  * coop_probe is seeded in coop_defaults.cfg. Script getcvar CREATES an unregistered cvar
+//    EMPTY and permanently defeats any later engine default (bug-1669, which killed limping,
+//    tinnitus and gore-drip). Anything engine-side reading this must ALSO pre-register it in
+//    G_InitGame.
+//  * The mask is decoded ONCE into level flags. Call sites test a level var, never getcvar -
+//    a getcvar per record on a hot path would cost more than the thing being measured.
+//  * Decoding is done by descending subtraction, not bitwise ops, which Morpheus does not
+//    reliably provide.
+//  * enableEnemy is NOT reported: it is a lone EV_SETTER and READING it throws (bug-2034).
+//    coop_aiDisabled is our readable mirror. threatbias IS readable (real EV_GETTER).
+//=========================================================================
+
+//=========================================================================
+prb_init:{
+//=========================================================================
+// Called from main.scr::main, which must complete in ONE FRAME - so no wait/waitframe here.
+	level.coop_prbActor   = 0
+	level.coop_prbAnim    = 0
+	level.coop_prbWeapon  = 0
+	level.coop_prbSound   = 0
+	level.coop_prbScript  = 0
+	level.coop_prbPlayer  = 0
+	level.coop_prbFeature = 0
+	level.coop_prbCensus  = 0
+	level.coop_prbAny     = 0
+	level.coop_prbFilter  = ""
+	level.coop_prbSeq     = 0
+	thread prb_poll
+}end
+
+//=========================================================================
+prb_poll:{
+//=========================================================================
+// Re-read the mask every second so the user can flip channels mid-map from the console
+// without reloading. One getcvar per second is free; one per record would not be.
+	while( 1 ){
+		local.m = int( getcvar "coop_probe" ) + 0
+		if( local.m != level.coop_prbMask ){
+			level.coop_prbMask = local.m
+			waitthread prb_decode local.m
+			level.coop_prbFilter = getcvar "coop_probeFilter"
+			println( "^~^~^ PRB probe.mask t=" + int( level.time ) + " mask=" + local.m + " actor=" + level.coop_prbActor + " anim=" + level.coop_prbAnim + " weapon=" + level.coop_prbWeapon + " sound=" + level.coop_prbSound + " script=" + level.coop_prbScript + " player=" + level.coop_prbPlayer + " feature=" + level.coop_prbFeature + " census=" + level.coop_prbCensus + " filter=" + level.coop_prbFilter )
+			if( level.coop_prbCensus == 1 && level.coop_prbCensusOn != 1 ){
+				level.coop_prbCensusOn = 1
+				thread prb_censusLoop
+			}
 		}
-		wait 0.5
+		wait 1
 	}
 }end
 
 //=========================================================================
-coop_probe_dump local.cmd:{
+prb_decode local.m:{
 //=========================================================================
-	println("^~^~^ PROBE START mode=" + local.cmd + " map=" + getcvar("mapname"))
-	local.maxentities = int(getcvar("maxentities"))
-	local.found = 0
+// Descending subtraction, so this needs only >= and -. Morpheus has no dependable bitwise
+// AND, and a wrong decode would silently enable the wrong channel - which is the exact class
+// of silent-veto bug this whole system exists to catch.
+	level.coop_prbCensus = 0
+	if( local.m >= 128 ){ level.coop_prbCensus = 1
+		local.m = local.m - 128 }
+	level.coop_prbFeature = 0
+	if( local.m >= 64 ){ level.coop_prbFeature = 1
+		local.m = local.m - 64 }
+	level.coop_prbPlayer = 0
+	if( local.m >= 32 ){ level.coop_prbPlayer = 1
+		local.m = local.m - 32 }
+	level.coop_prbScript = 0
+	if( local.m >= 16 ){ level.coop_prbScript = 1
+		local.m = local.m - 16 }
+	level.coop_prbSound = 0
+	if( local.m >= 8 ){ level.coop_prbSound = 1
+		local.m = local.m - 8 }
+	level.coop_prbWeapon = 0
+	if( local.m >= 4 ){ level.coop_prbWeapon = 1
+		local.m = local.m - 4 }
+	level.coop_prbAnim = 0
+	if( local.m >= 2 ){ level.coop_prbAnim = 1
+		local.m = local.m - 2 }
+	level.coop_prbActor = 0
+	if( local.m >= 1 ){ level.coop_prbActor = 1
+		local.m = local.m - 1 }
+	level.coop_prbAny = 0
+	if( level.coop_prbMask > 0 ){ level.coop_prbAny = 1 }
+}end
 
-	for(local.i = 0; local.i < local.maxentities; local.i++){
-		local.ent = getentbyentnum local.i
+//=========================================================================
+prb_id local.e:{
+//=========================================================================
+// The standard identity block. EVERY actor-bearing record carries this, because a record
+// without identity cannot be correlated with any other record - which is what made the old
+// tracker unusable.
+	if( local.e == NULL || local.e == NIL ){ end ( "ent=NULL" ) }
+	local.s = "ent=" + local.e.entnum
+	local.tn = local.e.targetname
+	if( local.tn == NIL || local.tn == "" ){ local.tn = "-" }
+	local.s = local.s + " tn=" + local.tn
+	local.tm = local.e.team
+	if( local.tm == NIL || local.tm == "" ){ local.tm = "-" }
+	local.s = local.s + " tm=" + local.tm
+	local.hp = local.e.health
+	if( local.hp == NIL ){ local.hp = 0 - 1 }
+	local.s = local.s + " hp=" + int( local.hp )
+	end ( local.s )
+}end
 
-		if(local.ent != NULL && local.ent.model != NIL && local.ent.health != NIL){
-			//skip the players themselves
-			local.isplayer = 0
-			for(local.p = 1; local.p <= $player.size; local.p++){
-				if($player[local.p] && local.ent.entnum == $player[local.p].entnum){
-					local.isplayer = 1
-				}
-			}
+//=========================================================================
+prb_pass local.e:{
+//=========================================================================
+// coop_probeFilter: when set, only entities whose targetname or model contain the substring
+// are reported. A busy map emits thousands of records a minute; without a filter the signal
+// for one actor is unreadable.
+	if( level.coop_prbFilter == NIL || level.coop_prbFilter == "" ){ end (1) }
+	if( local.e == NULL || local.e == NIL ){ end (0) }
+	local.tn = local.e.targetname
+	if( local.tn != NIL && local.tn != "" ){
+		if( local.tn == level.coop_prbFilter ){ end (1) }
+	}
+	local.md = local.e.model
+	if( local.md != NIL && local.md != "" ){
+		if( local.md == level.coop_prbFilter ){ end (1) }
+	}
+	end (0)
+}end
 
-			if(local.isplayer == 0 && waitthread coop_mod/replace.scr::withinDistanceOf local.ent 500){
-				local.found++
-				local.vec = local.ent.origin
-				local.msg = "^~^~^ PROBE ent=" + local.ent.entnum + " tn='" + local.ent.targetname + "' class=" + local.ent.classname
-				local.msg = local.msg + " model=" + local.ent.model + " hp=" + local.ent.health
-				local.msg = local.msg + " @ " + int(local.vec[0]) + " " + int(local.vec[1]) + " " + int(local.vec[2])
-				println(local.msg)
+//=========================================================================
+prb local.ev local.e local.extra:{
+//=========================================================================
+// The one emit call. Gate at the CALL SITE on the channel's level var before threading this,
+// so a disabled channel costs a single level-var read rather than a thread spawn.
+	if( local.e != NULL && local.e != NIL ){
+		if( !(waitthread prb_pass local.e) ){ end }
+	}
+	if( local.extra == NIL ){ local.extra = "" }
+	level.coop_prbSeq = level.coop_prbSeq + 1
+	println( "^~^~^ PRB " + local.ev + " t=" + int( level.time ) + " n=" + level.coop_prbSeq + " " + ( waitthread prb_id local.e ) + " " + local.extra )
+}end
 
-				if(local.cmd == "hurt" && local.ent.health > 0){
-					local.before = local.ent.health
-					local.ent hurt 1
-					waitframe
-					if(local.ent != NULL && local.ent != NIL){
-						if(local.ent.health >= local.before){
-							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: NO DAMAGE TAKEN (hp " + local.before + " -> " + local.ent.health + ") <-- damage-proof")
-						}else{
-							println("^~^~^ PROBE ent=" + local.ent.entnum + " HURT-1 RESULT: damage ok (hp " + local.before + " -> " + local.ent.health + ")")
-						}
-					}else{
-						println("^~^~^ PROBE HURT-1 RESULT: entity died/removed from 1 damage")
-					}
-				}
+//=========================================================================
+prb_actorSnap local.a:{
+//=========================================================================
+// FULL per-actor state. This is the record that would have ended the m1l1 hunt on day one:
+// it reports every coop-owned flag that any of our systems can set, so a wrongly-flagged
+// actor is visible WITHOUT the system that flagged him having been instrumented.
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !(waitthread prb_pass local.a) ){ end }
+
+	local.x = ""
+	// --- what the MAP declared about him (scene markers) ---------------------------------
+	local.v = local.a.coop_aiDisabled
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " aiDis=" + local.v
+	local.v = local.a.no_idle
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " noIdle=" + local.v
+	// threatbias IS readable - real EV_GETTER at sentient.cpp:469. -6969 = THREATBIAS_IGNOREME
+	local.v = local.a.threatbias
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " tbias=" + local.v
+	local.v = local.a.flags["coop_sceneActor"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " scene=" + local.v
+
+	// --- what OUR systems did to him -----------------------------------------------------
+	local.v = local.a.flags["coop_surrendered"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " surr=" + local.v
+	local.v = local.a.coop_converted
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " conv=" + local.v
+	local.v = local.a.coop_personality
+	if( local.v == NIL ){ local.v = "-" }
+	local.x = local.x + " pers=" + local.v
+	local.v = local.a.coop_actorActualHealth
+	if( local.v == NIL ){ local.v = 0 - 1 }
+	local.x = local.x + " hpReal=" + int( local.v )
+	local.v = local.a.max_health
+	if( local.v == NIL ){ local.v = 0 - 1 }
+	local.x = local.x + " hpMax=" + int( local.v )
+
+	// --- what he is doing right now ------------------------------------------------------
+	local.v = local.a.weapon
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " wp=" + local.v
+	local.v = local.a.weapongroup
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " wg=" + local.v
+	local.v = local.a.position
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " pos=" + local.v
+	local.v = local.a.type_attack
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " atk=" + local.v
+
+	// --- WHO is he fighting? -------------------------------------------------------------
+	// The single most valuable field in this record, and the one the old tracker lacked.
+	// coop_aiBehav counted `engaging` over level.coop_actorArray["german"], but an actor's
+	// .enemy can be a PLAYER or another ACTOR - so "engaging=12" could mean twelve germans
+	// shooting at the players, or twelve germans fighting the map's own allied cast, and
+	// those two have opposite fixes. The m1l1 investigation could not tell them apart.
+	local.en = 0
+	local.ec = "-"
+	local.et = "-"
+	local.ee = "-"
+	if( local.a.enemy != NULL && local.a.enemy != NIL ){
+		local.en = 1
+		local.ee = local.a.enemy.entnum
+		local.ec = local.a.enemy.classname
+		if( local.ec == NIL || local.ec == "" ){ local.ec = "-" }
+		local.et = local.a.enemy.team
+		if( local.et == NIL || local.et == "" ){ local.et = "-" }
+	}
+	local.x = local.x + " hasEnemy=" + local.en + " foeEnt=" + local.ee + " foeCls=" + local.ec + " foeTm=" + local.et
+
+	waitthread prb "actor.snap" local.a local.x
+}end
+
+//=========================================================================
+prb_censusLoop:{
+//=========================================================================
+// Periodic full-world sweep. Bounded and OFF by default: it walks the entity table, which is
+// up to 2048 slots, so it runs on a timer rather than per frame and exits the moment the
+// channel is switched off.
+	while( level.coop_prbCensus == 1 ){
+		waitthread prb_census
+		local.iv = int( getcvar "coop_probeInterval" ) + 0
+		if( local.iv < 1 ){ local.iv = 5 }
+		wait local.iv
+	}
+	level.coop_prbCensusOn = 0
+}end
+
+//=========================================================================
+prb_census:{
+//=========================================================================
+	local.maxent = int( getcvar "maxentities" )
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	local.i = 0
+	local.nAct = 0
+	local.nSurr = 0
+	local.nDis = 0
+	local.nEng = 0
+	while( local.i < local.maxent ){
+		local.e = getentbyentnum local.i
+		if( local.e != NULL && local.e != NIL ){
+			if( local.e.classname == "Actor" && isAlive local.e ){
+				local.nAct++
+				if( local.e.flags["coop_surrendered"] == 1 ){ local.nSurr++ }
+				if( local.e.coop_aiDisabled == 1 ){ local.nDis++ }
+				if( local.e.enemy != NULL && local.e.enemy != NIL ){ local.nEng++ }
+				waitthread prb_actorSnap local.e
 			}
 		}
+		local.i++
 	}
+	println( "^~^~^ PRB census.total t=" + int( level.time ) + " actors=" + local.nAct + " surrendered=" + local.nSurr + " aiDisabled=" + local.nDis + " engaging=" + local.nEng )
+}end
 
-	println("^~^~^ PROBE END found=" + local.found)
+//=========================================================================
+prb_playerSnap local.p:{
+//=========================================================================
+	if( local.p == NULL || local.p == NIL ){ end }
+	local.x = ""
+	local.v = local.p.health
+	if( local.v == NIL ){ local.v = 0 - 1 }
+	local.x = local.x + " hp=" + int( local.v )
+	local.v = local.p.flags["coop_dbno_active"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " dbno=" + local.v
+	local.v = local.p.flags["coop_isActive"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " active=" + local.v
+	local.v = local.p.weapon
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " wp=" + local.v
+	waitthread prb "player.snap" local.p local.x
 }end
