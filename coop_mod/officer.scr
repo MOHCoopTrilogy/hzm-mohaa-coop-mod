@@ -1939,6 +1939,50 @@ coop_apply_personality local.actor:{
 //=========================================================================
 	if( local.actor == NULL || !isAlive local.actor ){ end }
 
+	//[user 2026-08-22, bug-2051] A MAP THAT SAID "IGNORE THIS ONE" MEANT IT. threatbias ignoreme
+	//is how a map marks an actor the AI system should not treat as a combatant, and across the
+	//trilogy it is overwhelmingly applied to scenery and non-combatants - $Prisoner1/2/3, $MCpow1-3,
+	//$medic, $woundedguy, $pinnedbrit01-04, $spy, $radioguy, $piatguy, truck passengers, the m1l1
+	//barrel_guy and bazooka_wall set-pieces. Giving those a combat personality overwrites the
+	//type_attack the map assigned and turns a prop into an attacker.
+	//MEASURED on m1l1: at t=20s, six germans were targeting the PLAYER during the scripted truck
+	//ride - ent=9 and ent=110 (barrel_guy, which the map also gives nodamage and gren_awareness 0),
+	//ent=170 (bazooka_wall), and three unnamed. Every one carried role=aggr or role=cover, i.e. a
+	//personality WE gave them. Retail leaves them with the passive think the map placed them with.
+	//SCOPE, and it is a reversal I should own: bug-2038 added this same test to coop_variantRoll
+	//ONLY, and deliberately kept it out of the protection path on the reasoning that "ignoreme"
+	//means "do not target me", not "I am scenery". An adversarial review agreed. The live evidence
+	//says that reasoning was too clean. The cost of being wrong the other way is small and known:
+	//m5l1b:706 and e1l3/hacks' Claus are live-but-untargetable AI who now keep their map-assigned
+	//think instead of gaining flank/cover. Two actors trading dynamism for scripted scenes that
+	//actually play out.
+	//-6969 is THREATBIAS_IGNOREME (0xFFFFE4C7 signed, sentient.h:81). threatbias is READABLE - a
+	//real EV_GETTER at sentient.cpp:469, unlike enableEnemy (bug-2034).
+	//[bug-2051b] ...but READ IT LATE ENOUGH TO SEE IT. The gate above was correct and fired on
+	//nobody, because this label runs synchronously ~1s after an actor spawns while a map sets its
+	//markers later in its own main. Measured on m1l1: at t=0 ent=9 is still `tn=- tm=american
+	//tbias=0`, not yet even named; by t=5 it is `barrel_guy tm=german tbias=-6969` AND already
+	//role=aggr. Both landed inside that window and the personality won.
+	//mg42guy is the control that proves the gate itself is sound - it comes back tbias=-6969
+	//role=- persSet=0, correctly skipped, because the machinegunner exemption below does not
+	//depend on timing.
+	//So: BOUNDED SETTLE, and only for actors that exist at map load. A map's own main does its
+	//setup in the first seconds; a reinforcement or officer wave spawning at t=200 has no such
+	//window and must not be delayed, because a wave actor standing passive for three seconds
+	//after spawning is a gameplay cost. level.time discriminates the two exactly.
+	//This is a MITIGATION, not a cure: the general fix for the whole marker race is retroactive
+	//reconcile (re-check when the marker lands, not when the consumer runs), which is a bigger
+	//change than belongs in this pass.
+	if( level.time < 4 ){
+		local.settle = 0
+		while( level.time < 4 && local.settle < 200 ){
+			local.settle++
+			wait 0.05
+		}
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+	}
+	if( local.actor.threatbias == 0 - 6969 ){ end }
+
 	//[user 08-07] MACHINEGUNNERS ARE EXEMPT. This is what made "he gets off the MG42 and runs"
 	//happen on every gunner in the game, and it is our own doing, not retail: the "cover" and
 	//"flank" branches below do `type_attack "cover"`, which OVERWRITES the machinegunner think an
