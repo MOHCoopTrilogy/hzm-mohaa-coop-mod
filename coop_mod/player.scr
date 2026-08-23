@@ -16,6 +16,44 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 
 //this manages players previously done by: main.scr::managePlayers
 //=========================================================================
+coop_notargetWatch local.player:{
+//=========================================================================
+// [user 2026-08-22, bug-2063] RE-ASSERT, DO NOT TRUST A ONE-SHOT.
+// bug-2062 set notarget once per spawn and the ride was still hot. The user spotted why without
+// the log: "I get my inventory twice, once when I spawn, and then again a few seconds later."
+// The capture shows the kit issued THREE times - twice in the same second at spawn, then again
+// 24 seconds later. Each of those is manageAliveSpawning running again, which is exactly where
+// the one-shot lived, so a later pass can undo it or land after germans have already acquired.
+// FL_NOTARGET gates ENTRY into attack and cannot evict (actor.cpp:9077), so losing it for even a
+// moment during the ride is permanent for anything that acquires in that moment.
+// So: hold it every half second for as long as the ride is running, and release it once. This is
+// the same shape as the surrender loop's backstop - re-assert cheaply rather than reason about
+// which of several writers ran last, which is a class of argument I have lost repeatedly today.
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_ntWatch"] == 1 ){ end }
+	local.player.flags["coop_ntWatch"] = 1
+	local.held = 0
+	while( local.player != NULL && isAlive local.player ){
+		local.want = 0
+		if( level.coop_playerGlue == 1 ){ local.want = 1 }
+		if( level.glueplayer == 1 && level.coop_glueDone != 1 ){ local.want = 1 }
+		if( local.want == 1 ){
+			local.player notarget 1
+			local.held = 1
+		} else {
+			if( local.held == 1 ){
+				local.player notarget 0
+				local.held = 0
+			}
+		}
+		wait 0.5
+	}
+	//never leave a disconnecting/dying player flagged - the next body must be shootable
+	if( local.player != NULL && local.held == 1 ){ local.player notarget 0 }
+	if( local.player != NULL ){ local.player.flags["coop_ntWatch"] = NIL }
+}end
+
+//=========================================================================
 manage:{
 //=========================================================================
 if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "-#-#- thread player/manage->"+level.cMTE+"" )} //[202] chrissstrahl - this is to debug the coop mod thread handling
@@ -1130,14 +1168,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//before any player exists. Keying on it closes the window. coop_glueDone (set in
 	//replace.scr::unglue) reopens targeting the moment the ride genuinely ends, so this cannot
 	//leave anyone permanently unshootable.
-	local.wantNT = 0
-	if( level.coop_playerGlue == 1 ){ local.wantNT = 1 }
-	if( level.glueplayer == 1 && level.coop_glueDone != 1 ){ local.wantNT = 1 }
-	if( local.wantNT == 1 ){
-		local.player notarget 1
-	} else {
-		local.player notarget 0
-	}
+	thread coop_notargetWatch local.player
 	local.player solid
 	local.player american
 	
