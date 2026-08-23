@@ -520,6 +520,19 @@ prb_playerSnap local.p:{
 	local.lg = level.coop_playerGlue
 	if( local.lg == NIL ){ local.lg = 0 }
 	local.x = local.x + " lvlAlarm=" + local.la + " lvlDisg=" + local.ld + " glued=" + local.lg
+	//[user 2026-08-22, bug-2064] THE FLAG ITSELF, READ BACK. Four attempts to hold FL_NOTARGET
+	//through m1l1's ride were each judged by PROXY - census "engaging", player health, who the
+	//actors named as .enemy - and all four proxies are blind to it: cansee (entity.cpp:2941) has
+	//no FL_NOTARGET test, and AddPotentialEnemy (actorenemy.cpp:280) rejects only dead/IGNOREME,
+	//so an actor happily lists a notarget'd player as .enemy while the engine refuses the attack
+	//transition (actor.cpp:9150). The flag had no getter, so it could not be measured at all -
+	//which is how a TOGGLE went four rounds undetected. Entity::GetNoTarget is that getter.
+	//Appended LAST on purpose: on an older game.dll the getter does not exist and this read
+	//throws, and a Script Error SKIPS THE STATEMENT (TRAPS) - which would truncate everything
+	//after it. Last means nothing is lost but this field. bug-2061 was exactly that mistake.
+	local.nt = local.p.notarget
+	if( local.nt == NIL ){ local.nt = "NIL" }
+	local.x = local.x + " notgt=" + local.nt
 
 	waitthread prb "player.snap" local.p local.x
 }end
@@ -550,7 +563,66 @@ boot:{
 			setcvar "coop_probe" ("" + local.restore)
 			waitthread coop_probe_dump local.cmd
 		}
+		//[user 2026-08-22, bug-2064] `rcon set coop_probe notgt` - SET-vs-TOGGLE acceptance test.
+		//The whole m1l1 aggro hunt turned on one question nobody could answer from the game:
+		//does `player notarget 1` SET the flag, or FLIP it? It flipped, for four rounds, because
+		//there was no way to read the flag back and no way to exercise the write on demand. This
+		//is that test, and it lives here permanently so the answer is never a guess again.
+		if(local.cmd == "notgt"){
+			local.restore = level.coop_prbMask
+			if( local.restore == NIL ){ local.restore = 0 }
+			setcvar "coop_probe" ("" + local.restore)
+			waitthread coop_probe_notarget
+		}
 		wait 0.5
+	}
+}end
+
+//=========================================================================
+coop_probe_notarget:{
+//=========================================================================
+// Writes the SAME value twice on purpose. With correct setter semantics the flag is 1 after both
+// writes; with the old cheat-toggle it reads 1 then 0, which is exactly what the scripted ride
+// suffered (two spawn-time asserts cancelling each other).
+	for(local.p = 1; local.p <= $player.size; local.p++){
+		local.pl = $player[local.p]
+		if( local.pl == NULL || local.pl == NIL ){ continue }
+		local.b = local.pl.notarget
+		local.pl notarget 1
+		local.a1 = local.pl.notarget
+		local.pl notarget 1
+		local.a2 = local.pl.notarget
+		local.pl notarget 0
+		local.a3 = local.pl.notarget
+		local.verdict = "TOGGLE-BUG"
+		if( local.a1 == 1 && local.a2 == 1 && local.a3 == 0 ){ local.verdict = "SET-OK" }
+		println("^~^~^ PRBNT ent=" + local.pl.entnum + " before=" + local.b + " set1=" + local.a1 + " set1again=" + local.a2 + " set0=" + local.a3 + " verdict=" + local.verdict)
+		//[user 2026-08-22, bug-2068] PHASE 2 - DOES THE WATCHER RESPECT A FOREIGN OWNER?
+		//buildmode.scr and the MoM dev toggle also set FL_NOTARGET on a player, and
+		//coop_notargetWatch runs for that player's whole life. A draft of that loop wrote
+		//whenever the flag disagreed with what the RIDE wanted, which silently revoked the
+		//builder's protection within half a second. Set the flag as a foreign owner would,
+		//hold it across three watcher ticks, and see whether it survives.
+		//Only meaningful while the ride is NOT running - if it is, the watcher legitimately owns
+		//the flag and the test reports SKIP rather than a false failure.
+		local.ride = 0
+		if( level.coop_playerGlue == 1 ){ local.ride = 1 }
+		if( level.glueplayer == 1 && level.coop_glueDone != 1 ){ local.ride = 1 }
+		if( local.ride == 1 ){
+			println("^~^~^ PRBNT ent=" + local.pl.entnum + " foreign=SKIP reason=ride-in-progress")
+		} else {
+			local.pl notarget 1
+			wait 1.6
+			if( local.pl != NULL ){
+				local.f = local.pl.notarget
+				local.fv = "STOMPED-BY-WATCHER"
+				if( local.f == 1 ){ local.fv = "RESPECTED" }
+				println("^~^~^ PRBNT ent=" + local.pl.entnum + " foreign=" + local.fv + " after1.6s=" + local.f)
+				local.pl notarget 0
+			}
+		}
+		//leave the player exactly as found - the watcher owns this flag during a ride
+		if( local.b == 1 ){ local.pl notarget 1 }
 	}
 }end
 

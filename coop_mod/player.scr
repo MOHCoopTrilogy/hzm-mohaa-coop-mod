@@ -29,17 +29,51 @@ coop_notargetWatch local.player:{
 // So: hold it every half second for as long as the ride is running, and release it once. This is
 // the same shape as the surrender loop's backstop - re-assert cheaply rather than reason about
 // which of several writers ran last, which is a class of argument I have lost repeatedly today.
+//
+// [user 2026-08-22, bug-2064] AND THE REASON ALL OF THAT STILL FAILED: `notarget` WAS A TOGGLE.
+// Player::NoTargetCheat (player.cpp) and Entity::NoTarget (entity.cpp) are BOTH declared
+// EV_NORMAL under the command name "notarget", ScriptMaster keeps one name -> eventnum entry
+// (scriptmaster.cpp:616, last write wins), and on the shipped build the PLAYER one won - a cheat
+// handler that ignores its argument and XORs the flag. Three consecutive live m1l1 runs of one
+// identical build each printed "notarget ON" / "notarget OFF" / "notarget ON": the two spawn
+// asserts cancelled, the ride ran targetable, and the ride-end clear turned it back ON.
+// The engine now SETS when given an argument, so re-asserting is idempotent - but this loop must
+// not become a 1 Hz square wave if a pk3 ever ships ahead of game.dll. So it READS THE FLAG BACK
+// (Entity::GetNoTarget, added in the same edit) and writes only on a genuine disagreement.
+// If that getter is missing - an older game.dll - the read throws, a Script Error SKIPS THE
+// STATEMENT (TRAPS), local.have stays -1 = "unknown", and the loop falls back to writing only
+// when the DESIRED state changes. That is exactly the old one-shot behaviour: no better, but
+// never worse. THIS FIX NEEDS game.dll AND THE PK3 SHIPPED TOGETHER.
 	if( local.player == NULL ){ end }
 	if( local.player.flags["coop_ntWatch"] == 1 ){ end }
 	local.player.flags["coop_ntWatch"] = 1
-	local.held = 0
+	local.held = 0 - 1		//1 only once WE have written it on; -1/0 = not ours
 	while( local.player != NULL && isAlive local.player ){
 		local.want = 0
 		if( level.coop_playerGlue == 1 ){ local.want = 1 }
 		if( level.glueplayer == 1 && level.coop_glueDone != 1 ){ local.want = 1 }
+		local.have = 0 - 1		//-1 survives when the getter is absent
+		local.have = local.player.notarget
+		//[user 2026-08-22, bug-2068] RELEASE ONLY WHAT THIS WATCHER ACQUIRED.
+		//An earlier draft of this loop wrote whenever have != want, which reads as a tidy
+		//re-assert and is actually a STOMP: coop_mod/buildmode.scr:171 and the MoM dev toggle
+		//(developer.scr:810) also own FL_NOTARGET on a player, and this loop lives for the whole
+		//life of that player - so with want=0 it would have cleared the builder's protection
+		//within half a second and made the dev toggle un-toggleable. The flag is shared state
+		//with three owners; a watcher may assert its own claim and must not revoke anyone else's.
 		if( local.want == 1 ){
-			local.player notarget 1
-			local.held = 1
+			//known to be off -> assert, and keep asserting if anything clears it
+			if( local.have == 0 ){
+				local.player notarget 1
+				local.held = 1
+			}
+			//getter absent (older game.dll): write ONCE on the edge, never on a timer -
+			//blind re-assertion onto what may still be a toggle is an oscillator (TRAPS T3)
+			if( local.have == 0 - 1 && local.held != 1 ){
+				local.player notarget 1
+				local.held = 1
+			}
+			//have == 1 already: nothing to do, and deliberately do NOT claim it as ours
 		} else {
 			if( local.held == 1 ){
 				local.player notarget 0

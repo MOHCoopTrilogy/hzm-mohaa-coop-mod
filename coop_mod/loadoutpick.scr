@@ -217,6 +217,22 @@ loadout_deny local.player local.slot local.msg local.keepArchive:{
 //=========================================================================
 loadout_regiveWatch local.player:{
 //=========================================================================
+	//[user 2026-08-22, bug-2067] ALSO WAIT OUT THE JOIN RESEND, not just the 1.5s debounce.
+	//loadout_resend fires its two volleys 11s apart, which is far wider than this debounce, so
+	//without the extra term volley 1 applies a kit and volley 2 applies it again. Reusing the
+	//existing coop_loRegivePending latch means volley 2's commits simply re-dirty the ONE watch
+	//that is already parked here, and a single apply lands when the burst is genuinely over.
+	//BOUNDED: a stuck flag would mean the picks NEVER apply, which is worse than applying twice,
+	//so it is only honoured for 45s - comfortably past the ~20s resend and self-healing if the
+	//clear is ever missed (a disconnect mid-resend, a future edit adding an early exit).
+	local.jrGuard = 90
+	while(local.player != NULL && local.jrGuard > 0){
+		local.jr = local.player.flags["coop_loJoinResend"]
+		if(local.jr == NIL){ break }
+		if((level.time - local.jr) > 45){ break }
+		local.jrGuard--
+		wait 0.5
+	}
 	while(local.player != NULL && (level.time - local.player.flags["coop_loDirty"]) < 1.5){
 		wait 0.5
 	}
@@ -278,6 +294,19 @@ loadout_resend local.player:{
 	//detect.cfg/obj_setup execs client-side all boot) - the late volley lands after the
 	//client is fully active. Double delivery is harmless: loadout_set is idempotent and
 	//the regive is debounced.
+	//[user 2026-08-22, bug-2067] ...EXCEPT THE DEBOUNCE CANNOT REACH ACROSS THE TWO VOLLEYS.
+	//The debounce window is 1.5s (loadout_regiveWatch) and the volleys are ELEVEN SECONDS apart,
+	//so volley 1 goes quiet, fires a full kit re-issue, and volley 2 then fires a second one.
+	//That is the user's "I get my inventory twice, once when I spawn, and then again a few
+	//seconds later" - measured on m1l1 as two "Armory: your loadout has been applied" toasts 24s
+	//apart, with a KITSPAWN/KITGIVE pair under each. It is not free: every re-issue runs a takeall
+	//plus the engine's Holster/RemoveWeapons/give/Unholster sequence, which sets EF_UNARMED for a
+	//frame or two - measured at 141ms and 168ms of blanked viewmodel and arms (bug-2066, the
+	//"my gun briefly disappears" report). So: hold the regive off for the whole resend window and
+	//let ONE fire at the end. The watch already loops on this flag, and clearing it is what
+	//releases it - so the clear must be unconditional, which is why it sits on every exit below.
+	if(local.player == NULL){ end }
+	local.player.flags["coop_loJoinResend"] = level.time
 	wait 4
 	waitthread loadout_resendVolley local.player 1
 	if(local.player == NULL){ end }
@@ -348,6 +377,8 @@ loadout_resend local.player:{
 	//lock icons too). Repurposed from the retired bug-759/772 locked-skip redirect chains.
 	waitthread coop_mod/helmet.scr::armory_skin_exportLocks local.player
 	waitthread coop_mod/helmet.scr::armory_helmet_exportLocks local.player
+	//[bug-2067] release the held regive - one apply for the whole join burst
+	if(local.player != NULL){ local.player.flags["coop_loJoinResend"] = NIL }
 }end
 
 //=========================================================================
