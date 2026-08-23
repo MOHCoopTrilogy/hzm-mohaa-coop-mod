@@ -310,6 +310,40 @@ prb_actorSnap local.a:{
 	}
 	local.x = local.x + " hasEnemy=" + local.en + " foeEnt=" + local.ee + " foeCls=" + local.ec + " foeTm=" + local.et
 
+	//[user 2026-08-22, bug-2059] THE FIELDS TODAY ACTUALLY NEEDED. Every one of these is here
+	//because its absence cost a diagnosis:
+	// org/dist/see - the probe recorded WHERE NOTHING WAS. The leading explanation for the m1l1
+	//   aggro is that the coop player is VISIBLE where retail's scripted passenger was not, and
+	//   that was untestable: no position, no sightline, in 29,796 records. `see` is the direct
+	//   answer - can this actor actually see a player right now.
+	// tdis/tidl/alrm - coop_isProtectedActor keys on type_disguise, type_idle and alarmthread,
+	//   and an adversarial review showed those are TIME-VARYING (the engine demotes a sentry to
+	//   "salute" once he accepts papers). Modelling protection from the log was guesswork.
+	// supp - coop_suppressedAt is what coop_suppress_react keys on. The crouched-patroller
+	//   diagnosis was an inference I could never prove.
+	local.v = local.a.origin
+	local.x = local.x + " org=" + int( local.v[0] ) + "," + int( local.v[1] ) + "," + int( local.v[2] )
+	local.pp = waitthread coop_mod/replace.scr::player_closestTo local.a
+	local.dist = 0 - 1
+	local.see = 0
+	if( local.pp != NULL && local.pp != NIL ){
+		local.dist = int( vector_length( local.pp.origin - local.a.origin ) )
+		if( local.a cansee local.pp ){ local.see = 1 }
+	}
+	local.x = local.x + " dist=" + local.dist + " see=" + local.see
+	local.v = local.a.type_disguise
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " tdis=" + local.v
+	local.v = local.a.type_idle
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " tidl=" + local.v
+	local.v = 0
+	if( local.a.alarmthread != NIL ){ local.v = 1 }
+	local.x = local.x + " alrm=" + local.v
+	local.v = local.a.coop_suppressedAt
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " supp=" + int( local.v )
+
 	waitthread prb "actor.snap" local.a local.x
 }end
 
@@ -338,6 +372,7 @@ prb_census:{
 	local.nSurr = 0
 	local.nDis = 0
 	local.nEng = 0
+	local.nSee = 0
 	while( local.i < local.maxent ){
 		local.e = getentbyentnum local.i
 		if( local.e != NULL && local.e != NIL ){
@@ -346,12 +381,29 @@ prb_census:{
 				if( local.e.flags["coop_surrendered"] == 1 ){ local.nSurr++ }
 				if( local.e.coop_aiDisabled == 1 ){ local.nDis++ }
 				if( local.e.enemy != NULL && local.e.enemy != NIL ){ local.nEng++ }
+				//[bug-2059] the headline number the whole investigation lacked: how many actors
+				//can SEE a player this instant. If the aggro tracks sightlines rather than any
+				//script state, this is the column that will show it.
+				local.cp = waitthread coop_mod/replace.scr::player_closestTo local.e
+				if( local.cp != NULL && local.cp != NIL ){
+					if( local.e cansee local.cp ){ local.nSee++ }
+				}
 				waitthread prb_actorSnap local.e
 			}
 		}
 		local.i++
 	}
-	println( "^~^~^ PRB census.total t=" + int( level.time ) + " actors=" + local.nAct + " surrendered=" + local.nSurr + " aiDisabled=" + local.nDis + " engaging=" + local.nEng )
+	//[bug-2052] players too. prb_playerSnap existed but nothing ever called it, so the census
+	//has been reporting a world with no players in it - and the player's own state is exactly
+	//what the m1l1 disguise question turns on.
+	local.pi = 1
+	while( local.pi <= $player.size ){
+		if( $player[local.pi] != NULL ){
+			waitthread prb_playerSnap $player[local.pi]
+		}
+		local.pi++
+	}
+	println( "^~^~^ PRB census.total t=" + int( level.time ) + " actors=" + local.nAct + " surrendered=" + local.nSurr + " aiDisabled=" + local.nDis + " engaging=" + local.nEng + " canSeePlayer=" + local.nSee )
 }end
 
 //=========================================================================
@@ -371,6 +423,31 @@ prb_playerSnap local.p:{
 	local.v = local.p.weapon
 	if( local.v == NIL || local.v == "" ){ local.v = "-" }
 	local.x = local.x + " wp=" + local.v
+	//[user 2026-08-22, bug-2052] THE NUMBER THAT DECIDES THE DISGUISE. Retail m1l1 does
+	//`$player threatbias -100`; coop's DEFAULT is level.coop_threatbias = 10 (variables.scr:80),
+	//which is POSITIVE - the opposite of a disguise - and player.scr:1116 applies whatever that
+	//level var holds on every spawn. If a player ever spawns while it is still 10, they are the
+	//highest-priority target on the map for the rest of it, which would explain why it never
+	//mattered what KIND of german was shooting: they were all just picking the best target.
+	//threatbias is readable (real EV_GETTER, sentient.cpp:469). -6969 = IGNOREME.
+	local.v = local.p.threatbias
+	if( local.v == NIL ){ local.v = "NIL" }
+	local.x = local.x + " tbias=" + local.v
+	local.x = local.x + " lvlTbias=" + level.coop_threatbias
+	//[bug-2059] position and facing - without these the visibility question cannot be asked at
+	//all, and it is currently the leading explanation for the whole m1l1 aggro.
+	local.v = local.p.origin
+	local.x = local.x + " org=" + int( local.v[0] ) + "," + int( local.v[1] ) + "," + int( local.v[2] )
+	local.v = local.p.viewangles
+	local.x = local.x + " yaw=" + int( local.v[1] )
+	local.v = 0
+	if( local.p.is_disguised == 1 ){ local.v = 1 }
+	local.x = local.x + " disg=" + local.v
+	local.v = local.p.flags["coop_busted"]
+	if( local.v == NIL ){ local.v = 0 }
+	local.x = local.x + " busted=" + local.v
+	local.x = local.x + " lvlAlarm=" + level.alarm + " lvlDisg=" + level.coop_enableDisguises
+
 	waitthread prb "player.snap" local.p local.x
 }end
 
