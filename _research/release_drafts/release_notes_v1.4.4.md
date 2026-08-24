@@ -1,4 +1,4 @@
-## HZM Coop v1.4.4 — gloves, and a lot of things that were quietly not working
+## MOH Trilogy Coop v1.4.4 — gloves, and a lot of things that were quietly not working
 
 A big pass. Some of it is new, but most of the value this time is in things that *looked* fine and
 were not — including several where the fix we shipped earlier turned out to do nothing at all.
