@@ -2017,6 +2017,37 @@ coop_apply_personality local.actor:{
 
 	if( local.actor.flags["coop_personality_set"] == 1 ){ end }
 	local.actor.flags["coop_personality_set"] = 1
+
+	//[user 2026-08-23, bug-2074] LEASH IS LEVEL DESIGN, NOT PERSONALITY. Every branch below used to
+	//OVERWRITE .leash with a flat constant (aggr 4096 / flank 2560 / prone 2048 / cover 1536). The
+	//engine default is 512 (actor.cpp:2984) and it is measured from m_vHome, which is the actor's
+	//SPAWN POINT (actor.cpp:3873) - so leash is precisely "how far from his post may this defender
+	//roam". Handing 35% of the force an 8x radius (64x the area) is a level-design decision, made
+	//by a dice roll, on every german in the trilogy.
+	//USER, m3l2: "right at the beginning everyone leaves the house and comes out front instead of
+	//staying inside and fighting like what is scripted in vanilla." Measured on that map the same
+	//minute: alive=21 engaging=12 flanked=9 | aggr=7 cover=6 - 13 of 21 living defenders carrying a
+	//role WE gave them, and the 7 aggr among them each licensed to wander 4096u from the room they
+	//were placed in. The house emptied because we told it to.
+	//It also silently stomped 20 map scripts that set leash deliberately, including distinctions the
+	//designers drew by hand (m3l2:780 gives one man of a four-man squad 2400 where his squadmates
+	//get 6400; M3L3:1048 pins Ramsey at 64 to keep him on his mark).
+	//SO: ADD A BONUS, NEVER ASSIGN. Additive is scale-free - it cannot blow up a map's 10000 leash
+	//the way a multiplier would, and it cannot shrink a short one. The personality still expresses
+	//itself through cover think, mindist/maxdist and nosurprise; only the TERRITORY goes back to
+	//whoever owns it. Verified leash is genuinely readable first: EV_Actor_GetLeash is a real
+	//EV_GETTER (actor.cpp:1170) returning m_fLeash - unlike enableEnemy (bug-2034), so this read
+	//is not a silent NIL that would make the whole fix a no-op (TRAPS T3).
+	//Every movement path this gates is engine-native and therefore leash-bounded: coop_aiCoverThink
+	//hands flank/cover to actor_cover.cpp and issues no runto (aimaneuver.scr:151), and the aggr
+	//runto path is behind coop_aiAggrMove, which is off. Checked before writing this, because a fix
+	//to a bound that nothing respects is the other way this class of change does nothing.
+	local.base = local.actor.leash
+	if( local.base == NIL || local.base <= 0 ){ local.base = 512 }
+	local.lbonus = 512
+	local.lb = getcvar( "coop_aiLeashBonus" )
+	if( local.lb != "" ){ local.lbonus = int( local.lb ) }
+
 	local.roll = randomint 100
 	// ~12% PRONE SHOOTER -- only weapongroups that actually have prone anims (bazooka/grenade/mg42/
 	// generic have none -> they fall through to a normal role). Crash-safe: a cosmetic scripted prone
@@ -2040,24 +2071,47 @@ coop_apply_personality local.actor:{
 		// meant it never re-rolled once armed (bug: prone=0 in every tracker sample). coop_prone_shooter
 		// waits for the weapon to populate, THEN validates the group (crash-safe: never poses unsupported).
 		local.actor.flags["coop_role"] = "prone"
-		local.actor.leash = 2048
+		//a man lying down to shoot has no business roaming at all - keep the map's own radius
+		local.actor.leash = local.base
 		thread coop_prone_shooter local.actor
 		end
 	}
-	if( local.roll < 35 ){
+	//[user 2026-08-23, bug-2074] THE COVER-THINK SHARE IS NOW A DIAL, because it is a FEEL decision
+	//and it was hard-coded at 65%. The engine default attack think is THINK_TURRET (actor.cpp:8651) -
+	//hold m_vHome and shoot - which is the vanilla "stay in the house and defend it" behaviour on
+	//every BSP-placed enemy in the trilogy. The cover and flank branches convert that to cover think,
+	//so 65% of every garrison stops holding and starts relocating. That conversion IS the feature
+	//(it is what "enemies were stand-and-shoot turrets" asked for), so it is not being removed on my
+	//own judgement - but it should be tunable without a rebuild.
+	//The aggr branch deliberately does NOT convert: an aggressive man who holds his post and pushes
+	//within it is still turret think, so lowering the share hands actors back to vanilla.
+	//Defaults reproduce the current split EXACTLY (35 aggr / 40 cover / 25 flank), so this line
+	//changes nothing until somebody turns the dial.
+	local.cshare = 65
+	local.cs = getcvar( "coop_aiCoverShare" )
+	if( local.cs != "" ){ local.cshare = int( local.cs ) }
+	if( local.cshare < 0 ){ local.cshare = 0 }
+	if( local.cshare > 100 ){ local.cshare = 100 }
+	local.aggrThresh  = 100 - local.cshare
+	local.coverThresh = local.aggrThresh + ( ( local.cshare * 40 ) / 65 )
+
+	if( local.roll < local.aggrThresh ){
 		local.actor.flags["coop_role"] = "aggr"
-		local.actor.leash = 4096
+		//the pusher gets the full bonus - enough to rush the room and the doorway, not the map
+		local.actor.leash = local.base + local.lbonus
 		local.actor.nosurprise = 1
-	} else if( local.roll < 75 ){
+	} else if( local.roll < local.coverThresh ){
 		local.actor.flags["coop_role"] = "cover"
 		local.actor type_attack "cover"
-		local.actor.leash = 1536
+		//half: just enough slack to reach an adjacent cover node without leaving the building
+		local.actor.leash = local.base + ( local.lbonus / 2 )
 		local.actor.mindist = 400
 		local.actor.maxdist = 1600
 	} else {
 		local.actor.flags["coop_role"] = "flank"
 		local.actor type_attack "cover"
-		local.actor.leash = 2560
+		//three quarters: a flank is a wide swing, still anchored to the post he was given
+		local.actor.leash = local.base + ( ( local.lbonus * 3 ) / 4 )
 	}
 }end
 
@@ -2133,7 +2187,34 @@ coop_prone_shooter local.actor:{
 	local.gun projectile "models/projectiles/coop_ai_rifleround.tik"
 	local.gun firedelay 0.9			// bolt/semi cadence, NOT the 0.05 default
 	local.gun bulletspread 16 16
+	//[user 2026-08-23, bug-2076] GIVE THE SHOT A TELL. "Do you have a way to tell what the hell is
+	//hurting me right now / Myself and the paradroopers are taking some kind of invisible damage /
+	//i dont see him anywhere, hes hitting us all at the same time."
+	//This gun was completely unseeable, from two independent decisions that were each reasonable
+	//alone and lethal together: the round is deliberately `scale 0.04` ("effectively invisible; the
+	//round reads as hitscan at this speed", coop_ai_rifleround.tik, from bug-1185), and tracerfreq
+	//was 0. So a prone rifleman - already lying flat, in cover, at range - shot the player with
+	//something that had no projectile, no tracer and no visible muzzle line. There is no counterplay
+	//against a threat you cannot locate, and the player correctly concluded he was not being SHOT at
+	//all. MEASURED: the kill that ended that wave is attributed to ScriptAimedStrafingGunfire, and
+	//the live probe caught ent=409 firing on the player (PRB prone.FIRE foeCls=Player).
+	//A tracer is the whole fix - it costs nothing, it does not change the damage, and it turns an
+	//unattributable hazard back into an enemy with a position you can shoot back at.
+	//[bug-2082] tracerfreq IS ACCEPTED AND THEN IGNORED. ScriptAimedStrafingGunfire stores
+	//tracerFrequency and NOTHING ever reads it back - constructor, setter, archive, header, and no
+	//reader anywhere; both GunFire paths call ProjectileAttack() with no tracer argument. The
+	//similarly-named Weapon::tracerfrequency is a DIFFERENT class. So the "give the shot a tell"
+	//fix written here earlier was inert, and the round stayed exactly as invisible as before.
+	//Setting it to 0 explicitly, so nobody reads this line as working plumbing.
 	local.gun tracerfreq 0
+
+	//The alias for the audible muzzle below. Both are existing aliascache entries in ubersound
+	//(kar98_snd_fire1 / mp40_snd_fire1), so they resolve on every theatre; picking off the
+	//weapongroup the pose already validated stops an MP40 poser cracking like a bolt rifle.
+	local.shotsnd = "kar98_snd_fire1"
+	if( local.wg == "mp40" || local.wg == "mp44" || local.wg == "thompson" || local.wg == "sten" ){
+		local.shotsnd = "mp40_snd_fire1"
+	}
 	local.gun bulletdamage 12		// ignored by the engine; kept for intent/readability
 	local.lostsight = 0
 	local.refresh = 0
@@ -2231,8 +2312,19 @@ coop_prone_shooter local.actor:{
 				local.actor.coop_prbFired = 1
 				println( "^~^~^ PRB prone.FIRE t=" + int( level.time ) + " ent=" + local.actor.entnum + " foe=" + local.target.entnum + " foeCls=" + local.target.classname )
 			}
+			//[user 2026-08-23, bug-2082] AN AUDIBLE MUZZLE, because the visual one cannot be had.
+			//"Myself and the paradroopers are taking some kind of invisible damage / i dont see him
+			//anywhere". The round is deliberately scale 0.04 ("effectively invisible", bug-1185) and
+			//the tracer field is ignored by the engine, so there is no way to make the BULLET show.
+			//A shot sound at the muzzle gives the same thing a tracer would - a direction to look and
+			//a position to shoot back at - and playsound on a script entity is proven plumbing rather
+			//than a setter the engine happens to drop on the floor.
+			//Two shots across the 1.5s burst, matching the 0.9s firedelay the gun actually uses.
+			local.gun playsound local.shotsnd
 			local.gun on
-			wait 1.5
+			wait 0.75
+			if( local.gun != NULL ){ local.gun playsound local.shotsnd }
+			wait 0.75
 			local.gun off
 		} else {
 			local.gun off

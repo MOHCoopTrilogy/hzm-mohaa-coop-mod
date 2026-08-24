@@ -1,0 +1,200 @@
+//=========================================================================
+// HZM coop - ARMORY GLOVES  [user 2026-08-23, bug-2080]
+//=========================================================================
+// A glove is a shader swap on the hand surface, not an attached prop - so this file is a small
+// fraction of helmet.scr. There is no attachmodel, no follower thread and no fit-tuning cvars,
+// because there is nothing to position: the model already has the hands.
+//
+// HOW THE INDEX TRAVELS, and why it is done twice:
+//
+//   THIRD PERSON - the index lives in the PER-SURFACE bits of the player entity's `hand` surface.
+//     Bits 0-1 plus bit 6 compose a 0-7 value (MDL_SURFACE_SKININDEX, q_shared.h). Per-surface is
+//     deliberate: entityState.skinNum would have been simpler but it is applied to EVERY surface,
+//     and our own gore ladder gives player body surfaces three skins each - so a glove index would
+//     have rendered an undamaged player's trousers at a gore tier. Measured on 76+ shipped tiks.
+//
+//   FIRST PERSON - cgame swaps to a different tiki (<skin>_fps.tik) and memsets the surface array,
+//     so the 3P bits cannot reach it. coop_gloveIdx carries the same index to the client, which
+//     re-applies it to triggerhand/lefthand/garandhand (cg_modelanim.c). Push it on CHANGE only.
+//
+// The gore writer is what makes the 3P half safe: Sentient::CoopGoreUpdateSkinTier now skips the
+// `hand` surface on players, so taking damage cannot walk the glove index through the roster.
+//
+// Index 0 is each uniform's OWN hand shader, so an unset player is correct by default and no skin
+// loses its intended look.
+//=========================================================================
+
+//=========================================================================
+glove_initList:{
+//=========================================================================
+	if( level.coop_gloveCount != NIL ){ end }
+
+	//Index 0 is not listed as a token: it is whatever the model already had.
+	level.coop_gloveName[0] = "Bare Hands"
+	level.coop_gloveTok[0]  = "glv_bare"
+
+	level.coop_gloveName[1] = "Leather Gloves"
+	level.coop_gloveTok[1]  = "glv_leather"
+
+	level.coop_gloveName[2] = "Wool Knit Gloves"
+	level.coop_gloveTok[2]  = "glv_wool"
+
+	level.coop_gloveName[3] = "US Winter Gloves"
+	level.coop_gloveTok[3]  = "glv_uswinter"
+
+	level.coop_gloveName[4] = "Wool Mittens"
+	level.coop_gloveTok[4]  = "glv_mittens"
+
+	level.coop_gloveName[5] = "Seaman's Gloves"
+	level.coop_gloveTok[5]  = "glv_seaman"
+
+	//[user 2026-08-23] "if it can be 3p only I dont want those included." A Paratrooper Hands entry
+	//sat at index 6 and was cut: its third-person look was real, but the only first-person texture
+	//available for it was plain handview - the same one Bare Hands uses - so it was invisible as a
+	//choice the moment you aimed. Every entry below has a distinct look in BOTH views.
+	level.coop_gloveName[6] = "Alpine Hands"
+	level.coop_gloveTok[6]  = "glv_alpine"
+
+	level.coop_gloveCount = 7
+}end
+
+//=========================================================================
+glove_apply local.player:{
+//=========================================================================
+// The choke point. Called on spawn, on revive, and after any skin change - all three rebuild the
+// model, and a rebuilt model comes back with clean surface bits.
+	if( local.player == NULL ){ end }
+
+	//A model rebuild lands on the frame AFTER the spawn event (the same reason helmet_apply waits),
+	//so writing the bits now would target the model that is about to be replaced.
+	waitframe
+	if( local.player == NULL ){ end }
+	waitthread glove_initList
+
+	local.idx = local.player.flags["coop_gloveIdx"]
+	if( local.idx == NIL ){ local.idx = 0 }
+	if( local.idx < 0 || local.idx >= level.coop_gloveCount ){ local.idx = 0 }
+
+	//WEAR-TIME RE-VALIDATION. The armory refuses a locked pick at PICK time, but an unlock record
+	//can be revoked between sessions and the archived token is replayed on every join. Fail safe to
+	//bare hands rather than trusting the stored value (the same rule helmet_apply follows).
+	if( local.idx > 0 ){
+		if( !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player level.coop_gloveTok[local.idx]) ){
+			local.idx = 0
+			local.player.flags["coop_gloveIdx"] = 0
+		}
+	}
+
+	waitthread glove_writeBits local.player local.idx
+
+	//FIRST PERSON. Change-only: this runs on every spawn and revive, and re-sending an unchanged
+	//value would be pointless client traffic. The payload is a bare integer - no embedded quote, so
+	//it cannot be truncated on the wire (TRAPS T8).
+	if( local.player.flags["coop_gloveSent"] != local.idx ){
+		local.player.flags["coop_gloveSent"] = local.idx
+		local.player stufftext ( "set coop_gloveIdx " + local.idx )
+	}
+}end
+
+//=========================================================================
+glove_writeBits local.ent local.idx:{
+//=========================================================================
+// Compose the 0-7 index out of the three surface bits. Clear all three first: the surface command
+// sets and clears individual flags, it does not assign a value, so a stale high bit from a previous
+// glove would otherwise survive and select the wrong one.
+//
+// THE QUOTES ARE LOAD-BEARING. An unquoted +/- argument is valid TIKI but a SCRIPT parse-killer
+// (unexpected TOKEN_PLUS) that takes this whole file down with balanced braces - see docs/TRAPS.md
+// and bugs 533 and 1308. Every one of these six arguments is quoted for that reason.
+	if( local.ent == NULL ){ end }
+
+	local.ent surface hand "-skin1"
+	local.ent surface hand "-skin2"
+	local.ent surface hand "-skin4"
+
+	if( local.idx == 1 ){ local.ent surface hand "+skin1" }
+	else if( local.idx == 2 ){ local.ent surface hand "+skin2" }
+	else if( local.idx == 3 ){ local.ent surface hand "+skin1" local.ent surface hand "+skin2" }
+	else if( local.idx == 4 ){ local.ent surface hand "+skin4" }
+	else if( local.idx == 5 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin1" }
+	else if( local.idx == 6 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin2" }
+	else if( local.idx == 7 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin1" local.ent surface hand "+skin2" }
+}end
+
+//=========================================================================
+armory_glove_set local.player local.data:{
+//=========================================================================
+// Bus 52 (,gn). data = a 1-digit glove index. Mirrors armory_helmet_set exactly, including the
+// SHOW-ALL-WITH-LOCK rule: the client previews every glove freely and the server simply refuses to
+// APPLY a locked one, so the preview may sit on a locked entry with its padlock showing.
+	if( local.player == NULL ){ end }
+	waitthread glove_initList
+
+	local.idx = int( local.data )
+	if( local.idx < 0 || local.idx >= level.coop_gloveCount ){ end }
+
+	if( local.idx > 0 ){
+		if( !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player level.coop_gloveTok[local.idx]) ){
+			waitthread glove_lockNotice local.player local.idx
+			end
+		}
+	}
+
+	local.player.flags["coop_gloveIdx"] = local.idx
+	waitthread glove_writeBits local.player local.idx
+	if( local.player.flags["coop_gloveSent"] != local.idx ){
+		local.player.flags["coop_gloveSent"] = local.idx
+		local.player stufftext ( "set coop_gloveIdx " + local.idx )
+	}
+	waitthread glove_applyMannequin local.player
+}end
+
+//=========================================================================
+glove_lockNotice local.player local.idx:{
+//=========================================================================
+// ONE message per distinct locked item, keyed on the index - the armory replays its picks on every
+// join and armory close, so an unkeyed iprint here is chatter rather than information. Same shape
+// as helmet_lockNotice, and it names the actual requirement rather than shrugging (bug-2078).
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_gloveLockMsg"] == local.idx ){ end }
+	local.player.flags["coop_gloveLockMsg"] = local.idx
+	waitthread glove_initList
+	local.req = waitthread coop_mod/challenges.scr::chal_reqText level.coop_gloveTok[local.idx]
+	local.player iprint ( "Gloves locked: " + level.coop_gloveName[local.idx] + " - " + local.req ) 1
+}end
+
+//=========================================================================
+glove_applyMannequin local.player:{
+//=========================================================================
+// Mirror the pick onto the lobby mannequin, the same way helmet_applyMannequin does. The mannequin
+// is a script_model of the same rig, so the identical surface write applies.
+	if( local.player == NULL ){ end }
+	local.man = local.player.flags["coop_lobbyMannequin"]
+	if( local.man == NIL || local.man == NULL ){ end }
+	local.idx = local.player.flags["coop_gloveIdx"]
+	if( local.idx == NIL ){ local.idx = 0 }
+	waitthread glove_writeBits local.man local.idx
+}end
+
+//=========================================================================
+armory_glove_exportLocks local.player:{
+//=========================================================================
+// Push per-entry lock state to the client so the armory can draw a padlock and a requirement
+// caption without the client knowing anything about unlocks. Mirrors armory_helmet_exportLocks.
+	if( local.player == NULL ){ end }
+	waitthread glove_initList
+	for( local.i = 1; local.i < level.coop_gloveCount; local.i++ ){
+		local.lk = 0
+		if( !(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player level.coop_gloveTok[local.i]) ){
+			local.lk = 1
+		}
+		//[bug-2082] MUST MATCH WHAT THE PAGE READS. This used to push coop_loGlLk<i>, a name with
+		//ZERO readers anywhere in ui/ - so no padlock ever lit and every glove looked unlocked, which
+		//is exactly what the user reported. The gated pages do `set coop_loCosLk 1` then
+		//`vstr coop_loGlLkA<NN>`, mirroring the helmet row, so the value pushed here has to be that
+		//vstr's BODY: a two-digit page id and a command that sets the shared caption cvar.
+		local.pg = local.i
+		if( local.i < 10 ){ local.pg = "0" + local.i }
+		local.player stufftext ( "seta coop_loGlLkA" + local.pg + " set coop_loCosLk " + local.lk )
+	}
+}end

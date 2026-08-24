@@ -712,6 +712,52 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 //not the clone's own handler got there first. Deliberately reads self.team rather than group.team:
 //group scope belongs to the handler, and this can run before it.
 //=========================================================================
+// [user 2026-08-23, bug-2088] MOVE A CONVERTED ACTOR BETWEEN TEAM ARRAYS.
+//=========================================================================
+// USER: "on this mission the last objective you have to kill all enemies to complete mission, its
+// not working because I converted an axis."
+//
+// surrender.scr's conversion flips the actor's real team correctly - the `american` COMMAND does
+// ClearEnemies + DisbandSquadMate + m_Team + EF_ALLIES + JoinNearbySquads - so he genuinely fights
+// for us and `self.team` reads american afterwards. What it never did was move him between the
+// COOP ARRAYS, and level.coop_actorArray["german"] is what every "are any enemies left" sweep
+// counts. So a converted man stayed on the axis ledger forever: he cannot be killed (he is
+// friendly) and he cannot be removed (nothing removes him), which makes a kill-them-all objective
+// permanently uncompletable. That is a softlock, not a cosmetic miscount.
+//
+// removeActorFromArray cannot be reused here - it reads group.team/group.actor, and group scope
+// belongs to actorHandler. This is the same rebuild-without-one-entry loop written for an explicit
+// actor, plus the append half.
+//=========================================================================
+coop_moveActorToTeam local.actor local.from local.to:{
+//=========================================================================
+	if( local.actor == NULL || local.from == NIL || local.to == NIL ){ end }
+	if( local.from == local.to ){ end }
+
+	local.old = level.coop_actorArray[local.from]
+	local.new[1] = NIL
+	local.j = 1
+	for( local.i = 1; local.i <= local.old.size; local.i++ ){
+		local.a = local.old[local.i]
+		if( local.a != NULL && local.a != local.actor ){
+			local.new[local.j] = local.a
+			local.j++
+		}
+	}
+	level.coop_actorArray[local.from] = local.new
+
+	local.idx = level.coop_actorArray[local.to].size + 1
+	level.coop_actorArray[local.to][local.idx] = local.actor
+	//the in-array latch stays SET - he is still in an array, just a different one. Clearing it would
+	//let coop_ensureInArray add him to the american list a second time.
+	local.actor.flags["coop_inActorArray"] = 1
+
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ AIARRAY moved ent=" + local.actor.entnum + " " + local.from + " -> " + local.to + " (axis left " + level.coop_actorArray[local.from].size + ")" )
+	}
+}end
+
+//=========================================================================
 coop_ensureInArray:{
 //=========================================================================
 	if( !isAlive self ){ end }

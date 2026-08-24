@@ -484,7 +484,8 @@ helmet_lockNotice local.player local.idx:{
 	if( local.player.flags["coop_helmetLockMsg"] == local.idx ){ end }
 	local.player.flags["coop_helmetLockMsg"] = local.idx
 	waitthread helmet_initList
-	local.player iprint ( "Helmet locked: " + level.coop_helmetName[local.idx] + " - earn it via challenges/ranks" ) 1
+	local.req = waitthread coop_mod/challenges.scr::chal_reqText level.coop_helmetTik[local.idx]
+	local.player iprint ( "Helmet locked: " + level.coop_helmetName[local.idx] + " - " + local.req ) 1
 }end
 
 //-------------------------------------------------------------------------
@@ -801,6 +802,7 @@ armory_helmet_applyIdx local.player local.idx:{
 	local.player.flags["coop_helmetTouched"] = 1	//from now on helmet_apply manages this player every spawn
 
 	waitthread helmet_apply local.player
+	thread coop_mod/gloves.scr::glove_apply local.player	//[bug-2080] a skin change re-models the player and wipes surface bits
 	if( local.player == NULL ){ end }	//helmet_apply waits a frame - the player can disconnect during it
 	thread helmet_applyMannequin local.player	//[user 07-17] tier 1: mannequin wears it + armory tile cvar
 	local.player iprint ( "Helmet: " + level.coop_helmetName[local.idx] ) 1
@@ -824,6 +826,13 @@ armory_helmet_set local.player local.data:{
 	//appeared. The gate now runs AFTER validation and RECORDS the choice instead of dropping it.
 	waitthread helmet_initList
 	local.idx = int( local.data )
+	//[user 2026-08-23, bug-2085] HIDDEN HELMETS. 30/31/32 (Brit Beret, German Beret, Soviet Seaman
+	//Hat) are bridged out of the armory browse chain because their meshes carry a full 73-bone
+	//character skeleton instead of the single-bone prop rig the attach expects, so they render but
+	//sit off the head. The pages are skipped client-side; this refuses them server-side too, because
+	//a player who picked one BEFORE they were hidden still has that index archived and replays it on
+	//every join. Falls back to Standard Issue rather than leaving a floating hat.
+	if( local.idx == 30 || local.idx == 31 || local.idx == 32 ){ local.idx = 1 }
 	if( local.idx < 1 || local.idx > level.coop_helmetCount ){ end }	//non-numeric/cleared token ("0") - inert
 	//server-side unlock gate: the client pages preview ALL helmets including LOCKED ones - refuse
 	//to apply a locked pick. [user 07-18 pre-release] SHOW-ALL-WITH-LOCK: NO snap-back revert
@@ -1357,7 +1366,8 @@ armory_skin_set local.player local.data:{
 	//join-resend, so the WORN skin never changes (the spawn re-force reads flags["coop_armorySkin"],
 	//which only armory_skin_applyIdx writes).
 	if( !(waitthread cosmetic_isUnlocked local.player ("models/player/" + level.coop_armorySkins[local.idx] + ".tik")) ){
-		local.player iprint ( "Skin locked: " + level.coop_armorySkins[local.idx] + " - earn it via challenges/ranks" ) 1
+		local.req = waitthread coop_mod/challenges.scr::chal_reqText ( "models/player/" + level.coop_armorySkins[local.idx] + ".tik" )
+		local.player iprint ( "Skin locked: " + level.coop_armorySkins[local.idx] + " - " + local.req ) 1
 		end
 	}
 	waitthread armory_skin_applyIdx local.player local.idx
@@ -1379,6 +1389,7 @@ armory_skin_applyIdx local.player local.idx:{
 	//[user 2026-08-04] bug-1361 - the model swap wipes the surface nodraws, so the model's own
 	//helmet reappears under the attached headgear. Re-apply on every skin change.
 	thread helmet_apply local.player
+	thread coop_mod/gloves.scr::glove_apply local.player	//[bug-2080] a skin change re-models the player and wipes surface bits
 	local.player stufftext ( "seta dm_playermodel " + local.skin )
 	//[user 07-17] SERVER-AUTHORITATIVE skin persist: dm_playermodel alone loses the race (the client
 	//re-seats a default preview each menu open + two writers fight it), so also record the pick on the
@@ -1398,6 +1409,7 @@ armory_skin_applyIdx local.player local.idx:{
 	local.player iprint ( "Skin: " + local.skin )
 	//re-apply the helmet choice on top of the new model (InitModel wiped attachments)
 	thread helmet_apply local.player
+	thread coop_mod/gloves.scr::glove_apply local.player	//[bug-2080] a skin change re-models the player and wipes surface bits
 }end
 
 //-------------------------------------------------------------------------
@@ -1529,6 +1541,16 @@ cosmetic_gatedBuild:{
 	//helmets earned via challenges.scr rewards + xp.scr rank grants.
 	level.coop_cosmeticGated = 1   //non-NIL marker so the guard above trips on re-entry
 	level.coop_cosmeticGatedTok["models/coop_helmets/coop_helmet_29th.tik"] = 1
+	//[user 2026-08-23, bug-2080] ARMORY GLOVES. This list is an ALLOW-LIST of things that REQUIRE
+	//unlocking - a cosmetic missing from it is free to everyone no matter what challenge points at
+	//it, which is exactly the mistake recorded 13 lines below for the 08-07 helmet batch. Bare
+	//Hands (index 0) and Leather Gloves (index 1) are the two free starters and are deliberately
+	//absent. The other six are gated: three by challenge, three by rank.
+	level.coop_cosmeticGatedTok["glv_wool"] = 1
+	level.coop_cosmeticGatedTok["glv_uswinter"] = 1
+	level.coop_cosmeticGatedTok["glv_mittens"] = 1
+	level.coop_cosmeticGatedTok["glv_seaman"] = 1
+	level.coop_cosmeticGatedTok["glv_alpine"] = 1
 	//[user 08-07] the 13 pieces added 08-07 (gas mask + the 12 from the pak audit). Without these
 	//they stayed FREE - cosmetic_isUnlocked only gates a token that is in this set, so an ungated
 	//piece is wearable by everyone regardless of the challenge reward now pointing at it.
