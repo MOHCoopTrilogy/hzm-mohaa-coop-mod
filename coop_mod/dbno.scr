@@ -708,6 +708,7 @@ dbno_teamrevive_monitor local.downed:{
 	local.reviverNum = -1
 	local.slack = 0			// seconds since USE was last seen held
 	local.shown = 0			// 0 none, 1 healing, 2 out-of-medkits
+	local.toastSeen = 0		// see the objective-toast re-assert inside the loop below
 
 	// ---- reviver HUD (21 text, 22 bar track, 23 bar fill) : created lazily on first use ----
 	// ---- downed  HUD (24 text, 25 bar track, 26 bar fill) ----
@@ -737,6 +738,25 @@ dbno_teamrevive_monitor local.downed:{
 	ihuddraw_alpha       local.downed 140 0
 
 	while( local.downed != NULL && local.downed.flags["coop_dbno_active"] == 1 ){
+		//[user 2026-08-30, bug-1680 in the other direction] RE-ASSERT AFTER AN OBJECTIVE TOAST.
+		//objectives.scr::coop_obj_toast owns 135-142 and tears the whole range down
+		//unconditionally when it finishes. Its guard is one-directional: it waits at the top
+		//only if somebody is ALREADY down, so a man who goes down WHILE the toast is up gets
+		//the revive prompt and both progress bars zeroed under him. Nothing recovered, because
+		//local.shown is a latch - the block that sets text and alpha runs only on a state
+		//CHANGE, and the state had not changed. The bar rect kept updating every tick at alpha
+		//0, so the reviver held [USE] with no feedback for the rest of a 90-second bleed-out.
+		//Clearing the latch on the toast's falling edge forces one full re-issue on the next
+		//tick, so the worst case is a 0.1s flicker instead of a permanently blank HUD.
+		if( level.coop_objToastBusy == 1 ){
+			local.toastSeen = 1
+		}else{
+			if( local.toastSeen == 1 ){
+				local.toastSeen = 0
+				local.shown = 0
+			}
+		}
+
 		// nearest LIVING, non-downed teammate within range holding [USE]
 		local.best = NULL
 		local.bestD = local.range
@@ -1354,24 +1374,31 @@ dbno_marker_manager local.player:{
 	local.glow lightOn
 	local.glow notsolid
 
-	local.maxclients = $player.size
-	local.i = 1
-	while( local.i <= local.maxclients ){
-		if( $player[local.i] != NULL ){
-			if( $player[local.i].flags["coop_isActive"] == 1 ){
-				if( $player[local.i] != local.player ){
-					ihuddraw_virtualsize $player[local.i] 31 1
-					ihuddraw_align $player[local.i] 31 left top
-					ihuddraw_font $player[local.i] 31 "verdana-12"
-					ihuddraw_color $player[local.i] 31 1 0.2 0.2
-					ihuddraw_rect $player[local.i] 31 10 30 0 0
-					ihuddraw_alpha $player[local.i] 31 1
-					ihuddraw_string $player[local.i] 31 local.hud_label
-				}
-			}
-		}
-		local.i++
+	//[2026-08-28] THE "[DOWN] <name>" LABEL HAD THREE BUGS AT ONCE, all only visible with 2+ players:
+	//  1. slot 31 was a single GLOBAL constant, so a second man going down overwrote the first man's
+	//     label, and reviving either one blanked the label for BOTH.
+	//  2. it was drawn ONCE before the spin loop and never redrawn, so anyone who was dead, respawning
+	//     or spectating at that instant never saw it at all - and a teammate who died and respawned
+	//     while you were down lost your label permanently.
+	//  3. the teardown blanked 31 for every player unconditionally.
+	//Per-downed-player slot fixes 1 and 3; redrawing inside the spin loop fixes 2.
+	//
+	//Slots 30/36/37 are the only free ones left in the 27-39 DBNO band (27,28,29,31,32,33,34,35,38,39
+	//are taken) - exactly enough for four players. The >=100 fade-exempt band is full, so this label
+	//still fades when the reader stands still; that is a known limitation, not something a slot change
+	//can fix here.
+	local.downIdx = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] == local.player ){ local.downIdx = local.i }
 	}
+	if( local.downIdx == 2 ){ local.coop_downLabelSlot = 30 }
+	else if( local.downIdx == 3 ){ local.coop_downLabelSlot = 36 }
+	else if( local.downIdx == 4 ){ local.coop_downLabelSlot = 37 }
+	else { local.coop_downLabelSlot = 31 }
+
+	//stack the labels vertically so two simultaneous downs do not draw on the same line
+	local.labelY = 30 + ((local.downIdx - 1) * 14)
+	if( local.labelY < 30 ){ local.labelY = 30 }
 
 	local.spin = 0
 	wait 0.1
@@ -1381,6 +1408,22 @@ dbno_marker_manager local.player:{
 		local.spin = local.spin + 10
 		if( local.spin >= 360 ){ local.spin = 0 }
 		local.medkit.angles = (90 local.spin 0)
+
+		//redraw on a slow cadence so a player who respawns, un-spectates or joins mid-down still gets
+		//the label. Every frame would be wasteful; twice a second is invisible to the reader.
+		if( (local.spin % 180) == 0 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 && $player[local.i] != local.player ){
+					ihuddraw_virtualsize $player[local.i] local.coop_downLabelSlot 1
+					ihuddraw_align $player[local.i] local.coop_downLabelSlot left top
+					ihuddraw_font $player[local.i] local.coop_downLabelSlot "verdana-12"
+					ihuddraw_color $player[local.i] local.coop_downLabelSlot 1 0.2 0.2
+					ihuddraw_rect $player[local.i] local.coop_downLabelSlot 10 local.labelY 0 0
+					ihuddraw_alpha $player[local.i] local.coop_downLabelSlot 1
+					ihuddraw_string $player[local.i] local.coop_downLabelSlot local.hud_label
+				}
+			}
+		}
 		waitframe
 	}
 
@@ -1391,8 +1434,10 @@ dbno_marker_manager local.player:{
 	local.i = 1
 	while( local.i <= local.maxclients ){
 		if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 ){
-			ihuddraw_alpha $player[local.i] 31 0
-			ihuddraw_string $player[local.i] 31 ""
+			//only THIS downed player's slot - blanking 31 for everyone is what wiped the other man's
+			//label when either of them was revived
+			ihuddraw_alpha $player[local.i] local.coop_downLabelSlot 0
+			ihuddraw_string $player[local.i] local.coop_downLabelSlot ""
 		}
 		local.i++
 	}

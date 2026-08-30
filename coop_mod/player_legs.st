@@ -569,6 +569,13 @@ state CROUCH_IDLE
 		// HZM coop - TAKE COVER [214]: already crouched at a low obstacle when the pose engages
 		COVER_LOW				: COOP_COVER_LOW
 
+		// HZM coop [user 2026-08-24] PRONE. COOP_PRONE is published by Player::TickCoopProne after the
+		// crouch key has been HELD for coop_proneHold - a hold, not a tap, because tap-crouch is already
+		// the stand/crouch toggle and thousands of existing inputs use it.
+		// Leaving prone is guarded ENGINE-side by a standing-clearance trace, so !COOP_PRONE can never
+		// fire while the player is under something they cannot stand up into.
+		PRONE_IDLE				: COOP_PRONE
+
 		CROUCH_RUN_FORWARD		: RUN FORWARD HAS_VELOCITY !BLOCKED "2"
 		CROUCH_RUN_BACKWARD		: RUN BACKWARD HAS_VELOCITY !BLOCKED "2"
 		CROUCH_RUN_LEFT			: RUN STRAFE_LEFT HAS_VELOCITY !BLOCKED "2"
@@ -618,6 +625,10 @@ state CROUCH_WALK_FORWARD
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -669,6 +680,10 @@ state CROUCH_WALK_BACKWARD
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND				: JUMP CHECK_HEIGHT "stand"
@@ -721,6 +736,10 @@ state CROUCH_WALK_LEFT
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -773,6 +792,10 @@ state CROUCH_WALK_RIGHT
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -831,6 +854,10 @@ state CROUCH_RUN_FORWARD
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -882,6 +909,10 @@ state CROUCH_RUN_BACKWARD
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -933,6 +964,10 @@ state CROUCH_RUN_LEFT
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -984,6 +1019,10 @@ state CROUCH_RUN_RIGHT
 
 	states
 	{
+		// HZM coop [user 2026-08-24] prone must be reachable while MOVING too - only
+		// CROUCH_IDLE had this at first, so holding crouch while walking silently did nothing.
+		PRONE_IDLE				: COOP_PRONE
+
 		FALL_DUCKED				: FALLING
 
 		STAND					: JUMP CHECK_HEIGHT "stand"
@@ -2327,5 +2366,438 @@ state DBNO_GETUP_STAND
 	states
 	{
 		STAND : ANIMDONE_LEGS
+	}
+}
+
+////////////////////////////////////////////////////////////////
+//
+// Prone  [user 2026-08-24]
+//
+// The LEGS state carries the whole body here: the torso STAND state is `none : default`, which the
+// header of player_Torso.st explains takes the torso animation from the leg animation. That is why
+// a single legs state is enough for the idle pose.
+// It is NOT enough while aiming - the torso AIM state has real per-gun animations and would put an
+// upright aim pose on a flat body. Prone aim states are added separately.
+//
+// All classes use the RIFLE prone set (user call): only rifle/pistol/mp40/mp44 have prone anims and
+// mp40 has no crawl, so an SMG is held rifle-style rather than posed brokenly.
+////////////////////////////////////////////////////////////////
+
+//=========================================================================
+// [user 2026-08-26] SUPINE - EYEBALL PROTOTYPE. Reached only from PRONE_IDLE while the engine
+// publishes COOP_SUPINE (today: driven purely by the coop_supineTest cvar; the real trigger -
+// prone + ADS aimed far behind the body - is built only if the pose passes the user's eyeball).
+// Torso deliberately left to the statemap's normal rules for now; judging the BASE POSE is the
+// whole point of this state existing.
+//=========================================================================
+//=========================================================================
+// [user 2026-08-26] P2 - the FLIP between belly and back. The lateral roll plays while the
+// engine's body-yaw ease rotates the base 180 (CoopProneBodyYaw drives toward view+180 the
+// moment supine latches), so the composite reads as rolling over. bang_rollover was rejected
+// as the flip: it measures 11.7 SECONDS - a whole scripted scene, not a transition.
+//=========================================================================
+state SUPINE_FLIP_IN_L
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rolll		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		COOP_SUPINE_IDLE		: ANIMDONE_LEGS
+	}
+}
+
+state SUPINE_FLIP_IN_R
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rollr		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		COOP_SUPINE_IDLE		: ANIMDONE_LEGS
+	}
+}
+
+state SUPINE_FLIP_OUT_L
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rolll		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE		: ANIMDONE_LEGS
+	}
+}
+
+state SUPINE_FLIP_OUT_R
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rollr		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE		: ANIMDONE_LEGS
+	}
+}
+
+state COOP_SUPINE_IDLE
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_supine_idle		: default
+	}
+	states
+	{
+		SUPINE_FLIP_OUT_L		: !COOP_SUPINE COOP_SUPINE_FLIPL
+		SUPINE_FLIP_OUT_R		: !COOP_SUPINE COOP_SUPINE_FLIPR
+		PRONE_IDLE				: !COOP_SUPINE
+		CROUCH_IDLE				: !COOP_PRONE
+	}
+}
+
+state PRONE_IDLE
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.5"
+		moveposflags "prone"
+	}
+	legs
+	{
+		// coop_prone_legs, NOT coop_prone_idle. rifle_prone_legs.skc is the LEGS-slot pose;
+		// rifle_prone_idle.skc is the TORSO one, and putting it in the legs slot posed the whole
+		// body from an upper-body-only animation - the "pile of flesh". The torso gets its own via
+		// POSITION_TYPE "prone" in player_Torso.st.
+		coop_prone_legs				: default
+	}
+
+	states
+	{
+		// [user 2026-08-25] FALL_DUCKED : FALLING REMOVED. Going prone shrinks the hull from 94 to
+		// 20, so on the entry frame the player is momentarily unsupported, FALLING goes true, and this
+		// transition threw him straight back out - "I go to prone, and then immediately goes right
+		// back to crouch". Ground-dependent because the drop distance varies with the surface, which
+		// is why it looked like only certain terrain allowed prone.
+		// A prone player who genuinely falls simply stays prone and lands prone; the engine still
+		// force-exits on death, vehicle, turret, spectate and frozen.
+
+		// the ONLY way out - and the engine refuses to clear COOP_PRONE without standing clearance
+		// P1 fluidity: turn-in-place only when NOT moving - the crawl routes above win first
+		// [user 2026-08-26, bug-2121] FLIP OUTRANKS TURN AND ROLL. A supine latch puts the body 180
+		// degrees from target, which also satisfies the turn condition - with turns first, the turn
+		// state grabbed the frame and looped its sweep through the whole half-circle chase while the
+		// 0.9s flip window expired unseen ('it gets stuck doing this sweeping side animation').
+		SUPINE_FLIP_IN_L		: COOP_SUPINE COOP_SUPINE_FLIPL
+		SUPINE_FLIP_IN_R		: COOP_SUPINE COOP_SUPINE_FLIPR
+		// evasive rolls: lean keys (Q/E) while prone - engine latches a 0.9s window + side impulse
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+		PRONE_TURN_LEFT			: COOP_PRONE_TURNL
+		PRONE_TURN_RIGHT		: COOP_PRONE_TURNR
+		COOP_SUPINE_IDLE		: COOP_SUPINE
+		CROUCH_IDLE				: !COOP_PRONE
+
+		// crawl. Same guards the crouch walks use - HAS_VELOCITY so the anim only runs when actually
+		// moving, !BLOCKED so crawling into a wall does not play a travel anim on the spot.
+		// [user 2026-08-25] HAS_VELOCITY REMOVED from every prone direction test. Crawl speed is
+		// 0.30 of run and the back/strafe directions are slower still, so only FORWARD cleared the
+		// velocity threshold - the others fell straight back to PRONE_IDLE and played the idle pose
+		// while the body slid. "I can only move forward with a prone animation, any other direction
+		// my body just very slowly slides." The movement INPUT is the right trigger here, not a
+		// measured speed that the stance itself makes small.
+		PRONE_FORWARD			: FORWARD !BLOCKED "2"
+		PRONE_BACKWARD			: BACKWARD !BLOCKED "2"
+		PRONE_LEFT				: STRAFE_LEFT !BLOCKED "2"
+		PRONE_RIGHT				: STRAFE_RIGHT !BLOCKED "2"
+
+		// restart if our weapon has changed
+		PRONE_IDLE				: +HAS_WEAPON
+		PRONE_IDLE				: -HAS_WEAPON
+	}
+}
+
+////////////////////////////////////////////////////////////////
+//
+// Prone crawling  [user 2026-08-24]
+//
+// Speed is applied ENGINE-side (coop_proneSpeed, Player::ClientMove) with the other stance
+// multipliers, so the weapon-weight and limp terms still compose on top. These states only carry
+// the pose. Every one returns to PRONE_IDLE the moment the input or the velocity stops, which is
+// what keeps a crawl anim from playing on the spot against a wall.
+////////////////////////////////////////////////////////////////
+//=========================================================================
+// [user 2026-08-26] P1 FLUIDITY - the body turning in place to catch the eased yaw
+// (Player::CoopProneBodyYaw). Same one-shot-replay pattern as the crawl states; crawl input
+// exits to the move states so turning never blocks movement.
+//=========================================================================
+//=========================================================================
+// [user 2026-08-26] EVASIVE ROLLS - lean keys while prone. One-shot: the anim plays once and the
+// engine's roll window (TickCoopProne) expires with it; the side impulse is applied engine-side so
+// the body actually displaces instead of rolling in place.
+//=========================================================================
+state PRONE_ROLL_LEFT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.6"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rolll		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: ANIMDONE_LEGS
+		PRONE_IDLE				: !COOP_PRONE_ROLLL
+	}
+}
+
+state PRONE_ROLL_RIGHT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.6"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_rollr		: default
+	}
+	states
+	{
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: ANIMDONE_LEGS
+		PRONE_IDLE				: !COOP_PRONE_ROLLR
+	}
+}
+
+state PRONE_TURN_LEFT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.4"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_turnl		: default
+	}
+	states
+	{
+		// bug-2121: a supine latch mid-turn escapes at once instead of finishing the sweep
+		SUPINE_FLIP_IN_L		: COOP_SUPINE COOP_SUPINE_FLIPL
+		SUPINE_FLIP_IN_R		: COOP_SUPINE COOP_SUPINE_FLIPR
+		COOP_SUPINE_IDLE		: COOP_SUPINE
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+		PRONE_TURN_LEFT			: ANIMDONE_LEGS COOP_PRONE_TURNL
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_FORWARD			: FORWARD !BLOCKED "2"
+		PRONE_BACKWARD			: BACKWARD !BLOCKED "2"
+		PRONE_LEFT				: STRAFE_LEFT !BLOCKED "2"
+		PRONE_RIGHT				: STRAFE_RIGHT !BLOCKED "2"
+		PRONE_IDLE				: !COOP_PRONE_TURNL
+	}
+}
+
+state PRONE_TURN_RIGHT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.4"
+		moveposflags "prone"
+	}
+	legs
+	{
+		coop_prone_turnr		: default
+	}
+	states
+	{
+		// bug-2121: a supine latch mid-turn escapes at once instead of finishing the sweep
+		SUPINE_FLIP_IN_L		: COOP_SUPINE COOP_SUPINE_FLIPL
+		SUPINE_FLIP_IN_R		: COOP_SUPINE COOP_SUPINE_FLIPR
+		COOP_SUPINE_IDLE		: COOP_SUPINE
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+		PRONE_TURN_RIGHT			: ANIMDONE_LEGS COOP_PRONE_TURNR
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_FORWARD			: FORWARD !BLOCKED "2"
+		PRONE_BACKWARD			: BACKWARD !BLOCKED "2"
+		PRONE_LEFT				: STRAFE_LEFT !BLOCKED "2"
+		PRONE_RIGHT				: STRAFE_RIGHT !BLOCKED "2"
+		PRONE_IDLE				: !COOP_PRONE_TURNR
+	}
+}
+
+state PRONE_FORWARD
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.35"
+		moveposflags "prone" "walking"
+	}
+	legs
+	{
+		coop_prone_fwd				: default
+	}
+
+	states
+	{
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+
+		// The crawl .skc is a ONE-SHOT: without this it plays once and then sticks on its last
+		// frame ("stuck crawling anim"). Re-entering the state on ANIMDONE replays it, which is
+		// how a non-loop-flagged animation is made continuous here.
+		PRONE_FORWARD			: ANIMDONE_LEGS FORWARD
+
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: !FORWARD
+		PRONE_IDLE				: BLOCKED
+	}
+}
+
+state PRONE_BACKWARD
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.35"
+		moveposflags "prone" "walking"
+	}
+	legs
+	{
+		coop_prone_back				: default
+	}
+
+	states
+	{
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+
+		// The crawl .skc is a ONE-SHOT: without this it plays once and then sticks on its last
+		// frame ("stuck crawling anim"). Re-entering the state on ANIMDONE replays it, which is
+		// how a non-loop-flagged animation is made continuous here.
+		PRONE_BACKWARD			: ANIMDONE_LEGS BACKWARD
+
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: !BACKWARD
+		PRONE_IDLE				: BLOCKED
+	}
+}
+
+state PRONE_LEFT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.35"
+		moveposflags "prone" "walking"
+	}
+	legs
+	{
+		coop_prone_left				: default
+	}
+
+	states
+	{
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+
+		// The crawl .skc is a ONE-SHOT: without this it plays once and then sticks on its last
+		// frame ("stuck crawling anim"). Re-entering the state on ANIMDONE replays it, which is
+		// how a non-loop-flagged animation is made continuous here.
+		PRONE_LEFT			: ANIMDONE_LEGS STRAFE_LEFT
+
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: !STRAFE_LEFT
+		PRONE_IDLE				: BLOCKED
+	}
+}
+
+state PRONE_RIGHT
+{
+	entrycommands
+	{
+		modheight "prone"
+		movementstealth "0.35"
+		moveposflags "prone" "walking"
+	}
+	legs
+	{
+		coop_prone_right				: default
+	}
+
+	states
+	{
+		// [pass4, bug-2127] roll rows were PRONE_IDLE-only - a lean press here fired the
+		// 170 u/s side impulse with no animation routed (the statue-slide class).
+		PRONE_ROLL_LEFT			: COOP_PRONE_ROLLL
+		PRONE_ROLL_RIGHT		: COOP_PRONE_ROLLR
+
+		// The crawl .skc is a ONE-SHOT: without this it plays once and then sticks on its last
+		// frame ("stuck crawling anim"). Re-entering the state on ANIMDONE replays it, which is
+		// how a non-loop-flagged animation is made continuous here.
+		PRONE_RIGHT			: ANIMDONE_LEGS STRAFE_RIGHT
+
+		CROUCH_IDLE				: !COOP_PRONE
+		PRONE_IDLE				: !STRAFE_RIGHT
+		PRONE_IDLE				: BLOCKED
 	}
 }

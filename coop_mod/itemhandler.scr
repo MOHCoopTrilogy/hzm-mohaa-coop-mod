@@ -1568,50 +1568,35 @@ coop_stealthHoldDisguise local.player:{
 
 
 //=========================================================================
-// FIRST-CONTACT OFFICER ADVISORY. self = player. Hosted inside the stealth hurt-watchdog.
+// coop_stealthArmOnHurt WAS HERE, and it never ran once (bug-1688, closed 2026-08-30).
 //=========================================================================
-// [user 2026-08-10] "I didn't see the officer warning text until I was right on top of him, I think
-// that should appear when you are within his radius (on the same level as him, so if you are above
-// him on 2nd floor it shouldn't trigger)."
+// It was the 'arm an unarmed player who is being shot' watchdog. Defined here and threaded by
+// NOTHING - not in the mod, not in any map script, not in any cfg - for its whole life, so
+// bug-1674 diagnosed a race THROUGH it and bug-1676 shipped a fix INTO it, both reasoning about
+// code that had never executed. aimaneuver.scr:147 cites it as the reason to re-test a guard
+// where the damage is done. Deleted rather than wired, on evidence:
+//  * it could never have covered e1l3, the one papers-only map with no watcher of its own. Its
+//    loop condition and coop_armOnBlown BOTH require level.coop_startUnarmed, which e1l3 never
+//    sets - see the note at :716. Wiring it there would have shipped inert.
+//  * on the three maps that DO set coop_startUnarmed a live map-local watcher already runs, all
+//    named coop_blownOnDamage (maps/m2l2a.scr, maps/m6l1c.scr, maps/m6l2a.scr), each carrying an
+//    attacking-german-within-1600u filter this label lacked - so wiring it would have armed the
+//    whole squad on FALL DAMAGE, and on m6l2a bypassed that map's own alarm cascade.
 //
-// TWO defects, one cause each:
-//  * TOO LATE - it was drawn off the contain prompt's own test, which is coop_bustUseRange (112u,
-//    the guaranteed-bash range) and only while he was actively challenging. By then it is not a
-//    warning, it is a caption. It now has coop_bustHintRange (400u) and fires on proximity alone.
-//  * WRONG FLOOR - `vector_length` is a 3D distance, so any radius is a SPHERE that reaches through
-//    ceilings. Tested as 2D distance plus a vertical band instead, which is what "on the same level
-//    as him" actually means. The Naxos room message had the identical bug from the identical cause.
+// e1l3 is NOT covered and deliberately stays that way: its designed response to blown cover is
+// courtyard.scr::enableEnemyOnAll, which re-arms from the loadout snapshot AND fails the
+// mission. A watcher that armed WITHOUT failing would delete the papers (global/items.scr:461-464
+// sets level.papers = 0) and the truck sentry's engine disguise check
+// (actor_disguise_common.cpp:112) would then deny forever, so $playerProducedPapers could never
+// fire and driveAway (maps/e1l3/FinalEscape.scr:571) would block for the rest of the session.
+// Arming the player on e1l3 makes the map UNWINNABLE. Do not add one.
 //
-// Hosted here rather than in a thread of its own: this watchdog is already a per-player loop that
-// runs for exactly the stealth phase (`while level.coop_startUnarmed == 1`), which is precisely the
-// window where the advice is worth giving. self is the player, so no entity crosses a thread
-// boundary (docs/TRAPS.md T6).
+// THE ONE THING THIS LABEL KNEW THAT THE LIVE COPIES DO NOT: a player carrying
+// flags['coop_busted'] is mid-contain, and arming the squad globally for him is the bug-1676
+// race. If a blown-on-damage watcher is touched again, that exemption is the part worth carrying.
+// The stale 'FIRST-CONTACT OFFICER ADVISORY' header that used to sit here described code that
+// had already been moved out: the live advisory is at :1338-1345.
 //=========================================================================
-coop_stealthArmOnHurt:{
-	if( self == NULL ){ end }
-	local.hp = self.health
-	while( self != NULL && level.coop_startUnarmed == 1 ){
-		if( isAlive self && self.health < local.hp ){
-			//[user 2026-08-10] A BUSTED PLAYER OWNS HIS OWN ESCALATION. This watchdog exists so nobody is
-			//left unarmed under fire - but it fired on the officer's FIRST SHOT and went global loud before
-			//the bust could arm anyone. User: "he fires a shot everytime before I even get my equipment...
-			//not enough time to escalate the situation". That race is why the containable state never
-			//existed, and why the kit always arrived HOLSTERED - it was coop_armOnBlown issuing it, not
-			//coop_bustArm (which force-draws the pistol and was confirmed working).
-			//Being shot at by the officer IS the bust. coop_bustMonitor decides contained vs loud.
-			if( self.flags["coop_busted"] == 1 ){
-				if( self != NULL ){ local.hp = self.health }
-				wait 0.2
-				continue
-			}
-			println "^~^~^ STEALTH player hurt while unarmed - arming everyone"
-			thread coop_armOnBlown
-			end
-		}
-		if( self != NULL ){ local.hp = self.health }
-		wait 0.2
-	}
-}end
 
 
 //=========================================================================

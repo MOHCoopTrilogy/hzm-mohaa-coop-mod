@@ -85,8 +85,14 @@ state STAND
 		// torso in COVER_TORSO (action none) so the full-body legs cover/blind-fire anims own
 		// every bone and the hip ATTACK dispatch below can't fight them. Must sit ABOVE the
 		// attack edges; weapon switch/reload still work from inside COVER_TORSO.
-		COVER_TORSO			: COOP_COVER
-		COVER_TORSO			: COOP_COVER_LOW
+		// [user 2026-08-28] BRACING BEATS COVER. These two rows sit above the AIM row, and first match
+		// wins - so crouched at a wall, auto-cover-low took the torso before COOP_ADS was ever evaluated and
+		// a mounted player never reached the sights. Standing was fine only because low cover was not firing.
+		// The mount already clears the cover flags, but only on the frame it is taken; auto-cover re-requests
+		// on the next one, so the flag clear alone cannot hold. This is the user's rule from 2026-08-27 -
+		// mounting overrides cover rather than competing with it - expressed where the contest is decided.
+		COVER_TORSO			: COOP_COVER !COOP_BRACED
+		COVER_TORSO			: COOP_COVER_LOW !COOP_BRACED
 
 		CHECK_MORTARRIFLE       	: +ATTACK_PRIMARY IS_WEAPON_ACTIVE "mainhand" "Gewehrgranate"
 		CHECK_PRIMARY_ATTACK_SEMIAUTO	: +ATTACK_PRIMARY IS_WEAPON_SEMIAUTO "mainhand" IS_WEAPON_READY_TO_FIRE "mainhand"
@@ -142,6 +148,25 @@ state AIM
 	// Torso slot masks to upper bones; the legs keep their run/strafe anims underneath.
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		// [user 2026-08-28] PRONE BRACING keeps the PRONE pose. The unqualified COOP_BRACED rows below
+		// carry !POSITION_TYPE "prone" so a prone player who mounts falls through to the prone rows
+		// further down instead of matching coop_brace_stand_aim - which would have put a standing torso
+		// on a flat body. Bracing while prone is a STABILITY change, not a pose change: the prone aim
+		// already reads as braced, which is most of why prone is steady in the first place.
+		coop_brace_aim_pistol	: COOP_BRACED POSITION_TYPE "crouching" IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
+		coop_brace_aim_rifle	: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_aim_pistol	: COOP_BRACED IS_WEAPONCLASS_ACTIVE "mainhand" "pistol" !POSITION_TYPE "prone"
+		coop_brace_stand_aim	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_aim			: COOP_SUPINE
+		coop_prone_aim_pistol	: POSITION_TYPE "prone" IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		coop_aim_smg			: IS_WEAPON_ACTIVE "mainhand" "MP40"
 		coop_aim_mg			: IS_WEAPON_ACTIVE "mainhand" "StG 44"
 		coop_aim_rifle			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
@@ -308,6 +333,13 @@ state ATTACK_SMG_PRIMARY_AIM
 
 	action
 	{
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_smg		: POSITION_TYPE "prone"
+
 		mp40_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		mp40_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		mp40_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching"
@@ -353,6 +385,13 @@ state ATTACK_MG_PRIMARY_AIM
 
 	action
 	{
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_mg		: POSITION_TYPE "prone"
+
 		vickers_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		vickers_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		vickers_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching"
@@ -392,6 +431,13 @@ state ATTACK_RIFLE_PRIMARY_AIM
 
 	action
 	{
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot			: POSITION_TYPE "prone"
+
 		enfieldl42a1_stand_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		enfieldl42a1_crouch_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		enfieldl42a1_crouch_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "crouching"
@@ -454,6 +500,13 @@ state ATTACK_PISTOL_PRIMARY_AIM
 
 	action
 	{
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_pistol	: POSITION_TYPE "prone"
+
 		beretta_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		beretta_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		beretta_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "crouching"
@@ -496,6 +549,13 @@ state ATTACK_SHOTGUN_PRIMARY_AIM
 
 	action
 	{
+		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
+		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
+		// so POSITION_TYPE "prone" is true for free. Listed FIRST because the first match wins - the
+		// per-gun standing poses below would otherwise put an upright torso on a flat body.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot			: POSITION_TYPE "prone"
+
 		shotgun_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		shotgun_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		shotgun_crouch_fire		: POSITION_TYPE "crouching"
@@ -521,6 +581,10 @@ state STAND_MINEDETECTOR
 	
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_aim		: COOP_SUPINE
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		minedetector_stand_idle0	: default
 		minedetectoraxis_stand_idle0	: default
 	}
@@ -561,6 +625,10 @@ state STAND_MINEDETECTOR_NEAR
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_aim		: COOP_SUPINE
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		minedetector_stand_idle1	: default
 		minedetectoraxis_stand_idle1	: default
 	}
@@ -601,6 +669,10 @@ state STAND_MINEDETECTOR_ON
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_aim		: COOP_SUPINE
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		minedetector_stand_idle2	: default
 		minedetectoraxis_stand_idle2	: default
 	}
@@ -680,6 +752,17 @@ state ATTACK_SMG_PRIMARY
 
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		coop_brace_shoot		: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_shoot_smg	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
+		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
+		// RECHAMBER deliberately uses coop_prone_aim, NOT coop_prone_shoot: the shoot alias carries a
+		// `first fire` notetrack and would discharge a round every time you worked the bolt.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_smg		: POSITION_TYPE "prone"
+
 		mp40_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		mp40_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		mp40_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching"
@@ -726,6 +809,17 @@ state ATTACK_MG_PRIMARY
 
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		coop_brace_shoot_mg	: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_shoot_mg	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
+		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
+		// RECHAMBER deliberately uses coop_prone_aim, NOT coop_prone_shoot: the shoot alias carries a
+		// `first fire` notetrack and would discharge a round every time you worked the bolt.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_mg		: POSITION_TYPE "prone"
+
 	      vickers_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		vickers_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		vickers_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching"
@@ -811,6 +905,17 @@ state ATTACK_RIFLE_PRIMARY
 
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		coop_brace_shoot_rifle	: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_shoot	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
+		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
+		// RECHAMBER deliberately uses coop_prone_aim, NOT coop_prone_shoot: the shoot alias carries a
+		// `first fire` notetrack and would discharge a round every time you worked the bolt.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot			: POSITION_TYPE "prone"
+
 		// Fire from the hip when jogging,
 		// from the shoulder when walking or standing
 	      enfieldl42a1_stand_run_fire	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
@@ -873,6 +978,13 @@ state ATTACK_SPRINGFIELD_RECHAMBER
 	
 	action
 	{
+		// [user 2026-08-26, bug-2118] prone substitution REMOVED - the real rechamber anim plays, bent by
+		// the spine action tier like shooting. The static coop_prone_aim pose here was the notetrack trap
+		// a FOURTH time: the real alias carries `entry weaponcommand mainhand anim "rechamber"`, which is
+		// what makes the WEAPON MODEL play its bolt animation - so the substitution froze both the hands
+		// AND the gun ("k98 in prone no longer pulls bolt after each shot"). Its `last weaponcommand
+		// mainhand idle` also returns the weapon to idle; a pose alias drops that too.
+
 		springfield_crouch_rechamber	: POSITION_TYPE "crouching"
 		springfield_stand_rechamber	: default
 	}
@@ -896,6 +1008,13 @@ state ATTACK_RIFLE_RECHAMBER
 	
 	action
 	{
+		// [user 2026-08-26, bug-2118] prone substitution REMOVED - the real rechamber anim plays, bent by
+		// the spine action tier like shooting. The static coop_prone_aim pose here was the notetrack trap
+		// a FOURTH time: the real alias carries `entry weaponcommand mainhand anim "rechamber"`, which is
+		// what makes the WEAPON MODEL play its bolt animation - so the substitution froze both the hands
+		// AND the gun ("k98 in prone no longer pulls bolt after each shot"). Its `last weaponcommand
+		// mainhand idle` also returns the weapon to idle; a pose alias drops that too.
+
 		enfield_crouch_rechamber	: POSITION_TYPE "crouching" IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield"
 		enfield_stand_rechamber		: IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield"
 
@@ -936,6 +1055,17 @@ state ATTACK_PISTOL_PRIMARY
 
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		coop_brace_shoot_pistol	: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_shoot_pistol	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
+		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
+		// RECHAMBER deliberately uses coop_prone_aim, NOT coop_prone_shoot: the shoot alias carries a
+		// `first fire` notetrack and would discharge a round every time you worked the bolt.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot_pistol	: POSITION_TYPE "prone"
+
 		// Fire from the hip when jogging, from the shoulder when
 		// walking, or standing
 
@@ -997,6 +1127,10 @@ state ATTACK_BAZOOKA_PRIMARY
 	
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot		: POSITION_TYPE "prone"
+
 		piat_stand_run_fire		: IS_WEAPON_ACTIVE "mainhand" "PIAT" POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		piat_crouch_run_fire		: IS_WEAPON_ACTIVE "mainhand" "PIAT" POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		piat_crouch_fire		: IS_WEAPON_ACTIVE "mainhand" "PIAT" POSITION_TYPE "crouching"
@@ -1029,6 +1163,17 @@ state ATTACK_SHOTGUN_PRIMARY
 	
 	action
 	{
+		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
+		coop_brace_shoot_mg	: COOP_BRACED POSITION_TYPE "crouching"
+		coop_brace_stand_shoot_mg	: COOP_BRACED !POSITION_TYPE "prone"
+
+		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
+		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
+		// RECHAMBER deliberately uses coop_prone_aim, NOT coop_prone_shoot: the shoot alias carries a
+		// `first fire` notetrack and would discharge a round every time you worked the bolt.
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot			: POSITION_TYPE "prone"
+
 		shotgun_stand_run_fire	     	: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		shotgun_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
 		shotgun_crouch_fire	     	: POSITION_TYPE "crouching"
@@ -1121,6 +1266,10 @@ state ATTACK_PISTOL_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_butt_supine		: COOP_SUPINE
+		coop_butt_prone		: POSITION_TYPE "prone"
+
 		beretta_butt  	  		: IS_WEAPON_ACTIVE "mainhand" "Beretta"
 		pistol_butt			: default
 	}
@@ -1184,6 +1333,10 @@ state ATTACK_KAR98MORTAR_PRIMARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_shoot		: COOP_SUPINE
+		coop_prone_shoot		: POSITION_TYPE "prone"
+
 		// Fire from the hip when jogging,
 		// from the shoulder when walking or standing
 		rifle_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
@@ -1217,6 +1370,10 @@ state ATTACK_KAR98MORTAR_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_shoot_sec	: COOP_SUPINE
+		coop_prone_shoot_sec	: POSITION_TYPE "prone"
+
 		// Fire from the hip when jogging,
 		// from the shoulder when walking or standing
 		mortarrifle_stand_run_fire	: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
@@ -1250,6 +1407,10 @@ state ATTACK_KAR98MORTAR_PREPARE
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_supine_aim		: COOP_SUPINE
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		mortarrifle_attachmortar  		: default
 	}
 	
@@ -1273,6 +1434,10 @@ state ATTACK_RIFLE_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_butt_supine		: COOP_SUPINE
+		coop_butt_prone		: POSITION_TYPE "prone"
+
 		carcano_butt	     		: IS_WEAPON_ACTIVE "mainhand" "Carcano"
 		delisle_butt	     		: IS_WEAPON_ACTIVE "mainhand" "DeLisle"
 		rifle_butt			: default
@@ -1296,6 +1461,10 @@ state ATTACK_SMG_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_butt_supine		: COOP_SUPINE
+		coop_butt_prone		: POSITION_TYPE "prone"
+
 		mp40_butt	  		: IS_WEAPON_ACTIVE "mainhand" "MP40"
 		sten_butt	  		: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II"
 		moschetto_butt    		: IS_WEAPON_ACTIVE "mainhand" "Moschetto"
@@ -1321,6 +1490,10 @@ state ATTACK_MG_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_butt_supine		: COOP_SUPINE
+		coop_butt_prone		: POSITION_TYPE "prone"
+
 	      	vickers_butt			: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier"
 		mp44_butt			: IS_WEAPON_ACTIVE "mainhand" "StG 44"
 		mg_butt				: default
@@ -1345,6 +1518,10 @@ state ATTACK_HEAVY_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_butt_supine		: COOP_SUPINE
+		coop_butt_prone		: POSITION_TYPE "prone"
+
 		shotgun_butt	      	: default
 	}
 	
@@ -1406,6 +1583,10 @@ state CHARGE_ATTACK_LANDMINE
 	
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_mine_supine_charge	: COOP_SUPINE
+		coop_mine_prone_charge	: POSITION_TYPE "prone"
+
 		minedetector_crouch_charge	: IS_WEAPON_ACTIVE "mainhand" "Minedetector" POSITION_TYPE "crouching"
 		minedetector_stand_charge	: IS_WEAPON_ACTIVE "mainhand" "Minedetector"
 		minedetectoraxis_crouch_charge	: IS_WEAPON_ACTIVE "mainhand" "Minensuchgerat" POSITION_TYPE "crouching"
@@ -1439,6 +1620,10 @@ state RELEASE_ATTACK_LANDMINE
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_mine_supine_fire	: COOP_SUPINE
+		coop_mine_prone_fire	: POSITION_TYPE "prone"
+
 		minedetector_crouch_fire	: IS_WEAPON_ACTIVE "mainhand" "Minedetector" POSITION_TYPE "crouching"
 		minedetector_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Minedetector"
 		minedetectoraxis_crouch_fire	: IS_WEAPON_ACTIVE "mainhand" "Minensuchgerat" POSITION_TYPE "crouching"
@@ -1469,6 +1654,10 @@ state CHARGE_ATTACK_LANDMINE_SECONDARY
 	
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_mine_supine_charge	: COOP_SUPINE
+		coop_mine_prone_charge	: POSITION_TYPE "prone"
+
 		minedetector_crouch_charge_secondary		: IS_WEAPON_ACTIVE "mainhand" "Minedetector" POSITION_TYPE "crouching"
 		minedetector_stand_charge_secondary		: IS_WEAPON_ACTIVE "mainhand" "Minedetector"
 		minedetectoraxis_crouch_charge_secondary	: IS_WEAPON_ACTIVE "mainhand" "Minensuchgerat" POSITION_TYPE "crouching"
@@ -1502,6 +1691,10 @@ state RELEASE_ATTACK_LANDMINE_SECONDARY
 
 	action
 	{
+		// [pass3, bug-2126] prone/supine rows - this state was missed by the 08-25 sweep
+		coop_mine_supine_fire_sec	: COOP_SUPINE
+		coop_mine_prone_fire_sec	: POSITION_TYPE "prone"
+
 		minedetector_stand_idle_secondary	: !ABLE_TO_DEFUSE
 		minedetector_stand_idle_secondary	: IS_WEAPON_ACTIVE "mainhand" "Minedetector" MOVEMENT_TYPE "running"
 		minedetector_crouch_fire_secondary	: IS_WEAPON_ACTIVE "mainhand" "Minedetector" POSITION_TYPE "crouching"
@@ -1541,6 +1734,7 @@ state CHARGE_ATTACK_GRENADE
 	
 	action
 	{
+		coop_gren_prone_charge	: POSITION_TYPE "prone"
 		bomba_crouch_charge		: IS_WEAPON_ACTIVE "mainhand" "Bomba A Mano" POSITION_TYPE "crouching"
 		bomba_stand_charge		: IS_WEAPON_ACTIVE "mainhand" "Bomba A Mano"
 
@@ -1585,6 +1779,7 @@ state RELEASE_ATTACK_GRENADE
 
 	action
 	{
+		coop_gren_prone_throw	: POSITION_TYPE "prone"
 		steilhandgranate_crouch_fire	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate" POSITION_TYPE "crouching"
 		steilhandgranate_stand_fire	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
 
@@ -1630,6 +1825,7 @@ state CHARGE_ATTACK_GRENADE_SECONDARY
 	
 	action
 	{
+		coop_gren_prone_charge2	: POSITION_TYPE "prone"
 		steilhandgranate_crouch_charge_secondary	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate" POSITION_TYPE "crouching"
 		steilhandgranate_stand_charge_secondary	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
 
@@ -1674,6 +1870,7 @@ state RELEASE_ATTACK_GRENADE_SECONDARY
 
 	action
 	{
+		coop_gren_prone_throw2	: POSITION_TYPE "prone"
 		steilhandgranate_crouch_fire_secondary	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate" POSITION_TYPE "crouching"
 		steilhandgranate_stand_fire_secondary	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
 
@@ -1802,6 +1999,7 @@ state PUTAWAY_PISTOL
 	
 	action
 	{
+		coop_prone_lower		: POSITION_TYPE "prone"
             beretta_crouch_lower		: IS_WEAPON_ACTIVE "mainhand" "Beretta" POSITION_TYPE "crouching"
 		beretta_stand_lower	      : IS_WEAPON_ACTIVE "mainhand" "Beretta"
 
@@ -1828,6 +2026,7 @@ state PUTAWAY_RIFLE
 	
 	action
 	{
+		coop_prone_lower		: POSITION_TYPE "prone"
             enfieldl42a1_crouch_lower	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1" POSITION_TYPE "crouching"
 		enfieldl42a1_stand_lower	: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
 
@@ -1862,6 +2061,7 @@ state PUTAWAY_SMG
 	
 	action
 	{
+		coop_prone_lower		: POSITION_TYPE "prone"
 		mp40_crouch_lower	        	: IS_WEAPON_ACTIVE "mainhand" "MP40" POSITION_TYPE "crouching"
 		mp40_stand_lower	        	: IS_WEAPON_ACTIVE "mainhand" "MP40"
 
@@ -1896,6 +2096,7 @@ state PUTAWAY_MG
 	//please add bubble and duck code here
 	action
 	{
+		coop_prone_lower		: POSITION_TYPE "prone"
             vickers_crouch_lower		: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching"
 		vickers_stand_lower	      : IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier"
 
@@ -1926,6 +2127,7 @@ state PUTAWAY_GRENADE
 	
 	action
 	{
+		coop_gren_prone_lower	: POSITION_TYPE "prone"
 		steilhandgranate_crouch_lower	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate" POSITION_TYPE "crouching"
 		steilhandgranate_stand_lower	: IS_WEAPON_ACTIVE "mainhand" "Stielhandgranate"
 
@@ -1981,6 +2183,7 @@ state PUTAWAY_HEAVY
 	
 	action
 	{
+		coop_prone_lower		: POSITION_TYPE "prone"
             piat_crouch_lower	   		: IS_WEAPON_ACTIVE "mainhand" "PIAT" POSITION_TYPE "crouching"
 		piat_stand_lower	        	: IS_WEAPON_ACTIVE "mainhand" "PIAT"
 
@@ -2069,6 +2272,7 @@ state RAISE_RIFLE
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone"
 		enfieldl42a1_crouch_raise	: IS_NEW_WEAPON "mainhand" "Enfield L42A1" POSITION_TYPE "crouching"
 		enfieldl42a1_stand_raise	: IS_NEW_WEAPON "mainhand" "Enfield L42A1" 
 
@@ -2099,6 +2303,7 @@ state RAISE_SMG
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone"
 		moschetto_crouch_raise  	: IS_NEW_WEAPON "mainhand" "Moschetto" POSITION_TYPE "crouching"
 		moschetto_stand_raise		: IS_NEW_WEAPON "mainhand" "Moschetto" 
 
@@ -2128,6 +2333,7 @@ state RAISE_MG
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone"
 		vickers_crouch_raise         	: IS_NEW_WEAPON "mainhand" "Vickers-Berthier" POSITION_TYPE "crouching"
 		vickers_stand_raise	     	: IS_NEW_WEAPON "mainhand" "Vickers-Berthier" 
 
@@ -2154,6 +2360,7 @@ state RAISE_PISTOL
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone"
 		beretta_crouch_raise          : IS_NEW_WEAPON "mainhand" "Beretta" POSITION_TYPE "crouching"
 		beretta_stand_raise	      : IS_NEW_WEAPON "mainhand" "Beretta"
 
@@ -2177,6 +2384,7 @@ state RAISE_GRENADE
 	
 	action
 	{
+		coop_gren_prone_raise	: POSITION_TYPE "prone"
 		steilhandgranate_crouch_raise	: IS_NEW_WEAPON "mainhand" "Stielhandgranate" POSITION_TYPE "crouching"
 		steilhandgranate_stand_raise	: IS_NEW_WEAPON "mainhand" "Stielhandgranate"
 
@@ -2221,6 +2429,7 @@ state RAISE_HEAVY
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone"
 		piat_crouch_raise             : IS_NEW_WEAPON "mainhand" "PIAT" POSITION_TYPE "crouching"
 		piat_stand_raise	        	: IS_NEW_WEAPON "mainhand" "PIAT"
 
@@ -2247,6 +2456,8 @@ state RAISE_PAPERS
 	
 	action
 	{
+		coop_prone_raise		: POSITION_TYPE "prone" // [pass4, bug-2127] the one RAISE_ state every sweep missed
+
 		show_papers	: default
 	}
 	
@@ -2283,10 +2494,58 @@ state RAISE_ABORT
 //
 //==============================================================================
 
+//=========================================================================
+// [user 2026-08-26] PRONE RELOAD, exiting on the WEAPON rather than on the animation.
+//
+// The first attempt put coop_prone_reload in each RELOAD_* action block. Those states exit on
+// ANIMDONE_TORSO, and the borrowed pistol animation is SHORTER than a rifle reload - so the torso
+// finished early, popped to STAND, found the weapon still reloading, re-entered and replayed. The
+// user saw exactly that: "the pistol anim I think would have worked if it actually ended versus
+// constantly played on repeat", plus the torso rising between each loop.
+//
+// A reload does NOT end when a body animation ends. Weapon::DoneReloading (weapon.cpp:3932) clears
+// ShouldReload when the WEAPON's own reload animation completes, and the RELOAD conditional reads
+// exactly that. Exiting on !RELOAD therefore tracks the real reload for every weapon, whatever its
+// length, with no per-weapon timing to get wrong.
+//
+// Nothing re-enters this state, so the one-shot animation holds its LAST FRAME for the remainder -
+// a prone pose - instead of looping. That is the same one-shot behaviour the crawl states rely on.
+//=========================================================================
+state COOP_RELOAD_PRONE
+{
+	movetype legs
+
+	entrycommands
+	{
+		zoomoff
+		viewmodelanim reload
+	}
+
+	action
+	{
+		coop_prone_reload		: default
+	}
+
+	states
+	{
+		STAND					: KILLED
+		STAND					: !RELOAD
+		RELOAD_INTERUPTED		: NEW_WEAPON
+		RELOAD_INTERUPTED		: IS_USING_VEHICLE
+		RELOAD_INTERUPTED		: IS_USING_TURRET
+	}
+}
+
 state RELOAD_WEAPON
 {
 	states
 	{
+		//[user 2026-08-26] ROUTE DISABLED: exiting on !RELOAD locked the player out of firing
+		//("cant shoot after I reload in prone") - ShouldReload evidently does not clear the way this
+		//assumed, so the state never released the torso. A cosmetic pop is survivable; being unable to
+		//shoot is not. State kept below, unreachable, as the starting point for a third attempt.
+		//COOP_RELOAD_PRONE		: POSITION_TYPE "prone"
+
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Springfield '03 Sniper"
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "KAR98 - Sniper"
 		RELOAD_SHOTGUN			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
@@ -2419,6 +2678,9 @@ state RELOAD_PISTOL
 
 	action
 	{
+		// [user 2026-08-26] the one class with a NATIVE prone reload. Duration honestly changes to
+		// the animation's real 1.50s (standing colt reload is ~1.5s too - net wash, stated anyway).
+		coop_prone_reload_pistol	: POSITION_TYPE "prone"
 	      beretta_reload			  : IS_WEAPON_ACTIVE "mainhand" "Beretta"
 		p38_reload			        : IS_WEAPON_ACTIVE "mainhand" "Walther P38"
 		histandard_reload	              : IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
@@ -2971,10 +3233,40 @@ state KILLED
 
 	states
 	{
+		// [user 2026-08-26] dying while prone stays flat instead of standing up to die
+		// [spec A8/P1] dying ON YOUR BACK stays on your back - COOP_DIED_SUPINE is latched by the
+		// engine before the death path wipes the stance flags (the live supine flag is gone by the
+		// time this dispatcher runs, which is why a COOP_SUPINE route here could never work).
+		KILLED_SUPINE		: COOP_DIED_SUPINE
+		KILLED_PRONE		: POSITION_TYPE "prone"
 		EXPLOSION_KILLED	: PAIN_TYPE "explosion"
 		EXPLOSION_KILLED	: PAIN_TYPE "grenade"
 		EXPLOSION_KILLED	: PAIN_TYPE "rocket"
 		KILLED_GENERIC		: default
+	}
+}
+
+state KILLED_SUPINE
+{
+	action
+	{
+		coop_supine_death		: default
+	}
+	states
+	{
+		KILLED_WAIT_FOR_DONE		: default
+	}
+}
+
+state KILLED_PRONE
+{
+	action
+	{
+		coop_prone_death		: default
+	}
+	states
+	{
+		KILLED_WAIT_FOR_DONE		: default
 	}
 }
 
@@ -3788,6 +4080,11 @@ state COOP_SELFHEAL
 
 	action
 	{
+		// [pass4, bug-2127] the medkit heal is script-forced (forcetorsostate) and was
+		// missed by every stance sweep - the standing heal loop sat the torso up for seconds.
+		coop_supine_aim		: COOP_SUPINE
+		coop_prone_aim			: POSITION_TYPE "prone"
+
 		coop_selfheal			: default
 	}
 

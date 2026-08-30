@@ -108,15 +108,31 @@ main:{
 			if( local.e.enemy == NULL || local.e.enemy == NIL ){ continue }
 			local.dbg_eng++
 			local.role = local.e.flags["coop_role"]
-			// Playtest#2 (gated coop_aiAggrMove): also advance the AGGR role. ~37% of the force rolls aggr,
-			// which native-charges only past ~1024u - inside typical combat range they were pure static
-			// shooters this layer never touched. Given a small-lateral / large-forward push below, throttled
-			// slower (6s) so it reads as a measured advance, not a zerg.
-			local.allowAggr = 0
-			if( getcvar( "coop_aiAggrMove" ) == "1" ){ local.allowAggr = 1 }
-			if( local.role != "flank" && local.role != "cover" ){
-				if( local.role != "aggr" || local.allowAggr == 0 ){ continue }
-			}
+			//[2026-08-30] THE AGGR BRANCH IS REMOVED, not left unseeded, because enabling it would have
+			//issued the SAME runto at :259 that bug-1812 measured STALLING 85% of the time, for the same
+			//unchanged reason: the destination is an arbitrary offset validated with `traced`, which proves
+			//line of sight and not reachability. runto -> global/runto.scr -> Actor::MoveTo builds a
+			//TempWaypoint (SimpleArchivedEntity, not Waypoint), so MoveToPatrolCurrentNode takes the SetPath
+			//branch (actor.cpp:6637) and PathSearch::NearestEndNode only accepts a node in the destination's
+			//own 256u map cell (navigate.cpp PATHMAP_CELLSIZE); no path leaves the man in Anim_Idle.
+			//It is WORSE for aggr than it was for flank/cover:
+			//  1. aggr is the only role still on the engine's THINK_TURRET (officer.scr:2102 does not convert
+			//     it), so the order replaces working native combat with a blind pause.
+			//  2. Actor::UpdateEnableEnemy calls SetLeashHome(origin) on every enableEnemy 0->1 restore, so
+			//     each order re-anchors m_vHome to where he now stands and the leash cannot bound him.
+			//  3. MoveToPatrolCurrentNode paths with SetPath(..., NULL, 0) - a script runto is the one
+			//     movement path that ignores leash outright.
+			//Together that is bug-2074 / bug-2100 ("the garrison abandons its post") with its only bound gone.
+			//[2026-08-30] NO REPLACEMENT IS SHIPPED WITH THIS DELETION, deliberately. The obvious
+			//substitute - lowering coop_aiChargeRange (actor_turret.cpp:129) so THINK_TURRET actors
+			//charge from ~563u instead of 1024u - was designed and REJECTED: it is engine-wide, has
+			//no team or role gate (actor_turret.cpp:162 - only the WAIT arm at :158 is german-only),
+			//and its sole safety argument is the leash, which bug-2100 already recorded as no bound
+			//on this behaviour at all ("fixed the RADIUS, not the BEHAVIOUR"). On m3l2, where the
+			//symptom was reported twice, the map's own leashes are 2400-10000 (m3l2.scr:720+), so
+			//the clamp is vacuous at combat range. An aggr advance needs a PER-ACTOR engine gate,
+			//not a global multiplier.
+			if( local.role != "flank" && local.role != "cover" ){ continue }
 			local.dbg_cand++
 
 			//[user 2026-08-15, bug-1812] HAND COVER/FLANK ACTORS TO THE ENGINE'S OWN COVER AI.
@@ -245,7 +261,12 @@ main:{
 			if( local.role == "aggr" ){ local.thr = 6 }
 			local.e.coop_manNext = level.time + local.thr
 			local.e.movedoneradius = 96
+			//[bug-2117] same guard as the squad site - reengage will not restore these two, so they must
+			//never be ordered in the first place
+			if( local.e.flags["coop_surrendered"] == 1 ){ continue }
+			if( local.e.coop_aiDisabled == 1 ){ continue }
 			local.e.enableEnemy = 0
+			local.e.flags["coop_ee0src"] = "maneuver"
 			//[user 2026-08-15, bug-1812] capture where it started and how far we asked, so the
 			//re-engage watcher can classify the outcome rather than only counting the order.
 			local.sx = local.e.origin[0]

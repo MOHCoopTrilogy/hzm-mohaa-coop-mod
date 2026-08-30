@@ -20,6 +20,19 @@
 //=========================================================================
 mg42AttackBeach:{
 //=========================================================================
+	thread coop_inlandShelling		//[user 2026-08-28] cosmetic naval shelling behind the bunkers
+	thread coop_farFieldShelling	//[user 2026-08-28] the rest of the beach is being shelled too
+	thread coop_beachWrecks			//[user 2026-08-28] knocked-out armour at the waterline (one-shot)
+	//[user 2026-08-28] UNDO THE LASER. m3l1a.scr sets `AIbulletspread 2 2` on both beach guns - 2 units
+	//at a 4000 unit bulletrange, i.e. a guaranteed hit - and it does that BEFORE branching here, so it
+	//overrides coop_mg42AiSpread on the entity itself. That is why tuning the global spread cvar never
+	//changed anything on this map. Widened only on the COOP path; single player keeps retail behaviour.
+	if(level.coop_beachSpread == NIL){ level.coop_beachSpread = 90 }
+	if(level.coop_beachSpread > 0){
+		$mg42_middle1 AIbulletspread level.coop_beachSpread level.coop_beachSpread
+		$mg42_middle2 AIbulletspread level.coop_beachSpread level.coop_beachSpread
+	}
+
 	level.coop_mg42Fiering = 1
 	while(level.coop_mg42Fiering){
 
@@ -77,6 +90,13 @@ mg42AttackBeach:{
 				if!(waitthread isInCover local.player){
 					thread mg42_damage_player local.player
 					local.explosedPlayers++;
+					//[user 2026-08-28] THE MISSING WAIT. Single player spaces these 8 ticks with
+					//`wait (randomfloat(0.6) + 0.3)` INSIDE this loop (m3l1a.scr:1861). The coop rewrite
+					//dropped it, so all 8 fired in ONE FRAME. normal_damage is a PERCENTAGE of max_health
+					//(entity.cpp:6079), so at coop_health 750 each tick is 37.5 HP and the burst was 300 HP
+					//- 40 percent of the pool, instantly, with no gap to react in. That is the instakill,
+					//and it is why tuning the MG42 weapon never changed anything.
+					wait (randomfloat(0.6) + 0.3)
 				}
 				else{//chrissstrahl - in cover
 					local.playerNotIncover = 0
@@ -212,13 +232,26 @@ craters_cover local.player:{
 //=========================================================================
 jitter_mg local.player:{
 //=========================================================================
-
+	//[user 2026-08-28] THESE WERE EMPTY. The coop rewrite stubbed both jitter labels out and never
+	//filled them in, so every MG round that hits you on this beach lands with a perfectly still camera.
+	//The engine's universal explosion shake (explosion.cpp:120) does not cover this - the beach guns do
+	//not create an Explosion, they call script damage directly.
+	//
+	//Per-PLAYER, not radius: the stub already receives the exact player being hit, so the man being shot
+	//gets the kick and the man behind the seawall does not. earthquake_player (coop_mod/main.scr:1893)
+	//spawns a ViewJitter with donedeath, so it removes itself - bounded, and SVF_NOCLIENT so it costs no
+	//snapshot.
+	if(local.player == NULL || local.player.health <= 0){ end }
+	local.player thread coop_mod/main.scr::earthquake_player 0.35 0.9
 }end
 
 //=========================================================================
 jitter_mg_cover local.trig:{
 //=========================================================================
-
+	//Rounds cracking into the cover you are hiding behind. Softer than a hit - it should read as
+	//pressure, not damage - but it must not be silent, or cover feels like a safe room.
+	if(local.trig == NULL || local.trig == NIL){ end }
+	thread coop_mod/main.scr::earthquake_radius local.trig.origin 0.3 0.45 700
 }end
 
 // mg42 damage player routine
@@ -232,7 +265,36 @@ mg42_damage_player local.player:{
 		end
 	}
 
+	//[user 2026-08-28] BEACH LETHALITY BY DISTANCE. Every previous attempt tuned the MG42 WEAPON -
+	//spread, AI damage, falloff - and none of it moved the needle, because the beach guns do not kill
+	//you with bullets. This function does, directly, and the map aims the guns straight at your origin
+	//with AIbulletspread 2 2. So the weapon was never the lever; this line is.
+	//
+	//The user's own design steer: the run up the open sand should be survivable, and it should get
+	//dangerous as you close on the bunkers past the seawall. Y is the beach axis here (the thread above
+	//already treats y > 4000 as inland), so damage scales with how far up the beach you are.
+	//[user 2026-08-28] MISS CHANCE, ported from m3l1a.scr:1917. That fix was written for exactly this
+	//complaint but lives in the SP-only mg42_damage_player, and coop ends the thread at m3l1a.scr:1790
+	//before ever reaching it - so it has been inert in coop since it was written.
+	if(level.coop_beachMiss == NIL){ level.coop_beachMiss = 0.4 }
+	if(randomfloat(1) < level.coop_beachMiss){
+		thread jitter_mg local.player
+		end
+	}
+
+	//NOTE: normal_damage takes a PERCENT of max_health, not HP - 5 here is 37.5 HP at coop_health 750.
 	local.damage = 5
+	local.py = local.player.origin[1]
+	if(local.py < 0){ local.py = 0 }
+	if(local.py > 3000){ local.py = 3000 }
+	//[user 2026-08-28] 0.10 at the waterline climbing to 1.0 at the seawall - the run-in should be
+	//survivable enough to actually play the landing; the danger belongs at the bunkers.
+	local.scale = 0.10 + (0.90 * (local.py / 3000))
+	if(level.coop_beachDmg != NIL && level.coop_beachDmg > 0){
+		local.scale = local.scale * level.coop_beachDmg
+	}
+	local.damage = local.damage * local.scale
+	if(local.damage < 1){ local.damage = 1 }
 
 	local.player normal_damage local.damage (0 -1 0)
 	local.player playsound snd_bh_flesh
@@ -493,4 +555,144 @@ medic_closest local.object:{
 	}
 }end local.playerReturn
 
+//=========================================================================
+//[user 2026-08-28] NAVAL GUNFIRE LANDING INLAND.
+//
+//Historically the capital ships offshore - Texas and Arkansas at Omaha - shifted to inland targets
+//once the landing began, so shells were falling BEHIND the German positions for the whole approach.
+//The bunkers on this map sit at Y 5360..5952 (read from the BSP entity lump), so this shells the
+//ground beyond them and never near a player.
+//
+//COSMETIC ONLY, by the user's instruction: no radiusdamage, no Damage call, notsolid. It cannot hurt
+//a player or an actor, and it cannot break a scripted AI. That also keeps it off the damage paths that
+//caused the beach lethality problem in the first place.
+//
+//ENTITY COST: one transient script model at a time, removed after its animation. The pool is 2048 and
+//an overrun once cost this project a weekend of crashes, so the loop is strictly serial - it never
+//spawns a second burst before removing the first.
+//=========================================================================
+coop_inlandShelling:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_inlandShell == NIL){ level.coop_inlandShell = 1 }
 
+	while(level.coop_inlandShell){
+		local.org = (0 0 0)
+		local.org[0] = 0 - 2500 + (randomint 5700)		//across the bluff face
+		local.org[1] = 6200 + (randomint 1600)			//BEHIND the bunkers (they end at Y 5952)
+		local.org[2] = 0 + (randomint 260)				//varied height so bursts are not a flat line
+
+		local.burst = spawn "models/fx/explosionartilleryshell.tik"
+		local.burst.origin = local.org
+		local.burst notsolid
+		local.burst anim start
+
+		//the shell report, distant. arty_exp_sand* is already scoped to m3l1 and carries a 1000-8000
+		//unit falloff, so from the waterline it reads as a thump behind the bluff rather than a bang.
+		local.burst playsound ("arty_exp_sand" + ((randomint 4) + 1))
+
+		wait 4
+		if(local.burst != NULL){ local.burst remove }
+
+		//irregular spacing - a metronome reads as a machine, not a bombardment
+		wait (randomfloat(2.6) + 0.9)
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-28] FAR-FIELD BOMBARDMENT - the beach is being shelled somewhere OTHER than where you
+//are standing. The stock mortar_ambient only ever fires in the zone the player currently occupies, so
+//the rest of the beach is dead quiet and the battle feels like it is following you around.
+//
+//Fires $mortar anchors DIRECTLY with `anim start` and deliberately NOT through mortar_call: that label
+//carries `radiusdamage self.origin 1000 192` and a whistle-and-waittill, neither of which belongs on a
+//decorative blast a thousand units away. Cosmetic only, like the inland shelling.
+//
+//ZERO entity cost: the $mortar anchors are BSP entities that already exist and are already in the pool.
+//Nothing is spawned here at all.
+//=========================================================================
+coop_farFieldShelling:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if($mortar == NULL || $mortar.size <= 0){ end }
+	if(level.coop_farField == NIL){ level.coop_farField = 1 }
+
+	while(level.coop_farField){
+		local.pick = $mortar[(randomint $mortar.size) + 1]
+		if(local.pick == NULL){
+			wait 1
+			continue
+		}
+
+		//only fire it if it is FAR from every living player - that is the whole point. A near anchor is
+		//mortar_ambient's job and it already does damage there.
+		local.tooClose = 0
+		for(local.i = 1; local.i <= $player.size; local.i++){
+			local.pl = $player[local.i]
+			if(local.pl == NULL || local.pl.health <= 0){ continue }
+			if(vector_length(local.pick.origin - local.pl.origin) < 1400){
+				local.tooClose = 1
+			}
+		}
+
+		if(!local.tooClose){
+			local.pick anim start
+			local.pick playsound ("arty_exp_sand" + ((randomint 4) + 1))
+		}
+
+		wait (randomfloat(2.2) + 0.8)
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-28] KNOCKED-OUT ARMOUR AT THE WATERLINE.
+//
+//Historically the 743rd Tank Battalion landed Shermans directly onto Dog sector (the DD tanks that
+//swam were mostly lost further out), and knocked-out armour on the sand is one of the defining images
+//of that beach. There is none on this map.
+//
+//models/static/vehicle_shermantank_dead.tik ONLY - verified clean: it is in main/Pak0 (always mounted),
+//has no init block and no classname, so it carries no vehicle logic, no turret state and no scripting.
+//The Breakthrough US_V_Sherman_BustedTread variant was deliberately NOT used: it is maintt-only and
+//declares `init { server { classname ScriptSlave } }`, which is a live entity, not scenery.
+//
+//NOTSOLID on purpose. A solid box dropped on a beach the AI walks across is a pathing hazard, and this
+//is set dressing - it should never block a soldier or absorb a bullet meant for you.
+//=========================================================================
+coop_beachWrecks:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachWrecksOn == NIL){ level.coop_beachWrecksOn = 1 }
+	if(!level.coop_beachWrecksOn){ end }
+
+	//waterline positions, off to the flanks so they frame the run-in rather than block it. Z matches the
+	//beach floor the BSP corpses sit on (about -500).
+	local.spots[1] = (0 0 0)
+	local.spots[1][0] = 0 - 2050
+	local.spots[1][1] = 0 - 520
+	local.spots[1][2] = 0 - 500
+	local.spots[2] = (0 0 0)
+	local.spots[2][0] = 2280
+	local.spots[2][1] = 0 - 180
+	local.spots[2][2] = 0 - 500
+	local.spots[3] = (0 0 0)
+	local.spots[3][0] = 0 - 380
+	local.spots[3][1] = 0 - 900
+	local.spots[3][2] = 0 - 500
+
+	for(local.i = 1; local.i <= 3; local.i++){
+		local.wreck = spawn script_model model "models/static/vehicle_shermantank_dead.tik"
+		local.wreck.origin = local.spots[local.i]
+		local.wreck.angles = (0 (55 + (randomint 70)) 0)
+		local.wreck notsolid
+		local.wreck anim idle
+
+		//one of them is still burning - a cold wreck reads as scenery, a burning one reads as recent
+		if(local.i == 2){
+			local.smoke = spawn script_model model "models/emitters/shermansmoke.tik"
+			local.smoke.origin = local.spots[local.i]
+			local.smoke notsolid
+			local.smoke anim start
+		}
+	}
+}end

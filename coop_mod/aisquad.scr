@@ -109,13 +109,21 @@ main:{
 			//unbounded version, which is what makes it safe to leave on.
 			//A lone engaged actor is granted unconditionally: bounding a squad of one just pins
 			//him for half the time and reads as a bug rather than as tactics.
-			if( getcvar( "coop_aiBound" ) == "1" ){
+			if( getcvar( "coop_aiBound" ) != "0" ){
 				local.engN = 0
 				for( local.k = 1; local.k <= local.memN; local.k++ ){
 					local.m = local.mem[local.k]
 					if( local.m == NULL || local.m == NIL ){ continue }
 					if( !isAlive local.m ){ continue }
 					if( local.m.enemy == NULL || local.m.enemy == NIL ){ continue }
+					// [2026-08-30] Own only what the brain is really driving. These four flags mark an
+					// actor another system is already moving; SB2 skips the same set at :146-149 and SS1
+					// at :211-214. Never stamping them means the engine never bounds them - they keep the
+					// unbounded bug-1813 relocation rather than being pinned by a squad not steering them.
+					if( local.m.flags["coop_role"] == "prone" ){ continue }
+					if( local.m.flags["coop_limping"] == 1 ){ continue }
+					if( local.m.flags["coop_retreating"] == 1 ){ continue }
+					if( local.m.flags["coop_actorStopPainHandler"] == 1 ){ continue }
 					local.engN = local.engN + 1
 					local.engM[local.engN] = local.m
 				}
@@ -131,6 +139,16 @@ main:{
 							local.dbgB = local.dbgB + 1
 							local.grant = 0
 						} else {
+							// [2026-08-30] REVOKE, do not merely skip. Two reasons.
+							// (1) OWNERSHIP: coop_relocateok is what tells the engine a brain is driving
+							// this actor, and the holding half needs that as much as the moving half - without
+							// it the engine cannot tell "held by his squad" from "nobody is bounding him", and
+							// the gate would apply to actors no squad brain has ever walked.
+							// (2) The alternation was leaky: the grant is 2.5s and the tick is 1.7s, so a man
+							// granted at tick N still held 0.8s of permission at tick N+1 when he was supposed
+							// to be the one shooting - both halves free to move for ~47% of every tick. A 0s
+							// window ends it now (EventCoopRelocateOk: level.inttime + 0, so t < t is false).
+							local.engM[local.k] coop_relocateok 0
 							local.grant = 1
 						}
 					}
@@ -201,6 +219,13 @@ main:{
 				if( !isAlive local.e ){ continue }
 				if( local.e.coop_lastKnown == NIL ){ continue }			// never had contact
 				if( local.e.enemy != NULL && local.e.enemy != NIL ){ continue }	// still engaged - not searching
+				//[bug-2117] THE LEAK. This filter excluded prone/limping/retreating but NOT surrendered and
+				//NOT map-disabled - and aimaneuver_reengage deliberately refuses to restore enableEnemy for
+				//exactly those two. So a surrendered/disabled german with a lastKnown was ordered to RUN TO
+				//the player with acquisition off, and nothing ever turned it back on: probe read
+				//near=2 nearEE0=2 nearCur=0 - the actors standing on the player had enableEnemy OFF.
+				if( local.e.flags["coop_surrendered"] == 1 ){ continue }
+				if( local.e.coop_aiDisabled == 1 ){ continue }
 				if( local.e.flags["coop_role"] == "prone" ){ continue }
 				if( local.e.flags["coop_limping"] == 1 ){ continue }
 				if( local.e.flags["coop_retreating"] == 1 ){ continue }
@@ -231,6 +256,7 @@ main:{
 				local.e.coop_searchNext = level.time + 3
 				local.e.movedoneradius = 96
 				local.e.enableEnemy = 0
+				local.e.flags["coop_ee0src"] = "squad"
 				local.e runto local.dest
 				local.e forceactivate
 				thread coop_mod/aimaneuver.scr::aimaneuver_reengage local.e

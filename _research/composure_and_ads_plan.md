@@ -1,6 +1,11 @@
 # Composure system + ADS transition unification — design plan
 
-Status: **PLAN ONLY — nothing built.** Written 2026-08-20 for vetting before any code.
+Status: **PART A IS BUILT, SHIPPED AND DEPLOYED.** Parts B-H remain plan-only.
+Written 2026-08-20 for vetting before any code; Part A landed the same evening (9e71d739) and
+shipped in v1.4.4. The header used to read "PLAN ONLY — nothing built", which on 2026-08-24 sent a
+session to re-fix an already-fixed defect. **The Part A text below is the ORIGINAL diagnosis and is
+wrong in two places** — read the "REVISION after three independent reviews" section near the end of
+this file before acting on anything in it.
 
 Scope requested by the user, in their priority order:
 1. Composure signal (foundation)
@@ -13,7 +18,20 @@ Scope requested by the user, in their priority order:
 
 ---
 
-## PART A — the ADS jolt (defect, build first)
+## PART A — the ADS jolt (defect) — **DONE, shipped v1.4.4. Do not re-implement.**
+
+> **Superseded diagnosis below.** Verified against the live source 2026-08-24:
+> * source 1 (shift unscaled) — FIXED, `cg_view.c` scales it by `CG_AdsPoseFactor()` and settles to exact 0.
+> * source 3 (three ease clocks) — FIXED, one ease in `CG_AdsFactorAdvance`, advanced once per frame
+>   from `CG_DrawActiveFrame` before every consumer; the zoom is derived from it, not eased separately.
+> * source 2 (the 0.05° renderer gate) — deliberately NOT changed, and the reasoning below for it is
+>   wrong. With source 1 fixed the gate closes at ADS factor ≈ 0.0037 (see the revision for the algebra),
+>   so what vanishes at the crossing is ~0.4% of the shift. Sub-pixel, not a jolt.
+> * a FOURTH source this text never named — the crouch rotation at full strength — was the big one,
+>   and is fixed via `CG_AdsCrouchBlend()`.
+> * the residual "STG44 still jolts leaving ADS" was none of these: it was the third-person camera
+>   minimum-distance fallback gated on proximity instead of obstruction (bug-2000). Seven reasoned
+>   fixes failed before a live trace (`coop_adsTrace 1`) found it.
 
 ### What the user reported
 

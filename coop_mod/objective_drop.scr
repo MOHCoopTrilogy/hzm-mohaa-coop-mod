@@ -48,6 +48,19 @@ coop_objective_drop_init:{
 
 	local.pos = level.coop_objdrop_origin
 
+	// Snap the authored coord onto real floor, and place NOTHING if it cannot be snapped.
+	// coop_find_ground (officer.scr:1284) returns NIL on startSolid/allSolid, on nothing below,
+	// and on a drop greater than 300u - exactly the cases where a table coord would bury the
+	// pickup inside geometry or leave it hanging in the air. An unreachable pickup is worse
+	// than no pickup: it looks shipped and is not. The println names the map so a bad coord is
+	// visible in qconsole instead of failing silently.
+	local.gnd = exec coop_mod/officer.scr::coop_find_ground local.pos
+	if( local.gnd == NIL ){
+		println( "^~^~^ OBJDROP no_ground map=" + level.coop_mapname + " pos=" + local.pos )
+		end
+	}
+	local.pos = local.gnd
+
 	// 50/50: randomint 2 yields 0 or 1.
 	local.pick = randomint 2
 	if( local.pick == 0 ){
@@ -64,16 +77,27 @@ coop_objective_drop_init:{
 coop_objdrop_spawn_smoke local.pos:{
 	iprintlnbold "Intel recovered: a Signal Smoke Grenade is stashed at the objective!"
 
-	// Visible smoke model + a touch trigger that GIVES the weapon via "player item"
+	// Visible smoke model + a trigger_USE that GIVES the weapon via "player item"
 	// (Sentient::giveItem). We do NOT spawn it as a world Weapon the player walks onto:
 	// that routes through the engine's Weapon::PickupWeapon grenade-class special-case,
 	// which strips the player's German Stielhandgranate. See coop_objdrop_smoke_pickup.
+	//
+	// trigger_USE, not trigger_multiple. The script command "solid" is Entity::BecomeSolid ->
+	// SOLID_BBOX (entity.cpp:3251), and G_TouchTriggers skips every entity whose
+	// solid != SOLID_TRIGGER (g_active.cpp:891), so a solid trigger_multiple never fires as a
+	// walk-over - only on a physical collision (bg_slidemove.cpp:119) or by standing on top of
+	// it (bg_pmove.cpp:1028). It was an invisible wall you had to bump. trigger_use is the
+	// proven officer recipe (officer.scr:4235). `solid` is NOT required for +use to find it:
+	// getUseableEntities ends in gi.AreaEntities (player.cpp:17582), an areagrid query with no
+	// solidity filter. What solid buys is that the MASK_USE trace STOPS on the trigger, so the
+	// +/-16 endpoint box centres on it. Kept to match officer.scr, not because it is required.
 	local.smoke_vis = spawn script_model
 	local.smoke_vis model "models/weapons/coop_smoke_grenade.tik"
 	local.smoke_vis.origin = local.pos
 	local.smoke_vis notsolid
 	local.smoke_vis rendereffects "+fullbright"
-	local.smoke_trig = spawn trigger_multiple
+	println( "^~^~^ OBJDROP placed kind=smoke map=" + level.coop_mapname + " pos=" + local.pos )
+	local.smoke_trig = spawn trigger_use
 	local.smoke_trig.origin = local.pos
 	local.smoke_trig solid
 	local.smoke_trig setsize ( -16 -16 0) (16 16 48)
@@ -103,10 +127,15 @@ coop_objdrop_spawn_binoc local.pos:{
 	local.binoc_vis notsolid
 	local.binoc_vis rendereffects "+fullbright"
 
+	println( "^~^~^ OBJDROP placed kind=binoc map=" + level.coop_mapname + " pos=" + local.pos )
 	local.binoc = spawn trigger_use
 	local.binoc.origin = local.pos
 	local.binoc solid
 	local.binoc setsize ( -12 -12 0) (12 12 40)
+	// [correction A] The officer binoc drop threads this at officer.scr:4263 and this one did
+	// not, so on the 50 percent binoc roll the reward was an unlit models/items/binoculars.tik
+	// at an arbitrary objective entity with no marker - built, announced, and unfindable.
+	thread coop_mod/officer.scr::coop_spawn_binoc_glow local.pos
 	thread coop_objdrop_binoc_wait_pickup local.binoc local.binoc_vis
 }end
 
@@ -136,6 +165,10 @@ coop_objdrop_smoke_pickup local.trig local.vis:{
 	iprintlnbold (local.player.netname + " picked up the Signal Smoke!")
 	iprintlnbold "Signal Smoke ready! Equip grenades and throw - Allied paradrop falls where it hits!"
 	thread coop_mod/officer.scr::coop_smoke_hud_show
+	// Parity with the officer smoke (officer.scr:4309). Without this the smoke is destroyed with
+	// the owner on a full death: coop_paradrop_armed stays 1 with nobody holding a smoke, and no
+	// teammate can recover it. coop_smoke_owner_watch re-drops it where he fell.
+	thread coop_mod/officer.scr::coop_smoke_owner_watch local.player
 }end
 
 
@@ -147,7 +180,13 @@ coop_objdrop_binoc_wait_pickup local.binoc local.binoc_vis:{
 	local.binoc waittill trigger
 	local.player = parm.other
 	if( local.player == NULL || local.binoc == NULL ){ end }
+	// [correction C] officer.scr:4319 parity - a non-player toucher must never take
+	// ownership (the bug-1620 one-shot-consumption family).
+	if( local.player.classname != "Player" ){ end }
 	if( local.binoc_vis != NULL ){ local.binoc_vis delete }
+	// [correction B] mirror officer.scr:4328 - the glow correction A spawns must die with
+	// the pickup. NIL passes an == NULL test (bug-1583), so this is safe when never assigned.
+	if( level.coop_binoc_beacon != NULL ){ level.coop_binoc_beacon delete }
 	// Boolean flag avoids NIL comparison on first pickup (same as officer path).
 	if( level.coop_binoc_given == 1 ){
 		local.binoc remove
@@ -155,11 +194,25 @@ coop_objdrop_binoc_wait_pickup local.binoc local.binoc_vis:{
 	}
 	level.coop_binoc_given = 1
 	local.binoc remove
-	level.coop_binoc_uses = 3
+	// Only a FIRST-EVER pickup grants 3 strikes. coop_binoc_uses is a level global that survives
+	// a drop/recover cycle (officer.scr:4330-4335), so an unconditional 3 here refilled a partly
+	// spent counter whenever the officer binoc had been dropped and this one was found after.
+	if( level.coop_binoc_uses == NIL ){ level.coop_binoc_uses = 3 }
 	level.coop_binoc_owner = local.player
 	local.player item weapons/coop_binoculars.tik
 	iprintlnbold (local.player.netname + " picked up Binoculars!")
-	iprintlnbold "Equip binoculars from pistol slot, aim and fire [LMB] to call bombing runs! (3 strikes)"
+	// [correction F] officer.scr:4339-4353 branches this message on first pickup; printing
+	// "(3 strikes)" for a RECOVERED binoc that has one left is simply wrong.
+	if( local.firstPickup == 1 ){
+		iprintlnbold "Equip binoculars from pistol slot, aim and fire [LMB] to call bombing runs! (3 strikes)"
+	} else {
+		iprintlnbold ( "Binoculars recovered - " + level.coop_binoc_uses + " strike(s) left" )
+	}
 	local.player playsound coop_radio_standby
 	thread coop_mod/officer.scr::coop_binoc_update_hud local.player
+	// Parity with the officer binoc (officer.scr:4357). Without this, coop_binoc_given is stuck at
+	// 1 forever if this owner disconnects (owner goes NULL, nothing resets given), and the
+	// officer's own binoc drop is then silently consumed and removed by the given==1 branch at
+	// officer.scr:4322-4325 - the bombing-run reward is gone for the rest of the map.
+	thread coop_mod/officer.scr::coop_binoc_owner_watch local.player
 }end

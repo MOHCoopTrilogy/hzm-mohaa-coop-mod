@@ -175,9 +175,14 @@ main:{
 	thread coop_mod/flchatter.scr::flchatter_init	// HZM coop - Frontline battle chatter (coop_flchatter 0 disables)
 	thread coop_mod/aivoice.scr::aivoice_init	// HZM coop - SITUATIONAL AI voice: under fire / man down / reload / in-combat taunt (coop_aiVoice 0 disables)
 	thread coop_mod/flmusic.scr::coop_flmusic_filler	// HZM coop - Frontline filler OST on quiet maps when the music channel is silent (coop_musicFiller 0 disables)
-	// 50/50 objective binoc/smoke drop DISABLED for now (its pickup re-granted on every
-	// touch -> infinite grenades). Re-enable by uncommenting once the pickup is one-shot.
-	// thread coop_mod/objective_drop.scr::coop_objective_drop_init
+	//[2026-08-30] 50/50 objective binoc/smoke drop, RE-ENABLED. The old "pickup re-granted on
+	//every touch" note described the pre-2026-06-22 draft that used the trigger's setthread
+	//(docs/archive/legacy-root-2026-06/objective_drop_implementation.md:50). The shipped file has
+	//used a one-shot `waittill trigger` since its first and only commit (4fa27cd), and the note
+	//landed in that same commit, so it never described this code. Trigger::StartThread calls
+	//Unregister(STRING_TRIGGER) once (trigger.cpp:376) and m_Thread.Execute is a no-op with no
+	//setthread (gamescript.cpp:910), so a second touch cannot grant anything.
+	thread coop_mod/objective_drop.scr::coop_objective_drop_init
 
 	// TEMP dev probe: helmet pop mechanic verification. No-op unless coop_helmtest==1.
 	if( getcvar( "coop_helmtest" ) == "1" ){
@@ -2223,3 +2228,68 @@ coop_launcherRespawnSweep:
 		println("^~^~^ LAUNCHER-RESPAWN armed on " + local.n + " placed launcher pickup(s)")
 	}
 end
+
+
+//=========================================================================
+//[user 2026-08-30] PLAYER COUNT, TWO HONEST FLAVOURS.
+//
+//Every count-scaling site in the mod read $player.size, which is the CONNECTED
+//count: it includes a player who is still loading, one sitting in the team menu,
+//an AFK spectator, and a man bleeding out on the floor. So a squad of three that
+//has lost its fourth to spectator faced four-player enemy numbers, four-player
+//accuracy and four-player reinforcement waves - punished hardest exactly when it
+//was weakest, which is the opposite of what count-scaling is for.
+//
+//director.scr already computed the honest numbers privately and never shared
+//them. These two are that census, lifted out so every site can agree. Named to
+//match director.scr's own locals so the correspondence is obvious:
+//
+//  coop_activePlayerCount  == director's activeN. On the ROSTER: finished setup,
+//                             picked a team, not a spectator, not dev-noclipping.
+//                             Says nothing about health. Use for one-shot spawn
+//                             decisions - a man mid-respawn still populates a map.
+//  coop_fightingPlayerCount == director's upN. The roster, minus the dead and the
+//                             downed. Use for anything re-evaluated during play,
+//                             where the answer should ease off when a squad is in
+//                             trouble and tighten when it is not.
+//
+//Written as a while loop with an explicit increment, not a for/continue: in
+//Morpheus a `continue` inside for(;;) can skip the increment and hang the server.
+//An empty $player array reports .size -1, so the loop body simply never runs.
+//=========================================================================
+coop_activePlayerCount:{
+//=========================================================================
+	local.n = 0
+	local.i = 1
+	while( $player != NULL && $player != NIL && local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.flags["coop_isActive"] == 1 && local.p.dmteam != "spectator" && local.p.flags["coopDevNoclip"] == NIL ){
+				local.n++
+			}
+		}
+		local.i++
+	}
+	end local.n
+}end
+
+//=========================================================================
+coop_fightingPlayerCount:{
+//=========================================================================
+	local.n = 0
+	local.i = 1
+	while( $player != NULL && $player != NIL && local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.flags["coop_isActive"] == 1 && local.p.dmteam != "spectator" && local.p.flags["coopDevNoclip"] == NIL ){
+				if( isAlive local.p ){
+					if( local.p.flags["coop_dbno_active"] != 1 ){
+						local.n++
+					}
+				}
+			}
+		}
+		local.i++
+	}
+	end local.n
+}end

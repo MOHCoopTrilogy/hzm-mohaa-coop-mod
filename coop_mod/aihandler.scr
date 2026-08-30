@@ -106,8 +106,27 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	//cover and push instead of standing as turrets. Enemies only (self.team german); replicas/waves
 	//already carry coop_personality_set so the re-call is a cheap no-op. Gated on coop_aiDynamic (off
 	//by default until tuned + verified with the coop_aiBehav tracker).
+	//[user 2026-08-24] APPLY THE PERSONALITY AT FIRST CONTACT, NOT AT SPAWN.
+	//User: "how can we just ensure the ai behavior system won't mess with the scripted campaign
+	//segments? can their ai behavior be enabled specifically when they end up in conflict?"
+	//
+	//That is the right shape and it fixes a whole CLASS rather than one map. The roll used to happen
+	//HERE, in actorHandler, which runs once per actor at spawn - so every german was handed a role
+	//before any combat existed, and the ~35% who roll AGGRESSIVE started roaming immediately. On a map
+	//whose vanilla script has the garrison HOLD (m3l2's house) that reads exactly as "everyone leaves
+	//the house and comes out front" - which is what the user reported, twice, on that same map.
+	//
+	//bug-2074 fixed the RADIUS (leash became additive instead of an assigned constant). It did not,
+	//and could not, stop an actor leaving his post - only bound how far he got. Deferring the roll is
+	//the part that actually preserves scripted intent: a man who has not been shot at has no
+	//personality yet, so he does whatever the map told him to do.
+	//
 	if( getcvar( "coop_aiDynamic" ) == "1" && self.team == "german" ){
-		thread coop_mod/officer.scr::coop_apply_personality self
+		if( getcvar( "coop_aiDynamicOnContact" ) == "0" ){
+			thread coop_mod/officer.scr::coop_apply_personality self
+		}else{
+			thread coop_personality_onContact self
+		}
 	}
 
 	//[user 2026-08-22, bug-2045] AI-DYNAMICS ATTACHMENT, now explicit and ONCE per actor.
@@ -204,16 +223,41 @@ coop_tryDuplicateActor:{
 	if( self.flags["coop_isReplica"] == 1 ){ end }		// recursion guard FIRST: a replica never duplicates
 	if( getcvar "coop_aiScale" == "0" ){ end }			// master gate (default ON)
 	if( self.team != "german" ){ end }				// enemies only - never allies (team set synchronously)
-	// player count (with a solo-dev override: coop_aiScaleTest 1 makes a lone host scale as if 2 players)
-	local.pc = 0
-	if( $player != NULL ){ local.pc = $player.size }
-	if( getcvar "coop_aiScaleTest" == "1" && local.pc < 2 ){ local.pc = 2 }
-	if( local.pc < 2 ){ end }					// only when 2+ players (or the test override)
-
 	// let initialisePainVars finish (it stores coop_actorActualHealth + sets self.health=5000) and give a
 	// brief spawn delay so replicas never appear the same instant / on top of the original.
 	wait 0.3
 	if( self == NULL || !isAlive self ){ end }
+
+	//[user 2026-08-30] COUNT AFTER THE ROSTER SETTLES, AND COUNT THE RIGHT THING.
+	//Two separate faults lived in the four lines this replaces. First, the count was
+	//$player.size - the CONNECTED count, which includes a spectator and a man still in
+	//the team menu. Second, it was read at the top of this thread, and every preplaced
+	//actor on the map runs that in the level's first frame, while players are still
+	//loading in one by one. So a four-player game routinely populated its map against a
+	//count of one or two and then played the rest of the mission under-scaled.
+	//
+	//The settle loop waits for the active roster to stop CHANGING (not to equal the
+	//connected count - a permanent spectator would never satisfy that and would stall
+	//every actor for the full timeout). Typically 1.5s, hard cap 8s. It runs ONCE per
+	//level: the first actor through sets the flag and every later spawn reads the count
+	//directly, so a mid-mission spawner pays nothing.
+	if( level.coop_rosterSettled != 1 ){
+		local.settle = 0
+		local.stable = 0
+		local.pc = waitthread coop_mod/main.scr::coop_activePlayerCount
+		while( local.settle < 16 && local.stable < 3 ){
+			wait 0.5
+			if( self == NULL || !isAlive self ){ end }
+			local.now = waitthread coop_mod/main.scr::coop_activePlayerCount
+			if( local.now == local.pc ){ local.stable++ } else { local.stable = 0 }
+			local.pc = local.now
+			local.settle++
+		}
+		level.coop_rosterSettled = 1
+	}
+	local.pc = waitthread coop_mod/main.scr::coop_activePlayerCount
+	if( getcvar "coop_aiScaleTest" == "1" && local.pc < 2 ){ local.pc = 2 }
+	if( local.pc < 2 ){ end }					// only when 2+ players (or the test override)
 
 	// exclude the officer + wave/special actors (bespoke health systems) + turret gunners
 	if( self.flags["coop_actorStopPainHandler"] == 1 ){ end }
@@ -871,7 +915,12 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 	if(level.coop_maxPlayerScalar < 0){
 		level.coop_maxPlayerScalar = 0
 	}
-	local.accuracyMult = $player.size
+	//[user 2026-08-30] was $player.size, the CONNECTED count - so an AFK spectator and a
+	//teammate bleeding out on the floor both still bought every enemy on the map a full
+	//player's worth of extra accuracy. Re-evaluated during play, so it takes the FIGHTING
+	//count: the squad gets a measurable break while it is a man down, and loses it the
+	//moment he is back up.
+	local.accuracyMult = waitthread coop_mod/main.scr::coop_fightingPlayerCount
 	if(local.accuracyMult > level.coop_maxPlayerScalar){
 		local.accuracyMult = level.coop_maxPlayerScalar
 	}
@@ -1547,6 +1596,7 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 		local.enemy = level.coop_actorArray["german"][local.i]
 		if (local.enemy.thinkstate == "attack" || local.enemy.thinkstate == "pain"){
 			local.enemy.enableEnemy = 0
+			local.enemy.flags["coop_ee0src"] = "reset"
 			local.enemy.flags["coop_actorResetThinkstate"] 	= game.true
 			local.enemy.no_idle 							= game.true
 		}
@@ -2063,3 +2113,39 @@ coop_hitReact:{
 	self setmotionanim local.anim
 	thread coop_mod/aibehav.scr::behav_bump "hitreact"
 }end
+
+
+//=========================================================================
+// coop_personality_onContact <actor> - hold the personality roll until the actor is ACTUALLY in a
+// fight, so scripted campaign behaviour is preserved until the script's own combat begins.
+//
+// SIGNAL: self.enemy != NULL. That is the engine's own "I have acquired a target" state and it is
+// readable from script (aihandler.scr:532 already reads it), so this is not a new mechanism.
+// Damage is deliberately NOT a second trigger: an actor who is shot at acquires an enemy anyway,
+// and adding a damage hook would only widen the window in which a scripted man can be knocked out
+// of his scene by a stray round.
+//
+// BOUNDED: ends on death, on removal, or when the roll is applied - never a permanent poller. The
+// coop_personality_set latch inside coop_apply_personality makes a double-call a no-op anyway, so
+// the worst case if this races another caller is wasted work, not a double roll.
+//
+// coop_aiDynamicOnContact 0 restores the old spawn-time behaviour for a clean A/B.
+//=========================================================================
+coop_personality_onContact local.actor:
+
+	if( local.actor == NULL || local.actor == NIL ){ end }
+
+	while( 1 ){
+		if( local.actor == NULL || local.actor == NIL ){ end }
+		if( !( isAlive local.actor ) ){ end }
+		if( local.actor.flags[ "coop_personality_set" ] == 1 ){ end }
+
+		//in conflict = the engine says he has a target. Nothing else counts.
+		if( local.actor.enemy != NULL && local.actor.enemy != NIL ){
+			waitthread coop_mod/officer.scr::coop_apply_personality local.actor
+			end
+		}
+		wait 0.5
+	}
+
+end

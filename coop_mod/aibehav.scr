@@ -53,7 +53,15 @@ main:{
 			local.r_flank = 0
 			local.r_prone = 0
 			local.r_none = 0
-			local.flanked = 0			// engaged enemies at the player's SIDE/REAR (the felt "they flanked me")
+			local.aggrMoving = 0
+			local.aggrStatic = 0
+			local.aggrCover = 0
+			local.flanked = 0
+			local.near = 0
+			local.nearEnemy = 0
+			local.nearSee = 0
+			local.nearEE0 = 0
+			local.nearCur = 0			// engaged enemies at the player's SIDE/REAR (the felt "they flanked me")
 			for( local.i = 1; local.i <= local.arr.size; local.i++ ){
 				local.a = local.arr[local.i]
 				if( local.a == NIL || local.a == NULL ){ continue }
@@ -64,8 +72,57 @@ main:{
 				if( local.a.enemy != NULL && local.a.enemy != NIL ){ local.eng = 1; local.engaging++ }
 				if( local.spd > 20 ){ local.moving++ }
 				if( local.eng == 1 && local.spd <= 20 ){ local.staticCombat++ }
+				//[user 2026-08-26] "they all ran up to me and are standing here", with engaging=4 of 27 alive.
+				//So they are not failing to ATTACK - they have no enemy at all. The question is whether the
+				//ones standing on top of the player can SEE him: near = within 250u of a player, nearEnemy =
+				//of those, how many hold an enemy, nearSee = how many pass the actor's OWN cansee with its own
+				//fov/sight. near high + nearSee low is a perception failure; near high + nearSee high +
+				//nearEnemy low is target ACQUISITION failing downstream of sight.
+				if( $player != NULL ){
+					local.pp = NIL
+					local.pj = 1
+					while( local.pj <= $player.size ){
+						if( $player[local.pj] != NULL ){
+							if( isAlive $player[local.pj] ){
+								local.dv = local.a.origin - $player[local.pj].origin
+								if( vector_length( local.dv ) < 250 ){ local.pp = $player[local.pj] }
+							}
+						}
+						local.pj = local.pj + 1
+					}
+					if( local.pp != NIL && local.pp != NULL ){
+						//[bug-2117] near=3 nearSee=2 nearEnemy=0 said: they SEE the player and never ACQUIRE.
+						//Two new columns decide between the suspects. nearEE0 = near actors whose enableEnemy
+						//is OFF (a missed restore by aimaneuver/aisquad/aihandler leaves acquisition disabled
+						//while runto still paths them to the player). nearCur = near actors sitting in the
+						//CURIOUS thinkstate (investigate-and-stand is exactly curious behaviour). EE0 high =
+						//find the missed restore; EE0 zero + cur high = acquisition inputs, not the switch.
+						if( local.a.enableEnemy == 0 ){
+							local.nearEE0++
+							local.eesrc = local.a.flags["coop_ee0src"]
+							if( local.eesrc == NIL ){ local.eesrc = "unstamped" }
+							println( "^~^~^ EE0NEAR ent=" + local.a.entnum + " src=" + local.eesrc + " surr=" + local.a.flags["coop_surrendered"] + " dis=" + local.a.coop_aiDisabled )
+						}
+						if( local.a.thinkstate == "curious" ){ local.nearCur++ }
+						local.near++
+						if( local.eng == 1 ){ local.nearEnemy++ }
+						if( local.a cansee local.pp local.a.fov local.a.sight ){ local.nearSee++ }
+					}
+				}
 				local.role = local.a.flags["coop_role"]
-				if( local.role == "aggr" ){ local.r_aggr++ }
+				if( local.role == "aggr" ){
+					local.r_aggr++
+					//[2026-08-30] does the aggr third actually ADVANCE? aggrMoving / aggrStatic split the
+					//ENGAGED aggr men by speed. aggrCover counts the ones the engine has already flipped to
+					//cover think - coop_aiSuppressCover (actor.cpp:11302) converts THINKSTATE_ATTACK to
+					//THINK_COVER on the first near-miss and is sticky, and type_attack is a live EV_GETTER
+					//reading m_ThinkMap[THINKSTATE_ATTACK], so this is the honest count. A high aggrCover is
+					//the single most likely reason the charge band looks like it did nothing.
+					if( local.eng == 1 ){
+						if( local.spd > 20 ){ local.aggrMoving++ } else { local.aggrStatic++ }
+					}
+					if( local.a.type_attack == "cover" ){ local.aggrCover++ }
+				}
 				else if( local.role == "cover" ){ local.r_cover++ }
 				else if( local.role == "flank" ){ local.r_flank++ }
 				else if( local.role == "prone" ){ local.r_prone++ }
@@ -91,7 +148,21 @@ main:{
 					}
 				}
 			}
-			println( "^~^~^ AIBEHAV alive=" + local.alive + " engaging=" + local.engaging + " moving=" + local.moving + " staticCombat=" + local.staticCombat + " flanked=" + local.flanked + " | aggr=" + local.r_aggr + " cover=" + local.r_cover + " flank=" + local.r_flank + " prone=" + local.r_prone + " none=" + local.r_none )
+			//[user 2026-08-26] "enemies that will literally run to me and stand and do nothing".
+			//The documented mechanism for that exact shape is FL_NOTARGET: an actor legitimately names a
+			//notarget'd player as .enemy and closes on him, while the engine refuses the attack
+			//(actor.cpp:9150). The glue path sets it (main.scr) and unglue clears it, so the pairing looks
+			//right on paper - which is exactly why it needs measuring rather than arguing about. ntgt>0
+			//with engaging>0 and nobody taking damage is the signature.
+			local.ntgt = 0
+			local.pi = 1
+			while( local.pi <= $player.size ){
+				if( $player[local.pi] != NULL ){
+					if( $player[local.pi].notarget == 1 ){ local.ntgt = local.ntgt + 1 }
+				}
+				local.pi = local.pi + 1
+			}
+			println( "^~^~^ AIBEHAV alive=" + local.alive + " engaging=" + local.engaging + " moving=" + local.moving + " staticCombat=" + local.staticCombat + " flanked=" + local.flanked + " | aggr=" + local.r_aggr + " cover=" + local.r_cover + " flank=" + local.r_flank + " prone=" + local.r_prone + " none=" + local.r_none + " | ntgt=" + local.ntgt + " glue=" + level.coop_playerGlue + " | near=" + local.near + " nearEnemy=" + local.nearEnemy + " nearSee=" + local.nearSee + " nearEE0=" + local.nearEE0 + " nearCur=" + local.nearCur + " | aggrMove=" + local.aggrMoving + " aggrStatic=" + local.aggrStatic + " aggrCover=" + local.aggrCover )
 			if( getcvar( "coop_aiBehav" ) == "2" ){
 				iprintlnbold( "AI  alive:" + local.alive + "  moving:" + local.moving + "  static:" + local.staticCombat + "   [aggr:" + local.r_aggr + " cover:" + local.r_cover + " flank:" + local.r_flank + "]" )
 			}

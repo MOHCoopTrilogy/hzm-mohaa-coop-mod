@@ -239,7 +239,9 @@ level waittill prespawn
 	// HZM coop - cinematic beach audio: start the Frontline "After the Drop" track ~10s after spawn
 	// (loops), boosted LOUD (quiet track -> big s_musicvolume; engine AL_MAX_GAIN headroom). When the
 	// ramp nears, SFX/ambient duck so the music owns the scene (coop_m3l1a_beachAudio).
-	thread coop_m3l1a_startMusic
+	//[user 2026-08-30] the music no longer starts on its own clock here - it is started BY the duck so
+	//the two land together. See coop_m3l1a_beachAudio.
+	//thread coop_m3l1a_startMusic
 
 	level.flags[craters] = 0
 
@@ -2464,7 +2466,9 @@ higgins1_landing:{
 //=========================================================================
 coop_m3l1a_startMusic:{
 //=========================================================================
-	wait 10
+	//[user 2026-08-30] startMusic is now driven BY the duck (coop_m3l1a_beachAudio), which is already
+	//timed to the ramp - so the old 'wait 10 from map load' delay would now just add lag to the cue.
+	//no wait: the caller owns the timing
 	exec coop_mod/replace.scr::tmstartloop "sound/music/AfterTheDrop.mp3"
 	exec coop_mod/replace.scr::tmvolume 1.0
 	//[user 08-06] bug-1502 - was coop_setClientCvar "s_musicvolume" 3.5 (one-shot hardcoded set,
@@ -2477,6 +2481,11 @@ coop_m3l1a_startMusic:{
 //=========================================================================
 coop_m3l1a_beachAudio:{
 //=========================================================================
+	//[user 2026-08-30] MUSIC AND DUCK TOGETHER. startMusic used to run on a fixed `wait 10` from map
+	//load while this thread fires when the boat nears the ramp - two unrelated clocks, so the track was
+	//already well underway (or not) by the time the world ducked under it. Starting it here makes the
+	//swell and the duck one event: the battlefield recedes and the music arrives on the same beat.
+	thread coop_m3l1a_startMusic
 	// TRUE effects duck via the engine s_sfxduck cvar (music-EXEMPT): gunfire/voices/effects recede
 	// to faint chaos so the music owns the scene, while the soundtrack stays full. Also swell the
 	// music a touch (coop_m3l1a_startMusic, threaded separately at map start) and fade out the
@@ -2491,6 +2500,22 @@ coop_m3l1a_beachAudio:{
 	//set to 12 at DuckStart above), so no wait/thread is needed here to time it out.
 	exec coop_mod/replace.scr::coop_cvarDuckEnd "Ambient"
 	exec coop_mod/replace.scr::coop_cvarDuckEnd "Music"
+	//[user 2026-08-28] SHELL SHOCK ON THE WAY BACK IN. The concussion wash lands just BEFORE the
+	//battlefield un-ducks, so the ring arrives first and the world comes rushing back underneath it -
+	//the beat the scene was always reaching for. Per-player playlocalsound (2D, non-positional), the
+	//same call tinnitus.scr:61 and dbno.scr:505 use; a positional playsound would put it in the world
+	//and every player would hear each other's.
+	if(level.coop_beachShellshock == NIL){ level.coop_beachShellshock = 1 }
+	if(level.coop_beachShellshock){
+		for(local.i = 1; local.i <= $player.size; local.i++){
+			local.sp = $player[local.i]
+			if(local.sp != NULL && local.sp.health > 0 && local.sp.dmteam != "spectator"){
+				local.sp stoplocalsound coop_shellshock
+				local.sp playlocalsound coop_shellshock 1
+			}
+		}
+		wait 1.2		// let the wash establish before the world returns under it
+	}
 	waitthread coop_mod/replace.scr::coop_cvarFade "s_sfxduck" 0.03 1.0 12		// slow fade the battlefield back in
 }end
 
@@ -8125,6 +8150,12 @@ move_object local.distance local.time:{
 //  mortar call in
 // <mortar> mortar_call [play leadin sound| any value for no]
 //=========================================================================
+//=========================================================================
+coopMortarShake:{
+//=========================================================================
+	//placeholder hook - kept so the call above always resolves; real work is earthquake_radius
+}end
+
 mortar_call local.leadin:{
 //=========================================================================
 	local.distance = 999//chrissstrahl
@@ -8139,6 +8170,10 @@ mortar_call local.leadin:{
 		//chrissstrahl - handle for mp/coop
 		else{
 			//self playsound arty_leadin wait
+			//[user 2026-08-28] the coop beach hears the shell COMING. arty_leadin maxes at 1600 units and
+			//that is a hard start gate in this engine, so on a beach this deep the whistle never played at
+			//all - shells just thumped. coop_arty_leadin_far* is the same audio at 900/16000, positional.
+			self playsound ("coop_arty_leadin_far" + ((randomint 6) + 1))
 			self thread coop_mod/replace.scr::playsound_wait "arty_leadin" //[200] Smithy - make sound callback work in coop (also inadvertantly fixes mortars as callback error was preventing thread continuing from here)			
 			self waittill sounddone
 		}
@@ -8146,6 +8181,20 @@ mortar_call local.leadin:{
 
 	self anim start
 
+	//[user 2026-08-28] COOP MORTARS HAD NO SHAKE AT ALL, and the tiering below was dead code.
+	//`local.distance = 999` is set unconditionally at the top of this label and the coop branch never
+	//recomputes it, so `$player.size > 1 || local.distance >= 513` always took jitter_small - medium and
+	//large could never fire. And jitter_small itself early-outs on $player.size > 1.
+	//
+	//Worse, mortars never got the engine's universal explosion shake either: this label ends in script
+	//`radiusdamage`, which calls RadiusDamage() directly and never constructs an Explosion, so the
+	//ViewJitter at explosion.cpp:120 never runs for them. Coop mortars have been silent-camera.
+	//
+	//Radius-bounded per blast, so a shell landing on one man does not rattle a man 3000 units away.
+	if(level.gametype != 0){
+		thread coop_mod/main.scr::earthquake_radius self.origin 0.9 1.6 1100
+		thread coopMortarShake
+	}
 	//chrissstrahl - only jitter small, because it affects all players
 	if ( $player.size > 1 || local.distance >= 513){ // beyond 512, small shake
 		thread jitter_small
