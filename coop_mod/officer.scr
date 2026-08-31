@@ -1611,8 +1611,32 @@ coop_reinf_pc:{
 	//[user 2026-08-30] was $player.size, the CONNECTED count, so a wave sized itself against
 	//spectators and downed men. Reinforcement waves are the most punishing of the three
 	//scaling sites, so they take the FIGHTING count; the floor of 1 below is unchanged.
+	//
+	//THIS CENSUS IS INLINED, AND MUST STAY INLINED. It is the same loop as
+	//main.scr::coop_fightingPlayerCount, and calling that helper here instead is exactly the
+	//regression this comment exists to prevent: EVERY caller of this label uses `exec`
+	//(officer.scr:610 via coop_reinf_count, :1635, :1710), and `exec` returns a THREAD POINTER
+	//unless the callee finishes without yielding. A cross-file waitthread yields, so local.pc
+	//arrived as a pointer and coop_reinf_count:1645 then threw
+	//  binary '-' applied to incompatible types 'pointer' and 'int'
+	//fifteen times a session, leaving every wave size as 'none'. Shipped in v1.4.6; caught by
+	//the first regression capture. Keep this loop free of wait, waitframe and waitthread.
 	local.pc = 1
-	local.live = waitthread coop_mod/main.scr::coop_fightingPlayerCount
+	local.live = 0
+	local.i = 1
+	while( $player != NULL && $player != NIL && local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.flags["coop_isActive"] == 1 && local.p.dmteam != "spectator" && local.p.flags["coopDevNoclip"] == NIL ){
+				if( isAlive local.p ){
+					if( local.p.flags["coop_dbno_active"] != 1 ){
+						local.live++
+					}
+				}
+			}
+		}
+		local.i++
+	}
 	if( local.live > 0 ){ local.pc = local.live }
 	if( getcvar "coop_aiScaleTest" == "1" && local.pc < 2 ){ local.pc = 2 }
 	local.cap = level.coop_maxPlayerScalar
