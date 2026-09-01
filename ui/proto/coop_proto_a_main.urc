@@ -1,0 +1,497 @@
+// ============================================================================================
+// MOH Trilogy Coop - PROTOTYPE A "CINEMATIC" - main page.        PROTOTYPE. NOT A SHIPPING MENU.
+//
+// WHAT THIS IS
+//   A layout study for a main menu built like a title card: one full-bleed plate carrying the
+//   image, and a short, quiet column of large items down the left edge over a soft gradient.
+//   Nothing is crowded and nothing is boxed - the only "panel" is the darkness itself.
+//   Five items, one caption line, one dev hint.  That is the whole page.
+//
+//   The plate ("coop_proto_a_backplate", the FIRST resource below) is deliberately the only
+//   widget that carries the image, so the backdrop can be swapped for something else later -
+//   a still, or an in-engine render of a map location - by pointing one cvar at it and
+//   touching nothing else on the page.
+//
+// HOW TO OPEN IT  (nothing under ui/proto/ is loaded until you ask for it - see WHY, below)
+//     exec ui/proto/coop_proto_a.cfg           <- does all of the following for you
+//   or by hand, from the console (~):
+//     loadmenu proto/coop_proto_a_ops
+//     loadmenu proto/coop_proto_a_main
+//     pushmenu coop_proto_a_main
+//   BACK (bottom left, from the shared chrome) is popmenu 0 - it returns you to whatever menu
+//   was underneath, normally the real main menu.  No shipped menu is touched or shadowed.
+//
+// WHY IT CANNOT DISTURB THE REAL MENUS
+//   The startup sweep is FS_ListFiles("ui/", "urc", qfalse, &nfiles) at client/cl_ui.cpp:5634.
+//   wantSubs=qfalse makes the pak walk reject any entry whose path depth != 1
+//   (qcommon/files.cpp:2426), so ui/proto/*.urc is never enumerated and never auto-registered.
+//   A prototype exists only after an explicit loadmenu.  Every menu name here is also
+//   coop_proto_-prefixed, and menu names are a single global namespace, so even a hand load
+//   cannot collide with a shipped menu.
+//
+// CONTAINER: fullscreen 1.  DELIBERATE - here is the reasoning, since a cinematic page is
+//   exactly where you would want the live 3D world showing through:
+//     * A non-fullscreen menu does let the world render behind it (client/cl_ui.cpp:1993-2005:
+//       a fullscreen menu calls view3d->setShow(false) and Com_FakePause()s a running server;
+//       a non-fullscreen one shows the view while clc.state == CA_ACTIVE).
+//     * BUT the shared chrome's first widget, "coop_proto_bleed", is a stretch-both Widget
+//       with bgcolor alpha 1.00, and uilib/uiwidget.cpp:2056 paints any bgcolor whose alpha is
+//       non-zero across the whole rect.  It covers the entire physical screen, first, opaquely.
+//       Declaring fullscreen 0 would therefore buy a 3D scene that is 100% occluded, and would
+//       un-pause the server while you stare at a menu.
+//   So: fullscreen 1 while the chrome owns an opaque ground.  The day the backdrop becomes a
+//   live map view, the change is (a) fullscreen 0 here and (b) an alpha on the chrome's bleed -
+//   the column, the mattes and the gradient below all keep working unmodified.
+//
+// ENGINE RULES THIS FILE IS BUILT AROUND (each re-verified against openmohaa-hzm)
+//   * Widgets DO NOT NEST.  Every resource is a direct child of the menu container
+//     (uilib/uilayout.cpp:150).  This is a flat list; the "column" is a shared x and a rhythm
+//     of y values, nothing more.
+//   * Draw order is DECLARATION order, and hit-testing walks children LAST to FIRST
+//     (uilib/uiwidget.cpp:1721-1745).  So: plate, then gradient, then mattes, then text, then
+//     the click targets last.  ordernumber is arrow-key focus order only (uiwidget.cpp:1506).
+//   * "stretch horizontal" is a PROPERTY, not a resource type (uiwidget.cpp:347 -> handler
+//     LayoutStretch at :1409-1422).  It sets pos.x = 0 and width = uid.vidWidth
+//     (:1142-1145, :2288-2291) AND sets WF_NOPARENTADJUST|WF_DIRECTED, which makes the widget
+//     screen-absolute and skips the parent-clip intersection at :872-906.  That is what lets
+//     the plate and the two mattes run past the 640-wide canvas to the real edges of an
+//     ultrawide instead of being pillarboxed.  It has zero uses in retail data.
+//   * There is NO text wrapping - only a literal \n breaks a line (uilib/uifont.cpp:388-428).
+//     Every title below is one line, sized against the measured metrics: facfont-20 is about
+//     8.5 px per capital (11 px worst case, "W"); verdana-12 about 5.6; courier-16 exactly 8.
+//   * "textalign" reads ONLY its first argument - the loop at uiwidget.cpp:1510-1529 calls
+//     ev->GetString(1) on every pass regardless of the index.  "textalign left centery" would
+//     silently apply "left" twice, so each value gets its own line.
+//   * The default borderstyle is border_indent, NOT none (uiwidget.cpp:747), and "RAISED" -
+//     used 40 times across this mod shipped UI - is not a recognised value (:1349-1360) and
+//     silently leaves that indent border drawn.  Every widget here says borderstyle "NONE".
+//   * A Button prints its title with its own font/fgcolor (uilib/uibutton.cpp:229-238), and
+//     hovershader is drawn BEFORE that text (uiwidget.cpp:2110-2117, then Draw() at :2119) -
+//     so the highlight lands behind the label on the same widget, no second resource needed.
+//     "name" does NOT set the title (uiwidget.cpp:1324-1327); only "title" does.
+//   * "enabledcvar" draws and hit-tests purely off the cvar: UI_GetCvarInt(name, 0) != 0
+//     (uiwidget.cpp:1709, gate at :2027), and a gated-off widget is click-transparent
+//     (:1730-1739).  An unset cvar reads 0, so the hover marks below are hidden until hovered.
+//   * A backslash-quote inside a quoted token is a literal quote and does not end the token
+//     (qcommon/script.cpp:907-929) - that is how the hovercommands set a captioned string.
+//   * Every field is on its OWN LINE: a single-line resource block is silently dropped.
+//
+// ASSETS - all pre-existing and confirmed present.  No new shader is declared (bug-922: a
+// bare-name shader for new menu art cost five sessions), no invented font (an unloadable font
+// name is Com_Error(ERR_DROP) at uilib/uifont.cpp:295-299 - the client drops at menu load):
+//     fonts       facfont-20, verdana-12, courier-16   (the only three used anywhere in this mod)
+//     shaders     menu_button_trans, textures/mohmenu/m_buttonhighlight
+//                 (both shipped, and used exactly this way in ui/multiplayerstart.urc:174-176)
+//     sounds      sound/menu/apply.wav   (sound/menu/mouseover.wav does NOT exist)
+//     backdrop    none by default - see coop_protoAArt in ui/proto/coop_proto_a.cfg
+//
+// WIRING - everything here is inert and reversible.  Two items push the sibling prototype page
+// (coop_proto_a_ops); three set a display-only cvar so the click visibly does something.
+// Nothing loads a map, disconnects, quits, or writes a config.
+// ============================================================================================
+
+menu "coop_proto_a_main" 640 480 NONE 0
+bgcolor 0 0 0 1
+borderstyle NONE
+bgfill 0 0 0 1
+fullscreen 1
+virtualres 1
+
+include "ui/proto/coop_proto_chrome.inc"
+
+
+// ============================================================================================
+// THE PLATE - the one swappable backdrop widget.
+// "stretch horizontal" spans the full physical width at any aspect while keeping the y band
+// the rest of the page is composed against.  With coop_protoAArt unset it registers no
+// material (uilib/uilabel.cpp:275-284) and simply shows its own colour, so the page is
+// correct with no art at all.  It carries no title, so nothing prints over the image.
+// ============================================================================================
+resource
+Label
+{
+	name "coop_proto_a_backplate"
+	rect 0 72 640 360
+	stretch horizontal
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.070 0.078 0.068 1.00
+	borderstyle "NONE"
+	linkcvar "coop_protoAArt"
+	linkcvartoshader
+}
+
+// --- gradient off the left edge -------------------------------------------------------------
+// Three stepped alphas stand in for a gradient: the column has to stay legible over whatever
+// image lands on the plate, and there is no gradient primitive.  These are ordinary widgets,
+// so they scale with the 640x480 design space rather than bleeding - only the plate and the
+// mattes bleed, which is what keeps the composition anchored on an ultrawide.
+resource
+Widget
+{
+	name "coop_proto_a_grad1"
+	rect 0 72 300 360
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.015 0.017 0.014 0.78
+	borderstyle "NONE"
+}
+resource
+Widget
+{
+	name "coop_proto_a_grad2"
+	rect 300 72 90 360
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.015 0.017 0.014 0.50
+	borderstyle "NONE"
+}
+resource
+Widget
+{
+	name "coop_proto_a_grad3"
+	rect 390 72 84 360
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.015 0.017 0.014 0.22
+	borderstyle "NONE"
+}
+
+// --- letterbox mattes -----------------------------------------------------------------------
+// The cinematic frame, and the practical reason for it: both mattes are "stretch horizontal",
+// so on a 21:9 display they run to the physical edges while the plate image does too.  They
+// also give the kicker (top) and the corner mark (bottom) a guaranteed dark band to sit on.
+resource
+Widget
+{
+	name "coop_proto_a_matte_top"
+	rect 0 72 640 18
+	stretch horizontal
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.010 0.010 0.010 0.62
+	borderstyle "NONE"
+}
+resource
+Widget
+{
+	name "coop_proto_a_matte_bot"
+	rect 0 414 640 18
+	stretch horizontal
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.010 0.010 0.010 0.62
+	borderstyle "NONE"
+}
+
+
+// ============================================================================================
+// TITLE BLOCK - drawn over the chrome sign plate.
+// The chrome own title/strapline are cvar-driven and blank unless you set coop_protoTitle /
+// coop_protoSub; this page carries fixed text instead, declared after the include so it draws
+// on top.  Leave those two cvars unset for this prototype or the two will stack.
+// "MOH TRILOGY COOP" at facfont-20 is 16 caps, about 136 px in a 460 px rect.
+// ============================================================================================
+resource
+Label
+{
+	name "coop_proto_a_title"
+	title "MOH TRILOGY COOP"
+	rect 90 16 460 24
+	fgcolor 0.95 0.90 0.76 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign centerx
+	outlinedtext 1
+	dontlocalize
+}
+resource
+Label
+{
+	name "coop_proto_a_sub"
+	title "the whole campaign, together"
+	rect 90 42 460 15
+	fgcolor 0.80 0.72 0.54 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	dontlocalize
+}
+
+// --- column head ----------------------------------------------------------------------------
+resource
+Label
+{
+	name "coop_proto_a_kicker"
+	title "OPERATIONS"
+	rect 36 74 264 14
+	fgcolor 0.82 0.68 0.40 0.95
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	dontlocalize
+}
+resource
+Widget
+{
+	name "coop_proto_a_kickrule"
+	rect 36 96 140 1
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.78 0.64 0.36 0.85
+	borderstyle "NONE"
+}
+
+
+// ============================================================================================
+// THE COLUMN.  Five items, 44 px apart, 34 px tall.
+// Each item is TWO resources, declared in this order:
+//   1. a hover mark - a 3 px brass tick outside the text, gated on its own cvar, so it is
+//      invisible (and click-transparent) until the item is hovered;
+//   2. the item itself - one Button that owns its text, its highlight, its caption and its
+//      action.  Declared after the mark, and last overall, so it takes the click.
+// The Buttons are the only clickable things on the page.
+// ============================================================================================
+
+// --- 1. CONTINUE ----------------------------------------------------------------------------
+resource
+Widget
+{
+	name "coop_proto_a_mark1"
+	rect 22 118 3 34
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.86 0.70 0.36 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoAH1"
+}
+resource
+Button
+{
+	name "coop_proto_a_item1"
+	title "CONTINUE"
+	rect 36 118 280 34
+	fgcolor 0.94 0.90 0.78 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign left
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	hovercommand "set coop_protoAH1 1; set coop_protoACap \"resume where the squad stopped\""
+	mouseawaycommand "set coop_protoAH1 0; set coop_protoACap \"\""
+	stuffcommand "pushmenu coop_proto_a_ops"
+	ordernumber 2
+	dontlocalize
+}
+
+// --- 2. OPERATIONS --------------------------------------------------------------------------
+resource
+Widget
+{
+	name "coop_proto_a_mark2"
+	rect 22 162 3 34
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.86 0.70 0.36 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoAH2"
+}
+resource
+Button
+{
+	name "coop_proto_a_item2"
+	title "OPERATIONS"
+	rect 36 162 280 34
+	fgcolor 0.94 0.90 0.78 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign left
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	hovercommand "set coop_protoAH2 1; set coop_protoACap \"pick a campaign and a mission\""
+	mouseawaycommand "set coop_protoAH2 0; set coop_protoACap \"\""
+	stuffcommand "pushmenu coop_proto_a_ops"
+	ordernumber 3
+	dontlocalize
+}
+
+// --- 3. SQUAD -------------------------------------------------------------------------------
+resource
+Widget
+{
+	name "coop_proto_a_mark3"
+	rect 22 206 3 34
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.86 0.70 0.36 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoAH3"
+}
+resource
+Button
+{
+	name "coop_proto_a_item3"
+	title "SQUAD"
+	rect 36 206 280 34
+	fgcolor 0.94 0.90 0.78 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign left
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	hovercommand "set coop_protoAH3 1; set coop_protoACap \"loadout, appearance, service record\""
+	mouseawaycommand "set coop_protoAH3 0; set coop_protoACap \"\""
+	stuffcommand "set coop_protoAPick squad"
+	ordernumber 4
+	dontlocalize
+}
+
+// --- 4. SETTINGS ----------------------------------------------------------------------------
+resource
+Widget
+{
+	name "coop_proto_a_mark4"
+	rect 22 250 3 34
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.86 0.70 0.36 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoAH4"
+}
+resource
+Button
+{
+	name "coop_proto_a_item4"
+	title "SETTINGS"
+	rect 36 250 280 34
+	fgcolor 0.94 0.90 0.78 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign left
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	hovercommand "set coop_protoAH4 1; set coop_protoACap \"coop rules, audio, video\""
+	mouseawaycommand "set coop_protoAH4 0; set coop_protoACap \"\""
+	stuffcommand "set coop_protoAPick settings"
+	ordernumber 5
+	dontlocalize
+}
+
+// --- 5. CREDITS -----------------------------------------------------------------------------
+resource
+Widget
+{
+	name "coop_proto_a_mark5"
+	rect 22 294 3 34
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.86 0.70 0.36 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoAH5"
+}
+resource
+Button
+{
+	name "coop_proto_a_item5"
+	title "CREDITS"
+	rect 36 294 280 34
+	fgcolor 0.94 0.90 0.78 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign left
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	hovercommand "set coop_protoAH5 1; set coop_protoACap \"who built this, and on whose work\""
+	mouseawaycommand "set coop_protoAH5 0; set coop_protoACap \"\""
+	stuffcommand "set coop_protoAPick credits"
+	ordernumber 6
+	dontlocalize
+}
+
+
+// ============================================================================================
+// THE CAPTION - one line, driven by whichever item the mouse is over.  This is the whole
+// reason the page can afford to be this sparse: the explanation lives here instead of under
+// every item.  Empty when nothing is hovered (an unset/empty cvar prints nothing).
+// Longest caption is 35 chars at verdana-12, about 196 px in a 300 px rect.
+// ============================================================================================
+resource
+Label
+{
+	name "coop_proto_a_caption"
+	rect 36 344 300 14
+	fgcolor 0.88 0.85 0.74 0.95
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	linkcvar "coop_protoACap"
+	dontlocalize
+}
+
+// --- click readout: proof the three cvar-setting items actually fired --------------------
+resource
+Label
+{
+	name "coop_proto_a_picklabel"
+	title "last action"
+	rect 36 364 74 13
+	fgcolor 0.60 0.57 0.50 0.85
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	dontlocalize
+}
+resource
+Label
+{
+	name "coop_proto_a_pick"
+	rect 112 364 200 13
+	fgcolor 0.82 0.70 0.42 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	linkcvar "coop_protoAPick"
+	dontlocalize
+}
+
+// --- dev hint: names the one cvar that swaps the backdrop --------------------------------
+// courier-16 is 8 px per character exactly, so 27 characters is 216 px in a 300 px rect.
+resource
+Label
+{
+	name "coop_proto_a_hint"
+	title "set coop_protoAArt <shader>"
+	rect 36 384 300 16
+	fgcolor 0.55 0.62 0.55 0.80
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "courier-16"
+	textalign left
+	dontlocalize
+}
+
+// --- corner mark, sitting in the bottom matte ---------------------------------------------
+resource
+Label
+{
+	name "coop_proto_a_corner"
+	title "PROTOTYPE A / CINEMATIC"
+	rect 380 416 244 14
+	fgcolor 0.70 0.66 0.56 0.45
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign right
+	dontlocalize
+}
+
+end.

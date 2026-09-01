@@ -122,7 +122,7 @@ mg42AttackBeach:{
 		if( local.explosedPlayers == 0){
 			//iprintlnbold_noloc("mg42AttackBeach fire: normal targets")
 			// set the MG42 turrets to fire at normal targets
-			local.index = (randomint 3 + 1)
+			local.index = (randomint 4 + 1)
 			$mg42_middle1 setaimtarget $mg42_target_left[local.index]
 			$mg42_middle2 setaimtarget $mg42_target_right[local.index]
 			wait 4 //was 3
@@ -149,6 +149,56 @@ isInCover local.player:{
 				end 1
 			}
 		}
+	}
+
+	//[user 2026-08-31] REAL COVER, NOT JUST THE AUTHORED VOLUMES.
+	//
+	//The user: standing behind the beached Sherman wrecks "does not actually" protect you - and it
+	//could not, because nothing on this beach shoots you. mg42_damage_player applies damage DIRECTLY
+	//(see the note at :268), and the only thing that ever stopped it was `istouching` one of the map's
+	//baked $cover_trigger volumes. Anything not authored in 2002 - our tank wrecks, the beached Higgins
+	//hulls, a shell crater lip, even a hedgehog the designer did not wrap in a trigger - counted for
+	//nothing. Making the wrecks solid was therefore never going to help, which is why two attempts at
+	//that did not move it.
+	//
+	//So ask the actual question instead: can the guns SEE him? sighttrace returns 1 for a clear line
+	//(the map uses it that way at m3l1a.scr, `if (sighttrace ... 1)`), so if every emplacement is
+	//blocked, he is behind something real and is in cover. That makes every solid object on the beach
+	//work as cover, including the ones we add, without hand-authoring a trigger volume for each.
+	//
+	//Cost is bounded: the gun list is built ONCE into a level array, and it is at most 6 traces for a
+	//player the guns are actively firing at. Chest height both ends so a prone man is not clipped by
+	//his own floor.
+	if(level.coop_losGunsBuilt != 1){
+		level.coop_losGunsBuilt = 1
+		level.coop_losN = 0
+		if($mg42_leftbunker1 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_leftbunker1 }
+		if($mg42_leftbunker2 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_leftbunker2 }
+		if($mg42_rightbunker1 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_rightbunker1 }
+		if($mg42_rightbunker2 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_rightbunker2 }
+		if($mg42_middle1 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_middle1 }
+		if($mg42_middle2 != NULL){ level.coop_losN++; level.coop_losGun[level.coop_losN] = $mg42_middle2 }
+		println("^~^~^ BEACHLOS guns=" + level.coop_losN)
+	}
+
+	if(level.coop_losCoverOn == NIL){ level.coop_losCoverOn = 1 }
+	if(level.coop_losCoverOn && level.coop_losN > 0){
+		local.eye = local.player.origin + (0 0 40)
+		local.seen = 0
+		local.gi = 1
+		while(local.gi <= level.coop_losN && local.seen == 0){
+			local.gun = level.coop_losGun[local.gi]
+			if(local.gun != NULL){
+				//pass_entities MUST be 0. The engine does `if (arg3) content_mask &= ~MASK_IGNORE_ENTS`,
+				//and MASK_IGNORE_ENTS CONTAINS CONTENTS_BBOX - so passing 1 strips entity contents out of
+				//the mask and the trace sees world geometry only. With 1 the tank clip was invisible to
+				//this test, which is why the wrecks still did not protect anyone.
+				if(sighttrace (local.gun.origin + (0 0 24)) local.eye 0){ local.seen = 1 }
+			}
+			local.gi++
+		}
+		//nothing can see him - he is behind something solid
+		if(local.seen == 0){ end 1 }
 	}
 }end 0
 
@@ -369,8 +419,12 @@ mg42_attack_closest:{
 //=========================================================================
 	while(level.mg42_attack_closest){
 		local.player = exec coop_mod/replace.scr::player_closestTo $mg42_middle2
-		$mg42_middle1.setaimtarget = local.player
-		$mg42_middle2.setaimtarget = local.player
+		//[user 2026-08-31] THIS WAS A SILENT NO-OP. `setAimTarget` is registered EV_NORMAL, not
+		//EV_SETTER (fgame/weapturret.cpp), so the property form `$ent.setaimtarget = x` does not reach
+		//it - it just wrote a dead script variable, and the middle guns never tracked anyone. The
+		//command form is what works, and this same file already uses it correctly at :67 and :126.
+		$mg42_middle1 setaimtarget local.player
+		$mg42_middle2 setaimtarget local.player
 		wait 3
 	}
 }end
@@ -575,27 +629,74 @@ coop_inlandShelling:{
 //=========================================================================
 	if(level.gametype == 0){ end }
 	if(level.coop_inlandShell == NIL){ level.coop_inlandShell = 1 }
+	if(level.coop_bluffShellGap == NIL){ level.coop_bluffShellGap = 2.6 }
+
+	//[user 2026-08-31] REWRITTEN. The 2026-08-28 version never put a single visible burst on the
+	//bluff, for two independent reasons, and the user's report was simply "i dont see the bunker
+	//areas getting shelled either":
+	//
+	//  1. It spawned models/fx/explosionartilleryshell.tik and called `anim start`. That TIKI's
+	//     animations block contains ONLY `idle` - there is no `start` - and Animate::NewAnim is a
+	//     silent no-op when Anim_NumForName returns -1. The call did nothing and said nothing.
+	//     models/animate/fx_mortar_dirt.tik has a real `start` anim and is already precached by
+	//     m3l1a_precache.scr, so it is the right entity here.
+	//
+	//  2. It rolled Y as `6200 + (randomint 1600)` = 6200..7800, described in its own comment as
+	//     "BEHIND the bunkers". Behind the bunkers is behind the crest, i.e. out of sight from the
+	//     beach by construction - and most of that band is past the far edge of the map entirely.
+	//     A bombardment the player cannot see is indistinguishable from no bombardment.
+	//
+	//Now it walks the actual emplacements the player is looking at. Purely cosmetic: fx_mortar_dirt
+	//is `classname effectentity` + `notsolid`, its start anim's server block only schedules a return
+	//to idle, and NOTHING here calls radiusdamage - so the MG gunners the mission depends on are
+	//never touched. The tik plays its own `arty_exp_sand` on the client, so no playsound here either;
+	//adding one would double every bang.
+	local.n = 0
+	if($mg42_left1 != NULL){ local.n++; local.tgt[local.n] = $mg42_left1 }
+	if($mg42_left2 != NULL){ local.n++; local.tgt[local.n] = $mg42_left2 }
+	if($mg42_leftbunker1 != NULL){ local.n++; local.tgt[local.n] = $mg42_leftbunker1 }
+	if($mg42_leftbunker2 != NULL){ local.n++; local.tgt[local.n] = $mg42_leftbunker2 }
+	if($mg42_middle1 != NULL){ local.n++; local.tgt[local.n] = $mg42_middle1 }
+	if($mg42_middle2 != NULL){ local.n++; local.tgt[local.n] = $mg42_middle2 }
+	if($mg42_right1 != NULL){ local.n++; local.tgt[local.n] = $mg42_right1 }
+	if($mg42_right2 != NULL){ local.n++; local.tgt[local.n] = $mg42_right2 }
+	if($mg42_rightbunker1 != NULL){ local.n++; local.tgt[local.n] = $mg42_rightbunker1 }
+	if($mg42_rightbunker2 != NULL){ local.n++; local.tgt[local.n] = $mg42_rightbunker2 }
+
+	if(local.n < 1){
+		println("^~^~^ BLUFFSHELL no emplacements found - shelling disabled")
+		end
+	}
+	println("^~^~^ BLUFFSHELL armed targets=" + local.n)
 
 	while(level.coop_inlandShell){
-		local.org = (0 0 0)
-		local.org[0] = 0 - 2500 + (randomint 5700)		//across the bluff face
-		local.org[1] = 6200 + (randomint 1600)			//BEHIND the bunkers (they end at Y 5952)
-		local.org[2] = 0 + (randomint 260)				//varied height so bursts are not a flat line
+		local.pick = local.tgt[((randomint local.n) + 1)]
+		if(local.pick == NULL){
+			wait 1
+			continue
+		}
 
-		local.burst = spawn "models/fx/explosionartilleryshell.tik"
-		local.burst.origin = local.org
-		local.burst notsolid
-		local.burst anim start
+		//Scatter around the emplacement rather than on it, so rounds walk across the position
+		//instead of stacking on one point. Up on the lip, not inside the casemate.
+		local.org = local.pick.origin
+		local.org[0] = local.org[0] + ((randomint 420) - 210)
+		local.org[1] = local.org[1] + ((randomint 420) - 210)
+		local.org[2] = local.org[2] + (randomint 80)
 
-		//the shell report, distant. arty_exp_sand* is already scoped to m3l1 and carries a 1000-8000
-		//unit falloff, so from the waterline it reads as a thump behind the bluff rather than a bang.
-		local.burst playsound ("arty_exp_sand" + ((randomint 4) + 1))
+		local.burst = spawn "models/animate/fx_mortar_dirt.tik"
+		if(local.burst != NULL && local.burst != NIL){			//entity-pool guard
+			local.burst.origin = local.org
+			local.burst notsolid
+			local.burst anim start
 
-		wait 4
-		if(local.burst != NULL){ local.burst remove }
+			wait 4
+			if(local.burst != NULL){ local.burst remove }
+		}else{
+			wait 4
+		}
 
 		//irregular spacing - a metronome reads as a machine, not a bombardment
-		wait (randomfloat(2.6) + 0.9)
+		wait (randomfloat(level.coop_bluffShellGap) + 0.9)
 	}
 }end
 
@@ -656,8 +757,22 @@ coop_farFieldShelling:{
 //The Breakthrough US_V_Sherman_BustedTread variant was deliberately NOT used: it is maintt-only and
 //declares `init { server { classname ScriptSlave } }`, which is a live entity, not scenery.
 //
-//NOTSOLID on purpose. A solid box dropped on a beach the AI walks across is a pathing hazard, and this
-//is set dressing - it should never block a soldier or absorb a bullet meant for you.
+//[user 2026-08-31] NOW SOLID. The original note below argued for notsolid on AI-pathing grounds; the
+//user played it and reported walking straight through the hulls, which reads as broken scenery long
+//before it reads as considerate pathing. A knocked-out Sherman is also the only hard cover on an
+//otherwise open beach, so solid is the better answer twice over. Superseded reasoning kept for the
+//record: "A solid box dropped on a beach the AI walks across is a pathing hazard, and this is set
+//dressing - it should never block a soldier or absorb a bullet meant for you."
+//
+//Two things make it safe here. The spots are off the flanks, clear of the scripted run-in lanes the
+//rangers use, and the boxes are sized to the hull rather than left at the model default.
+//
+//YAW IS FIXED, NOT RANDOM, AND THAT IS LOAD-BEARING. A SOLID_BBOX entity is axis-aligned in world
+//space - SV_ClipMoveToEntities only feeds angles through CM_TransformedBoxTrace for bmodels, and a
+//script_model is not one - so the collision box does NOT rotate with the model. The old
+//`(55 + randomint 70)` yaw would have put a 230-long hull at an arbitrary angle inside whatever box
+//we picked, giving invisible walls off the bow on some rolls and walk-through flanks on others. Each
+//wreck now gets a yaw near an axis and a box matching THAT orientation.
 //=========================================================================
 coop_beachWrecks:{
 //=========================================================================
@@ -680,12 +795,46 @@ coop_beachWrecks:{
 	local.spots[3][1] = 0 - 900
 	local.spots[3][2] = 0 - 500
 
+	//Yaw per spot, each within ~10 degrees of an axis, with the matching hull box below.
+	//A Sherman is roughly 230 long, 115 wide, 110 tall in map units (1u ~= 1in).
+	local.yaw[1] = 90
+	local.yaw[2] = 8
+	local.yaw[3] = 82
+
 	for(local.i = 1; local.i <= 3; local.i++){
 		local.wreck = spawn script_model model "models/static/vehicle_shermantank_dead.tik"
+		if(local.wreck == NULL){ continue }		//entity-pool guard
 		local.wreck.origin = local.spots[local.i]
-		local.wreck.angles = (0 (55 + (randomint 70)) 0)
-		local.wreck notsolid
+		local.wreck.angles = (0 local.yaw[local.i] 0)
+
 		local.wreck anim idle
+
+		//[user 2026-08-31] COLLISION IS A SEPARATE ENTITY NOW. The user reported twice that standing
+		//behind these still did not stop rounds, and two attempts to make the MODEL solid (vector-literal
+		//form, then anim/setsize/solid ordering) did not settle it. Rather than guess a third time at why
+		//a TIKI-derived bbox is not taking, the hull keeps its visuals and an invisible box does the
+		//blocking. That box is ours end to end - explicit setsize, nothing derived from the model.
+		//
+		//`rendereffects "+dontdraw"` and NOT `hide`: dontdraw still SENDS the entity to the client
+		//(entity.cpp:881), so the client's own bullet traces stop on it and you get impact effects on
+		//cover. `hide` sets SVF_NOCLIENT, which would stop server damage but let tracers visibly pass
+		//straight through - protection that looks broken.
+		local.wreck notsolid
+		local.clip = spawn script_model model "models/fx/dummy.tik"
+		if(local.clip != NULL && local.clip != NIL){			//entity-pool guard
+			local.clip.origin = local.spots[local.i]
+			local.clip.angles = (0 local.yaw[local.i] 0)
+			local.clip rendereffects "+dontdraw"
+			//long axis runs along Y for the near-90 yaws, along X for the near-0 one. A SOLID_BBOX is
+			//axis-aligned in world space regardless of angles, which is why the yaws are fixed near an
+			//axis and the box is matched to each one.
+			if(local.yaw[local.i] > 45){
+				local.clip setsize ( -58 -115 0) (58 115 112)
+			}else{
+				local.clip setsize ( -115 -58 0) (115 58 112)
+			}
+			local.clip solid
+		}
 
 		//one of them is still burning - a cold wreck reads as scenery, a burning one reads as recent
 		if(local.i == 2){
@@ -694,5 +843,2780 @@ coop_beachWrecks:{
 			local.smoke notsolid
 			local.smoke anim start
 		}
+	}
+}end
+
+
+//[user 2026-08-31] BEACH SMOKE SIGNAL.
+//
+//The landing used to open straight into "Get to the shingle". It now opens on a portable field radio at
+//the waterline: call the smoke drop, a white screen goes up along the run-in, and THAT releases the rest
+//of the mission. Every position is one of the user's own viewpos marks.
+//
+//OBJECTIVE INDEX 0, so it sorts to the TOP of the objective list. It was 8 first, which put it at the
+//BOTTOM - the HUD walks CS_OBJECTIVES..CS_OBJECTIVES+MAX_OBJECTIVES in index order
+//(cg_drawtools.cpp:761), so the index IS the sort key. 0 is free: retail owns 1-7 here, and the chain
+//cannot simply be renumbered because coop_mod/challenges.scr keys two awards off the literal strings
+//"m3l1a:3" and "m3l1a:7" (challenges.scr:1702 and :1771) - shifting retail would silently break Finest
+//Hour and Dog Green Present. Index 0 is safe: nothing tests the index for truthiness, and
+//current_objectives only ever compares it (global/objectives.scr:245, :463).
+//
+//RADIO IS models/items/walkietalkie.tik - the SCR-536 handie-talkie, which is the small portable set.
+//The first version used models/miscobj/radio_military.tik, a big static field station.
+//
+//VIEWPOS REPORTS THE EYE, NOT THE FEET, so every coordinate is lowered by 60 before use.
+//
+//SP is untouched: the caller only threads this when level.gametype != 0, and
+//level.coop_smokeSignalOn 0 restores the retail opening.
+//=========================================================================
+coop_smokeSignal:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( level.coop_smokeSignalOn == NIL ){ level.coop_smokeSignalOn = 1 }
+	if( level.coop_smokeSignalLife == NIL ){ level.coop_smokeSignalLife = 300 }
+
+	//Switched off, or the radio could not be built: fall back to the retail opening so the map is
+	//never left without a current objective.
+	if( !level.coop_smokeSignalOn ){
+		waitthread coop_smokeSignal_releaseShingle
+		end
+	}
+
+	local.rpos = (0 0 0)
+	local.rpos[0] = 297
+	local.rpos[1] = 312
+	local.rpos[2] = 0 - 479
+
+	//spawn by TIK path, not `spawn script_model` + model: walkietalkie.tik declares its own
+	//`classname animate` in its init/server block, and that block only runs on the TIK-spawn path.
+	local.radio = spawn "models/items/walkietalkie.tik"
+	if( local.radio == NULL ){				//entity-pool guard, bug-914 family
+		waitthread coop_smokeSignal_releaseShingle
+		end
+	}
+	//[user 2026-08-31] SIT IT ON THE SAND. The first version drove the origin straight to the viewpos
+	//mark minus 60, which left the set half-sunk in the beach. Spawn it clear of the ground and let the
+	//engine put it down.
+	local.radio.origin = local.rpos + (0 0 40)
+	local.radio.angles = (0 79 0)
+	local.radio notsolid
+	local.radio droptofloor
+	local.radio rendereffects "+fullbright"
+	level.coop_smokeRadio = local.radio
+
+	//[user 2026-08-31] THE RADIO ITSELF PULSES RED - no separate marker.
+	//The first version put a models/items/pulse_explosive.tik above it, which the user correctly called
+	//out twice over: it is a BOMB icon on a radio you are meant to talk into, and its red light was what
+	//made the radio look like it was flashing in the first place, so the two together read as one
+	//blinking thing with a bomb floating over it. A pulsing dynamic light on the radio does the whole
+	//job with one entity fewer, and it can be switched OFF the moment the call goes out - which a
+	//self-animating marker model cannot.
+	thread coop_smokeSignal_beacon local.radio
+
+	//trigger_use, not trigger_multiple: a solid trigger_multiple never fires on walk-over because
+	//G_TouchTriggers skips anything whose solid != SOLID_TRIGGER. Documented at objective_drop.scr:85.
+	local.trig = spawn trigger_use
+	if( local.trig == NULL ){
+		waitthread coop_smokeSignal_releaseShingle
+		end
+	}
+	local.trig.origin = local.rpos + (0 0 10)
+	local.trig solid
+	local.trig setsize ( -32 -32 -10) (32 32 72)
+	level.coop_smokeTrig = local.trig
+
+	waitthread global/objectives.scr::add_objectives 1 1 "Signal the smoke drop." local.rpos
+	waitthread global/objectives.scr::add_objectives 1 2
+	wait .5
+	waitthread global/objectives.scr::current_objectives 1
+
+	//Wait for a real player to use it. parm.other is the toucher (objective_drop.scr:143).
+	while( 1 ){
+		local.trig waittill trigger
+		local.user = parm.other
+		if( local.user == NULL ){ continue }
+		if( local.user.classname != "Player" ){ continue }
+		break
+	}
+
+	//Setting this stops coop_smokeSignal_beacon on its next tick, so the radio goes dark once used.
+	level.coop_smokeSignalDone = 1
+	if( level.coop_smokeTrig != NULL ){ level.coop_smokeTrig remove }
+	if( level.coop_smokeRadio != NULL ){ level.coop_smokeRadio lightOff }
+
+	//Call and answer, on the radio itself so it is positional. These are the mod's own airstrike
+	//request/response lines (ubersound/coop_audio.scr, scoped "m e t"), which is exactly the beat here:
+	//the player calls it in, fire control answers, then the rounds start landing.
+	if( level.coop_smokeRadio != NULL ){
+		level.coop_smokeRadio playsound coop_radio_airstrike_req
+	}
+	wait 1.6
+	if( level.coop_smokeRadio != NULL ){
+		level.coop_smokeRadio playsound coop_radio_airstrike_resp
+	}
+
+	iprintlnbold "Smoke drop called in. Move up under the smoke!"
+	waitthread global/objectives.scr::add_objectives 1 3
+
+	level.coop_smokeUp = 0
+	thread coop_smokeSignal_drop
+	thread coop_advanceOnSmoke
+	waitthread coop_smokeSignal_releaseShingle
+}end
+
+//Slow red pulse on the radio so it can be found on an open beach, and goes dark the moment it is used.
+//light/lightRadius/lightOn is the same locator recipe objective_drop.scr:107-113 uses for its pickup
+//glow; the only addition is lightOff on the off-beat to make it blink rather than glow steadily.
+//=========================================================================
+coop_smokeSignal_beacon local.ent:{
+//=========================================================================
+	if( local.ent == NULL ){ end }
+	local.ent light (1 0.12 0.08)
+	local.ent lightRadius 110
+
+	while( level.coop_smokeSignalDone != 1 ){
+		if( local.ent == NULL ){ end }
+		local.ent lightOn
+		wait 0.45
+		if( local.ent == NULL ){ end }
+		local.ent lightOff
+		wait 0.35
+	}
+	if( local.ent != NULL ){ local.ent lightOff }
+}end
+
+
+//Fires the barrage. Each round is its own thread with its own delay and its own scatter, so they land
+//RANDOMLY over about 16 seconds instead of all appearing at once.
+//=========================================================================
+coop_smokeSignal_drop:{
+//=========================================================================
+	local.sx[1] = 0 - 865
+	local.sy[1] = 1685
+	local.sz[1] = 0 - 415
+	local.sx[2] = 0 - 464
+	local.sy[2] = 1741
+	local.sz[2] = 0 - 396
+	local.sx[3] = 0 - 181
+	local.sy[3] = 1897
+	local.sz[3] = 0 - 341
+	local.sx[4] = 98
+	local.sy[4] = 1792
+	local.sz[4] = 0 - 361
+	local.sx[5] = 273
+	local.sy[5] = 2059
+	local.sz[5] = 0 - 341
+	local.sx[6] = 492
+	local.sy[6] = 2018
+	local.sz[6] = 0 - 417
+	local.sx[7] = 686
+	local.sy[7] = 1920
+	local.sz[7] = 0 - 379
+	local.sx[8] = 783
+	local.sy[8] = 1674
+	local.sz[8] = 0 - 362
+	local.sx[9] = 964
+	local.sy[9] = 1686
+	local.sz[9] = 0 - 362
+	local.sx[10] = 1190
+	local.sy[10] = 1654
+	local.sz[10] = 0 - 416
+	local.sx[11] = 1548
+	local.sy[11] = 1536
+	local.sz[11] = 0 - 468
+	local.sx[12] = 1455
+	local.sy[12] = 1240
+	local.sz[12] = 0 - 374
+	local.sx[13] = 919
+	local.sy[13] = 1035
+	local.sz[13] = 0 - 376
+
+	local.i = 1
+	while( local.i <= 13 ){
+		local.jx = ( randomint 240 ) - 120
+		local.jy = ( randomint 240 ) - 120
+		local.p = (0 0 0)
+		local.p[0] = local.sx[local.i] + local.jx
+		local.p[1] = local.sy[local.i] + local.jy
+		local.p[2] = local.sz[local.i] - 60
+		local.delay = randomfloat 16
+		thread coop_smokeSignal_round local.p local.delay local.i
+		local.i++
+	}
+	println( "^~^~^ SMOKESIG barrage n=13 life=" + level.coop_smokeSignalLife )
+
+	//[user 2026-08-31] THE SMOKE ACTUALLY PROTECTS YOU. "once the smoke starts dropping can we ensure
+	//that the damage dealt is temporarily extremely low... up until we get to the captain at the
+	//sandwall". mg42_damage_player already multiplies its distance curve by level.coop_beachDmg
+	//(coopified.scr, the BEACH LETHALITY BY DISTANCE block), so this is the intended lever - no second
+	//damage path, and it keeps working if that curve is retuned later.
+	//The saved value is restored rather than assumed to be 1, so a server that had already tuned
+	//coop_beachDmg gets its own number back.
+	if( level.coop_smokeDmgScale == NIL ){ level.coop_smokeDmgScale = 0.12 }
+	level.coop_beachDmgSaved = level.coop_beachDmg
+	level.coop_beachDmg = level.coop_smokeDmgScale
+	println( "^~^~^ SMOKESIG cover ON beachDmg=" + level.coop_beachDmg )
+
+	//[user 2026-08-31] The screen now comes down when the CAPTAIN HAS BEEN MET, not on a bare timer -
+	//"After you meet with the captain make the smoke SLOWLY start to fade." Meeting the captain is
+	//objective 3 in the renumbered chain (it was 2 before the smoke objective took slot 1), and
+	//global/objectives.scr sets $world.flags["objectiveCompleteN"] on completion, so that flag is the
+	//signal. The life timer stays as a backstop for anyone who never triggers it.
+	local.t = 0
+	while( local.t < level.coop_smokeSignalLife ){
+		if( $world.flags["objectiveComplete3"] == 1 ){ break }
+		wait 2
+		local.t = local.t + 2
+	}
+
+	//Reaching the captain at the sea wall ends the protection - the run-in was the part that needed
+	//to be survivable, not the rest of the mission. Objective 3 is "Meet up with the Captain" in the
+	//renumbered chain, and global/objectives.scr sets objectiveCompleteN on completion.
+	if( level.coop_beachDmgSaved != NIL ){ level.coop_beachDmg = level.coop_beachDmgSaved }
+	else{ level.coop_beachDmg = 1 }
+	println( "^~^~^ SMOKESIG cover OFF beachDmg=" + level.coop_beachDmg )
+
+	//SLOWLY: pull one column at a time with a random gap rather than deleting all 13 in a frame, so the
+	//screen thins and drifts apart instead of blinking out. Roughly 40-70s end to end.
+	local.i = 1
+	while( local.i <= 13 ){
+		if( level.coop_smokeCloud[local.i] != NIL && level.coop_smokeCloud[local.i] != NULL ){
+			level.coop_smokeCloud[local.i] remove
+		}
+		wait ( 2 + ( randomfloat 3 ) )
+		local.i++
+	}
+	println( "^~^~^ SMOKESIG cleared n=13" )
+}end
+
+//One smoke round: whistle in, thump, then the screen stands up.
+//=========================================================================
+coop_smokeSignal_round local.pos local.delay local.slot:{
+//=========================================================================
+	wait local.delay
+
+	//A dummy at the impact point carries the sound so it is POSITIONAL - the player hears each round
+	//land where it lands rather than on themselves.
+	local.mark = spawn script_model
+	if(local.mark != NULL && local.mark != NIL){
+		local.mark model "models/fx/dummy.tik"
+		local.mark.origin = local.pos
+		local.mark notsolid
+
+		//coop_arty_leadin_far*, NOT retail arty_leadin: the retail aliases carry maxdist 1600, which in
+		//this engine is a HARD START GATE rather than a rolloff, so a shell landing across the beach
+		//would simply not play. See the note at ubersound/coop_audio.scr:164.
+		local.r = randomint 3
+		if( local.r == 0 ){ local.mark playsound coop_arty_leadin_far1 }
+		else if( local.r == 1 ){ local.mark playsound coop_arty_leadin_far2 }
+		else{ local.mark playsound coop_arty_leadin_far3 }
+		wait 1.1
+
+		local.r = randomint 3
+		if( local.r == 0 ){ local.mark playsound coop_ex_close_01 }
+		else if( local.r == 1 ){ local.mark playsound coop_ex_close_02 }
+		else{ local.mark playsound coop_ex_close_03 }
+	}
+
+	local.sm = spawn "models/emitters/coop_smokescreen.tik"
+	if(local.sm != NULL && local.sm != NIL){			//entity-pool guard
+		local.sm.origin = local.pos
+		local.sm notsolid
+		local.sm anim start
+		level.coop_smokeCloud[local.slot] = local.sm
+		level.coop_smokeUp++
+	}
+
+	wait 3
+	if( local.mark != NULL ){ local.mark remove }
+}end
+
+//The retail opening, lifted out so every bail-out path above reaches the same place. This is
+//m3l1a.scr:2292-2295 verbatim.
+//=========================================================================
+coop_smokeSignal_releaseShingle:{
+//=========================================================================
+	waitthread global/objectives.scr::add_objectives 2 2		// get to the shingle, setting to active
+	wait .5
+	waitthread global/objectives.scr::current_objectives 2	// setting get to shingle as current
+}end
+
+//=========================================================================
+//[user 2026-08-31] AUTOMATIC ALLIED ADVANCE ON THE SMOKE.
+//
+//"you reach a certain point and they take off pushing up the beach after some radio man dies, im just
+//asking that to be executed automatically once the smoke hits."
+//
+//That beat is retail sequence tier 7 (m3l1a.scr::player_sequence_7_center): the tier that kills
+//$center_radioman with ai_mg_death and hands "move_mg_death"/"move_crouch" to all 13 named higgins
+//rangers. Their _path_7 chains end well UP the beach (ranger10: (408 344) -> (712 520) -> (768 872)
+//-> (768 1152)), which lands them in the smoke band. Tier 8, the final sprint to the shingle, is
+//deliberately left player-driven exactly as retail.
+//
+//THIS IS NOT A TIER JUMP. The radio sits at (297 312 -479). The tier-6 gate is a continuous
+//full-width wall at y 0..128 (brushes x -3584..192 and x 208..3648, a 16-unit seam a 32-unit-wide
+//player cannot thread); the tier-7 gate is at y 832..960. Nobody can be holding the radio without
+//having already crossed tier 6, so this is an in-order 6 -> 7 advance fired 584 units of beach early.
+//It is also a net safety WIN: sequence_7_spawn_shingle is the ONLY place $shingle_ranger1 (the
+//captain) is spawned, and sequence 9 does a bare field read on him for "Meet up with the Captain" -
+//so a party that walks around the tier-7 brushes soft-locks that chain TODAY.
+//
+//`trigger $ent` AT STATEMENT LEVEL, never a direct thread call and never `local.x trigger $ent`.
+//Statement-level trigger sends EV_Activate with WORLD as the activator and skips NULL entities, and
+//Trigger::TriggerStuff exempts world+EV_Activate from its respondTo gate - so a tier that already ran
+//is a silent no-op rather than a re-run. The entity form passes self as activator and is then dropped
+//silently, with nothing in qconsole.log. Retail precedent: m3l1a.scr:3555.
+//=========================================================================
+coop_advanceOnSmoke:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( level.coop_beachAdvanceOn == NIL ){ level.coop_beachAdvanceOn = 1 }
+	if( !level.coop_beachAdvanceOn ){ end }
+
+	//One shot, claimed BEFORE the first wait so four players cannot produce two runs.
+	if( level.coop_beachAdvanceDone == 1 ){ end }
+	level.coop_beachAdvanceDone = 1
+
+	//WAIT FOR THE SMOKE TO ACTUALLY STAND UP. Each of the 13 rounds carries its own randomfloat 16
+	//delay plus 1.1s of lead-in, so when coop_smokeSignal_drop returns there is no smoke out there at
+	//all. Count real clouds rather than guessing a delay - and do NOT wait for all 13: the counter is
+	//incremented INSIDE the entity-pool guard, so a slot can legitimately stay empty forever and a
+	//"wait for 13" loop would hang, silently never firing the advance.
+	//
+	//The same loop waits out the radioman. sequence_5_center_radioman holds isinsequence = 1 until a
+	//player closes to 160 units, then says his line and clears it. He stands 345 units from the radio,
+	//so at the moment the smoke is called he has NOT spoken - and tier 7 would shoot him mid-idle,
+	//deleting the very cue the user described. We WAIT for his line; we never say it ourselves, which
+	//would race his own parked thread and play it twice.
+	local.t = 0
+	local.ready = 0
+	while( local.t < 26 && local.ready == 0 ){
+		local.ok = 1
+		if( level.coop_smokeUp == NIL ){ local.ok = 0 }
+		else if( level.coop_smokeUp < 6 ){ local.ok = 0 }
+		if( $center_radioman != NULL ){
+			if( isalive $center_radioman ){
+				if( $center_radioman.isinsequence == 1 ){ local.ok = 0 }
+			}
+		}
+		if( local.ok == 1 ){ local.ready = 1 }
+		else{
+			wait 0.5
+			local.t = local.t + 0.5
+		}
+	}
+
+	//SEQUENCE GATE. Tier 6 sets level.m3l1a_sequence = 6 only after clearing its own
+	//`while (level.m3l1a_sequence_isupdating == 1)` spin, and tier 5 can hold that lock for ~3.2s, so
+	//a fast runner can be at the radio while the variable still reads 5. Wait it out rather than
+	//testing one instant and silently giving up.
+	local.t = 0
+	while( level.m3l1a_sequence != NIL && level.m3l1a_sequence < 6 && local.t < 20 ){
+		wait 0.5
+		local.t = local.t + 0.5
+	}
+
+	if( level.m3l1a_sequence == NIL || level.m3l1a_sequence == NULL ){
+		println( "^~^~^ BEACHADV abort reason=sequence_unset" )
+		end
+	}
+
+	//NEVER FIRE BACKWARDS. level.m3l1a_sequence IS the path index - ai_execute_todo composes
+	//$(self.targetname + "_path_" + self.nextsequence[1]) - so re-stamping 7 over an 8 would turn
+	//nine rangers around and walk them ~700 units back DOWN the beach.
+	if( level.m3l1a_sequence >= 7 ){
+		println( "^~^~^ BEACHADV skip reason=already_advanced seq=" + level.m3l1a_sequence )
+		end
+	}
+
+	//TIER 6 NEVER FIRED. Do NOT force it: sequence_6_spawn_shingle is the only spawner of
+	//shingle_wave1-18 and tier 7 hands todos to five of them. Geometrically unreachable, but guarded
+	//rather than trusted.
+	if( level.m3l1a_sequence < 6 ){
+		println( "^~^~^ BEACHADV abort reason=tier6_not_fired seq=" + level.m3l1a_sequence )
+		end
+	}
+
+	//THE CHARGE CALL - the map's own line, already spoken by this same ranger at m3l1a.scr:3619
+	//("get up the beach now....move move...cmon...go"). Skip him if he is mid-todo or mid-set-piece
+	//or his own waittill saydone gets stomped; ai_execute_todo owns .isbusy / .isinsequence.
+	local.caller = NULL
+	if( $higgins1_ranger10 != NULL ){
+		if( isalive $higgins1_ranger10 && $higgins1_ranger10.isinsequence != 1 && $higgins1_ranger10.isbusy != 1 ){
+			local.caller = $higgins1_ranger10
+		}
+	}
+	if( local.caller == NULL ){
+		if( $higgins5_ranger1 != NULL ){
+			if( isalive $higgins5_ranger1 && $higgins5_ranger1.isinsequence != 1 && $higgins5_ranger1.isbusy != 1 ){
+				local.caller = $higgins5_ranger1
+			}
+		}
+	}
+	if( local.caller != NULL ){
+		local.caller say streamed_dfr_scripted_M3L1_044a
+	}
+
+	//The alias carries maxDist 1500, and in this engine that is a HARD START GATE rather than a
+	//rolloff (see ubersound/coop_audio.scr), so a player already past y 1500 hears nothing. Pair the
+	//diegetic line with one print. Do NOT re-declare 044a under a wider coop alias: `say` resolves
+	//the lipsync anim BY ALIAS NAME, and the .skc ships only under the original name.
+	iprintlnbold "Get up the beach! Move! Move!"
+
+	wait 0.75
+
+	//Re-test: a player can trip the real gate at y 896 during the shout.
+	if( level.m3l1a_sequence >= 7 ){
+		println( "^~^~^ BEACHADV skip reason=raced_by_player" )
+		end
+	}
+
+	if( $player_sequence_7_center != NIL && $player_sequence_7_center != NULL ){
+		trigger $player_sequence_7_center
+		println( "^~^~^ BEACHADV fired tier=7 branch=center smokeUp=" + level.coop_smokeUp )
+	}else{
+		println( "^~^~^ BEACHADV skip reason=trigger_gone" )
+		end
+	}
+
+	//ANTI-REGRESSION SWEEP. Every tier deletes only its OWN three siblings, so a tier that was
+	//physically walked around stays live BEHIND the party. Tier 5's brush seams are 40 and 48 units,
+	//wider than the 32-unit player, so tiers 2-5 are genuinely skippable by running the seam. If one
+	//fires after this it re-stamps level.m3l1a_sequence backwards, the rangers walk back down the
+	//beach, and sequence_7_shingle_chatter's `while (level.m3l1a_sequence == 7)` loop ends for good.
+	//nottriggerable rather than delete: TriggerStuff early-outs on it, and nothing else in the map
+	//addresses these entities. TIER 6 IS DELIBERATELY NOT SWEPT - it has fired by definition of the
+	//gate above, and it is the only spawner of shingle_wave1-18.
+	local.n = 2
+	while( local.n <= 5 ){
+		local.e = $( "player_sequence_" + local.n + "_center" )
+		if( local.e != NULL ){ local.e nottriggerable }
+		local.e = $( "player_sequence_" + local.n + "_right" )
+		if( local.e != NULL ){ local.e nottriggerable }
+		local.e = $( "player_sequence_" + local.n + "_left" )
+		if( local.e != NULL ){ local.e nottriggerable }
+		local.n++
+	}
+	println( "^~^~^ BEACHADV swept tiers=2-5" )
+}end
+
+//=========================================================================
+//[user 2026-08-31] FLANK MG42s - "they should come out of the bluff once the bangalores are destroyed".
+//
+//$mg42_left1/2 and $mg42_right1/2 are fully configured turretweapon_german_mg42-fake entities sitting
+//on the bluff, and NOTHING has ever told them to fire - not in coop and not in retail. Their entire
+//setup block is commented out at m3l1a.scr:788-808 under the author's own note, "are these even used?"
+//Only the four bunker guns ever shoot.
+//
+//They ship `rendereffects "+dontdraw"`, i.e. sent to the client but not drawn - which is exactly why
+//"come out of the bluff" works as written: clearing the flag reveals guns that were already there,
+//already aimed. $mg42_right2 is even authored at angle 225, pre-yawed to enfilade in from the right.
+//
+//BALANCE. Deliberately NOT the bunkers' `bulletspread 5 7`. Four more guns at the bunkers' accuracy,
+//opening at the moment the party is committed and moving, is a wall rather than an escalation. These
+//run a much wider cone and a longer pause between bursts: they are pressure and noise from the flanks,
+//not a second kill zone. level.coop_flankMGSpread / level.coop_flankMGGap tune it without a rebuild.
+//
+//They aim at the map's own $mg42_target_left / _right beaten-zone origins, the same points the bunker
+//guns use - never at a player directly, which is what makes them suppressive rather than lethal.
+//=========================================================================
+coop_flankMG:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( level.coop_flankMGOn == NIL ){ level.coop_flankMGOn = 1 }
+	if( !level.coop_flankMGOn ){ end }
+	if( level.coop_flankMGDone == 1 ){ end }		//one shot - three bangalores, one reveal
+	level.coop_flankMGDone = 1
+
+	if( level.coop_flankMGSpreadA == NIL ){ level.coop_flankMGSpreadA = 14 }
+	if( level.coop_flankMGSpreadB == NIL ){ level.coop_flankMGSpreadB = 18 }
+	if( level.coop_flankMGGap == NIL ){ level.coop_flankMGGap = 3 }
+
+	//Left and right are tracked separately so each gun fires into its own side's beaten zone.
+	local.ln = 0
+	if( $mg42_left1 != NULL ){ local.ln++; local.lg[local.ln] = $mg42_left1 }
+	if( $mg42_left2 != NULL ){ local.ln++; local.lg[local.ln] = $mg42_left2 }
+	local.rn = 0
+	if( $mg42_right1 != NULL ){ local.rn++; local.rg[local.rn] = $mg42_right1 }
+	if( $mg42_right2 != NULL ){ local.rn++; local.rg[local.rn] = $mg42_right2 }
+
+	if( local.ln < 1 && local.rn < 1 ){
+		println( "^~^~^ FLANKMG no flank guns on this map" )
+		end
+	}
+
+	//Configure and reveal. This is the commented-out retail block, widened, minus the +dontdraw.
+	local.i = 1
+	while( local.i <= local.ln ){
+		local.lg[local.i] burstfiresettings .01 .01 .3 .3
+		local.lg[local.i] firedelay .5
+		local.lg[local.i] tracerfrequency 1
+		local.lg[local.i] maxyawoffset 45
+		local.lg[local.i] pitchcaps (0 45 0)
+		local.lg[local.i] setplayerusable 0
+		local.lg[local.i] bulletspread level.coop_flankMGSpreadA level.coop_flankMGSpreadB
+		local.lg[local.i] rendereffects "-dontdraw"
+		local.i++
+	}
+	local.i = 1
+	while( local.i <= local.rn ){
+		local.rg[local.i] burstfiresettings .01 .01 .3 .3
+		local.rg[local.i] firedelay .5
+		local.rg[local.i] tracerfrequency 1
+		local.rg[local.i] maxyawoffset 45
+		local.rg[local.i] pitchcaps (0 45 0)
+		local.rg[local.i] setplayerusable 0
+		local.rg[local.i] bulletspread level.coop_flankMGSpreadA level.coop_flankMGSpreadB
+		local.rg[local.i] rendereffects "-dontdraw"
+		local.i++
+	}
+
+	iprintlnbold "Machine guns on the flanks! Keep moving!"
+	println( "^~^~^ FLANKMG revealed left=" + local.ln + " right=" + local.rn )
+
+	//Alternating bursts, left battery then right, so the fire sweeps rather than saturating.
+	while( level.coop_flankMGOn ){
+		local.i = 1
+		while( local.i <= local.ln ){
+			if( local.lg[local.i] != NULL && $mg42_target_left != NULL ){
+				local.lg[local.i] setaimtarget $mg42_target_left[((randomint 4) + 1)]
+				local.lg[local.i] startfiring
+			}
+			local.i++
+		}
+		wait ( (randomint 3) + 2 )
+		local.i = 1
+		while( local.i <= local.ln ){
+			if( local.lg[local.i] != NULL ){ local.lg[local.i] stopfiring }
+			local.i++
+		}
+
+		wait ( randomfloat level.coop_flankMGGap )
+
+		local.i = 1
+		while( local.i <= local.rn ){
+			if( local.rg[local.i] != NULL && $mg42_target_right != NULL ){
+				local.rg[local.i] setaimtarget $mg42_target_right[((randomint 4) + 1)]
+				local.rg[local.i] startfiring
+			}
+			local.i++
+		}
+		wait ( (randomint 3) + 2 )
+		local.i = 1
+		while( local.i <= local.rn ){
+			if( local.rg[local.i] != NULL ){ local.rg[local.i] stopfiring }
+			local.i++
+		}
+
+		wait ( randomfloat level.coop_flankMGGap )
+	}
+}end
+
+
+
+
+//=========================================================================
+//[user 2026-08-31] BLOOD ON THE BEACH - a pool under every one of the map's baked-in dead.
+//
+//The user asked for a bloodier beach. m3l1a ships 43 body_us* static models lying on the sand and not
+//one of them has any blood under it, which is most of why the beach reads clean.
+//
+//The coordinates below are NOT hand-placed: they were read straight out of maps/m3l1a.bsp,
+//LUMP_STATICMODELDEF (lump 25, 164-byte dstaticModel_t records), filtered to body_us*. That is why
+//they land exactly under the corpses rather than approximately near them.
+//
+//These are static, permanent and cheap: one plane each, no update loop, no per-frame cost. The
+//shader carries polygonOffset, which is what keeps them off the opaque sand without z-fighting.
+//
+//Blood in the SURF is deliberately NOT done here - it is a stage inside
+//scripts/zz_coop_shoreline.shader instead. That surface carries a deformVertexes flap which moves it
+//vertically every ~12.5s, and no separate entity can follow a per-vertex deform, so a floating plane
+//would sink under the wash and surface through it. A stage inherits the deform for free.
+//=========================================================================
+coop_beachBlood:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachBloodOn == NIL){ level.coop_beachBloodOn = 1 }
+	if(!level.coop_beachBloodOn){ end }
+
+	local.n = 0
+	local.n++; local.bx[local.n] = 2600; local.by[local.n] = 5048; local.bz[local.n] = 0 - 538
+	local.n++; local.bx[local.n] = 2013; local.by[local.n] = 4612; local.bz[local.n] = 0 - 504
+	local.n++; local.bx[local.n] = 2152; local.by[local.n] = 4800; local.bz[local.n] = 0 - 504
+	local.n++; local.bx[local.n] = 1901; local.by[local.n] = 4581; local.bz[local.n] = 0 - 504
+	local.n++; local.bx[local.n] = 2605; local.by[local.n] = 4797; local.bz[local.n] = 0 - 504
+	local.n++; local.bx[local.n] = 2501; local.by[local.n] = 4596; local.bz[local.n] = 0 - 504
+	local.n++; local.bx[local.n] = 1087; local.by[local.n] = 0 - 126; local.bz[local.n] = 0 - 470
+	local.n++; local.bx[local.n] = 0 - 221; local.by[local.n] = 1162; local.bz[local.n] = 0 - 455
+	local.n++; local.bx[local.n] = 311; local.by[local.n] = 1036; local.bz[local.n] = 0 - 458
+	local.n++; local.bx[local.n] = 1490; local.by[local.n] = 652; local.bz[local.n] = 0 - 457
+	local.n++; local.bx[local.n] = 252; local.by[local.n] = 563; local.bz[local.n] = 0 - 460
+	local.n++; local.bx[local.n] = 0 - 1083; local.by[local.n] = 0 - 584; local.bz[local.n] = 0 - 475
+	local.n++; local.bx[local.n] = 696; local.by[local.n] = 0 - 242; local.bz[local.n] = 0 - 471
+	local.n++; local.bx[local.n] = 0 - 678; local.by[local.n] = 815; local.bz[local.n] = 0 - 459
+	local.n++; local.bx[local.n] = 0 - 1274; local.by[local.n] = 1080; local.bz[local.n] = 0 - 453
+	local.n++; local.bx[local.n] = 0 - 830; local.by[local.n] = 0 - 1082; local.bz[local.n] = 0 - 507
+	local.n++; local.bx[local.n] = 0 - 352; local.by[local.n] = 0 - 985; local.bz[local.n] = 0 - 492
+	local.n++; local.bx[local.n] = 43; local.by[local.n] = 0 - 941; local.bz[local.n] = 0 - 496
+	local.n++; local.bx[local.n] = 0 - 534; local.by[local.n] = 435; local.bz[local.n] = 0 - 465
+	local.n++; local.bx[local.n] = 0 - 1127; local.by[local.n] = 0 - 52; local.bz[local.n] = 0 - 467
+	local.n++; local.bx[local.n] = 0 - 390; local.by[local.n] = 0 - 406; local.bz[local.n] = 0 - 470
+	local.n++; local.bx[local.n] = 1267; local.by[local.n] = 0 - 858; local.bz[local.n] = 0 - 488
+	local.n++; local.bx[local.n] = 0 - 1621; local.by[local.n] = 840; local.bz[local.n] = 0 - 461
+	local.n++; local.bx[local.n] = 0 - 905; local.by[local.n] = 1165; local.bz[local.n] = 0 - 454
+	local.n++; local.bx[local.n] = 0 - 241; local.by[local.n] = 0 - 31; local.bz[local.n] = 0 - 465
+	local.n++; local.bx[local.n] = 1130; local.by[local.n] = 712; local.bz[local.n] = 0 - 459
+	local.n++; local.bx[local.n] = 0 - 1309; local.by[local.n] = 321; local.bz[local.n] = 0 - 466
+	local.n++; local.bx[local.n] = 0 - 1436; local.by[local.n] = 0 - 316; local.bz[local.n] = 0 - 474
+	local.n++; local.bx[local.n] = 825; local.by[local.n] = 979; local.bz[local.n] = 0 - 456
+	local.n++; local.bx[local.n] = 497; local.by[local.n] = 0 - 1109; local.bz[local.n] = 0 - 507
+	local.n++; local.bx[local.n] = 1578; local.by[local.n] = 0 - 157; local.bz[local.n] = 0 - 468
+	local.n++; local.bx[local.n] = 1337; local.by[local.n] = 0 - 531; local.bz[local.n] = 0 - 474
+	local.n++; local.bx[local.n] = 907; local.by[local.n] = 0 - 833; local.bz[local.n] = 0 - 480
+	local.n++; local.bx[local.n] = 1435; local.by[local.n] = 1129; local.bz[local.n] = 0 - 456
+	local.n++; local.bx[local.n] = 415; local.by[local.n] = 218; local.bz[local.n] = 0 - 464
+	local.n++; local.bx[local.n] = 0 - 1596; local.by[local.n] = 0; local.bz[local.n] = 0 - 468
+	local.n++; local.bx[local.n] = 1459; local.by[local.n] = 251; local.bz[local.n] = 0 - 467
+	local.n++; local.bx[local.n] = 0 - 23; local.by[local.n] = 265; local.bz[local.n] = 0 - 463
+	local.n++; local.bx[local.n] = 0 - 1445; local.by[local.n] = 1497; local.bz[local.n] = 0 - 453
+	local.n++; local.bx[local.n] = 0 - 2019; local.by[local.n] = 1297; local.bz[local.n] = 0 - 447
+	local.n++; local.bx[local.n] = 0 - 442; local.by[local.n] = 4602; local.bz[local.n] = 0 - 385
+	local.n++; local.bx[local.n] = 170; local.by[local.n] = 0 - 341; local.bz[local.n] = 0 - 472
+	local.n++; local.bx[local.n] = 867; local.by[local.n] = 274; local.bz[local.n] = 0 - 467
+
+	local.i = 1
+	local.made = 0
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.bx[local.i]
+		local.p[1] = local.by[local.i]
+		//+2 so the plane sits proud of the sand; polygonOffset does the rest
+		local.p[2] = local.bz[local.i] + 2
+
+		local.pool = spawn "models/fx/coop_bloodslick.tik"
+		if(local.pool != NULL && local.pool != NIL){			//entity-pool guard
+			local.pool.origin = local.p
+			local.pool.angles = (0 (randomint 360) 0)
+			//the plane is ~293u across at scale 1, far bigger than a man - 0.3..0.5 reads as a pool
+			local.pool scale (0.3 + (randomfloat 0.2))
+			local.pool notsolid
+			local.made++
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHBLOOD pools=" + local.made + "/" + local.n)
+}end
+
+//=========================================================================
+//[user 2026-08-31] RUN-IN SHELLING - shells landing in the water around the Higgins boats.
+//
+//User: "I dont feel like there are any explosions hitting the water while we are boating in on omaha,
+//I would expect explosions to be happening at random around the higgins boats with giant explosive
+//waves coming up and the sound of water being hit by the bombs." The map had no water FX at all.
+//
+//PLACEMENT IS PLAYER-RELATIVE, and that is the whole difficulty: the fleet is moving north the entire
+//time, so any fixed list of impact points would either trail behind the boats or sit ahead of them.
+//Each shell is offset from a living player instead, so the barrage travels with the run-in.
+//
+//The offsets are biased SOUTH (oy runs about -1360..+560) for two reasons: shells landing behind and
+//beside the boat read as the barrage the boat is driving through, and it keeps impacts off the sand
+//without needing a hard Y clamp - a clamp would stack the north-thrown shells into a visible straight
+//row on the clamp line. The absolute guard below is a safety net, not the mechanism.
+//
+//Minimum standoff is enforced by pushing each offset away from zero, so a shell can never land on the
+//boat the players are riding. NOTHING here calls radiusdamage: the players are on a scripted ride and
+//must not be hurt by set dressing. fx_mortar_water.tik is classname effectentity + notsolid and plays
+//its own arty_exp_water on the client, so there is no playsound here either - adding one would double
+//every impact.
+//=========================================================================
+coop_runInShelling:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_runInShellOn == NIL){ level.coop_runInShellOn = 1 }
+	if(!level.coop_runInShellOn){ end }
+	if(level.coop_runInShellGap == NIL){ level.coop_runInShellGap = 1.3 }
+
+	level.coop_runInShelling = 1
+	local.elapsed = 0
+	println("^~^~^ RUNINSHELL started")
+
+	//[user 2026-08-31] one round lands RIGHT BESIDE the boat, with the concussion wash.
+	thread coop_runInShelling_nearMiss
+
+	while(level.coop_runInShelling){
+		//pick a living player to hang the barrage off
+		local.pl = NULL
+		if($player != NULL && $player != NIL && $player.size > 0){
+			local.try = 0
+			while(local.try < 4 && local.pl == NULL){
+				local.cand = $player[((randomint $player.size) + 1)]
+				if(local.cand != NULL && local.cand.health > 0){ local.pl = local.cand }
+				local.try++
+			}
+		}
+		if(local.pl == NULL){
+			wait 0.5
+			local.elapsed = local.elapsed + 0.5
+			if(local.elapsed > 150){ break }
+			continue
+		}
+
+		local.ox = (randomint 1600) - 800
+		local.oy = (randomint 1400) - 1100
+		//push off zero so a round can never land on the boat itself
+		if(local.ox >= 0){ local.ox = local.ox + 320 }else{ local.ox = local.ox - 320 }
+		if(local.oy >= 0){ local.oy = local.oy + 260 }else{ local.oy = local.oy - 260 }
+
+		local.pos = (0 0 0)
+		local.pos[0] = local.pl.origin[0] + local.ox
+		local.pos[1] = local.pl.origin[1] + local.oy
+		//the map author's own water-impact height: every baked mortar-water anchor sits here
+		local.pos[2] = 0 - 496
+		//safety net only - the southward bias means this practically never fires
+		if(local.pos[1] > (0 - 2000)){ local.pos[1] = 0 - 2000 }
+
+		local.sh = spawn "models/animate/fx_mortar_water.tik"
+		if(local.sh != NULL && local.sh != NIL){			//entity-pool guard
+			local.sh.origin = local.pos
+			local.sh notsolid
+			local.sh anim start
+
+			//close ones shake the boat. earthquake_radius is the ONLY shake that works here - every
+			//jitter_* label in this map early-outs on `if($player.size > 1){ end }`.
+			if(local.ox < 700 && local.ox > (0 - 700) && local.oy < 700 && local.oy > (0 - 700)){
+				thread coop_mod/main.scr::earthquake_radius local.pos 0.5 0.8 750
+			}
+
+			wait 3
+			if(local.sh != NULL){ local.sh remove }
+			local.elapsed = local.elapsed + 3
+		}else{
+			wait 3
+			local.elapsed = local.elapsed + 3
+		}
+
+		local.gap = (randomfloat level.coop_runInShellGap) + 0.45
+		wait local.gap
+		local.elapsed = local.elapsed + local.gap
+
+		//two independent leak guards: the ride can end on a path that skips the stop hook (map
+		//restart, everyone disconnects, coop_devTest collapsing the ride to time 1)
+		if(local.elapsed > 150){ break }
+		if($player == NULL || $player == NIL){ break }
+		if($player.size <= 0){ break }
+	}
+
+	level.coop_runInShelling = 0
+	println("^~^~^ RUNINSHELL stopped t=" + local.elapsed)
+}end
+
+//One deliberate near miss during the run-in. The random barrage keeps its distance on purpose - it must
+//never land on the boat - so without this the whole ride stays at arm's length and nothing ever makes the
+//player flinch. This one is scripted: close enough to soak the screen, still outside the hull.
+//
+//The shellshock is the mod's own coop_tinnitus_triggerBlast (coop_mod/tinnitus.scr:93), called with
+//closeness 1 = point-blank, which plays the ring AND layers the 10s concussion wash and the world-SFX
+//duck. It is called on EVERY living player, not just one, because they are all in the same boat.
+//=========================================================================
+coop_runInShelling_nearMiss:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_nearMissAt == NIL){ level.coop_nearMissAt = 7.5 }
+	wait level.coop_nearMissAt
+	if(!level.coop_runInShelling){ end }
+
+	local.pl = NULL
+	if($player != NULL && $player != NIL && $player.size > 0){
+		local.i = 1
+		while(local.i <= $player.size && local.pl == NULL){
+			if($player[local.i] != NULL && $player[local.i].health > 0){ local.pl = $player[local.i] }
+			local.i++
+		}
+	}
+	if(local.pl == NULL){ end }
+
+	//just off the port side and slightly astern - close enough to drench, clear of the hull
+	local.pos = (0 0 0)
+	local.pos[0] = local.pl.origin[0] - 210
+	local.pos[1] = local.pl.origin[1] - 150
+	local.pos[2] = 0 - 496
+
+	local.sh = spawn "models/animate/fx_mortar_water.tik"
+	if(local.sh != NULL && local.sh != NIL){
+		local.sh.origin = local.pos
+		local.sh notsolid
+		local.sh anim start
+	}
+
+	thread coop_mod/main.scr::earthquake_radius local.pos 1.2 1.6 1400
+
+	local.i = 1
+	while($player != NULL && $player != NIL && local.i <= $player.size){
+		if($player[local.i] != NULL && $player[local.i].health > 0){
+			$player[local.i] thread coop_mod/tinnitus.scr::coop_tinnitus_triggerBlast 1
+		}
+		local.i++
+	}
+	//[user 2026-08-31] AND THE MEN IN THE BOAT REACT TO IT.
+	//
+	//A shell goes up point-blank off the side, it shakes every screen and rings every player's ears -
+	//and the ten Rangers standing shoulder to shoulder with you carried on swaying placidly. These two
+	//threads are retail's own, already written and already used for six FIXED beats on the run-in
+	//(m3l1a.scr:3239-3284); this simply fires them at the shell that actually lands next to you.
+	//
+	//Costs nothing: no entity, no tempmodel, no thread of our own - ten anim calls on actors that
+	//already exist. higgins1_flinch is all `upperanim`, so it layers over the legs and cannot disturb
+	//the glue that holds the crew to the boat; higgins1_crouch is a full-body anim, which is why the
+	//crouch goes first and the flinch lands on top of it.
+	//
+	//The 0.35s gap is the point - a duck, then the flinch as it registers, rather than both at once.
+	//
+	//$higgins1_ranger4 is skipped inside those threads while coop_seasickPlaying is up, so this cannot
+	//stomp the seasick man if the two overlap - which they will, since the puke fires at 6-13s and
+	//this at 7.5s.
+	if(level.coop_crewFlinchOn == NIL){ level.coop_crewFlinchOn = 1 }
+	if(level.coop_crewFlinchOn){
+		thread maps/m3l1a.scr::higgins1_crouch
+		wait 0.35
+		thread maps/m3l1a.scr::higgins1_flinch
+	}
+
+	println("^~^~^ RUNINSHELL nearmiss")
+
+	wait 4
+	if(local.sh != NULL && local.sh != NIL){ local.sh remove }
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] OMAHA: MORE BOATS, AND THEY LAND.
+//
+//User: "place way more higgins boats that are advancing or some already ashore", "a few more of those
+//higgins boats also got hit and blew up", "ensure they all end up landing and opening and soldiers
+//come out, even if they are scripted to get shot up or blown up upon landing", "some higgins boats on
+//fire after they blow up".
+//
+//WHY THIS IS CHEAP: models/vehicles/higginslite_soldiers.tik is ONE entity containing the hull, three
+//soldier groups AND the coxswain. A boat full of men costs a single edict. `anim removeguys` empties
+//it - which is how a boat "unloads" here without spawning eight actors and wrecking the entity pool.
+//
+//POSITIONS WERE RE-SOLVED. The first pass put five of six ashore boats INSIDE beach obstacles, because
+//the ground height for each spot had been taken from its NEAREST static model - which guarantees a
+//boat sits on top of one. These are chosen for >=460u clearance from any BSP static, with the height
+//averaged from statics in the 430-1100u band instead. Verified against LUMP_STATICMODELDEF.
+//
+//RAMP-DOWN BOATS ARE YAW 90 AND ONLY YAW 90 - the hinge offset is measured in the unrotated frame and
+//rotatez is ROLL. `anim removeguys`, never `removesoldiers`: the latter's wildcards nodraw the
+//COXSWAIN's head as well, giving a headless boat driver.
+//=========================================================================
+coop_extraBoats:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_xboatsOn == NIL){ level.coop_xboatsOn = 1 }
+	if(!level.coop_xboatsOn){ end }
+
+	//---------------- already ashore: ramp down, emptied, some of them wrecked and burning
+	local.n = 0
+	local.n++; local.asx[local.n] = 0 - 3000; local.asy[local.n] = 0 - 1240; local.asz[local.n] = 0 - 499
+	local.n++; local.asx[local.n] = 0 - 2820; local.asy[local.n] = 0 - 2500; local.asz[local.n] = 0 - 561
+	local.n++; local.asx[local.n] = 0 - 1620; local.asy[local.n] = 0 - 1600; local.asz[local.n] = 0 - 528
+	local.n++; local.asx[local.n] = 2520; local.asy[local.n] = 0 - 2500; local.asz[local.n] = 0 - 557
+	local.n++; local.asx[local.n] = 3360; local.asy[local.n] = 0 - 1720; local.asz[local.n] = 0 - 542
+
+	local.i = 1
+	local.made = 0
+	while(local.i <= local.n && local.made < 16){
+		local.p = (0 0 0)
+		local.p[0] = local.asx[local.i]
+		local.p[1] = local.asy[local.i]
+		local.p[2] = local.asz[local.i]
+
+		//two of the five are burning wrecks - the damaged hull reads as "this one did not make it"
+		local.wrecked = 0
+		if(local.i == 2 || local.i == 4){ local.wrecked = 1 }
+
+		local.hull = spawn script_model model "models/vehicles/higginslite_soldiers.tik"
+		if(local.hull != NULL && local.hull != NIL){			//entity-pool guard
+			local.hull.origin = local.p + (0 0 120)
+			local.hull.angles = (0 90 0)
+			local.hull notsolid
+			local.hull droptofloor
+			local.hull anim removeguys		//emptied - these men are already on the sand
+			local.made++
+			if(local.wrecked){ thread coop_boatBurn local.p }
+
+			local.door = spawn script_model model "models/vehicles/higginsdoor.tik"
+			if(local.door != NULL && local.door != NIL){
+				local.door.origin = local.p
+				local.door.angles = (0 90 0)
+				local.door notsolid
+				//the door mesh sits ~265u forward of its entity origin, so it must hinge off a
+				//separate origin or it swings through the hull
+				local.hinge = spawn script_origin
+				if(local.hinge != NULL && local.hinge != NIL){
+					local.hinge.origin = local.p + (0 263 40)
+					local.door bind local.hinge
+					local.hinge time 0.1
+					local.hinge rotatezdown 90
+					local.hinge move
+				}
+			}
+		}
+		local.i++
+	}
+
+	//---------------- still coming in, bound to the fleet: each one lands, drops its ramp and unloads
+	local.n = 0
+	local.n++; local.afx[local.n] = 0 - 3400; local.afy[local.n] = 0 - 6400
+	local.n++; local.afx[local.n] = 0 - 2600; local.afy[local.n] = 0 - 5600
+	local.n++; local.afx[local.n] = 0 - 1500; local.afy[local.n] = 0 - 6150
+	local.n++; local.afx[local.n] = 1900; local.afy[local.n] = 0 - 6300
+	local.n++; local.afx[local.n] = 3100; local.afy[local.n] = 0 - 5750
+	local.n++; local.afx[local.n] = 760; local.afy[local.n] = 0 - 5900
+
+	local.i = 1
+	while(local.i <= local.n && local.made < 16){
+		local.p = (0 0 0)
+		local.p[0] = local.afx[local.i]
+		local.p[1] = local.afy[local.i]
+		local.p[2] = 0 - 544
+
+		local.hull = spawn script_model model "models/vehicles/higginslite_soldiers.tik"
+		if(local.hull != NULL && local.hull != NIL){
+			local.hull.origin = local.p
+			local.hull.angles = (0 90 0)
+			local.hull notsolid
+			local.hull anim idle			//troops and coxswain aboard
+			if($higgins_fleet != NULL && $higgins_fleet != NIL){ local.hull bind $higgins_fleet }
+			local.made++
+
+			local.door = spawn script_model model "models/vehicles/higginsdoor.tik"
+			if(local.door != NULL && local.door != NIL){
+				local.door.origin = local.p
+				local.door.angles = (0 90 0)
+				local.door notsolid
+				if($higgins_fleet != NULL && $higgins_fleet != NIL){ local.door bind $higgins_fleet }
+			}
+
+			//every one of them lands and unloads. Two are hit on the way in and burn - but they still
+			//drop the ramp first, because a boat that never opens just reads as scenery.
+			local.doomed = 0
+			if(local.i == 2 || local.i == 5){ local.doomed = 1 }
+			thread coop_boatLand local.hull local.door local.doomed local.i
+		}
+		local.i++
+	}
+
+	println("^~^~^ XBOATS placed=" + local.made)
+}end
+
+//One incoming boat: run in with the fleet, drop the ramp, empty out. The doomed ones take a shell on
+//the way and burn, but they still open - the user asked for that explicitly.
+//=========================================================================
+coop_boatLand local.hull local.door local.doomed local.slot:{
+//=========================================================================
+	if(local.hull == NULL){ end }
+
+	//stagger so they do not all beach in the same second
+	wait ( 6 + ( randomfloat 9 ) + ( local.slot * 1.5 ) )
+	if(local.hull == NULL){ end }
+
+	if(local.doomed == 1){
+		//hit on the run-in: burst, then the hull burns for the rest of the map
+		//[user 2026-08-31] THE MAP'S OWN BOAT-DEATH EFFECT, instead of a water splash.
+		//
+		//models/animate/fx_mortar_higgins.tik is purpose-built for exactly this event - a bang.spr
+		//flash at +256, a 30-second volumetric greasefire, two burst clouds and thirty woodsplinter
+		//chunks. Retail fires it five times on this map (m3l1a.scr:3100 and the bangalore sites), so
+		//it is proven here; the coop-added doomed boats were the odd ones out, dying in a splash that
+		//reads as a NEAR MISS while the retail boat beside you gets a fireball. This makes them match.
+		//
+		//No `angles` set: the tik's own init supplies angles 270 0 0 and all four retail instances
+		//run it that way.
+		local.hit = local.hull.origin + (0 0 40)
+		local.b = spawn "models/animate/fx_mortar_higgins.tik"
+		if(local.b != NULL && local.b != NIL){
+			local.b.origin = local.hit
+			local.b notsolid
+			local.b anim start
+		}
+		//SOUND ON THE HULL, and the long-range alias. exp_higgins is 320/2200 and these boats sit
+		//3200-3500 units out, so under AL_LINEAR_DISTANCE_CLAMPED its gain is exactly zero - the
+		//player would hear nothing at all. higgins_explosion is 500/5000 off the same wav and is what
+		//m3l1a.scr:3101 already plays for this event. The hull also outlives the fx entity, so a 7s
+		//report is not cut off by the remove below.
+		local.hull playsound higgins_explosion
+		thread coop_mod/main.scr::earthquake_radius local.hit 0.8 1.1 1500
+		thread coop_boatBurn local.hull.origin
+		local.hull model "models/vehicles/higgins_damage.tik"
+		//6s, not 1.2s: at 1.2 the smoke originemitter has barely started (~6 sources) and the
+		//standing column never forms. 6s gives it ~30 and still frees the entity long before the
+		//tik's own commanddelay 30 emitteroff.
+		wait 6
+		if(local.b != NULL && local.b != NIL){ local.b remove }
+	}
+
+	//ramp down - even the wrecked ones open
+	if(local.door != NULL){
+		local.hinge = spawn script_origin
+		if(local.hinge != NULL && local.hinge != NIL){
+			local.hinge.origin = local.door.origin + (0 263 40)
+			local.door bind local.hinge
+			local.hinge time 0.6
+			local.hinge rotatezdown 90
+			local.hinge move
+		}
+	}
+
+	//and the men go out. The tik carries the whole boatload, so emptying it IS the disembark.
+	wait ( 2 + ( randomfloat 2 ) )
+	if(local.hull != NULL && local.doomed != 1){ local.hull anim removeguys }
+}end
+
+//A burning hull: fire, smoke and a long column, for the rest of the map.
+//=========================================================================
+coop_boatBurn local.pos:{
+//=========================================================================
+	if(local.pos == NIL){ end }
+	local.f = spawn "models/emitters/firegood.tik"
+	if(local.f != NULL && local.f != NIL){
+		local.f.origin = local.pos + (0 0 30)
+		local.f notsolid
+		local.f anim start
+		local.f loopsound fire_med
+	}
+	local.sm = spawn "models/emitters/linger_smoke.tik"
+	if(local.sm != NULL && local.sm != NIL){
+		local.sm.origin = local.pos + (0 0 60)
+		local.sm notsolid
+		local.sm scale 2
+		local.sm anim start
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-31] THE WIDER INVASION - "we should see allies way outside of the beach area that we
+//are on too arriving in higgins boats and mg fire, explosions, etc. all over that area".
+//
+//Purely to be looked at: everything here sits outside the playable beach (|x| >= 4600), nothing is
+//solid, nothing does damage, and no AI is spawned. It is the rest of Omaha happening without you.
+//=========================================================================
+coop_farBattle:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_farBattleOn == NIL){ level.coop_farBattleOn = 1 }
+	if(!level.coop_farBattleOn){ end }
+
+	local.n = 0
+	local.n++; local.frx[local.n] = 0 - 4050; local.fry[local.n] = 0 - 4600
+	local.n++; local.frx[local.n] = 0 - 3450; local.fry[local.n] = 0 - 5500
+	local.n++; local.frx[local.n] = 0 - 2950; local.fry[local.n] = 0 - 3900
+	local.n++; local.frx[local.n] = 3450; local.fry[local.n] = 0 - 4400
+	local.n++; local.frx[local.n] = 3050; local.fry[local.n] = 0 - 5400
+	local.n++; local.frx[local.n] = 2600; local.fry[local.n] = 0 - 3800
+
+	//a landing wave out on both flanks
+	local.i = 1
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.frx[local.i]
+		local.p[1] = local.fry[local.i]
+		//[user 2026-08-31] REPOSITIONED. These sat at |x| 4600-5600, beyond the map's built extent
+		//(statics run x -4419..3854), so they were floating outside the world - which is what the
+		//user saw on both flanks. Now on the seaward flanks INSIDE the map, at the retail boat
+		//waterline (higgins3_model ships at z -543.72) rather than a guessed -520.
+		local.p[2] = 0 - 544
+
+		local.h = spawn script_model model "models/vehicles/higginslite_soldiers.tik"
+		if(local.h != NULL && local.h != NIL){
+			local.h.origin = local.p
+			local.h.angles = (0 90 0)
+			local.h notsolid
+			//[user 2026-08-31] EMPTY, and further out. With `anim idle` these carried a full visible
+			//boatload, and at that range a line of identical crews reads as duplicated props rather than
+			//as a landing. Beached, emptied hulls and burning wrecks read correctly at distance.
+			if(local.i == 3 || local.i == 5){
+				local.h model "models/vehicles/higgins_damage.tik"
+				thread coop_boatBurn local.p
+			}else{
+				local.h anim removeguys
+			}
+		}
+		local.i++
+	}
+	println("^~^~^ FARBATTLE boats=" + local.n)
+
+	//and it keeps going: shellfire walking along both flanks for the rest of the map
+	local.t = 0
+	while(level.coop_farBattleOn){
+		local.side = 1
+		if((randomint 2) == 0){ local.side = 0 }
+		local.p = (0 0 0)
+		if(local.side){ local.p[0] = 4400 + (randomint 1600) }
+		else{ local.p[0] = 0 - ( 4400 + (randomint 1600) ) }
+		local.p[1] = ( 0 - 3600 ) + (randomint 4200)
+		local.p[2] = 0 - 500
+
+		local.e = spawn "models/animate/fx_mortar_dirt.tik"
+		if(local.e != NULL && local.e != NIL){
+			local.e.origin = local.p
+			local.e notsolid
+			local.e anim start
+			wait 3.5
+			if(local.e != NULL){ local.e remove }
+		}else{
+			wait 3.5
+		}
+		wait ( 2.5 + ( randomfloat 4 ) )
+	}
+}end
+
+//=========================================================================
+//[user 2026-08-31] BEACH AMBIENCE - "this entire beach needs to feel more alive, a bit more random
+//events added to non scripted actors", "more fires", "it should look like a warzone".
+//
+//Cosmetic only: no radiusdamage anywhere in here, so it can never kill a player or a mission-critical
+//actor. Everything spawned in the loop carries an entity-pool guard and a removal path.
+//=========================================================================
+coop_beachWar:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachWarOn == NIL){ level.coop_beachWarOn = 1 }
+	if(!level.coop_beachWarOn){ end }
+	if(level.coop_beachWarGap == NIL){ level.coop_beachWarGap = 2.2 }
+
+	//standing fires scattered over the sand - lit once, they burn all map
+	local.i = 0
+	while(local.i < 9){
+		local.p = (0 0 0)
+		local.p[0] = ( 0 - 3000 ) + (randomint 6200)
+		local.p[1] = ( 0 - 2400 ) + (randomint 3000)
+		local.p[2] = 0 - 500
+		//keep the run-up lane clear so a fire never blocks the player's route
+		if(local.p[0] > (0 - 900) && local.p[0] < 1300){ local.p[0] = local.p[0] + 2200 }
+		local.f = spawn "models/emitters/firegood.tik"
+		if(local.f != NULL && local.f != NIL){
+			local.f.origin = local.p
+			local.f notsolid
+			local.f anim start
+			local.f loopsound fire_med
+		}
+		local.sm = spawn "models/emitters/linger_smoke.tik"
+		if(local.sm != NULL && local.sm != NIL){
+			local.sm.origin = local.p + (0 0 40)
+			local.sm notsolid
+			local.sm anim start
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHWAR fires=9")
+
+	//and a running barrage across the sand for the rest of the map
+	while(level.coop_beachWarOn){
+		local.p = (0 0 0)
+		local.p[0] = ( 0 - 3200 ) + (randomint 6600)
+		local.p[1] = ( 0 - 2600 ) + (randomint 3400)
+		local.p[2] = 0 - 500
+
+		local.e = spawn "models/animate/fx_mortar_dirt.tik"
+		if(local.e != NULL && local.e != NIL){
+			local.e.origin = local.p
+			local.e notsolid
+			local.e anim start
+			//close ones shake, but never hurt
+			thread coop_mod/main.scr::earthquake_radius local.p 0.5 0.7 850
+			wait 3
+			if(local.e != NULL){ local.e remove }
+		}else{
+			wait 3
+		}
+		wait ( 1.5 + ( randomfloat level.coop_beachWarGap ) )
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE DEAD, AND THE BLOOD - "more bodies and blood all over the shore too would make
+//sense. badly damaged is ideal", "beach is not bloody enough, it should look like a warzone and not
+//just be dictated by bodies, think saving private ryan".
+//
+//Two separate things, deliberately. coop_beachBlood already puts a pool under each of the 43 corpses
+//the map ships. This adds MORE dead, AND - the part the user actually asked for - blood that is not
+//attached to a body at all, so the sand reads as fought-over rather than as a tidy row of casualties.
+//
+//Positions were solved against LUMP_STATICMODELDEF, not guessed: >=120u clear of any static for a
+//body, >=70u for a pool, with the ground height averaged from statics within 900u. That is the same
+//method that had to be applied after five of six Higgins boats were found embedded in beach obstacles.
+//
+//All notsolid, all static, no threads, no per-frame cost.
+//=========================================================================
+coop_beachDead:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachDeadOn == NIL){ level.coop_beachDeadOn = 1 }
+	if(!level.coop_beachDeadOn){ end }
+
+	local.tk[1] = "models/static/body_us01.tik"
+	local.tk[2] = "models/static/body_us02.tik"
+	local.tk[3] = "models/static/body_us04.tik"
+	local.tk[4] = "models/static/body_us05.tik"
+	local.tk[5] = "models/static/body_usvest03.tik"
+	local.tk[6] = "models/static/body_usvest05.tik"
+
+	local.n = 0
+	local.n++; local.bdx[local.n] = 80; local.bdy[local.n] = 1329; local.bdz[local.n] = 0 - 462
+	local.n++; local.bdx[local.n] = 1990; local.bdy[local.n] = 1487; local.bdz[local.n] = 0 - 387
+	local.n++; local.bdx[local.n] = 1468; local.bdy[local.n] = 0 - 2176; local.bdz[local.n] = 0 - 575
+	local.n++; local.bdx[local.n] = 1237; local.bdy[local.n] = 1119; local.bdz[local.n] = 0 - 457
+	local.n++; local.bdx[local.n] = 1952; local.bdy[local.n] = 0 - 1; local.bdz[local.n] = 0 - 469
+	local.n++; local.bdx[local.n] = 502; local.bdy[local.n] = 979; local.bdz[local.n] = 0 - 460
+	local.n++; local.bdx[local.n] = 2223; local.bdy[local.n] = 86; local.bdz[local.n] = 0 - 314
+	local.n++; local.bdx[local.n] = 0 - 1458; local.bdy[local.n] = 0 - 1565; local.bdz[local.n] = 0 - 544
+	local.n++; local.bdx[local.n] = 536; local.bdy[local.n] = 0 - 2452; local.bdz[local.n] = 0 - 575
+	local.n++; local.bdx[local.n] = 0 - 2455; local.bdy[local.n] = 1101; local.bdz[local.n] = 0 - 385
+	local.n++; local.bdx[local.n] = 2169; local.bdy[local.n] = 0 - 2234; local.bdz[local.n] = 0 - 571
+	local.n++; local.bdx[local.n] = 0 - 1849; local.bdy[local.n] = 538; local.bdz[local.n] = 0 - 465
+	local.n++; local.bdx[local.n] = 0 - 3264; local.bdy[local.n] = 0 - 1312; local.bdz[local.n] = 0 - 510
+	local.n++; local.bdx[local.n] = 0 - 1040; local.bdy[local.n] = 0 - 1759; local.bdz[local.n] = 0 - 576
+	local.n++; local.bdx[local.n] = 233; local.bdy[local.n] = 0 - 2439; local.bdz[local.n] = 0 - 579
+	local.n++; local.bdx[local.n] = 1910; local.bdy[local.n] = 0 - 262; local.bdz[local.n] = 0 - 475
+	local.n++; local.bdx[local.n] = 0 - 2647; local.bdy[local.n] = 725; local.bdz[local.n] = 0 - 231
+	local.n++; local.bdx[local.n] = 0 - 1517; local.bdy[local.n] = 1193; local.bdz[local.n] = 0 - 451
+	local.n++; local.bdx[local.n] = 0 - 1234; local.bdy[local.n] = 0 - 1559; local.bdz[local.n] = 0 - 531
+	local.n++; local.bdx[local.n] = 2103; local.bdy[local.n] = 0 - 1052; local.bdz[local.n] = 0 - 533
+	local.n++; local.bdx[local.n] = 0 - 2540; local.bdy[local.n] = 1341; local.bdz[local.n] = 0 - 227
+	local.n++; local.bdx[local.n] = 0 - 732; local.bdy[local.n] = 0 - 2410; local.bdz[local.n] = 0 - 582
+	local.n++; local.bdx[local.n] = 0 - 2800; local.bdy[local.n] = 0 - 863; local.bdz[local.n] = 0 - 498
+	local.n++; local.bdx[local.n] = 3184; local.bdy[local.n] = 1129; local.bdz[local.n] = 0 - 474
+	local.n++; local.bdx[local.n] = 2280; local.bdy[local.n] = 0 - 1419; local.bdz[local.n] = 0 - 539
+	local.n++; local.bdx[local.n] = 2741; local.bdy[local.n] = 0 - 1600; local.bdz[local.n] = 0 - 557
+	local.n++; local.bdx[local.n] = 0 - 2595; local.bdy[local.n] = 77; local.bdz[local.n] = 0 - 401
+	local.n++; local.bdx[local.n] = 1531; local.bdy[local.n] = 0 - 510; local.bdz[local.n] = 0 - 468
+	local.n++; local.bdx[local.n] = 1742; local.bdy[local.n] = 0 - 123; local.bdz[local.n] = 0 - 467
+	local.n++; local.bdx[local.n] = 1124; local.bdy[local.n] = 0 - 1356; local.bdz[local.n] = 0 - 534
+
+	local.i = 1
+	local.made = 0
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.bdx[local.i]
+		local.p[1] = local.bdy[local.i]
+		local.p[2] = local.bdz[local.i]
+
+		local.b = spawn script_model model local.tk[((randomint 6) + 1)]
+		if(local.b != NULL && local.b != NIL){			//entity-pool guard
+			//[user 2026-08-31] DROP TO THE GROUND, do not compute it. The first pass averaged nearby
+			//STATIC MODEL origins for height, but minepoles, hedgehogs and barbwire posts carry their
+			//origins at wildly different heights, so the average was meaningless - 13 of 30 bodies ended
+			//up more than 60 units off, the worst floating 217u above the sand.
+			local.b.origin = local.p + (0 0 90)
+			local.b.angles = (0 (randomint 360) 0)
+			local.b notsolid
+			local.b droptofloor
+			local.made++
+
+			//every one of them bleeds into the sand
+			local.pool = spawn "models/fx/coop_bloodslick.tik"
+			if(local.pool != NULL && local.pool != NIL){
+				local.pool.origin = local.p + (0 0 90)
+				local.pool.angles = (0 (randomint 360) 0)
+				local.pool droptofloor
+				local.pool scale (0.35 + (randomfloat 0.3))
+				local.pool notsolid
+			}
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHDEAD bodies=" + local.made)
+
+	//---------------- blood with no body under it: drag marks, pools, wash at the waterline
+	local.n = 0
+	local.n++; local.plx[local.n] = 287; local.ply[local.n] = 0 - 717; local.plz[local.n] = 0 - 491
+	local.n++; local.plx[local.n] = 1501; local.ply[local.n] = 0 - 2156; local.plz[local.n] = 0 - 577
+	local.n++; local.plx[local.n] = 773; local.ply[local.n] = 890; local.plz[local.n] = 0 - 462
+	local.n++; local.plx[local.n] = 0 - 458; local.ply[local.n] = 1381; local.plz[local.n] = 0 - 467
+	local.n++; local.plx[local.n] = 0 - 2317; local.ply[local.n] = 613; local.plz[local.n] = 0 - 465
+	local.n++; local.plx[local.n] = 2639; local.ply[local.n] = 618; local.plz[local.n] = 0 - 318
+	local.n++; local.plx[local.n] = 198; local.ply[local.n] = 0 - 77; local.plz[local.n] = 0 - 469
+	local.n++; local.plx[local.n] = 1239; local.ply[local.n] = 0 - 1579; local.plz[local.n] = 0 - 548
+	local.n++; local.plx[local.n] = 1395; local.ply[local.n] = 1042; local.plz[local.n] = 0 - 459
+	local.n++; local.plx[local.n] = 2074; local.ply[local.n] = 0 - 2337; local.plz[local.n] = 0 - 572
+	local.n++; local.plx[local.n] = 0 - 2427; local.ply[local.n] = 0 - 1734; local.plz[local.n] = 0 - 556
+	local.n++; local.plx[local.n] = 0 - 1954; local.ply[local.n] = 185; local.plz[local.n] = 0 - 472
+	local.n++; local.plx[local.n] = 0 - 2305; local.ply[local.n] = 94; local.plz[local.n] = 0 - 397
+	local.n++; local.plx[local.n] = 1082; local.ply[local.n] = 872; local.plz[local.n] = 0 - 459
+	local.n++; local.plx[local.n] = 0 - 1153; local.ply[local.n] = 648; local.plz[local.n] = 0 - 467
+	local.n++; local.plx[local.n] = 842; local.ply[local.n] = 0 - 963; local.plz[local.n] = 0 - 488
+	local.n++; local.plx[local.n] = 2871; local.ply[local.n] = 518; local.plz[local.n] = 0 - 484
+	local.n++; local.plx[local.n] = 0 - 1423; local.ply[local.n] = 1386; local.plz[local.n] = 0 - 456
+	local.n++; local.plx[local.n] = 0 - 2449; local.ply[local.n] = 0 - 1433; local.plz[local.n] = 0 - 519
+	local.n++; local.plx[local.n] = 0 - 535; local.ply[local.n] = 0 - 975; local.plz[local.n] = 0 - 502
+	local.n++; local.plx[local.n] = 2553; local.ply[local.n] = 0 - 1291; local.plz[local.n] = 0 - 543
+	local.n++; local.plx[local.n] = 0 - 2464; local.ply[local.n] = 0 - 904; local.plz[local.n] = 0 - 504
+	local.n++; local.plx[local.n] = 3440; local.ply[local.n] = 0 - 2435; local.plz[local.n] = 0 - 475
+	local.n++; local.plx[local.n] = 0 - 1773; local.ply[local.n] = 0 - 919; local.plz[local.n] = 0 - 504
+	local.n++; local.plx[local.n] = 473; local.ply[local.n] = 0 - 2428; local.plz[local.n] = 0 - 577
+	local.n++; local.plx[local.n] = 0 - 2967; local.ply[local.n] = 700; local.plz[local.n] = 0 - 480
+	local.n++; local.plx[local.n] = 1165; local.ply[local.n] = 0 - 923; local.plz[local.n] = 0 - 487
+	local.n++; local.plx[local.n] = 1714; local.ply[local.n] = 154; local.plz[local.n] = 0 - 468
+	local.n++; local.plx[local.n] = 1217; local.ply[local.n] = 0 - 2500; local.plz[local.n] = 0 - 575
+	local.n++; local.plx[local.n] = 2092; local.ply[local.n] = 0 - 685; local.plz[local.n] = 0 - 502
+	local.n++; local.plx[local.n] = 0 - 2528; local.ply[local.n] = 0 - 386; local.plz[local.n] = 0 - 490
+	local.n++; local.plx[local.n] = 0 - 3060; local.ply[local.n] = 0 - 1783; local.plz[local.n] = 0 - 566
+	local.n++; local.plx[local.n] = 2907; local.ply[local.n] = 0 - 2175; local.plz[local.n] = 0 - 567
+	local.n++; local.plx[local.n] = 0 - 1058; local.ply[local.n] = 0 - 2351; local.plz[local.n] = 0 - 582
+	local.n++; local.plx[local.n] = 3270; local.ply[local.n] = 1370; local.plz[local.n] = 0 - 468
+	local.n++; local.plx[local.n] = 0 - 1942; local.ply[local.n] = 0 - 1355; local.plz[local.n] = 0 - 519
+	local.n++; local.plx[local.n] = 2260; local.ply[local.n] = 0 - 1462; local.plz[local.n] = 0 - 541
+	local.n++; local.plx[local.n] = 724; local.ply[local.n] = 0 - 1660; local.plz[local.n] = 0 - 571
+	local.n++; local.plx[local.n] = 1859; local.ply[local.n] = 790; local.plz[local.n] = 0 - 462
+	local.n++; local.plx[local.n] = 1143; local.ply[local.n] = 0 - 2273; local.plz[local.n] = 0 - 575
+	local.n++; local.plx[local.n] = 3082; local.ply[local.n] = 0 - 2169; local.plz[local.n] = 0 - 567
+	local.n++; local.plx[local.n] = 0 - 111; local.ply[local.n] = 908; local.plz[local.n] = 0 - 464
+	local.n++; local.plx[local.n] = 2197; local.ply[local.n] = 0 - 537; local.plz[local.n] = 0 - 502
+	local.n++; local.plx[local.n] = 243; local.ply[local.n] = 0 - 1445; local.plz[local.n] = 0 - 543
+	local.n++; local.plx[local.n] = 2974; local.ply[local.n] = 0 - 1752; local.plz[local.n] = 0 - 555
+	local.n++; local.plx[local.n] = 2785; local.ply[local.n] = 0 - 800; local.plz[local.n] = 0 - 514
+
+	local.i = 1
+	local.np = 0
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.plx[local.i]
+		local.p[1] = local.ply[local.i]
+		local.p[2] = local.plz[local.i]
+
+		local.s = spawn "models/fx/coop_bloodslick.tik"
+		if(local.s != NULL && local.s != NIL){
+			local.s.origin = local.p + (0 0 90)
+			local.s.angles = (0 (randomint 360) 0)
+			local.s droptofloor
+			//wider range than the corpse pools: some are smears, some are wide stains
+			local.s scale (0.3 + (randomfloat 0.85))
+			local.s notsolid
+			local.np++
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHDEAD pools=" + local.np)
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] INCOMING AND OUTGOING FIRE.
+//
+//User: "more explosions after the sandwall, more gunshots hitting the water sporadically at random as
+//you are getting closer inland and as youre moving through the water, plus gunshots hitting all around
+//the hill and bunkers constantly to show return fire happening" and "way more bullets hitting in and
+//around the seawall as you are meeting the captain and blowing it with bangalores".
+//
+//Four separate loops rather than one, because they belong to different moments and want different
+//rates - and because each can be switched off on its own if it turns out to be too much.
+//
+//ALL COSMETIC. Nothing here calls radiusdamage, so none of it can hurt a player or kill a
+//mission-critical actor. Every spawn carries an entity-pool guard and a removal path; nothing is
+//left standing. fx_mortar_water/fx_mortar_dirt are the map's own effects and are already precached by
+//maps/m3l1a_precache.scr, scaled down here so a rifle strike does not read as a mortar round.
+//=========================================================================
+
+//Rounds cracking into the water around you while you are still wading in.
+//=========================================================================
+coop_waterShots:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_waterShotsOn == NIL){ level.coop_waterShotsOn = 1 }
+	if(!level.coop_waterShotsOn){ end }
+
+	while(level.coop_waterShotsOn){
+		local.pl = NULL
+		if($player != NULL && $player != NIL && $player.size > 0){
+			local.try = 0
+			while(local.try < 4 && local.pl == NULL){
+				local.c = $player[((randomint $player.size) + 1)]
+				if(local.c != NULL && local.c.health > 0){ local.pl = local.c }
+				local.try++
+			}
+		}
+		//only while somebody is still in or near the water - the sand starts around y -1100
+		if(local.pl == NULL || local.pl.origin[1] > (0 - 900)){
+			wait 1
+			continue
+		}
+
+		//a short burst of strikes rather than one lonely splash
+		local.k = 0
+		local.shots = 1 + (randomint 3)
+		while(local.k < local.shots){
+			local.p = (0 0 0)
+			local.p[0] = local.pl.origin[0] + ((randomint 460) - 230)
+			local.p[1] = local.pl.origin[1] + ((randomint 460) - 230)
+			local.p[2] = 0 - 496
+			//[user 2026-08-31] SILENT effect, deliberately. fx_mortar_water plays arty_exp_water on
+			//every single spawn - at 2-6 strikes per burst on a loop that turned the run-in into a
+			//continuous shell track and made rifle fire sound like artillery. fx_water_spray carries no
+			//sound at all and is the right size for a round going into the water.
+			local.w = spawn script_model model "models/animate/fx_water_spray.tik"
+			if(local.w != NULL && local.w != NIL){			//entity-pool guard
+				local.w.origin = local.p
+				local.w notsolid
+				local.w scale 0.5
+				local.w anim start
+				thread coop_fxCleanup local.w 1.1
+			}
+			wait ( 0.14 + ( randomfloat 0.26 ) )
+			local.k++
+		}
+		wait ( 2.2 + ( randomfloat 3.4 ) )
+	}
+}end
+
+//Allied return fire walking over the bluff and the emplacements, all mission long.
+//=========================================================================
+coop_returnFire:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_returnFireOn == NIL){ level.coop_returnFireOn = 1 }
+	if(!level.coop_returnFireOn){ end }
+
+	//aim at the emplacements themselves so the fire reads as directed, not decorative
+	local.n = 0
+	if($mg42_leftbunker1 != NULL){ local.n++; local.t[local.n] = $mg42_leftbunker1 }
+	if($mg42_leftbunker2 != NULL){ local.n++; local.t[local.n] = $mg42_leftbunker2 }
+	if($mg42_rightbunker1 != NULL){ local.n++; local.t[local.n] = $mg42_rightbunker1 }
+	if($mg42_rightbunker2 != NULL){ local.n++; local.t[local.n] = $mg42_rightbunker2 }
+	if($mg42_middle1 != NULL){ local.n++; local.t[local.n] = $mg42_middle1 }
+	if($mg42_middle2 != NULL){ local.n++; local.t[local.n] = $mg42_middle2 }
+	if($mg42_left1 != NULL){ local.n++; local.t[local.n] = $mg42_left1 }
+	if($mg42_right1 != NULL){ local.n++; local.t[local.n] = $mg42_right1 }
+	if(local.n < 1){
+		println("^~^~^ RETURNFIRE no emplacements")
+		end
+	}
+	println("^~^~^ RETURNFIRE targets=" + local.n)
+
+	while(level.coop_returnFireOn){
+		local.tgt = local.t[((randomint local.n) + 1)]
+		if(local.tgt == NULL){
+			wait 1
+			continue
+		}
+		//a burst walking across one position
+		local.k = 0
+		local.shots = 2 + (randomint 3)
+		while(local.k < local.shots){
+			local.p = local.tgt.origin
+			local.p[0] = local.p[0] + ((randomint 300) - 150)
+			local.p[1] = local.p[1] + ((randomint 220) - 110)
+			local.p[2] = local.p[2] + ((randomint 90) - 20)
+			//silent - see the note in coop_waterShots. dudimpact is a round striking dirt and carries
+			//no sound, so a hundred of them a minute do not become an artillery barrage.
+			local.d = spawn script_model model "models/fx/dudimpact.tik"
+			if(local.d != NULL && local.d != NIL){
+				local.d.origin = local.p
+				local.d notsolid
+				local.d anim start
+				thread coop_fxCleanup local.d 1.4
+			}
+			wait ( 0.13 + ( randomfloat 0.22 ) )
+			local.k++
+		}
+		wait ( 2.0 + ( randomfloat 3.0 ) )
+	}
+}end
+
+//Explosions inland, past the sea wall - the fight carrying on above and behind the bluff.
+//=========================================================================
+coop_inlandBlasts:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_inlandBlastsOn == NIL){ level.coop_inlandBlastsOn = 1 }
+	if(!level.coop_inlandBlastsOn){ end }
+
+	while(level.coop_inlandBlastsOn){
+		local.p = (0 0 0)
+		//past the shingle (y ~2900) and up onto the rising ground behind it
+		local.p[0] = ( 0 - 2600 ) + (randomint 5600)
+		local.p[1] = 3100 + (randomint 2400)
+		local.p[2] = ( 0 - 380 ) + (randomint 460)
+
+		local.e = spawn "models/animate/fx_mortar_dirt.tik"
+		if(local.e != NULL && local.e != NIL){
+			local.e.origin = local.p
+			local.e notsolid
+			local.e anim start
+			thread coop_fxCleanup local.e 3.5
+		}
+		wait ( 2.4 + ( randomfloat 4.0 ) )
+	}
+}end
+
+//The seawall beat: from the moment the shingle sequences start until the bangalores blow the wire,
+//rounds hammer the sand and the shingle itself. This is the loudest, densest loop of the four and it
+//is deliberately time-boxed - it ends when the wire goes.
+//=========================================================================
+coop_seawallFire:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_seawallFireOn == NIL){ level.coop_seawallFireOn = 1 }
+	if(!level.coop_seawallFireOn){ end }
+
+	//wait for the shingle sequences (9+) - that is the meet-the-captain beat
+	local.t = 0
+	while(local.t < 600){
+		if(level.m3l1a_sequence != NIL && level.m3l1a_sequence >= 9){ break }
+		wait 1
+		local.t = local.t + 1
+	}
+	if(level.m3l1a_sequence == NIL || level.m3l1a_sequence < 9){ end }
+	println("^~^~^ SEAWALLFIRE started")
+
+	//...until the bangalores go. coop_flankMGDone is set by the last bangalore explosion.
+	while(level.coop_flankMGDone != 1 && level.coop_seawallFireOn){
+		local.k = 0
+		local.shots = 3 + (randomint 4)
+		while(local.k < local.shots){
+			local.p = (0 0 0)
+			local.p[0] = ( 0 - 1200 ) + (randomint 2200)
+			local.p[1] = 2700 + (randomint 420)
+			local.p[2] = 0 - 300
+			//silent, same reason - this is the densest loop of the four and it runs right next to you.
+			local.d = spawn script_model model "models/fx/dudimpact.tik"
+			if(local.d != NULL && local.d != NIL){
+				local.d.origin = local.p
+				local.d notsolid
+				local.d anim start
+				thread coop_fxCleanup local.d 1.4
+			}
+			wait ( 0.12 + ( randomfloat 0.20 ) )
+			local.k++
+		}
+		wait ( 1.3 + ( randomfloat 2.0 ) )
+	}
+	println("^~^~^ SEAWALLFIRE stopped")
+}end
+
+//Shared cleanup so none of the four loops leaks an effect entity.
+//=========================================================================
+coop_fxCleanup local.ent local.life:{
+//=========================================================================
+	if(local.ent == NULL || local.ent == NIL){ end }
+	wait local.life
+	if(local.ent != NULL && local.ent != NIL){ local.ent remove }
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] FIRES UP AT THE BUNKERS - "there should be fires up around the bunkers too, should
+//add some cinematic depth, use different types of fires please".
+//
+//DEPTH IS THE POINT, so the fires are deliberately MIXED and placed at several distances up the bluff
+//rather than in one band. Six different emitters, all verified present and all carrying a real `start`
+//animation (a TIKI without one is a silent no-op - that is what killed the first bunker-shelling
+//attempt, bug-2195):
+//    firegood                     bright close fire
+//    fireandsmoke                 fire with its own smoke column
+//    firesmoke                    smaller, smokier
+//    tehao_firesmoke_long         tall column, reads at distance
+//    tehao_firesmoke_superlong    the tallest - the far skyline
+//    inferno_nosmoke              big flame with no smoke, so a near fire does not grey out the view
+//
+//Anchored on the real emplacements where possible so the fires sit ON the positions rather than in
+//the air near them, then scattered up the bluff behind. Cosmetic: notsolid, no damage, lit once and
+//left burning - no per-frame cost at all.
+//=========================================================================
+coop_bunkerFires:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_bunkerFiresOn == NIL){ level.coop_bunkerFiresOn = 1 }
+	if(!level.coop_bunkerFiresOn){ end }
+
+	local.ft[1] = "models/emitters/firegood.tik"
+	local.ft[2] = "models/emitters/fireandsmoke.tik"
+	local.ft[3] = "models/emitters/firesmoke.tik"
+	local.ft[4] = "models/emitters/tehao_firesmoke_long.tik"
+	local.ft[5] = "models/emitters/tehao_firesmoke_superlong.tik"
+	local.ft[6] = "models/animate/inferno_nosmoke.tik"
+
+	//--- on and around the emplacements themselves
+	local.n = 0
+	if($mg42_leftbunker1 != NULL){ local.n++; local.a[local.n] = $mg42_leftbunker1 }
+	if($mg42_leftbunker2 != NULL){ local.n++; local.a[local.n] = $mg42_leftbunker2 }
+	if($mg42_rightbunker1 != NULL){ local.n++; local.a[local.n] = $mg42_rightbunker1 }
+	if($mg42_rightbunker2 != NULL){ local.n++; local.a[local.n] = $mg42_rightbunker2 }
+	if($mg42_middle1 != NULL){ local.n++; local.a[local.n] = $mg42_middle1 }
+	if($mg42_middle2 != NULL){ local.n++; local.a[local.n] = $mg42_middle2 }
+	if($mg42_left1 != NULL){ local.n++; local.a[local.n] = $mg42_left1 }
+	if($mg42_left2 != NULL){ local.n++; local.a[local.n] = $mg42_left2 }
+	if($mg42_right1 != NULL){ local.n++; local.a[local.n] = $mg42_right1 }
+	if($mg42_right2 != NULL){ local.n++; local.a[local.n] = $mg42_right2 }
+
+	local.made = 0
+	local.i = 1
+	while(local.i <= local.n){
+		if(local.a[local.i] != NULL){
+			local.p = local.a[local.i].origin
+			local.p[0] = local.p[0] + ((randomint 360) - 180)
+			local.p[1] = local.p[1] + ((randomint 260) - 130)
+			local.p[2] = local.p[2] - 10
+
+			local.f = spawn local.ft[((randomint 6) + 1)]
+			if(local.f != NULL && local.f != NIL){			//entity-pool guard
+				local.f.origin = local.p
+				local.f notsolid
+				local.f anim start
+				//only the near ones carry a loop sound - ten looping fires up a hillside is mush
+				if((randomint 3) == 0){ local.f loopsound fire_med }
+				local.made++
+			}
+		}
+		local.i++
+	}
+
+	//--- and scattered up the bluff behind them, for depth
+	local.k = 0
+	while(local.k < 10){
+		local.p = (0 0 0)
+		local.p[0] = ( 0 - 3200 ) + (randomint 7000)
+		local.p[1] = 4200 + (randomint 1700)
+		local.p[2] = 120 + (randomint 300)
+
+		local.f = spawn local.ft[((randomint 6) + 1)]
+		if(local.f != NULL && local.f != NIL){
+			local.f.origin = local.p
+			local.f notsolid
+			local.f droptofloor			//sit them on the hillside, do not guess its height
+			local.f anim start
+			local.made++
+		}
+		local.k++
+	}
+
+	//--- a couple of tall columns further back still, so the skyline is not empty
+	local.k = 0
+	while(local.k < 3){
+		local.p = (0 0 0)
+		local.p[0] = ( 0 - 2600 ) + (randomint 5600)
+		local.p[1] = 6200 + (randomint 900)
+		local.p[2] = 200 + (randomint 260)
+		local.f = spawn "models/emitters/tehao_firesmoke_superlong.tik"
+		if(local.f != NULL && local.f != NIL){
+			local.f.origin = local.p
+			local.f notsolid
+			local.f anim start
+			local.made++
+		}
+		local.k++
+	}
+
+	println("^~^~^ BUNKERFIRE lit=" + local.made)
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] BLOOD ON THE WATER - "will the blood actually appear in the water? kinda like how
+//we made the oil and water mix on the uboat explosion mission?"
+//
+//Yes, and now by BOTH routes, because neither alone does the job:
+//
+//  1. A blended stage inside scripts/zz_coop_shoreline.shader tints the whole waterline. That is the
+//     one that covers everything and moves correctly, because it inherits the surface's own
+//     deformVertexes flap - a separate entity cannot follow a per-vertex deform.
+//  2. These planes, which are the u-boat recipe exactly: models/fx/coop_bloodslick.tik is a clone of
+//     coop_oilslick.tik - same retail waterPlane mesh, same one-surface setup, our own shader over a
+//     private texture path. They give discrete slicks with edges, which a flat tint cannot.
+//
+//WHY THEY SIT WHERE THEY DO. The shoreline's flap moves the water +/-8u at the far end of the band
+//and +/-16u at the near end on a ~12.5s cycle, so a plane near shore would sink under the wash and
+//surface through it every cycle. These are placed in the SEAWARD half of the band, where the same
+//survey puts the deform at about +/-0.08u - small enough that a plane 2u above the surface stays on
+//it. Heights come from the measured waterline: z = -520 + 0.0294*(y+2160).
+//=========================================================================
+coop_waterBlood:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_waterBloodOn == NIL){ level.coop_waterBloodOn = 1 }
+	if(!level.coop_waterBloodOn){ end }
+
+	local.n = 0
+	local.n++; local.wbx[local.n] = 0 - 2919; local.wby[local.n] = 0 - 1835; local.wbz[local.n] = 0 - 504
+	local.n++; local.wbx[local.n] = 175; local.wby[local.n] = 0 - 1553; local.wbz[local.n] = 0 - 496
+	local.n++; local.wbx[local.n] = 1989; local.wby[local.n] = 0 - 2033; local.wbz[local.n] = 0 - 510
+	local.n++; local.wbx[local.n] = 3181; local.wby[local.n] = 0 - 2012; local.wbz[local.n] = 0 - 510
+	local.n++; local.wbx[local.n] = 1228; local.wby[local.n] = 0 - 1963; local.wbz[local.n] = 0 - 508
+	local.n++; local.wbx[local.n] = 913; local.wby[local.n] = 0 - 2088; local.wbz[local.n] = 0 - 512
+	local.n++; local.wbx[local.n] = 0 - 2296; local.wby[local.n] = 0 - 1691; local.wbz[local.n] = 0 - 500
+	local.n++; local.wbx[local.n] = 0 - 165; local.wby[local.n] = 0 - 1455; local.wbz[local.n] = 0 - 493
+	local.n++; local.wbx[local.n] = 1420; local.wby[local.n] = 0 - 1777; local.wbz[local.n] = 0 - 503
+	local.n++; local.wbx[local.n] = 3160; local.wby[local.n] = 0 - 1916; local.wbz[local.n] = 0 - 507
+	local.n++; local.wbx[local.n] = 550; local.wby[local.n] = 0 - 1810; local.wbz[local.n] = 0 - 504
+	local.n++; local.wbx[local.n] = 1109; local.wby[local.n] = 0 - 1786; local.wbz[local.n] = 0 - 503
+	local.n++; local.wbx[local.n] = 3116; local.wby[local.n] = 0 - 1667; local.wbz[local.n] = 0 - 500
+	local.n++; local.wbx[local.n] = 0 - 448; local.wby[local.n] = 0 - 1780; local.wbz[local.n] = 0 - 503
+	local.n++; local.wbx[local.n] = 1116; local.wby[local.n] = 0 - 1658; local.wbz[local.n] = 0 - 499
+	local.n++; local.wbx[local.n] = 2688; local.wby[local.n] = 0 - 1984; local.wbz[local.n] = 0 - 509
+	local.n++; local.wbx[local.n] = 1307; local.wby[local.n] = 0 - 2128; local.wbz[local.n] = 0 - 513
+	local.n++; local.wbx[local.n] = 331; local.wby[local.n] = 0 - 2045; local.wbz[local.n] = 0 - 511
+	local.n++; local.wbx[local.n] = 0 - 1982; local.wby[local.n] = 0 - 1825; local.wbz[local.n] = 0 - 504
+	local.n++; local.wbx[local.n] = 1522; local.wby[local.n] = 0 - 1897; local.wbz[local.n] = 0 - 506
+	local.n++; local.wbx[local.n] = 0 - 1248; local.wby[local.n] = 0 - 1974; local.wbz[local.n] = 0 - 509
+	local.n++; local.wbx[local.n] = 0 - 2487; local.wby[local.n] = 0 - 1536; local.wbz[local.n] = 0 - 496
+	local.n++; local.wbx[local.n] = 0 - 1050; local.wby[local.n] = 0 - 1672; local.wbz[local.n] = 0 - 500
+	local.n++; local.wbx[local.n] = 0 - 552; local.wby[local.n] = 0 - 1955; local.wbz[local.n] = 0 - 508
+
+	local.i = 1
+	local.made = 0
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.wbx[local.i]
+		local.p[1] = local.wby[local.i]
+		local.p[2] = local.wbz[local.i]
+
+		local.b = spawn "models/fx/coop_bloodslick.tik"
+		if(local.b != NULL && local.b != NIL){			//entity-pool guard
+			local.b.origin = local.p
+			local.b.angles = (0 (randomint 360) 0)
+			//wider than the sand pools - blood spreads on water
+			//[user 2026-08-31] 0.6-1.7 was invisible at this range. Blood spreads far on water.
+		//[user 2026-08-31] TRIMMED. 44 planes at 1.6-3.8 on top of the shader wash read as a red
+		//filter rather than as blood. These now carry only the DISCRETE mid-water slicks; the
+		//shoreline shader's own stage handles the water's edge, where it can inherit the deform
+		//flap that a separate plane cannot follow.
+		local.b scale (1.3 + (randomfloat 1.6))
+			local.b notsolid
+			local.made++
+		}
+		local.i++
+	}
+	println("^~^~^ WATERBLOOD slicks=" + local.made)
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] AMBIENT BEACH VIGNETTES - m3l1a only.
+//
+//User: "add characters that do scripted things along the beaches... what are scripts we can have them
+//play out on repeat?" Men doing recognisable human things on loop, so Omaha reads as populated rather
+//than merely decorated.
+//
+//THE TRAP THAT DECIDES EVERY NAME BELOW (tiki_files.cpp:1046-1057): an animation alias flagged
+//`random` has its TRAILING DIGITS STRIPPED at load. So shingle_idle01 DOES NOT EXIST at runtime -
+//shingle_idle does, and the engine picks one of its six members per actor. Same for
+//crouch_beach_idle, stand_beach_idle, stand_water_idle, prone_beach_idle and fallen. Everything NOT
+//flagged random keeps its exact name: medic01, patient01, hedge_shake01/02/03, hedge_look01/02,
+//hedge_dodge01/02/03, shingle_idle_lookat, shingle_coveridle_bang, radioman, rifle_looking, and all
+//the drag_* clips. Get it backwards in either direction and you get a SILENT no-op - the same class
+//of failure that made the first bunker shelling invisible (bug-2195).
+//
+//Everything here is declared in level_m3l1.tik or fallen.tik, both already loaded on this map via
+//new_generic_human.tik's `includes m3l1a` block. NO tik edit is required - and nothing here may ever
+//be called from shared coop code, because on any other map these aliases do not exist.
+//
+//NO TARGETNAMES ANYWHERE (bug-2194): every actor is held in a local and never dereferenced by name,
+//and every keeper is launched as `local.a thread ...` so it receives the actor as self.
+//=========================================================================
+coop_beachVignettes:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_vignettesOn == NIL){ level.coop_vignettesOn = 1 }
+	if(!level.coop_vignettesOn){ end }
+	//exactly one stager, ever - two threads racing over one pair is what froze the retail medic and
+	//his patient mid-animation forever (bug-2188)
+	if(level.coop_vigDone == 1){ end }
+	level.coop_vigDone = 1
+
+	//[user 2026-08-31] 24 -> 30 for the six wounded added at the end of this thread (B5).
+	if(level.coop_vigCap == NIL){ level.coop_vigCap = 30 }
+	level.coop_vigMade = 0
+
+	//---------------- A1: the medic who is losing him (LOOP, zero threads)
+	local.i = 0
+	while(local.i < 2){
+		local.p = (0 0 0)
+		local.q = (0 0 0)
+		if(local.i == 0){
+			local.p[0] = 0 - 2840
+			local.p[1] = 0 - 448
+			local.p[2] = 0 - 488
+			local.q[0] = 0 - 2888
+			local.q[1] = 0 - 468
+			local.q[2] = 0 - 488
+		}else{
+			local.p[0] = 2232
+			local.p[1] = 1048
+			local.p[2] = 0 - 455
+			local.q[0] = 2184
+			local.q[1] = 1028
+			local.q[2] = 0 - 455
+		}
+		local.pat = waitthread coop_vigSpawn "models/human/dday_29th_private_patient" "none" local.p 0
+		local.med = waitthread coop_vigSpawn "models/human/dday_ranger_medic" "none" local.q 90
+		if(local.pat != NULL && local.pat != NIL && local.med != NULL && local.med != NIL){
+			local.pat setsynctime 0
+			local.med setsynctime 0
+			local.pat anim patient01
+			if(local.i == 0){ local.med anim medic01 }
+			else{ local.med anim medic02 }
+		}
+		local.i++
+	}
+
+	//---------------- A2: the line that is not going anywhere (LOOP, zero threads)
+	local.n = 0
+	local.n++; local.sx[local.n] = 0 - 1396
+	local.n++; local.sx[local.n] = 0 - 1576
+	local.n++; local.sx[local.n] = 0 - 1756
+	local.n++; local.sx[local.n] = 1156
+	local.n++; local.sx[local.n] = 1336
+	local.n++; local.sx[local.n] = 1516
+
+	local.i = 1
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.sx[local.i]
+		local.p[1] = 2860
+		local.p[2] = 0 - 400
+		local.a = waitthread coop_vigSpawn "models/human/dday_ranger_private" "m1 garand" local.p 90
+		if(local.a != NULL && local.a != NIL){
+			if($mg42_middle1 != NULL && $mg42_middle1 != NIL){ local.a turnto $mg42_middle1 }
+			//shingle_idle is the TRIMMED base of six members, so each man draws a different clip and
+			//a different cycle length and the row never syncs up
+			if(local.i == 1){ local.a anim shingle_idle_lookat }
+			else if(local.i == 4){ local.a anim shingle_coveridle_bang }
+			else{ local.a anim shingle_idle }
+		}
+		local.i++
+	}
+
+	//---------------- A3: the ones who stopped - alive, not corpses (LOOP, zero threads)
+	local.p = (0 0 0)
+	local.p[0] = 0 - 2340
+	local.p[1] = 1180
+	local.p[2] = 0 - 385
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p (randomint 360)
+	if(local.a != NULL && local.a != NIL){ local.a anim prone_beach_idle }
+
+	local.p = (0 0 0)
+	local.p[0] = 2110
+	local.p[1] = 160
+	local.p[2] = 0 - 314
+	local.a = waitthread coop_vigSpawn "models/human/dday_ranger_private" "none" local.p (randomint 360)
+	if(local.a != NULL && local.a != NIL){ local.a anim crouch_beach_idle }
+
+	local.p = (0 0 0)
+	local.p[0] = 0 - 3160
+	local.p[1] = 0 - 1230
+	local.p[2] = 0 - 510
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p (randomint 360)
+	if(local.a != NULL && local.a != NIL){ local.a anim crouch_beach_idle }
+
+	//---------------- A4: standing in the surf, not advancing (LOOP, zero threads)
+	local.p = (0 0 0)
+	local.p[0] = 0 - 2736
+	local.p[1] = 0 - 1984
+	local.p[2] = 0 - 581
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "m1 garand" local.p 90
+	if(local.a != NULL && local.a != NIL){
+		if($mg42_middle1 != NULL && $mg42_middle1 != NIL){ local.a turnto $mg42_middle1 }
+		local.a anim stand_water_idle
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 2344
+	local.p[1] = 0 - 1872
+	local.p[2] = 0 - 574
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "m1 garand" local.p 90
+	if(local.a != NULL && local.a != NIL){
+		if($mg42_middle1 != NULL && $mg42_middle1 != NIL){ local.a turnto $mg42_middle1 }
+		local.a anim stand_water_idle
+	}
+
+	//---------------- A5: the man who will not move (LOOP, zero threads)
+	local.p = (0 0 0)
+	local.p[0] = 0 - 2240
+	local.p[1] = 291
+	local.p[2] = 0 - 486
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 90
+	if(local.a != NULL && local.a != NIL){ local.a anim hedge_shake03 }
+
+	local.p = (0 0 0)
+	local.p[0] = 2534
+	local.p[1] = 0 - 200
+	local.p[2] = 0 - 486
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 90
+	if(local.a != NULL && local.a != NIL){ local.a anim hedge_shake02 }
+
+	//---------------- B1: peering round the obstacle and flinching back (one keeper)
+	local.p = (0 0 0)
+	local.p[0] = 2678
+	local.p[1] = 944
+	local.p[2] = 0 - 478
+	local.a = waitthread coop_vigSpawn "models/human/dday_ranger_private" "m1 garand" local.p 90
+	if(local.a != NULL && local.a != NIL){ local.a thread coop_vigKeep "hedge" }
+
+	//---------------- B2: the radio operator calling for fire (one keeper)
+	//gun "none" is MANDATORY - radio_backpack.skd only attaches under weapon "none"/"colt 45", so with
+	//any other loadout there is no radio and the pose reads as nothing. Retail spawns him the same way.
+	local.p = (0 0 0)
+	local.p[0] = 0 - 2480
+	local.p[1] = 820
+	local.p[2] = 0 - 430
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private_radio" "none" local.p 45
+	if(local.a != NULL && local.a != NIL){ local.a thread coop_vigKeep "radio" }
+
+	//---------------- B3: a man watching the bluff, then holding (one keeper)
+	local.p = (0 0 0)
+	local.p[0] = 2760
+	local.p[1] = 1420
+	local.p[2] = 0 - 420
+	local.a = waitthread coop_vigSpawn "models/human/dday_ranger_private" "m1 garand" local.p 0
+	if(local.a != NULL && local.a != NIL){
+		if($mg42_middle1 != NULL && $mg42_middle1 != NIL){ local.a turnto $mg42_middle1 }
+		local.a thread coop_vigKeep "looking"
+	}
+
+	//---------------- B4: a man going down to his knees, over and over (one keeper)
+	//`fallen` is the trimmed base of fallen01/02/03 and is NOT a loop - it freezes on its last frame,
+	//so it MUST be re-issued by a keeper. That is exactly the freeze bug-2188 shipped once already.
+	local.p = (0 0 0)
+	local.p[0] = 0 - 1980
+	local.p[1] = 1760
+	local.p[2] = 0 - 400
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p (randomint 360)
+	if(local.a != NULL && local.a != NIL){ local.a thread coop_vigKeep "fallen" }
+
+
+	//---------------- B5: THE WOUNDED (LOOP, zero threads)
+	//[user 2026-08-31] Every stopped man on this beach until now has been standing, crouching or
+	//lying still. Nobody was visibly IN PAIN, and an unattended casualty - a man down with no
+	//medic working on him - is the one casualty state the beach did not have.
+	//
+	//unarmed_pain_flooridle and unarmed_pain_kneesidle are declared in human_unarmed.tik and reach
+	//this map through new_generic_human.tik's includes. Both .skc carry header flag 0x20, which
+	//fgame reads as ANIM_LOOP - so anim.scr takes its pause branch and they loop with NO keeper
+	//thread at all. Verified by reading the SKC headers out of the pak, not assumed.
+	//
+	//DO NOT substitute riflep_flooridle / riflep_kneesidle. Same poses, but their flags word is
+	//0x00: they play once and freeze on the last frame, which is the bug-2188 failure exactly.
+	//
+	//setsynctime IS MANDATORY HERE. Both clips are 26 frames at 0.1s = 2.60s, identical length,
+	//so six men spawned in the same frame writhe in perfect unison - and mixing the two clips
+	//does not help, because they are the same length. A random phase per man is what breaks it.
+
+	local.p = (0 0 0)
+	local.p[0] = 0 - 1180
+	local.p[1] = 0 - 430
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 40
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_flooridle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 610
+	local.p[1] = 0 - 980
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 200
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_kneesidle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 1880
+	local.p[1] = 340
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 115
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_flooridle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 0 - 2010
+	local.p[1] = 880
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 300
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_kneesidle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 120
+	local.p[1] = 1460
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 75
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_flooridle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	local.p = (0 0 0)
+	local.p[0] = 2460
+	local.p[1] = 0 - 1180
+	local.p[2] = 200
+	local.a = waitthread coop_vigSpawn "models/human/dday_29th_private" "none" local.p 250
+	if(local.a != NULL && local.a != NIL){
+		local.a anim unarmed_pain_kneesidle
+		local.a setsynctime ( randomfloat 1 )
+	}
+
+	println("^~^~^ VIGNETTES actors=" + level.coop_vigMade + "/" + level.coop_vigCap)
+}end
+
+//Spawns one ambient actor: AI off, unshootable, unaggroable, invisible to objectives, dropped onto
+//the ground rather than placed at a guessed height. Returns the actor, or NULL if the cap or the
+//entity pool says no.
+//=========================================================================
+coop_vigSpawn local.model local.gun local.pos local.yaw:{
+//=========================================================================
+	if(level.coop_vigMade >= level.coop_vigCap){ end NULL }
+
+	local.a = spawn local.model gun local.gun
+	if(local.a == NULL || local.a == NIL){ end NULL }		//entity-pool guard
+	level.coop_vigMade++
+
+	local.a exec global/disable_ai.scr
+	local.a.coop_noChatter = 1
+	local.a threatbias ignoreme
+	local.a notarget 1
+	local.a dontdropweapons
+	local.a nodamage
+	local.a notsolid
+	//isinsequence/isbusy keep every coop sweeper and the map's own todo system away from them
+	local.a.isinsequence = 1
+	local.a.isbusy = 1
+
+	local.ang = (0 0 0)
+	local.ang[1] = local.yaw
+	local.a.angles = local.ang
+	local.a.origin = local.pos + (0 0 90)
+	local.a droptofloor
+	end local.a
+}end
+
+//One keeper thread, self is the actor, and it dies with him. Retail's own shape
+//(m3l1a.scr:4470-4481): while(isalive self). Liveness is re-checked after EVERY yield, because a
+//yield is where the actor can be removed out from under the thread.
+//=========================================================================
+coop_vigKeep local.mode:{
+//=========================================================================
+	while(isalive self){
+		if(local.mode == "hedge"){
+			//the four hedge clips retail never touches, so this man reads as a different person
+			//from the A5 pair standing a few hundred units away
+			self anim hedge_look01
+			self waittill animdone
+			if(!isalive self){ end }
+			self anim hedge_dodge01
+			self waittill animdone
+			if(!isalive self){ end }
+			self anim hedge_shake01
+			self waittill animdone
+			if(!isalive self){ end }
+			self anim hedge_dodge02			//LOOP - he settles into a shake
+			wait ( ( randomint 6 ) + 6 )
+		}
+		else if(local.mode == "radio"){
+			self anim radioman				//one-shot, 8.42s
+			self waittill animdone
+			if(!isalive self){ end }
+			wait ( 2 + ( randomfloat 3 ) )
+		}
+		else if(local.mode == "looking"){
+			self anim rifle_looking			//one-shot, 10.07s
+			self waittill animdone
+			if(!isalive self){ end }
+			self anim stand_beach_idle		//LOOP - he holds and watches
+			wait ( 6 + ( randomfloat 6 ) )
+		}
+		else if(local.mode == "fallen"){
+			self anim fallen				//trimmed base of fallen01/02/03, NOT a loop
+			self waittill animdone
+			if(!isalive self){ end }
+			wait ( ( randomint 10 ) + 15 )
+		}
+		else{ end }
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE FLANKS - "I dont see any guys moving up the far sides of the left and right
+//beach (the out of bounds areas for the players)... or higgins boats landed on those sides".
+//
+//coop_farBattle already put boats on both flanks, but it put them OUT TO SEA (y -3800..-5500), which
+//is behind you - you have to turn around and look at the horizon to find them. This is the other
+//thing: landings on the same stretch of sand you are on, just past the corridor you can walk.
+//
+//WHERE. The map's statics run x -4419..3854, and the walkable corridor is roughly x -1400..1900, so
+//the flanks are x -4100..-2300 and x 2400..3700 at beach y. Everything here stays inside the built
+//extent - the previous flank attempt sat at |x| 4600-5600, outside the world, which is why it
+//looked like it was floating in nothing.
+//
+//WHY THESE MEN USE runto AND THE VIGNETTES DO NOT. coop_vigSpawn calls disable_ai, which is right for
+//a man playing one loop on the spot and wrong here: the AI is what moves an actor, so these keep it.
+//They are neutered instead - threatbias ignoreme, notarget, nodamage, notsolid - so they cannot be
+//shot, cannot be shot at, cannot block you, and cannot be picked up by any coop sweeper. runto takes
+//a VECTOR as well as a pathnode, which matters because the out-of-bounds sand carries no pathnodes at
+//all; over open sand the AI's direct-path check carries them. If one does jam, the watchdog below
+//puts it back at the waterline rather than leaving a man frozen in a run cycle - which is exactly the
+//failure the user reported on the drag pair.
+//=========================================================================
+coop_flankLandings:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_flankLandOn == NIL){ level.coop_flankLandOn = 1 }
+	if(!level.coop_flankLandOn){ end }
+
+	//--- boats already ashore on both flanks, ramps down -------------------------------------
+	local.n = 0
+	local.n++; local.bx[local.n] = 0 - 3850; local.by[local.n] = 0 - 1520; local.bs[local.n] = 0
+	local.n++; local.bx[local.n] = 0 - 3150; local.by[local.n] = 0 - 1180; local.bs[local.n] = 1
+	local.n++; local.bx[local.n] = 0 - 2560; local.by[local.n] = 0 - 1640; local.bs[local.n] = 0
+	local.n++; local.bx[local.n] = 2620; local.by[local.n] = 0 - 1240; local.bs[local.n] = 0
+	local.n++; local.bx[local.n] = 3180; local.by[local.n] = 0 - 1600; local.bs[local.n] = 1
+	local.n++; local.bx[local.n] = 3620; local.by[local.n] = 0 - 1120; local.bs[local.n] = 0
+
+	local.made = 0
+	local.i = 1
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.bx[local.i]
+		local.p[1] = local.by[local.i]
+		//the retail higgins waterline, read off higgins3_model rather than guessed
+		local.p[2] = 0 - 544
+
+		local.h = spawn script_model model "models/vehicles/higginslite_soldiers.tik"
+		if(local.h != NULL && local.h != NIL){			//entity-pool guard
+			local.h.origin = local.p
+			local.h.angles = (0 90 0)
+			local.h notsolid
+			if(local.bs[local.i]){
+				//two of the six are wrecks, burning where they grounded
+				local.h model "models/vehicles/higgins_damage.tik"
+				thread coop_boatBurn local.p
+			}else{
+				//ramp down and empty - the crew is the column walking away from it
+				local.h anim removeguys
+			}
+			local.made++
+		}
+		local.i++
+	}
+
+	//--- and men walking up off them ---------------------------------------------------------
+	//Two columns a side. Each man starts near his boat and works up the sand; when he passes the
+	//shingle line he is put back at the water, so the flanks never empty out over a long mission.
+	if(level.coop_vigCap != NIL){ level.coop_vigCap = level.coop_vigCap + 16 }
+
+	local.men = 0
+	local.i = 1
+	while(local.i <= local.n){
+		local.k = 0
+		while(local.k < 3){
+			local.p = (0 0 0)
+			local.p[0] = local.bx[local.i] + ((randomint 260) - 130)
+			local.p[1] = local.by[local.i] + 120 + (randomint 260)
+			local.p[2] = 0 - 500
+
+			local.mdl = "models/human/dday_29th_private"
+			if((randomint 2) == 0){ local.mdl = "models/human/dday_ranger_private" }
+
+			local.a = spawn local.mdl gun "m1 garand"
+			if(local.a != NULL && local.a != NIL){		//entity-pool guard
+				//neutered, but AI LEFT ON - see the note above, the AI is what walks them
+				local.a.coop_noChatter = 1
+				local.a threatbias ignoreme
+				local.a notarget 1
+				local.a dontdropweapons
+				local.a nodamage
+				local.a notsolid
+				local.a.isinsequence = 1
+				local.a.isbusy = 1
+				local.a.origin = local.p + (0 0 80)
+				local.a droptofloor
+				local.a thread coop_flankWalk local.bx[local.i] local.by[local.i]
+				local.men++
+			}
+			local.k++
+		}
+		local.i++
+	}
+
+	println("^~^~^ FLANKLAND boats=" + local.made + " men=" + local.men)
+}end
+
+//One man working his way up an out-of-bounds flank, forever. local.hx/local.hy is the boat he came
+//off, which is also where he is put back when he reaches the top or gets stuck.
+//=========================================================================
+coop_flankWalk local.hx local.hy:{
+//=========================================================================
+	local.last = self.origin
+	local.stuck = 0
+
+	while(isalive self && level.coop_flankLandOn){
+		//a short bound up the beach, not a march to the far end - short legs path better on sand
+		local.t = (0 0 0)
+		local.t[0] = self.origin[0] + ((randomint 420) - 210)
+		local.t[1] = self.origin[1] + 260 + (randomint 380)
+		local.t[2] = self.origin[2]
+		self runto local.t
+
+		wait ( 2 + ( randomfloat 2 ) )
+		if(!isalive self){ end }
+
+		//STUCK CHECK. vector_length of the move since the last leg; two dead legs in a row and he
+		//goes back to the water. Without this a jammed man stands in a run cycle for the whole
+		//mission, which is precisely what the user saw on the drag pair.
+		local.moved = vector_length( self.origin - local.last )
+		if(local.moved < 24){ local.stuck++ }
+		else{ local.stuck = 0 }
+		local.last = self.origin
+
+		//past the shingle, or jammed - restart him at his boat
+		if(self.origin[1] > 2200 || local.stuck >= 2){
+			local.p = (0 0 0)
+			local.p[0] = local.hx + ((randomint 260) - 130)
+			local.p[1] = local.hy + 120 + (randomint 200)
+			local.p[2] = 0 - 500
+			self.origin = local.p + (0 0 80)
+			self droptofloor
+			local.last = self.origin
+			local.stuck = 0
+		}
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] SCATTERED GORE - "did we ever figure out anything about bloody limbs being
+//scattered around?"
+//
+//WHAT THE ANSWER TURNED OUT TO BE. _research/limb_dismemberment_plan.md settled this in July and the
+//answer is that real severed limbs are not available:
+//
+//  * The human body mesh is THREE FUSED SURFACES - pants (hips + BOTH legs), tunic (torso + BOTH
+//    arms), tunic_c (collar). Verified from the binary skd: numSurfaces 3, numBones 42. The rig has
+//    every Bip01 arm and leg bone, but the GEOMETRY is not split along them, so the nodraw trick that
+//    makes helmet-pop and decapitation work cannot hide one arm or one leg. It can only remove the
+//    whole upper or whole lower body at once.
+//  * NO severed-limb model exists in any of the 40 retail paks. The engine's own gib pipeline still
+//    references fx_rgib1..5.tik, fx_bspurt.tik and gib1.def - all FAKK/Alice-era leftovers that MOHAA
+//    never shipped. Nothing to reuse.
+//
+//So this is the fallback that same document recommends: "a generic red meat chunk reused N times -
+//reads as blown apart at gameplay distance without per-limb modeling." models/fx/coop_gorechunk.tik
+//already exists, authored for the decap work - a crossed-quad xbeam wearing the solid #150200 blood
+//shader, so it reads as a wet red mass from every angle with no bad silhouette.
+//
+//Clustered, not sprinkled. Two to four chunks close together with one larger piece reads as one man
+//coming apart; the same chunks spread evenly over the sand read as litter.
+//
+//spawn script_model model "..." NOT spawn "<path>" - coop_gorechunk.tik declares no classname in an
+//init block, and a plain spawn of a classname-less TIKI returns 'none' (bug-2215).
+//=========================================================================
+coop_beachGore:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachGoreOn == NIL){ level.coop_beachGoreOn = 1 }
+	if(!level.coop_beachGoreOn){ end }
+
+	local.n = 0
+	local.n++; local.gcx[local.n] = 2544; local.gcy[local.n] = 0 - 1636
+	local.n++; local.gcx[local.n] = 1244; local.gcy[local.n] = 0 - 724
+	local.n++; local.gcx[local.n] = 1650; local.gcy[local.n] = 567
+	local.n++; local.gcx[local.n] = 0 - 2006; local.gcy[local.n] = 1102
+	local.n++; local.gcx[local.n] = 0 - 365; local.gcy[local.n] = 923
+	local.n++; local.gcx[local.n] = 768; local.gcy[local.n] = 0 - 1814
+	local.n++; local.gcx[local.n] = 1878; local.gcy[local.n] = 0 - 2012
+	local.n++; local.gcx[local.n] = 0 - 2268; local.gcy[local.n] = 0 - 1448
+	local.n++; local.gcx[local.n] = 0 - 1612; local.gcy[local.n] = 0 - 2156
+	local.n++; local.gcx[local.n] = 0 - 2496; local.gcy[local.n] = 0 - 2339
+	local.n++; local.gcx[local.n] = 0 - 24; local.gcy[local.n] = 0 - 454
+	local.n++; local.gcx[local.n] = 260; local.gcy[local.n] = 0 - 2167
+	local.n++; local.gcx[local.n] = 0 - 337; local.gcy[local.n] = 0 - 258
+	local.n++; local.gcx[local.n] = 0 - 1032; local.gcy[local.n] = 0 - 697
+	local.n++; local.gcx[local.n] = 0 - 2108; local.gcy[local.n] = 0 - 3
+	local.n++; local.gcx[local.n] = 0 - 2286; local.gcy[local.n] = 0 - 1670
+	local.n++; local.gcx[local.n] = 1787; local.gcy[local.n] = 0 - 689
+	local.n++; local.gcx[local.n] = 2849; local.gcy[local.n] = 0 - 274
+	local.n++; local.gcx[local.n] = 1730; local.gcy[local.n] = 0 - 1744
+	local.n++; local.gcx[local.n] = 1430; local.gcy[local.n] = 511
+
+	local.i = 1
+	local.made = 0
+	while(local.i <= local.n){
+		//one cluster = one man. A big piece plus two or three smaller ones around it.
+		local.k = 0
+		local.pieces = 2 + (randomint 3)
+		while(local.k < local.pieces){
+			local.p = (0 0 0)
+			local.p[0] = local.gcx[local.i] + ((randomint 130) - 65)
+			local.p[1] = local.gcy[local.i] + ((randomint 130) - 65)
+			local.p[2] = 200			//dropped to the sand below, never guessed
+
+			local.g = spawn script_model model "models/fx/coop_gorechunk.tik"
+			if(local.g != NULL && local.g != NIL){			//entity-pool guard
+				local.g.origin = local.p
+				local.g.angles = ((randomint 360) (randomint 360) (randomint 360))
+				//the first piece of each cluster is the big one
+				if(local.k == 0){ local.g scale (1.1 + (randomfloat 0.7)) }
+				else{ local.g scale (0.45 + (randomfloat 0.55)) }
+				local.g notsolid
+				local.g anim idle
+				local.g droptofloor
+				local.made++
+			}
+			local.k++
+		}
+
+		//and a pool under the cluster, so it reads as wet rather than as props dropped on clean sand
+		local.q = (0 0 0)
+		local.q[0] = local.gcx[local.i]
+		local.q[1] = local.gcy[local.i]
+		local.q[2] = 200
+		local.s = spawn "models/fx/coop_bloodslick.tik"
+		if(local.s != NULL && local.s != NIL){
+			local.s.origin = local.q
+			local.s.angles = (0 (randomint 360) 0)
+			local.s scale (0.8 + (randomfloat 0.9))
+			local.s notsolid
+			local.s droptofloor
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHGORE clusters=" + local.n + " pieces=" + local.made)
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE SHERMAN THAT GETS KILLED IN FRONT OF YOU.
+//
+//User: "can we make one of the Sherman's get shelled and blow up (start it off as alive) but script it
+//to get shelled and blow up/catch fire when a player gets close to it."
+//
+//WHY THIS IS WORTH MORE THAN ANOTHER AMBIENT EFFECT. The beach already runs six continuous loops -
+//shellfire, return fire, water strikes, seawall fire, inland blasts, flank battle. Continuous chaos
+//becomes wallpaper inside a minute. This is the opposite: it happens ONCE, it happens because YOU
+//walked up to it, and it is loud. That is a punctuation mark, and the beach has almost none.
+//
+//THE BEAT, deliberately in this order:
+//  1. You approach an INTACT Sherman - the only live one on the beach, so it reads as cover and as
+//     something on your side.
+//  2. arty_leadin: the incoming whistle. Retail already plays this alias on this map
+//     (m3l1a.scr:3094), so the prefix match and the maxdist profile are proven here.
+//  3. About a second of nothing. The gap is the whole trick - it is long enough to look up.
+//  4. It brews up: fx_tank_explosion plus explosion_tank_sideplume, explode_tank on the wire, an
+//     earthquake you feel, and a suppression spike on anyone close.
+//  5. It is a burning wreck for the rest of the mission, and the cover box stays, so it is still
+//     cover - just cover that is now on fire.
+//
+//SAFETY. No radiusdamage anywhere in here. The blast cannot kill a player, cannot kill a scripted
+//actor, and cannot fail the mission; it only shakes the screen and makes noise. That is deliberate -
+//a scripted set piece that can kill you is a set piece players learn to avoid.
+//
+//The hull is notsolid and an invisible box does the blocking, exactly as coop_beachWrecks does - see
+//the long note there for why rendereffects "+dontdraw" and not `hide`.
+//=========================================================================
+coop_shermanShelled:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_shermanShelledOn == NIL){ level.coop_shermanShelledOn = 1 }
+	if(!level.coop_shermanShelledOn){ end }
+
+	//Open sand on the right of the run-up, clear of the lane coop_beachWar keeps free (x -900..1300)
+	//and about 700 from the nearest static wreck. Height is dropped, never guessed.
+	local.pos = (0 0 0)
+	local.pos[0] = 1620
+	local.pos[1] = 0 - 520
+	local.pos[2] = 0 - 440
+
+	local.tank = spawn script_model model "models/static/vehicle_shermantank.tik"
+	if(local.tank == NULL || local.tank == NIL){			//entity-pool guard
+		println("^~^~^ SHERMAN spawn failed")
+		end
+	}
+	local.tank.origin = local.pos
+	local.tank.angles = (0 85 0)
+	local.tank anim idle
+	local.tank notsolid
+	local.tank droptofloor
+	local.pos = local.tank.origin
+
+	//cover box - yaw is near 90, so the long axis runs along Y. A SOLID_BBOX is axis-aligned in world
+	//space whatever the entity's angles say, which is why the yaw is pinned near an axis.
+	local.clip = spawn script_model model "models/fx/dummy.tik"
+	if(local.clip != NULL && local.clip != NIL){
+		local.clip.origin = local.pos
+		local.clip.angles = (0 85 0)
+		local.clip rendereffects "+dontdraw"
+		local.clip setsize ( -58 -115 0) (58 115 112)
+		local.clip solid
+	}
+	println("^~^~^ SHERMAN alive at " + local.pos)
+
+	//--- wait for somebody to walk up to it -----------------------------------------------------
+	local.hit = 0
+	while(!local.hit && level.coop_shermanShelledOn){
+		local.i = 1
+		while(local.i <= $player.size){
+			local.pl = $player[local.i]
+			if(local.pl != NULL && local.pl != NIL && local.pl.health > 0){
+				if(vector_length( local.pl.origin - local.pos ) < 750){ local.hit = 1 }
+			}
+			local.i++
+		}
+		//5 Hz is plenty for a 750-unit trigger and costs nothing. $player.size reads -1 when nobody is
+		//connected, so the inner loop simply does not run - it does not need its own guard.
+		wait 0.2
+	}
+	if(!level.coop_shermanShelledOn){ end }
+
+	//--- the incoming round --------------------------------------------------------------------
+	local.tank playsound arty_leadin
+	wait ( 1.0 + ( randomfloat 0.5 ) )
+
+	//--- and the hit ---------------------------------------------------------------------------
+	local.up = local.pos + (0 0 70)
+
+	local.e = spawn script_model model "models/fx/fx_tank_explosion.tik"
+	if(local.e != NULL && local.e != NIL){
+		local.e.origin = local.up
+		local.e notsolid
+		local.e anim start
+		thread coop_fxCleanup local.e 6
+	}
+	local.sp = spawn script_model model "models/emitters/explosion_tank_sideplume.tik"
+	if(local.sp != NULL && local.sp != NIL){
+		local.sp.origin = local.up
+		local.sp notsolid
+		local.sp anim start
+		thread coop_fxCleanup local.sp 6
+	}
+	local.tank playsound explode_tank
+
+	//felt, not damaging
+	thread coop_mod/main.scr::earthquake_radius local.pos 1.1 1.4 1600
+	local.i = 1
+	while(local.i <= $player.size){
+		local.pl = $player[local.i]
+		if(local.pl != NULL && local.pl != NIL && local.pl.health > 0){
+			if(vector_length( local.pl.origin - local.pos ) < 1400){
+				thread coop_mod/main.scr::coop_bumpSuppression local.pl 0.75
+			}
+		}
+		local.i++
+	}
+
+	//--- it is a wreck from here on ------------------------------------------------------------
+	//Swapping the model in place rather than remove-and-respawn keeps the entity, and therefore keeps
+	//it in every client's snapshot without a spawn/despawn pop. The Higgins wrecks do the same thing.
+	local.tank model "models/static/vehicle_shermantank_dead.tik"
+	local.tank anim idle
+
+	local.sm = spawn script_model model "models/emitters/shermansmoke.tik"
+	if(local.sm != NULL && local.sm != NIL){
+		local.sm.origin = local.pos
+		local.sm notsolid
+		local.sm anim start
+	}
+	local.f = spawn script_model model "models/emitters/fireandsmoke.tik"
+	if(local.f != NULL && local.f != NIL){
+		local.f.origin = local.pos + (0 0 40)
+		local.f notsolid
+		local.f anim start
+		local.f loopsound fire_med
+	}
+	local.col = spawn script_model model "models/emitters/tehao_firesmoke_long.tik"
+	if(local.col != NULL && local.col != NIL){
+		local.col.origin = local.pos + (0 0 60)
+		local.col notsolid
+		local.col anim start
+	}
+
+	//and what came out of it
+	local.k = 0
+	while(local.k < 3){
+		local.q = (0 0 0)
+		local.q[0] = local.pos[0] + ((randomint 320) - 160)
+		local.q[1] = local.pos[1] + ((randomint 320) - 160)
+		local.q[2] = local.pos[2] + 90
+		local.g = spawn script_model model "models/fx/coop_gorechunk.tik"
+		if(local.g != NULL && local.g != NIL){
+			local.g.origin = local.q
+			local.g.angles = ((randomint 360) (randomint 360) (randomint 360))
+			local.g scale (0.6 + (randomfloat 0.7))
+			local.g notsolid
+			local.g anim idle
+			local.g droptofloor
+		}
+		local.k++
+	}
+
+	println("^~^~^ SHERMAN brewed up")
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE VOICES, AND THE ROUNDS HITTING YOUR COVER.
+//
+//Two retail sound sets that ship with the game and that nothing has ever played.
+//
+//WHY loopsound AND NOT playsound. Entity::LoopSound writes edict->s.loopSound into the entity state,
+//and S_OPENAL_AddLoopSounds re-evaluates every frame - it starts the loop when a listener comes into
+//range and stops it when they leave. That buys three things a retrigger thread cannot: no seam at the
+//60-second wrap, no per-frame script work at all, and a player who walks into range hears it
+//immediately instead of waiting out the rest of a cycle.
+//
+//IT ALSO DECIDES THE EMITTER. loopSound rides in entityState_t, so the emitter MUST be an entity the
+//client actually receives. A script_origin is NOT sent to clients and would be silent. So these use
+//the same dontdraw script_model the wreck cover boxes use: rendereffects "+dontdraw" still SENDS the
+//entity (entity.cpp:881), it just does not draw it.
+//
+//AND IT RESPECTS THE INTRO. The user asked for the opening music duck to be left alone. Nothing here
+//needs timing: a loopsound is evaluated by distance, so the beds are simply inaudible under the duck
+//and come up on their own as it releases. No wait, no sequence hook, no interaction with the intro.
+//
+//BUDGET. MAX_SOUNDSYSTEM_LOOP_SOUNDS is 64 (snd_local_new.h:50) and coopified already holds four
+//fire loops, so this is deliberately capped well under it. Same-alias loops are direction-averaged by
+//bCombine, so several hedgehog beds read as one wide source rather than stacking gain.
+//=========================================================================
+coop_beachVoices:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachVoicesOn == NIL){ level.coop_beachVoicesOn = 1 }
+	if(!level.coop_beachVoicesOn){ end }
+
+	//TWO anchors playing TWO DIFFERENT files. Never the same alias from two emitters at once - that is
+	//self-layering, and with a 60s bed it doubles the gain and phases against itself.
+	//The waterline crowd and the shingle crowd, so the beach has a front and a back.
+	local.n = 0
+	local.n++; local.vx[local.n] = 300;  local.vy[local.n] = 0 - 1500; local.va[local.n] = "coop_beachcrowd_rush"
+	local.n++; local.vx[local.n] = 200;  local.vy[local.n] = 2500;     local.va[local.n] = "coop_beachcrowd_shingle"
+
+	local.made = 0
+	local.i = 1
+	while(local.i <= local.n){
+		local.p = (0 0 0)
+		local.p[0] = local.vx[local.i]
+		local.p[1] = local.vy[local.i]
+		local.p[2] = 100
+
+		local.e = spawn script_model model "models/fx/dummy.tik"
+		if(local.e != NULL && local.e != NIL){			//entity-pool guard
+			local.e.origin = local.p
+			local.e notsolid
+			local.e rendereffects "+dontdraw"
+			local.e droptofloor
+			local.e.origin = local.e.origin + (0 0 60)		//head height, not buried in the sand
+			local.e loopsound local.va[local.i]
+			local.made++
+		}
+		local.i++
+	}
+	println("^~^~^ BEACHVOICES beds=" + local.made)
+}end
+
+//Rounds hammering the steel you are hiding behind.
+//
+//sound/amb/Amb_M3_HedgeImpacts_01..07 are scoped `maps "m3l1a "` in retail's own ubersound - authored
+//for this map, for this exact purpose, and played by nothing. The map's own $cover_sound entities are
+//already positioned at every piece of cover and retail already fires one-shot impacts from them
+//(m3l1a.scr:1986-1994), so they are the correct emitters and need no placement work.
+//
+//Only hedgehog and ramp cover. The seven `crater` anchors are sand - a metal impact bed reads wrong
+//there, and the map already has crater_supression for them.
+//=========================================================================
+coop_coverImpacts:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_coverImpactsOn == NIL){ level.coop_coverImpactsOn = 1 }
+	if(!level.coop_coverImpactsOn){ end }
+	//12 was too many on two counts. Loop-sound budget: MAX_SOUNDSYSTEM_LOOP_SOUNDS is 64 and the
+	//beach already holds ~28 (beachWar fires, boat burns, bunker fires, the Sherman, the two crowd
+	//beds, the levelwide surf), so 12 here took it to ~40. And these are 5-11s clips looping with no
+	//end condition - the exact "continuous texture stops registering" failure the user described.
+	//Six, spread wider, is pressure; twelve is wallpaper.
+	if(level.coop_coverImpactCap == NIL){ level.coop_coverImpactCap = 6 }
+
+	//setup_cover fills in sound_index; give it a moment rather than racing it
+	wait 2
+
+	if($cover_trigger == NULL || $cover_trigger == NIL){
+		println("^~^~^ COVERIMPACTS no cover triggers")
+		end
+	}
+
+	//Spread the beds across the beach instead of taking the first N, which would cluster them all at
+	//one end. Walk the list with a stride sized to land on the cap.
+	local.total = $cover_trigger.size
+	if(local.total < 1){ end }
+	local.stride = local.total / level.coop_coverImpactCap
+	if(local.stride < 1){ local.stride = 1 }
+
+	local.made = 0
+	local.i = 1
+	while(local.i <= local.total && local.made < level.coop_coverImpactCap){
+		local.t = $cover_trigger[local.i]
+		if(local.t != NULL && local.t != NIL){
+			if(local.t.cover_type == "hedgehog" || local.t.cover_type == "ramp"){
+				local.si = local.t.sound_index
+				if(local.si != NULL && local.si != NIL && local.si > 0){
+					local.snd = $cover_sound[local.si]
+					if(local.snd != NULL && local.snd != NIL){
+						//one of the seven clips, so adjacent pieces of cover are not in lockstep
+						local.snd loopsound ("hedgehog_ambient" + ((randomint 7) + 1))
+						local.made++
+						local.beds[local.made] = local.snd		//kept so they can be silenced below
+					}
+				}
+			}
+		}
+		local.i = local.i + local.stride
+	}
+	println("^~^~^ COVERIMPACTS beds=" + local.made + "/" + local.total)
+
+	//[user 2026-08-31] AND THEY STOP. Left alone these loop for the rest of the mission, so long after
+	//the bunkers are cleared the hedgehogs are still being hammered by rounds that no longer exist -
+	//which is the user's own complaint about continuous texture, in miniature.
+	//
+	//coop_flankMGDone is set when the bangalores blow the wire, i.e. the moment the beach is behind
+	//you. Same signal coop_seawallFire already stops on, so the two end together.
+	local.done = 0
+	while(local.done == 0){
+		if(level.coop_flankMGDone == 1){ local.done = 1 }
+		else if(!level.coop_coverImpactsOn){ local.done = 1 }
+		else{ wait 2 }
+	}
+	local.k = 1
+	local.hushed = 0
+	while(local.k <= local.made){
+		if(local.beds[local.k] != NULL && local.beds[local.k] != NIL){
+			local.beds[local.k] stoploopsound
+			local.hushed++
+		}
+		local.k++
+	}
+	println("^~^~^ COVERIMPACTS stopped=" + local.hushed)
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE SCREAMING.
+//
+//19 allied panic lines ship in retail, are aliased ~99 times, and are played by nothing on this map.
+//Meanwhile the beach has ~30 corpses, 46 blood pools, 21 ambient casualties and a shingle line of men
+//refusing to move - and all of it is completely silent. Sound is most of what makes a beach feel bad.
+//
+//A SINGLE PACED THREAD, not per-actor voices. Three reasons, all of them from the existing code:
+//  * coop_vigSpawn sets coop_noChatter = 1 and aivoice.scr:208 refuses on that flag, by design - the
+//    vignette actors are meant to be silent props, not chatterboxes.
+//  * A1 (the medic/patient pair) and A5 (the shingle line) are deliberately thread-free; the file
+//    warns that attaching a second thread to A1 is exactly what broke it before.
+//  * Nineteen actors each deciding independently when to scream is a chorus. One thread that fires
+//    one line every seven to sixteen seconds is a battlefield.
+//
+//EMITTERS ARE THE MAP'S OWN $cover_sound ENTITIES. They are already positioned at every piece of cover
+//across the whole beach, they are already networked, and retail already plays one-shot impacts from
+//them (m3l1a.scr:1986-1994) - so they need no placement work and are guaranteed to be somewhere a
+//player might be. One is picked near a live player each cycle so the scream is always audible.
+//=========================================================================
+coop_beachPanic:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_beachPanicOn == NIL){ level.coop_beachPanicOn = 1 }
+	if(!level.coop_beachPanicOn){ end }
+
+	wait 3			//let setup_cover finish before touching $cover_sound
+
+	if($cover_sound == NULL || $cover_sound == NIL){
+		println("^~^~^ BEACHPANIC no cover_sound anchors")
+		end
+	}
+	local.total = $cover_sound.size
+	if(local.total < 1){ end }
+	println("^~^~^ BEACHPANIC anchors=" + local.total)
+
+	while(level.coop_beachPanicOn){
+		wait ( 7 + ( randomfloat 9 ) )
+
+		//pick a live player to anchor the choice to, so we never scream on the far side of the map
+		local.pl = NULL
+		local.try = 0
+		while(local.try < 4 && local.pl == NULL){
+			if($player != NULL && $player != NIL && $player.size > 0){
+				local.c = $player[((randomint $player.size) + 1)]
+				if(local.c != NULL && local.c != NIL && local.c.health > 0){ local.pl = local.c }
+			}
+			local.try++
+		}
+		if(local.pl == NULL){ continue }
+
+		//and an anchor near him - a handful of tries rather than a full sort every cycle
+		local.pick = NULL
+		local.try = 0
+		while(local.try < 10 && local.pick == NULL){
+			local.a = $cover_sound[((randomint local.total) + 1)]
+			if(local.a != NULL && local.a != NIL){
+				local.d = vector_length( local.a.origin - local.pl.origin )
+				//inside the alias maxdist (2200) but not on top of the player
+				if(local.d > 250 && local.d < 1900){ local.pick = local.a }
+			}
+			local.try++
+		}
+		if(local.pick == NULL){ continue }
+
+		local.pick playsound coop_av_us_panic
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-08-31] THE SEASICK MAN.
+//
+//higgins_ride_puke02 -> scripted/higgins/higginspuke02.skc is declared in level_m3l1.tik inside its
+//$mapspec m3l1a block, so it is already loaded on this map through new_generic_human.tik's includes.
+//It is NOT flagged `random`, so the name survives verbatim - no digit strip. Nothing in the entire
+//game has ever played it.
+//
+//It is the single most recognisable image from the reference: on the way in, one of the men leans
+//over the gunwale and is sick. MOHAA shipped the animation for it and never used it.
+//
+//$higgins1_ranger4 is the right man to give it to. He is set to `anim higgins_ride_stand04` once at
+//m3l1a.scr:445 and is not touched again until the ramp drops (:2484 unglue/solid/physics_on), so
+//during the ride he is purely cosmetic - and he is restored to his stand anim afterwards regardless.
+//=========================================================================
+coop_seasickMan:{
+//=========================================================================
+	if(level.gametype == 0){ end }
+	if(level.coop_seasickOn == NIL){ level.coop_seasickOn = 1 }
+	if(!level.coop_seasickOn){ end }
+
+	//wait for the run-in to actually be under way rather than guessing at map-start timing
+	local.t = 0
+	while(local.t < 180 && level.coop_runInShelling != 1){
+		wait 0.5
+		local.t++
+	}
+	if(level.coop_runInShelling != 1){ end }
+
+	wait ( 6 + ( randomfloat 7 ) )
+	//if the ramp has already dropped the moment has passed - do not play it on the sand
+	if(level.coop_runInShelling != 1){ end }
+	if($higgins1_ranger4 == NULL || $higgins1_ranger4 == NIL){ end }
+
+	//CLAIM HIM FIRST. Every ranger on this boat is driven by higgins1_crouch / _look / _flinch
+	//(m3l1a.scr:7366/7379/7410/7423), and retail fires the flinch FIVE times during the ride, so
+	//without this the puke is overridden within a second or two and the beat never lands. Those four
+	//lines now skip ranger4 while this flag is up - only ranger4, only for the length of the anim.
+	level.coop_seasickPlaying = 1
+	$higgins1_ranger4 anim higgins_ride_puke02
+	println("^~^~^ SEASICK played")
+	wait 4.5
+	level.coop_seasickPlaying = 0
+	if(level.coop_runInShelling == 1 && $higgins1_ranger4 != NULL && $higgins1_ranger4 != NIL){
+		$higgins1_ranger4 anim higgins_ride_stand04
 	}
 }end

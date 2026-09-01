@@ -110,4 +110,55 @@ textures/misc_outside/deepbluesea_shoreline
 		tcMod scale -8 1.1
 		tcMod scroll -0.025 -0.025
 	}
+
+	// [coop 2026-08-31] BLOOD IN THE SURF - the user asked for blood in the water "specifically near
+	// the shore not out in the ocean".
+	//
+	// This is a STAGE, not spawned geometry, and that is the whole point. This shader is the near-shore
+	// band by construction - it is the 12 waterline faces, and the open ocean is a different shader
+	// (deepbluesea) - so putting the blood here bounds it to the shore for free, with zero entities and
+	// zero script.
+	//
+	// The alternative, floating blood planes on the water, does not work here: the deformVertexes flap
+	// above moves this surface vertically by roughly +/-8u at the far end of the band and +/-16u at the
+	// near end on a ~12.5s cycle, and no separate entity can follow a per-vertex deform. A static plane
+	// would sink under the wash and surface through it every cycle. A stage inherits the deform.
+	//
+	// Kept to ONE extra blended stage on a surface that is already 6 stages x 2 bundles. alphaGen const
+	// rather than the tCoord ramps above, so the wash reads evenly along the whole waterline instead of
+	// banding; the texture's own alpha does the shaping. Slow, near-perpendicular scroll so it drifts
+	// with the surf without ever looking like it is flowing in one direction.
+	{
+		nopicmip
+		map textures/coop_fx/bloodwash.tga
+		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+		// [user 2026-08-31] HEAVIER. First pass ran alpha 0.5 at scale 0.85/0.30 and the user still read
+		// the water as clean - "i was hoping more of having BLOODY WATER on the shoreline not just bodies
+		// with blood in the water". Alpha up to 0.82 and the texture stretched much wider (0.42/0.16, so
+		// each repeat covers roughly twice the surface) turns it from a tint into standing blood in the
+		// wash. Still ONE stage on a 6-stage surface.
+		// [user 2026-08-31] RAMPED ALONG T, and that is what fixes the seam.
+		//
+		// The user: "the blood is overwhelming in the water once you get off the boat, you can tell the
+		// clear difference between where the water textures separate between the higgins drive in and
+		// the actual landing in the water area, it does not blend well at all."
+		//
+		// Both halves of that are this stage's fault. This shader covers ONLY the wading band; the
+		// run-in is textures/misc_outside/deepbluesea, a different shader with no blood in it. So a
+		// flat `alphaGen const` painted the wading band evenly and stopped dead at the join - drawing
+		// the boundary rather than hiding it. Measured from the BSP, that join is at Y = -2160, and on
+		// these 12 faces T runs 0.005 at the seaward edge to 0.994 at the water's edge. So T is exactly
+		// the axis to ramp on: near zero at the seam, strongest where the user asked for it.
+		//
+		// FOUR PARAMETERS, not two. alphaGen sCoord/tCoord takes min, max, constMin, const - and the
+		// last two are the clamps. Every retail use of this keyword supplies only two, which leaves
+		// alphaConst at its -1 sentinel and drives the stage to alpha 0 in gl1 and to an
+		// undefined-order clamp in gl2 (bug-2226). Supplying all four keeps it well defined in both.
+		alphaGen tCoord 0.02 0.60 0 0.60
+		// Was 0.42/0.16 - less than one repeat across a 16,000-unit beach, i.e. one smooth blob, i.e. a
+		// red filter over the sea. 16 x 2 puts a repeat every ~1000 units across and ~700 deep, so the
+		// texture's clear water (58% of it now) actually reads as gaps between slicks.
+		tcMod scale 16 2
+		tcMod scroll 0.002 -0.008
+	}
 }

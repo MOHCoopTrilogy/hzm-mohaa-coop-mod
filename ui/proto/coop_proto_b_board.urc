@@ -1,0 +1,2474 @@
+// ============================================================================================
+// MOH Trilogy Coop - PROTOTYPE B, "OPERATIONS BOARD".
+//
+// WHAT THIS IS.  A layout study for a denser main menu: the whole trilogy - 3 theatres,
+// 12 missions, 52 maps - laid out as a wartime briefing board, on ONE screen, with a clear
+// typographic hierarchy and no scrolling anywhere.  It is a PROTOTYPE.  It starts nothing,
+// launches nothing, and writes only cvars whose names begin with coop_protoB.
+//
+// HOW TO OPEN IT.  Nothing under ui/proto/ is auto-loaded: the startup sweep is
+// FS_ListFiles("ui/", "urc", qfalse, ...) at client/cl_ui.cpp:5634, and wantSubs=qfalse drops
+// any path deeper than one level (qcommon/files.cpp:2426).  So, in the console:
+//
+//     exec ui/proto/coop_proto_b_open.cfg
+//
+// or by hand:
+//
+//     loadmenu proto/coop_proto_b_board
+//     loadmenu proto/coop_proto_b_brief
+//     pushmenu coop_proto_b_board
+//
+// pushmenu, never showmenu: UI_ShowMenu skips the focus call that turns the mouse on
+// (cl_ui.cpp:5524 vs :5529).  BACK, bottom-left, is popmenu 0 and returns you to whatever was
+// underneath - normally the real main menu, which this file never touches.
+//
+// fullscreen 0, NOT 1.  fullscreen only decides what happens to the 3D view: a fullscreen
+// container hides it and calls Com_FakePause() when a server is running (cl_ui.cpp:1993-1996).
+// A prototype opened mid-session should not pause a live coop server, and it costs nothing to
+// avoid, because the shared chrome's `stretch both` ground is fully opaque - the world behind
+// is covered anyway.  At the main menu the two are indistinguishable: pushmenu hides the menu
+// underneath (uimenu.cpp:538) and the non-fullscreen branch clears the background.
+//
+// THE PAGING MECHANISM, and why there is no scrollbar.
+// UIVertScroll registers no layout events of its own (uilib/uivertscroll.cpp:45-53) and has no
+// item source; only ListBox/ListCtrl ever drive one.  A long list therefore cannot scroll - it
+// has to be PAGED.  Three theatre tabs each drive one boolean, and every widget on a page
+// carries an enabledcvar:
+//     ALLIED ASSAULT   enabledcvar "!coop_protoBhide1"   visible while the cvar is 0 or unset
+//     SPEARHEAD        enabledcvar "coop_protoBp2"
+//     BREAKTHROUGH     enabledcvar "coop_protoBp3"
+// The "!" form is uiwidget.cpp:1701 and already ships in ui/coop_loadout.urc:696.  Using it for
+// page 1 means the board is correct with NO cvar registered at all - nothing has to be seeded
+// before the menu opens, and UI_GetCvarInt uses Cvar_Find, so reading an absent cvar creates
+// nothing (uilib/ui_init.cpp:57-64).  A gated-off widget returns early from Display
+// (uiwidget.cpp:2027) AND is skipped by FindResponder (uiwidget.cpp:1736-1739), so a hidden
+// page can neither draw nor eat a click from the page on top of it.
+//
+// GROUPING WITHOUT NESTING.  Widgets do not nest - every resource below is a flat, direct child
+// of the menu container (uilib/uilayout.cpp:150).  Every "panel" here is therefore just a
+// filled Widget declared BEFORE the things that sit on it: draw order is declaration order and
+// hit-testing walks children last-to-first (uiwidget.cpp:1744), so a backing plate can never
+// steal a click from the content drawn over it.  Grouping is done with position, a plate, and a
+// brass header bar - there is no other kind of group available.
+//
+// THE THREE COLUMNS
+//     x   8..140   ORDERS       the action rail: 6 primary, 4 reference
+//     x 146..476   MISSION BOARD  3 theatre tabs, 6 mission blocks, up to 12 map chips each
+//     x 482..632   DISPATCH     live readout of the chip you clicked, plus the board key
+// y 0..70 and y 434..480 belong to ui/proto/coop_proto_chrome.inc (title plate, credit, BACK).
+//
+// CVARS THIS FILE READS OR WRITES - all proto-private, by design:
+//     coop_protoBhide1 / coop_protoBp2 / coop_protoBp3   which theatre page is showing
+//     coop_protoBsel                                     selected map id, shown in DISPATCH
+//     coop_protoBshot                                    that map's loading art (linkcvartoshader)
+//     coop_protoBord                                     last button pressed on the ORDERS rail
+// It deliberately does NOT linkcvar a real game cvar.  ESC on any menu calls
+// menuManager.PopMenu(qtrue) (cl_ui.cpp:3127), which runs Menu::RestoreCVars, which does a
+// Cvar_Set on every widget cvarname - so a linkcvar pointed at a cvar that was not registered
+// when the menu was pushed would CREATE it as an empty string, permanently defeating the engine
+// default.  That is the bug-1669 failure mode arriving through the UI instead of through a
+// script getcvar.  Read-only game state stays static text until something registers it first.
+//
+// FONTS are only the three this mod actually ships menus in: facfont-20, verdana-12,
+// courier-16.  A font name the renderer cannot load is Com_Error(ERR_DROP) at
+// uilib/uifont.cpp:299 - the client drops at menu load.  Every string below was measured
+// against its rect using the real .RitualFont metric tables before it was written.
+//
+// ART is retail-only: menu_button_trans + textures/mohmenu/m_buttonhighlight (the exact hover
+// idiom already shipped at ui/multiplayerstart.urc:174-175) and textures/mohmenu/dmloading/*
+// for the map previews.  No new shader name is declared, so the bug-922 bare-name trap cannot
+// fire.  Five maps ship no loading art (m6l3e, e3l1-e3l4); their chips are dimmed and DISPATCH
+// says so, rather than silently leaving the previous map's picture up.
+//
+// borderstyle is spelled out on every widget: the default is border_indent, not none
+// (uiwidget.cpp:747), and "RAISED" - used 40 times elsewhere in this mod's UI - is not a
+// recognised value (uiwidget.cpp:1349-1360) and silently leaves the indent border drawn.
+// textalign is written as centerx / centery / left / top: "center" and "xcenter" are NOT
+// recognised (uiwidget.cpp:1511-1530), and the handler only ever reads argument 1, so each
+// alignment needs its own line.
+//
+// Generated, then checked: every rect is inside the 640x480 canvas and inside the chrome's
+// content contract, and every title fits its rect at its font's real metrics.
+// ============================================================================================
+menu "coop_proto_b_board" 640 480 NONE 0
+bgcolor 0 0 0 1
+borderstyle NONE
+bgfill 0 0 0 1
+fullscreen 0
+virtualres 1
+include "ui/proto/coop_proto_chrome.inc"
+
+// ---- title, hard-coded, drawn over the chrome's cvar-driven pair ----------
+resource
+Label
+{
+	name "bb_title"
+	title "OPERATIONS BOARD"
+	rect 90 16 460 24
+	fgcolor 0.94 0.88 0.70 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "facfont-20"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_sub"
+	title "MOH Trilogy Coop - theatre, mission and map, on one screen"
+	rect 90 42 460 15
+	fgcolor 0.78 0.70 0.52 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+
+// ---- census strip: what the board is holding ------------------------------
+resource
+Label
+{
+	name "bb_stat1"
+	title "3 THEATRES"
+	rect 8 76 153 18
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.130 0.142 0.110 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_stat2"
+	title "12 MISSIONS"
+	rect 165 76 153 18
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.130 0.142 0.110 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_stat3"
+	title "53 MAPS"
+	rect 322 76 153 18
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.130 0.142 0.110 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_stat4"
+	title "1 SCREEN, NO SCROLLING"
+	rect 479 76 153 18
+	fgcolor 0.860 0.720 0.380 1.00
+	bgcolor 0.130 0.142 0.110 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+
+// ==== COLUMN A - ORDERS RAIL ===============================================
+resource
+Label
+{
+	name "bb_a_hdr1"
+	title "ORDERS"
+	rect 8 100 132 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_a_plate1"
+	rect 8 118 132 172
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+}
+resource
+Button
+{
+	name "bb_a_ord1"
+	title "HOST A MISSION"
+	rect 8 122 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 1;pushmenu coop_proto_b_brief"
+	ordernumber 2
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ord2"
+	title "JOIN A SERVER"
+	rect 8 150 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 2"
+	ordernumber 3
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ord3"
+	title "ARMORY / LOADOUT"
+	rect 8 178 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 3"
+	ordernumber 4
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ord4"
+	title "SERVICE RECORD"
+	rect 8 206 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 4"
+	ordernumber 5
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ord5"
+	title "COOP SETTINGS"
+	rect 8 234 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 5"
+	ordernumber 6
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ord6"
+	title "WHAT IS NEW"
+	rect 8 262 132 24
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 6"
+	ordernumber 7
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_a_hdr2"
+	title "REFERENCE"
+	rect 8 296 132 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_a_plate2"
+	rect 8 314 132 100
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+}
+resource
+Button
+{
+	name "bb_a_ref7"
+	title "CONTROLS"
+	rect 8 318 132 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 7"
+	ordernumber 8
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ref8"
+	title "MAP TESTER"
+	rect 8 342 132 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 8"
+	ordernumber 9
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ref9"
+	title "REPORT A BUG"
+	rect 8 366 132 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 9"
+	ordernumber 10
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_a_ref10"
+	title "CREDITS"
+	rect 8 390 132 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBord 10"
+	ordernumber 11
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_a_note"
+	title "nothing here starts a map"
+	rect 8 418 132 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+
+// ==== COLUMN B - MISSION BOARD =============================================
+resource
+Label
+{
+	name "bb_b_hdr"
+	title "MISSION BOARD"
+	rect 146 100 330 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+// tabs, then the inactive rail, then the lit bar for whichever page is on.
+resource
+Button
+{
+	name "bb_b_tab_aa"
+	title "ALLIED ASSAULT"
+	rect 146 122 107 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBhide1 0;set coop_protoBp2 0;set coop_protoBp3 0"
+	ordernumber 12
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_b_baroff_aa"
+	rect 146 143 107 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.300 0.320 0.250 1.00
+	borderstyle "NONE"
+}
+resource
+Button
+{
+	name "bb_b_tab_sh"
+	title "SPEARHEAD"
+	rect 257 122 107 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBhide1 1;set coop_protoBp2 1;set coop_protoBp3 0"
+	ordernumber 13
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_b_baroff_sh"
+	rect 257 143 107 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.300 0.320 0.250 1.00
+	borderstyle "NONE"
+}
+resource
+Button
+{
+	name "bb_b_tab_bt"
+	title "BREAKTHROUGH"
+	rect 368 122 108 20
+	fgcolor 0.900 0.912 0.830 1.00
+	bgcolor 0.152 0.166 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBhide1 1;set coop_protoBp2 0;set coop_protoBp3 1"
+	ordernumber 14
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_b_baroff_bt"
+	rect 368 143 108 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.300 0.320 0.250 1.00
+	borderstyle "NONE"
+}
+resource
+Widget
+{
+	name "bb_b_bar_aa"
+	rect 146 143 107 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.860 0.720 0.380 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Widget
+{
+	name "bb_b_bar_sh"
+	rect 257 143 107 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.860 0.720 0.380 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Widget
+{
+	name "bb_b_bar_bt"
+	rect 368 143 108 3
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.860 0.720 0.380 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+
+// Each mission card is sized to the number of maps it actually holds - 3 chips to a
+// row, so a 3-map mission gets a short card and the 10-map one gets a tall card.
+// Cards in a grid row share a top edge, not a height: a uniform height would leave a
+// visible hole inside every short mission, and the ragged bottom edge is itself the
+// information (mission 4 is the shortest in the game, and its card says so).
+
+// ---- page: ALLIED ASSAULT   gate: !coop_protoBhide1
+resource
+Widget
+{
+	name "bb_pg_aa_plate"
+	rect 146 148 330 282
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.105 0.115 0.092 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Widget
+{
+	name "bb_blk_aa1"
+	rect 146 148 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa1"
+	title "1 - Lighting the Torch"
+	rect 146 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l1"
+	title "m1l1"
+	rect 149 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l1;set coop_protoBshot textures/mohmenu/dmloading/m1l1"
+	ordernumber 15
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l2a"
+	title "m1l2a"
+	rect 202 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l2a;set coop_protoBshot textures/mohmenu/dmloading/m1l2a"
+	ordernumber 16
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l2b"
+	title "m1l2b"
+	rect 255 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l2b;set coop_protoBshot textures/mohmenu/dmloading/m1l2b"
+	ordernumber 17
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l3a"
+	title "m1l3a"
+	rect 149 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l3a;set coop_protoBshot textures/mohmenu/dmloading/m1l3a"
+	ordernumber 18
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l3b"
+	title "m1l3b"
+	rect 202 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l3b;set coop_protoBshot textures/mohmenu/dmloading/m1l3b"
+	ordernumber 19
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m1l3c"
+	title "m1l3c"
+	rect 255 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m1l3c;set coop_protoBshot textures/mohmenu/dmloading/m1l3c"
+	ordernumber 20
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa1"
+	title "6 maps - jeep ride, sniper town"
+	rect 149 196 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_aa2"
+	rect 314 148 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa2"
+	title "2 - Scuttling the U-529"
+	rect 314 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m2l1"
+	title "m2l1"
+	rect 317 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m2l1;set coop_protoBshot textures/mohmenu/dmloading/m2l1"
+	ordernumber 21
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m2l2a"
+	title "m2l2a"
+	rect 370 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m2l2a;set coop_protoBshot textures/mohmenu/dmloading/m2l2a"
+	ordernumber 22
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m2l2b"
+	title "m2l2b"
+	rect 423 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m2l2b;set coop_protoBshot textures/mohmenu/dmloading/m2l2b"
+	ordernumber 23
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m2l2c"
+	title "m2l2c"
+	rect 317 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m2l2c;set coop_protoBshot textures/mohmenu/dmloading/m2l2c"
+	ordernumber 24
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m2l3"
+	title "m2l3"
+	rect 370 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m2l3;set coop_protoBshot textures/mohmenu/dmloading/m2l3"
+	ordernumber 25
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa2"
+	title "5 maps - Grillo, U-boat pens"
+	rect 317 196 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_aa3"
+	rect 146 216 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa3"
+	title "3 - Operation Overlord"
+	rect 146 216 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m3l1a"
+	title "m3l1a"
+	rect 149 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m3l1a;set coop_protoBshot textures/mohmenu/dmloading/m3l1a"
+	ordernumber 26
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m3l1b"
+	title "m3l1b"
+	rect 202 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m3l1b;set coop_protoBshot textures/mohmenu/dmloading/m3l1b"
+	ordernumber 27
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m3l2"
+	title "m3l2"
+	rect 255 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m3l2;set coop_protoBshot textures/mohmenu/dmloading/m3l2"
+	ordernumber 28
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m3l3"
+	title "m3l3"
+	rect 149 248 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m3l3;set coop_protoBshot textures/mohmenu/dmloading/m3l3"
+	ordernumber 29
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa3"
+	title "4 maps - beach, then the guns"
+	rect 149 264 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_aa4"
+	rect 314 216 162 49
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa4"
+	title "4 - Behind Enemy Lines"
+	rect 314 216 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m4l1"
+	title "m4l1"
+	rect 317 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m4l1;set coop_protoBshot textures/mohmenu/dmloading/m4l1"
+	ordernumber 30
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m4l2"
+	title "m4l2"
+	rect 370 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m4l2;set coop_protoBshot textures/mohmenu/dmloading/m4l2"
+	ordernumber 31
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m4l3"
+	title "m4l3"
+	rect 423 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m4l3;set coop_protoBshot textures/mohmenu/dmloading/m4l3"
+	ordernumber 32
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa4"
+	title "3 maps - shortest mission"
+	rect 317 249 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_aa5"
+	rect 146 284 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa5"
+	title "5 - Day of the Tiger"
+	rect 146 284 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m5l1a"
+	title "m5l1a"
+	rect 149 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m5l1a;set coop_protoBshot textures/mohmenu/dmloading/m5l1a"
+	ordernumber 33
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m5l1b"
+	title "m5l1b"
+	rect 202 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m5l1b;set coop_protoBshot textures/mohmenu/dmloading/m5l1b"
+	ordernumber 34
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m5l2a"
+	title "m5l2a"
+	rect 255 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m5l2a;set coop_protoBshot textures/mohmenu/dmloading/m5l2a"
+	ordernumber 35
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m5l2b"
+	title "m5l2b"
+	rect 149 316 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m5l2b;set coop_protoBshot textures/mohmenu/dmloading/m5l2b"
+	ordernumber 36
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m5l3"
+	title "m5l3"
+	rect 202 316 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m5l3;set coop_protoBshot textures/mohmenu/dmloading/m5l3"
+	ordernumber 37
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa5"
+	title "5 maps - King Tiger, MG slot"
+	rect 149 332 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_aa6"
+	rect 314 284 162 94
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_blkh_aa6"
+	title "6 - Return to Fort Schmerzen"
+	rect 314 284 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l1a"
+	title "m6l1a"
+	rect 317 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l1a;set coop_protoBshot textures/mohmenu/dmloading/m6l1a"
+	ordernumber 38
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l1b"
+	title "m6l1b"
+	rect 370 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l1b;set coop_protoBshot textures/mohmenu/dmloading/m6l1b"
+	ordernumber 39
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l1c"
+	title "m6l1c"
+	rect 423 301 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l1c;set coop_protoBshot textures/mohmenu/dmloading/m6l1c"
+	ordernumber 40
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l2a"
+	title "m6l2a"
+	rect 317 316 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l2a;set coop_protoBshot textures/mohmenu/dmloading/m6l2a"
+	ordernumber 41
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l2b"
+	title "m6l2b"
+	rect 370 316 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l2b;set coop_protoBshot textures/mohmenu/dmloading/m6l2b"
+	ordernumber 42
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l3a"
+	title "m6l3a"
+	rect 423 316 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l3a;set coop_protoBshot textures/mohmenu/dmloading/m6l3a"
+	ordernumber 43
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l3b"
+	title "m6l3b"
+	rect 317 331 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l3b;set coop_protoBshot textures/mohmenu/dmloading/m6l3b"
+	ordernumber 44
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l3d"
+	title "m6l3d"
+	rect 423 331 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l3d;set coop_protoBshot textures/mohmenu/dmloading/m6l3d"
+	ordernumber 45
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l3c"
+	title "m6l3c"
+	rect 370 331 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l3c;set coop_protoBshot textures/mohmenu/dmloading/m6l3c"
+	ordernumber 46
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_m6l3e"
+	title "m6l3e"
+	rect 317 346 50 14
+	fgcolor 0.560 0.575 0.500 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "!coop_protoBhide1"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel m6l3e;set coop_protoBshot 0"
+	ordernumber 47
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_aa6"
+	title "10 maps - the longest mission"
+	rect 317 362 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_foot_aa_plate"
+	rect 146 382 330 48
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "!coop_protoBhide1"
+}
+resource
+Label
+{
+	name "bb_foot_aa"
+	title "ALLIED ASSAULT - 6 missions, 33 maps, the largest theatre.\nEvery chip is a real map id; clicking one loads its art into\nDISPATCH. Nothing is launched, and briefings are not listed."
+	rect 152 386 318 40
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	enabledcvar "!coop_protoBhide1"
+	dontlocalize
+}
+
+// ---- page: SPEARHEAD   gate: coop_protoBp2
+resource
+Widget
+{
+	name "bb_pg_sh_plate"
+	rect 146 148 330 282
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.105 0.115 0.092 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Widget
+{
+	name "bb_notes_sh_plate"
+	rect 314 148 162 282
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Label
+{
+	name "bb_notes_sh_hdr"
+	title "THEATRE NOTES"
+	rect 314 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_notes_sh"
+	title "Three missions, nine maps.\nAll of them run under the\nstandard coop launch:\ncom_target_game 2 mounts\nmain, mainta and maintt\ntogether, so the t-series\nneeds no second profile.\n\nt2l2 carries the halftrack\nand truck ride - riders are\nsolid and the client view\nis locked to the vehicle.\n\nBriefings are not listed:\nthe board pages missions,\nnot cutscenes."
+	rect 320 168 150 256
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_sh1"
+	rect 146 148 162 49
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Label
+{
+	name "bb_blkh_sh1"
+	title "T1 - A Storm in the Port"
+	rect 146 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t1l1"
+	title "t1l1"
+	rect 149 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t1l1;set coop_protoBshot textures/mohmenu/dmloading/t1l1"
+	ordernumber 48
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t1l2"
+	title "t1l2"
+	rect 202 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t1l2;set coop_protoBshot textures/mohmenu/dmloading/t1l2"
+	ordernumber 49
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t1l3"
+	title "t1l3"
+	rect 255 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t1l3;set coop_protoBshot textures/mohmenu/dmloading/t1l3"
+	ordernumber 50
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_sh1"
+	title "3 maps"
+	rect 149 181 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_sh2"
+	rect 146 201 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Label
+{
+	name "bb_blkh_sh2"
+	title "T2 - The Bridge"
+	rect 146 201 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t2l1"
+	title "t2l1"
+	rect 149 218 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t2l1;set coop_protoBshot textures/mohmenu/dmloading/t2l1"
+	ordernumber 51
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t2l2"
+	title "t2l2"
+	rect 202 218 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t2l2;set coop_protoBshot textures/mohmenu/dmloading/t2l2"
+	ordernumber 52
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t2l3"
+	title "t2l3"
+	rect 255 218 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t2l3;set coop_protoBshot textures/mohmenu/dmloading/t2l3"
+	ordernumber 53
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t2l4"
+	title "t2l4"
+	rect 149 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t2l4;set coop_protoBshot textures/mohmenu/dmloading/t2l4"
+	ordernumber 54
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_sh2"
+	title "4 maps - halftrack ride"
+	rect 149 249 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_sh3"
+	rect 146 269 162 49
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Label
+{
+	name "bb_blkh_sh3"
+	title "T3 - The Great Escape"
+	rect 146 269 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t3l1"
+	title "t3l1"
+	rect 149 286 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t3l1;set coop_protoBshot textures/mohmenu/dmloading/t3l1"
+	ordernumber 55
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_t3l2"
+	title "t3l2"
+	rect 202 286 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp2"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel t3l2;set coop_protoBshot textures/mohmenu/dmloading/t3l2"
+	ordernumber 56
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_sh3"
+	title "2 maps"
+	rect 149 302 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_foot_sh_plate"
+	rect 146 322 162 108
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp2"
+}
+resource
+Label
+{
+	name "bb_foot_sh"
+	title "SPEARHEAD AT A GLANCE\n\n9 maps, no briefings:\nt1l1-t1l3, t2l1-t2l4\nand t3l1-t3l2.\n\nAll nine have loading\nart shipped."
+	rect 152 326 150 100
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	enabledcvar "coop_protoBp2"
+	dontlocalize
+}
+
+// ---- page: BREAKTHROUGH   gate: coop_protoBp3
+resource
+Widget
+{
+	name "bb_pg_bt_plate"
+	rect 146 148 330 282
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.105 0.115 0.092 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Widget
+{
+	name "bb_notes_bt_plate"
+	rect 314 148 162 282
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Label
+{
+	name "bb_notes_bt_hdr"
+	title "THEATRE NOTES"
+	rect 314 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_notes_bt"
+	title "Three missions, eleven maps,\nand the theatre this build\nhas worked on most recently:\ne1l2 invisible walls, the\ne1l4 alarm silence, and the\ne2l1 Crete overhaul.\n\nThe four e3 maps ship with\nno loading art, so their\nchips are dimmed and\nDISPATCH says so, rather\nthan leaving the last one up.\n\nA missing asset drawn is a\nmissing asset reported."
+	rect 320 168 150 256
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_bt1"
+	rect 146 148 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Label
+{
+	name "bb_blkh_bt1"
+	title "E1 - Battle of Kasserine Pass"
+	rect 146 148 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e1l1"
+	title "e1l1"
+	rect 149 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e1l1;set coop_protoBshot textures/mohmenu/dmloading/e1l1"
+	ordernumber 57
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e1l2"
+	title "e1l2"
+	rect 202 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e1l2;set coop_protoBshot textures/mohmenu/dmloading/e1l2"
+	ordernumber 58
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e1l3"
+	title "e1l3"
+	rect 255 165 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e1l3;set coop_protoBshot textures/mohmenu/dmloading/e1l3"
+	ordernumber 59
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e1l4"
+	title "e1l4"
+	rect 149 180 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e1l4;set coop_protoBshot textures/mohmenu/dmloading/e1l4"
+	ordernumber 60
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_bt1"
+	title "4 maps"
+	rect 149 196 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_bt2"
+	rect 146 216 162 49
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Label
+{
+	name "bb_blkh_bt2"
+	title "E2 - Sicily, Operation Husky"
+	rect 146 216 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e2l1"
+	title "e2l1"
+	rect 149 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e2l1;set coop_protoBshot textures/mohmenu/dmloading/e2l1"
+	ordernumber 61
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e2l2"
+	title "e2l2"
+	rect 202 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e2l2;set coop_protoBshot textures/mohmenu/dmloading/e2l2"
+	ordernumber 62
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e2l3"
+	title "e2l3"
+	rect 255 233 50 14
+	fgcolor 0.880 0.895 0.800 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e2l3;set coop_protoBshot textures/mohmenu/dmloading/e2l3"
+	ordernumber 63
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_bt2"
+	title "3 maps - Crete overhaul"
+	rect 149 249 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_blk_bt3"
+	rect 146 269 162 64
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Label
+{
+	name "bb_blkh_bt3"
+	title "E3 - Operation Avalanche"
+	rect 146 269 162 14
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e3l1"
+	title "e3l1"
+	rect 149 286 50 14
+	fgcolor 0.560 0.575 0.500 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e3l1;set coop_protoBshot 0"
+	ordernumber 64
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e3l2"
+	title "e3l2"
+	rect 202 286 50 14
+	fgcolor 0.560 0.575 0.500 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e3l2;set coop_protoBshot 0"
+	ordernumber 65
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e3l3"
+	title "e3l3"
+	rect 255 286 50 14
+	fgcolor 0.560 0.575 0.500 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e3l3;set coop_protoBshot 0"
+	ordernumber 66
+	dontlocalize
+}
+resource
+Button
+{
+	name "bb_chip_e3l4"
+	title "e3l4"
+	rect 149 301 50 14
+	fgcolor 0.560 0.575 0.500 1.00
+	bgcolor 0.168 0.182 0.140 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	enabledcvar "coop_protoBp3"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "set coop_protoBsel e3l4;set coop_protoBshot 0"
+	ordernumber 67
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_blkc_bt3"
+	title "4 maps - no loading art"
+	rect 149 317 156 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign centery
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_foot_bt_plate"
+	rect 146 337 162 93
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+	enabledcvar "coop_protoBp3"
+}
+resource
+Label
+{
+	name "bb_foot_bt"
+	title "BREAKTHROUGH SO FAR\n\n11 maps: e1l1-e1l4,\ne2l1-e2l3, e3l1-e3l4.\n\nFour of the eleven ship\nno loading art."
+	rect 152 341 150 85
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	enabledcvar "coop_protoBp3"
+	dontlocalize
+}
+
+// ==== COLUMN C - DISPATCH ==================================================
+resource
+Label
+{
+	name "bb_c_hdr"
+	title "DISPATCH"
+	rect 482 100 150 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+// The preview is SQUARE because the source art is: every textures/mohmenu/dmloading
+// tile is 512x512 or 1024x1024, and `shader` art is always drawn stretched to the
+// widget rect (uiwidget.cpp:2104-2107) - a 150x86 rect would squash it by a third.
+// Backing plate, then hint, then the art: declaration order is draw order, so the
+// art covers the hint when the map has a tile, and the hint stands when it does not
+// (an unresolvable name sets no material at all - uilabel.cpp:271-275).
+resource
+Widget
+{
+	name "bb_c_shotframe"
+	rect 482 120 150 150
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.045 0.050 0.038 1.00
+	borderstyle "NONE"
+}
+resource
+Label
+{
+	name "bb_c_shothint"
+	title "no preview available"
+	rect 486 189 142 12
+	fgcolor 0.620 0.640 0.520 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_c_shot"
+	rect 482 120 150 150
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	linkcvar "coop_protoBshot"
+	linkcvartoshader
+}
+resource
+Label
+{
+	name "bb_c_sel"
+	rect 482 274 150 18
+	fgcolor 0.860 0.720 0.380 1.00
+	bgcolor 0.130 0.142 0.110 1.00
+	borderstyle "NONE"
+	font "courier-16"
+	textalign centerx
+	textalign centery
+	linkcvar "coop_protoBsel"
+}
+resource
+Button
+{
+	name "bb_c_cta"
+	title "OPEN MISSION BRIEFING"
+	rect 482 296 150 26
+	fgcolor 1.000 0.955 0.780 1.00
+	bgcolor 0.360 0.298 0.128 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	shader "menu_button_trans"
+	hovershader "textures/mohmenu/m_buttonhighlight"
+	clicksound "sound/menu/apply.wav"
+	stuffcommand "pushmenu coop_proto_b_brief"
+	ordernumber 68
+	dontlocalize
+}
+resource
+Label
+{
+	name "bb_c_hdr2"
+	title "LAST ORDER"
+	rect 482 328 150 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+// linkstring maps a cvar VALUE to a display string, so a button can set a number
+// and the readout can still show a phrase with spaces (uilabel.cpp:271-283; the
+// same idiom ships at ui/advancedoptions.urc:157-159).
+resource
+Label
+{
+	name "bb_c_ord"
+	rect 482 348 150 14
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	linkcvar "coop_protoBord"
+	linkstring 1 "Host a mission"
+	linkstring 2 "Join a server"
+	linkstring 3 "Armory / loadout"
+	linkstring 4 "Service record"
+	linkstring 5 "Coop settings"
+	linkstring 6 "What is new"
+	linkstring 7 "Controls"
+	linkstring 8 "Map tester"
+	linkstring 9 "Report a bug"
+	linkstring 10 "Credits"
+}
+resource
+Label
+{
+	name "bb_c_hdr3"
+	title "BOARD KEY"
+	rect 482 368 150 16
+	fgcolor 0.980 0.945 0.830 1.00
+	bgcolor 0.430 0.352 0.155 1.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign centerx
+	textalign centery
+	dontlocalize
+}
+resource
+Widget
+{
+	name "bb_c_keyplate"
+	rect 482 386 150 44
+	fgcolor 1.00 1.00 1.00 1.00
+	bgcolor 0.075 0.082 0.065 1.00
+	borderstyle "NONE"
+}
+resource
+Label
+{
+	name "bb_c_key"
+	title "Tabs page the board.\nNo scrollbar exists here.\nA dim chip has no art."
+	rect 487 389 140 38
+	fgcolor 0.800 0.820 0.720 1.00
+	bgcolor 0.00 0.00 0.00 0.00
+	borderstyle "NONE"
+	font "verdana-12"
+	textalign left
+	textalign top
+	dontlocalize
+}
+
+end.
