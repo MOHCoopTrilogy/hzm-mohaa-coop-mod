@@ -116,15 +116,18 @@ static_wehrmact_pants
 	}
 }
 
-static_wehrmact_helmet
-{
-	qer_editorimage textures/models/human/germanmaps/wehrmact/wehrmact_helmet.tga
-	cull none
-	{
-		map textures/models/human/germanmaps/wehrmact/wehrmact_helmet.tga
-		rgbGen static
-	}
-}
+// [2026-09-01, bug-2243] static_wehrmact_helmet REMOVED from this file.
+//
+// This is a COMMANDO skin file. It also carried 18 blocks redefining retail Wehrmacht uniform
+// shaders - collateral from an imported pack, not a deliberate override. 17 of those 18 are
+// byte-identical to retail and are harmless no-ops, so they are left alone. This one was not:
+// retail's static_wehrmact_helmet is TWO stages - an environment-mapped reflection under the
+// helmet diffuse - and this copy was a single flat rgbGen static, so German steel helmets lost
+// their sheen wherever this file won.
+//
+// It won on gl1 all along. It began winning on gl2 too when bug-2228 corrected gl2's inverted
+// shader-name precedence, which is why the helmets visibly flattened in v1.4.8. Deleting the
+// block hands the surface back to retail on BOTH renderers and restores the reflection.
 
 static_wehrmact_face
 {

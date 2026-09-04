@@ -318,3 +318,118 @@ wintest_run:{
 	// authentic path: global/missioncomplete.scr::main detours to coop_mod/missioncomplete.scr::main
 	thread global/missioncomplete.scr::main local.next local.bsp 1
 }end
+
+
+//=========================================================================
+// AUTO-DEPLOY - the server-side "clicker", so a harness run needs no human.
+//
+// [2026-09-03] WHY THIS EXISTS
+//   A dedicated-server test can load any map, connect clients and force them onto allies
+//   (main.scr::skipTeamAndWeaponSelect), and they will still never enter the game. Measured on
+//   three m3l1a harness runs: both clients sat at org 352,-7440,-463 - the Higgins boat start -
+//   with coop_isActive = -1 (the spectator state, player.scr:867) and no weapon, for as long as
+//   the server ran. Everything downstream of the player actually deploying therefore never
+//   executes: the ramp cinematic, the audio cut, coop_showGunners, the whole handoff.
+//
+//   THE ENGINE GATE, read rather than assumed (player.cpp:6149-6152):
+//       if (deadflag == DEAD_DEAD && level.time > respawn_time)
+//           if (AllowRespawn() && AllowTeamRespawn())
+//               if ((server_new_buttons & BUTTON_ATTACKLEFT) || ... || g_forcerespawn ...)
+//   Two consequences. The deploy needs a FIRE BUTTON, which a scripted server cannot press; and
+//   g_forcerespawn cannot substitute, because the whole branch is behind deadflag == DEAD_DEAD
+//   and a fresh joiner has never died. That is the deadlock.
+//
+//   `player respawn` posts EV_Player_Respawn directly and bypasses both. This is not invented
+//   here - coop_mod/lobby.scr::lobbyAutoSpawnLoop already does exactly this for the pre-mission
+//   lobby and has shipped, so this is the proven recipe rather than a new idea.
+//
+// INERT BY DEFAULT. Armed only by coop_st_autodeploy 1, which is seeded in no cfg, so a real
+// player is never touched. ONE respawn attempt per player, latched on a per-player flag, because
+// a repeated respawn is a teleport loop rather than a spawn.
+//=========================================================================
+st_autodeploy_run:{
+//=========================================================================
+	level.coop_stAutoDeploy = 1
+	println("^~^~^ AUTODEPLOY armed - forcing clients past the fire-click spawn gate")
+
+	local.t = 0
+	local.done = 0
+	//bounded: this is a test aid, not a permanent supervisor. 180 s covers a map load plus a
+	//slow client connect, and it must not outlive the beat it exists to unblock.
+	while( local.t < 180 ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p != NULL && local.p != NIL ){
+				if( local.p.dmteam == "spectator" ){
+					waitthread coop_mod/main.scr::skipTeamAndWeaponSelect local.p
+					local.p.flags["coop_stDeployTry"] = NIL
+				}
+				else if( local.p.flags["coop_isActive"] != 1 && local.p.flags["coop_stDeployTry"] != 1 ){
+					local.p.flags["coop_stDeployTry"] = 1
+					local.p respawn
+					local.done++
+					println("^~^~^ AUTODEPLOY deployed player " + local.i + " (total " + local.done + ")")
+					//ARM HIM. A deployed player still has no ACTIVE weapon: the engine only
+					//auto-equips on the fire button, and only in single player -
+					//`if (g_gametype->integer == GT_SINGLE_PLAYER) { if (server_new_buttons &
+					//BUTTON_ATTACKLEFT && !GetActiveWeapon(WEAPON_MAIN)) ... useweaponclass item1 }`
+					//(player.cpp:6136-6142). Under gametype 2 that branch never runs, so the coop
+					//loadout is GIVEN but never RAISED and the probe reads wp=- forever. Measured:
+					//55 consecutive player.snap samples with no weapon, and consequently no combat
+					//on the beach at all - which makes every AI-behaviour reading from a headless
+					//run worthless. Equip after a short settle so the respawn inventory has landed.
+					thread st_autodeploy_arm local.p
+				}
+			}
+		}
+		wait 0.5
+		local.t = local.t + 0.5
+	}
+	println("^~^~^ AUTODEPLOY window closed after " + local.done + " deploy(s)")
+}end
+
+
+//=========================================================================
+//Raise a weapon on an auto-deployed player. Separate thread so the wait cannot stall the deploy
+//loop, and guarded because the player can disconnect or die inside the settle.
+//=========================================================================
+st_autodeploy_arm local.p:{
+//=========================================================================
+	wait 1.5
+	if( local.p == NULL || local.p == NIL ){ end }
+
+	//COPIED VERBATIM from the retail single-player branch at maps/m3l1a.scr:2801-2810, which is the
+	//only place in this map that arms a player from script and is therefore the proven recipe.
+	//My first attempt used `useweaponclass "item1"` - the string the ENGINE passes at
+	//player.cpp:6139 - and it raised nothing (measured: "AUTODEPLOY armed weapon=none", wp=- on 77
+	//consecutive samples). The class name retail actually uses is `smg`, and it gives the items
+	//FIRST: useweaponclass can only raise something already in the inventory, and an auto-deployed
+	//player never picked a loadout, so there was nothing to raise.
+	local.p item "weapons/colt45.tik"
+	local.p item "weapons/ThompsonSMG.tik"
+	local.p ammo "pistol" 40
+	local.p ammo "smg" 120
+	wait 0.2
+	if( local.p == NULL || local.p == NIL ){ end }
+	local.p useweaponclass "smg"
+
+	wait 0.5
+	if( local.p == NULL || local.p == NIL ){ end }
+	local.w = local.p.weapon
+	if( local.w == NIL || local.w == "" ){ local.w = "none" }
+	println("^~^~^ AUTODEPLOY armed weapon=" + local.w)
+}end
+
+
+//=========================================================================
+//FLANK-GUN TEST HOOK. coop_flankMG only fires when the bangalores blow (m3l1a.scr:5450), which a
+//headless run never reaches - it is one of the twelve markers that never emit without a driven
+//player. This forces that one beat early so the crew system can be verified without playing the
+//whole mission. Inert unless coop_st_flanktest 1.
+//=========================================================================
+st_flanktest_run:{
+//=========================================================================
+	wait 25		//let coop init, the vignette spawns and the obstacle pass finish first
+	println("^~^~^ FLANKTEST forcing the flank-gun reveal early")
+	thread maps/m3l1a/coopified.scr::coop_flankMG
+}end

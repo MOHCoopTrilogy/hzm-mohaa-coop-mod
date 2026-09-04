@@ -202,3 +202,194 @@ aliascache coop_arty_leadin_far6 sound/weapons/explo/Exp_LeadIn_13.wav soundparm
 // ============================================================================================
 aliascache coop_beachcrowd_rush sound/dialogue/m3l1/A/amb_guys_rush.wav soundparms 0.65 0.0 1.0 0.0 900 16000 auto loaded maps "m3l1a "
 aliascache coop_beachcrowd_shingle sound/dialogue/m3l1/A/amb_guys_shingle.wav soundparms 0.65 0.0 1.0 0.0 900 16000 auto loaded maps "m3l1a "
+
+//=========================================================================
+//[user 2026-09-02, bug-2342] THE UNDERWATER SHOCK SEQUENCE.
+//
+//coop_underwater_wash is `local` - 2D, played straight to the client with playlocalsound - because
+//it is what the player's own submerged ears hear, not a thing in the world with a position.
+//
+//The memory voices are the opposite: `auto` (3D) with a deliberately SHORT mindist of 140 and a
+//long 2600 maxdist, so the same line is loud and close when its emitter spawns near the camera and
+//a distant murmur when it spawns far. That is what makes them arrive from random directions and
+//distances rather than all sitting in the middle of the head. The reverb, the low-pass and the
+//slowing are baked into the samples - see docs/tools notes on the build - because reverb in this
+//engine belongs to a trigger volume and there is no script command for it.
+//
+//Volume 1.0 with the samples themselves normalised to -24 LUFS: they must sit UNDER the underwater
+//bed and the music, not compete with them.
+//=========================================================================
+//[user 2026-09-03] "underwater ambience could be a bit higher (the under water deep
+//shellshock noise)". 1.0 -> 1.5, and the number only started meaning anything in the
+//same change: coop_uwSay played this with playlocalsound, and Player::PlayLocalSound
+//passes a hardcoded 1.0f to gi.Sound (player.cpp:18190) - the alias volume never left
+//the server. The OPM_FEATURES branch above it that WOULD have sent alias->volume is
+//dead code; OPM_FEATURES is not defined anywhere in this tree. So this alias said 1.0,
+//coop_shellshock_uw said 1.7, and both played at exactly 1.0. coop_uwSay now uses
+//`playsound`, which reaches Entity::Sound with argstype 0 (ProcessSoundEvent,
+//entity.cpp:3405) and argstype 0 takes volume AND channel from the alias (:3751-3757).
+//
+//WHY 1.5 AND NOT MORE - the memory voices are the ceiling, not taste. They are played
+//with `playsound` on a spawned emitter (coop_memoryVoices), so their 1.7 has always
+//been real: 1.7 x their -24.72 dBFS sample = -20.11 alias-referred. This sample is
+//-23.81, so 1.5 lands at -20.29 - a clear one-step lift that still leaves the voices
+//just on top at closest approach and further under as they roll off past mindist 400.
+//1.6 overtakes them; 2.0 swamps them, undoing the balance this file exists to keep.
+//Peak-referred 1.5 x -9.67 dBFS = -6.15, no clipping (AL_MAX_GAIN is 8.0,
+//snd_openal_new.cpp:837, so volumes above 1 genuinely amplify).
+aliascache coop_underwater_wash sound/coop_tinnitus/coop_underwater01.wav soundparms 1.5 0.0 1.0 0.0 500 3000 local loaded maps "m e t dm obj train"
+
+//[user 2026-09-03] THE SURFACING BREATH. "when he comes out of the water use the
+//existing breath exhale noise that we have from HOLDING SHIFT IN ADS to steady/hold
+//breathe. That SPECIFIC breathe noise ... should be loud enough to hear."
+//
+//THE SAMPLE IS A BYTE COPY OF sound/coop_breath/breath_out.wav - literally the sound the
+//user named. That file is played by PATH, never through an alias:
+//  cgi.S_StartLocalSound("sound/coop_breath/breath_out.wav", qfalse)  cg_view.c:2221
+//on the FALLING edge of the ADS breath-hold, whose trigger at :2205 is
+//((bcmd.buttons & BUTTON_COOPADS) || bScoped) && bShift - ADS plus Shift, exactly as
+//described. The original is untouched; this is a second copy under a different path.
+//
+//WHY A COPY AND NOT AN ALIAS ONTO coop_breath/, AND WHY NOT A CGAME HOOK. This lands
+//inside coop_m3l1a_beachAudio's takeover: s_sfxduck 0.05 and coop_cueCut 0.30. The duck
+//is applied in openal_channel::set_gain (snd_openal_new.cpp:3782-3812) and keys on the
+//SAMPLE PATH - S_HZM_CueTier(pSfx->name) and S_HZM_DuckExempt(pSfx->name) - not on how
+//the sound was started. "coop_breath/" is in NEITHER list, so anything under that path
+//plays at five percent during this beat and cannot be heard. A cgame hook would not help:
+//cgi.S_StartLocalSound routes CHAN_AUTO (cl_cgame.cpp:581), which is tier 0 and takes the
+//same 0.05. Raising the alias volume cannot help either - punching through 0.05 needs x20
+//and AL_MAX_GAIN is 8.0. "coop_tinnitus/" IS tier 1 (:3563) and is ALSO the one tier-1
+//path carved out of coop_cueCut (:3855, added by bug-2373 so the concussion beat could not
+//be pushed under the music), so sourced from here the gasp plays at 1.00. That is the
+//whole reason for the copy, and it is why this needs no engine binary.
+//S_HZM_DuckExempt is deliberately NOT touched: that list is global, and the narrower
+//exemption this needs already exists.
+//
+//THE DIRECTORY NAME NOW LIES ABOUT THE CONTENTS - THIS COMMENT IS THE MITIGATION. If
+//"coop_tinnitus/" is ever removed from S_HZM_CueTier, this gasp silently drops to 5% with
+//no console error of any kind. The coupling is invisible from the script side.
+//
+//WHAT TIER 1 ALSO BUYS AND COSTS: multiplied by s_cueGain2 (archived, default 1), and it
+//arms the cue sidechain for its length + 350ms - music and ambience x0.40, other SFX x0.91
+//at the shipped s_cueDuck 2. The underwater bed is itself a tier-1 cue re-arming that same
+//sidechain every frame, so the dip is already held at the break; this carries it about
+//3.45s further, roughly 1.9s longer than the bed alone would have.
+//
+//VOLUME 1.2 IS MEASURED, NOT GUESSED, AND IS NOT THE PREVIOUS DRAFT'S 3.0. That number was
+//calibrated for sound/coop_sprint/breath1.wav, which is a DIFFERENT sound (the >=5s sprint
+//pant, player.cpp:16041) and 13.18 dB quieter. Measured, RMS of the loudest 400ms window:
+//  breath_out.wav   peak -1.95 dBFS   loud400 -16.18 dBFS   3.10s
+//  breath1.wav      peak -14.28 dBFS  loud400 -29.36 dBFS   4.12s
+//3.0 on THIS sample is +9.54 dB and puts the peak at +7.59 dBFS - it clips right through
+//the exhale. The target is level-continuity with the bed this cuts: coop_underwater01's
+//-20.28 x 1.5 = -16.76 alias-referred, and breath_out at 1.0 is -16.18, already a clean
+//handover. 1.2 adds 1.58 dB for the "loud enough to hear" and lands the peak at -0.37
+//dBFS, just inside full scale. 1.25 is the HARD CEILING (peak exactly 0.0); above that the
+//sample clips before any slider is involved. Tune inside 1.0 .. 1.25, never above.
+//
+//`local` (not the sprint aliases' `item`): CHAN_ITEM routes 3D - only CHAN_MENU and
+//CHAN_LOCAL take the 2D path (snd_openal_new.cpp:1959-1962) - and 3D would place this at
+//the player's body, glued and hidden in the boat, while the listener is out at the camera.
+//CHAN_LOCAL also renders unattenuated pinned to each client's own listener (:1835), which
+//is what makes one broadcast play land as one copy in every player's ears.
+aliascache coop_uw_break sound/coop_tinnitus/coop_uwbreath01.wav soundparms 1.2 0.0 1.0 0.0 500 3000 local loaded maps "m e t dm obj train"
+aliascache coop_memvoice01 sound/coop_memory/coop_memvoice01.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+aliascache coop_memvoice02 sound/coop_memory/coop_memvoice02.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+aliascache coop_memvoice03 sound/coop_memory/coop_memvoice03.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+aliascache coop_memvoice04 sound/coop_memory/coop_memvoice04.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+aliascache coop_memvoice05 sound/coop_memory/coop_memvoice05.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+aliascache coop_memvoice06 sound/coop_memory/coop_memvoice06.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
+
+//=========================================================================
+// HZM coop [user 2026-09-03] THE OMAHA RAMP SCREAMS.
+//
+// "if there is any death screams those should be played too before that explosion throws us
+// overboard." Retail's five Higgins rangers (maps/m3l1a.scr::higgins1_disembark_kill) carry no voice
+// call at all, so what they make today is the generic coop_deathvox grunt aihandler fires a frame
+// after death - the coop layer having already muted their own native American cry. Driven by
+// maps/m3l1a/coopified.scr::coop_rampScreams.
+//
+// SAME WAVS AS coop_av_us_wounded / coop_av_us_panic (ubersound/coop_aivoice.scr) - retail's generic
+// AMERICAN pool. Confirmed American rather than assumed: sound/dialogue/Generic/{A,G,UK,US,it} splits
+// by nationality, and models/human/animation/dialogue/Generic_dialogue_US.tik - the US dialogue set -
+// is what fires dfr_death_* / dfr_damage_* off its death and pain anims (:99-203). G is German, it is
+// Italian. Redeclared here rather than reused because this beat needs three things those pools cannot
+// give it:
+//
+//   1. CHANNEL. coop_av_us_wounded and coop_av_us_panic are `dialog` (CHAN_DIALOG, 8), and
+//      coop_mod/deathvox.scr::muteNativeVO stops channels 4, 7 and 8 on a dying man every frame for a
+//      full second. A cry on any of those is silenced by our own mute a frame after it starts.
+//      CHAN_ITEM (2) is chosen because nothing that can reach these five men inside this beat emits
+//      on it - see the measured channel census in the coop_rampScreams header in coopified.scr, which
+//      is where the reasoning lives. It is NOT because channel 2 is unused in the game: 910 aliases
+//      in this very ubersound tree are declared `item`. Override and stopsound are both scoped to one
+//      ENTITY (snd_openal_new.cpp:1664 and :2278), which is what makes the narrower claim enough.
+//   2. LEVEL. 1.45 against the wounded pool's 1.15, and mindist 600 rather than 200, because these
+//      five die inside an MG barrage with four to six snd_bh_flesh impacts going through each of
+//      them; the beach casualties the wounded pool serves are heard in comparative quiet.
+//   3. CACHE. `aliascache` precaches inside CG_RegisterSounds during CA_LOADING, behind the loading
+//      screen, at zero configstrings - see coop_mod/sndcache.scr. `alias` (what both those pools use)
+//      loads lazily at first play, a synchronous disk read in the middle of the one beat that must not
+//      hitch. The marginal cost is NOT zero, contrary to an earlier draft of this note: those pools
+//      are lazy, so these 33 files are genuinely new at load time - 991,154 bytes of PCM, measured,
+//      against 2033 distinct paths already precached by this tree and a client ceiling of MAX_SFX
+//      4096 (snd_local_new.h:181, a hard Com_Error; live count is cvar s_sfxCount).
+//
+// NAMES ARE ZERO PADDED. Alias lookup is a PREFIX match (Alias_ListFindRandomRange, qcommon/alias.c
+// :553 - strncmp against the requested name's length), so an unpadded coop_rampdeath1 would also
+// match coop_rampdeath10..14 and an explicit pick would not be the clip asked for. Two digits
+// everywhere makes every name exact, while the bare pool names coop_rampdeath / coop_ramphit /
+// coop_rampyell still pick evenly across their pools.
+//
+// DEATH CRIES - the 14 generic American death lines. Durations measured off the wav headers, and
+// three of them are load-bearing: coop_rampScreamDeath pins 08 (2.543s) and 13 (1.419s) on the two
+// men whose cries are cut off, so the cut is unmistakable, and pins 04 (0.407s) on ranger5 so his cry
+// is over before coop_rampAudioCut ducks the world at T+3.72.
+//=========================================================================
+aliascache coop_rampdeath01 sound/dialogue/Generic/A/death/dfr_death_01a.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.691s
+aliascache coop_rampdeath02 sound/dialogue/Generic/A/death/dfr_death_01b.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//1.161s
+aliascache coop_rampdeath03 sound/dialogue/Generic/A/death/dfr_death_01c.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.874s
+aliascache coop_rampdeath04 sound/dialogue/Generic/A/death/dfr_death_01e.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.407s - pinned to ranger5, must finish before the cut
+aliascache coop_rampdeath05 sound/dialogue/Generic/A/death/dfr_death_01h.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.855s
+aliascache coop_rampdeath06 sound/dialogue/Generic/A/death/dfr_death_01i.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.895s
+aliascache coop_rampdeath07 sound/dialogue/Generic/A/death/dfr_death_01j.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.289s
+aliascache coop_rampdeath08 sound/dialogue/Generic/A/death/dfr_death_01k.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//2.543s - the long one, cut off on ranger2
+aliascache coop_rampdeath09 sound/dialogue/Generic/A/death/dfr_death_01m.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.625s
+aliascache coop_rampdeath10 sound/dialogue/Generic/A/death/dfr_death_01n.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.561s
+aliascache coop_rampdeath11 sound/dialogue/Generic/A/death/dfr_death_01o.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.564s
+aliascache coop_rampdeath12 sound/dialogue/Generic/A/death/dfr_death_02d.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.989s
+aliascache coop_rampdeath13 sound/dialogue/Generic/A/death/dfr_death_02f.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//1.419s - long, cut off on ranger4
+aliascache coop_rampdeath14 sound/dialogue/Generic/A/death/dfr_death_03g.wav soundparms 1.45 0.10 1.0 0.10 600 3000 item loaded maps "m e t dm obj train"	//0.731s
+
+// HIT YELLS - the ten SHORTEST generic American damage lines, and this time it really is the ten
+// shortest: every one of the 24 in that directory was measured, and dfr_damage_01m (0.263s) and
+// dfr_damage_05b (0.363s) belong in the set. An earlier draft called its selection "the ten shortest"
+// while omitting both. Short on purpose: this is the reflex as the first stagger lands, and his death
+// cry has to be able to replace it a few tenths later. Slightly quieter and tighter than the death
+// cries so the death reads as the louder event of the two.
+aliascache coop_ramphit01 sound/dialogue/Generic/A/damage/dfr_damage_01m.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.263s
+aliascache coop_ramphit02 sound/dialogue/Generic/A/damage/dfr_damage_01e.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.292s
+aliascache coop_ramphit03 sound/dialogue/Generic/A/damage/dfr_damage_01i.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.311s
+aliascache coop_ramphit04 sound/dialogue/Generic/A/damage/dfr_damage_01k.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.312s
+aliascache coop_ramphit05 sound/dialogue/Generic/A/damage/dfr_damage_01c.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.331s
+aliascache coop_ramphit06 sound/dialogue/Generic/A/damage/dfr_damage_01j.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.336s
+aliascache coop_ramphit07 sound/dialogue/Generic/A/damage/dfr_damage_02f.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.349s
+aliascache coop_ramphit08 sound/dialogue/Generic/A/damage/dfr_damage_02c.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.361s
+aliascache coop_ramphit09 sound/dialogue/Generic/A/damage/dfr_damage_05b.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.363s
+aliascache coop_ramphit10 sound/dialogue/Generic/A/damage/dfr_damage_03b.wav soundparms 1.30 0.10 1.0 0.12 500 2400 item loaded maps "m e t dm obj train"	//0.368s
+
+// THE PRE-HIT SHOUT - ranger5 seeing it coming. NINE aliases, not the seventeen coop_av_us_panic
+// declares, and that is the point of redeclaring rather than reusing: ten of coop_av_us_panic's wavs
+// (dfr_panic_26a_2, 27j_2, 28m_2, 28m_3, 29e_1, 29e_2, 30f_1, 31k_1, 32o_1, 34f_1) are NOT in the
+// mod's own sound tree. They resolve on this machine only because they sit LOOSE in the retail
+// basepath - G:\GOG\...\main\sound\dialogue\generic\a\panic\ - so they are not in the shipped pk3 and
+// a pool pick would be a coin toss on someone else's install. These nine are the ones that ship.
+aliascache coop_rampyell01 sound/dialogue/Generic/A/panic/dfr_panic_25j_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.724s
+aliascache coop_rampyell02 sound/dialogue/Generic/A/panic/dfr_panic_26a_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.506s
+aliascache coop_rampyell03 sound/dialogue/Generic/A/panic/dfr_panic_27j_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.717s
+aliascache coop_rampyell04 sound/dialogue/Generic/A/panic/dfr_panic_28m_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.526s
+aliascache coop_rampyell05 sound/dialogue/Generic/A/panic/dfr_panic_33h_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.575s
+aliascache coop_rampyell06 sound/dialogue/Generic/A/panic/dfr_panic_35c_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.515s
+aliascache coop_rampyell07 sound/dialogue/Generic/A/panic/dfr_panic_35c_2.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.566s
+aliascache coop_rampyell08 sound/dialogue/Generic/A/panic/dfr_panic_36c_1.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.710s
+aliascache coop_rampyell09 sound/dialogue/Generic/A/panic/dfr_panic_36c_2.wav soundparms 1.35 0.10 1.0 0.08 550 2600 item loaded maps "m e t dm obj train"	//0.871s

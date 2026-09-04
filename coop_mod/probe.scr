@@ -286,6 +286,22 @@ prb_actorSnap local.a:{
 	local.v = local.a.position
 	if( local.v == NIL || local.v == "" ){ local.v = "-" }
 	local.x = local.x + " pos=" + local.v
+	//[2026-09-03] pos IS NOT WHAT HE IS DOING, AND SIX FIXES WERE AIMED AT IT.
+	//Actor::position (m_csCurrentPosition) has exactly THREE writers in the engine: the
+	//constructor (= STRING_STAND, simpleactor.cpp:82), an explicit script `self.position = x`
+	//(EventSetPosition, simpleactor.cpp:995), and the MG42 think (actor_machinegunner.cpp:197).
+	//`self anim <pose>` writes NONE of them - it runs global/anim.scr -> animscript
+	//"anim/anim.scr", which is ten lines of setmotionanim with no position write. So a man
+	//lying prone under a coop pose reports pos=stand forever, and the "83% of allies are
+	//standing" census was largely reading the CONSTRUCTOR DEFAULT. Measured: 2749 of 2757
+	//tidl=anim samples said stand, and no anim-posed actor ever said otherwise.
+	//animname is the field that says what he was actually told to do, and unlike `weapon`
+	//(a setter with no getter - bug-2417) it is a real EV_GETTER at actor.cpp:1244-1249.
+	//READ THE CENSUS AS: tidl=anim -> in a scripted pose, read anm=, NOT standing.
+	//tidl=runner -> moving. tidl=idle -> genuinely idle. tidl=aim -> aim node.
+	local.v = local.a.animname
+	if( local.v == NIL || local.v == "" ){ local.v = "-" }
+	local.x = local.x + " anm=" + local.v
 	local.v = local.a.type_attack
 	if( local.v == NIL || local.v == "" ){ local.v = "-" }
 	local.x = local.x + " atk=" + local.v
@@ -481,9 +497,18 @@ prb_playerSnap local.p:{
 	local.v = local.p.flags["coop_isActive"]
 	if( local.v == NIL ){ local.v = 0 }
 	local.x = local.x + " active=" + local.v
-	local.v = local.p.weapon
-	if( local.v == NIL || local.v == "" ){ local.v = "-" }
-	local.x = local.x + " wp=" + local.v
+	//[2026-09-03] wp= WAS ALWAYS A LIE ON PLAYER ROWS, AND IT MISLED A DIAGNOSIS TONIGHT.
+	//`weapon` on a Sentient is EV_Sentient_GiveWeapon (sentient.cpp:92-99) - a SETTER, "gives
+	//the sentient the weapon specified". ACTOR declares its own GETTER for the same name
+	//(actor.cpp:1935-1940, "Gets the weapon.", EV_GETTER), which is why the actor.snap row a
+	//few lines up reads wp=m1 garand perfectly well - but a PLAYER is a Sentient, not an
+	//Actor, so it inherits only the setter. local.p.weapon therefore reads NIL and
+	//this printed "-" on EVERY player row in EVERY log back to 2026-08-24, armed or not. I read
+	//that as "the auto-deployed players are unarmed" and stacked a second conclusion on it
+	//(that headless AI readings were worthless). Both were wrong.
+	//Same class as bug-2034, where a guard on the setter-only `enableEnemy` shipped having
+	//never once executed: BEFORE READING A PROPERTY, CHECK IT HAS A GETTER.
+	local.x = local.x + " wp=nogetter"
 	//[user 2026-08-22, bug-2052] THE NUMBER THAT DECIDES THE DISGUISE. Retail m1l1 does
 	//`$player threatbias -100`; coop's DEFAULT is level.coop_threatbias = 10 (variables.scr:80),
 	//which is POSITIVE - the opposite of a disguise - and player.scr:1116 applies whatever that

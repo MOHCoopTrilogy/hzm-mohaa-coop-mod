@@ -1,0 +1,156 @@
+// HZM coop [user 2026-09-02] THE WELDING TORCH PLAYED 8,074 TIMES IN A 7.5-MINUTE SESSION.
+//
+// "what can we do about the welding torch?" - measured at roughly 18 plays per second from two or
+// three welders, which made it the loudest continuous thing in the Omaha mix and, because the engine
+// caps concurrent copies of one sfx at 10 (S_OPENAL_ShouldPlay -> max_number_playing), the single
+// biggest contributor to the 968 dropped-sound lines in the same log.
+//
+// IT IS NOT THE SCRIPT. coop_welderWork re-issues `welding_start` once per burst, and that loop runs
+// every 19-34 s, which accounts for about 54 plays across a session, not eight thousand.
+// welding_action and welding_idle carry only `attachedmodelanim ORIGIN tank_*` and never touch the
+// torch. The retrigger is HERE: `idleon` is bound to weldingtorch.skc, a 384-byte ONE-SHOT, and this
+// model declares no plain `idle` at all - so when idleon ends there is nothing to fall back to, it
+// re-enters, and `first sound welding_torch` fires again on every re-entry.
+//
+// THE FIX IS ONE WORD, TWICE. `sound` queues a NEW one-shot on every re-entry; `loopsound` sets the
+// entity's looping sound, so re-issuing it with the same alias is idempotent - one persistent source
+// no matter how often idleon restarts. Both are valid client frame commands (cg_commands.cpp:563,
+// :572). idleoff's paired stop becomes stoploopsound to match. This is also closer to what the
+// original clearly intended: the comment on that line reads "this initiates the welder sound", and
+// idleoff already existed to stop it - a start/stop pair, not a stream of one-shots.
+//
+// Everything else in this file is retail's, copied VERBATIM from main/Pak0.pk3 so the five emitters,
+// the surface shader and the scale are untouched. Only the two audio verbs differ.
+//
+// SCOPE: this overrides the retail torch on every map, m2's sub pen included. That is deliberate -
+// the same re-entry happens there, so retail m2 has the same runaway and this quiets it too rather
+// than changing what it is meant to sound like. NEEDS A PLAYTEST to confirm the torch is still
+// audible and still stops; if it regresses, delete this file and the retail tik returns.
+
+TIKI
+setup
+{
+	scale 0.52			// Set default scale to 16/30.5 since world is in 16 units per foot and model is in cm's
+	path models/miscobj/welder_torch
+	skelmodel weldingtorch.skd
+	surface all shader weldertorch
+}
+
+init
+{
+	server
+	{
+		classname object
+	}
+
+	client
+	{
+		tagemitter tag_barrel fountain
+		(
+			spawnrate 300.00
+			model models/fx/bh_metal_fastpiece.tik
+			color 1.00 1.00 1.00
+			life .75
+		//	velocity 453.00
+			radialvelocity 15.00 20.00 100.00
+			randvelaxis range 294 312 range -12 24 range -12 24
+			accel 0.00 0.00 -300.00
+			avelocity crandom 5 crandom 5 crandom 5
+			alignstretch 0.09
+		)
+		tagemitter tag_barrel flash
+		(
+			spawnrate 20.00
+			model corona_util.spr
+			alpha 0.70
+			color 1.50 0.10 0.10
+			scale 0.02
+			life 0.07
+			scalerate 0.02
+			scalemin 0.02
+			scalemax 0.50
+			flickeralpha
+			randomroll
+		)
+		tagemitter tag_barrel colliders
+		(
+			spawnrate 5.00
+			model models/fx/bh_metal_fastpiece.tik
+			color 1.00 1.00 1.00
+			collision
+			bouncefactor 0.30
+			scale 0.50
+			life .50
+			velocity 500.00
+			accel 0.00 0.00 -234.00
+			inwardsphere
+			alignstretch 0.05
+		)
+		tagemitter tag_barrel sparks1a
+		(
+			spawnrate 30.00
+			model models/fx/bh_metal_fastpiece.tik
+			color 1.00 1.00 1.00
+			bouncefactor 0.40
+			life 1.00
+			scalerate 0.50
+			velocity 150.00
+			randvel range -50 50 range -30 40 range -5 -70
+			accel 0.00 0.00 -300.00
+			friction -1.00
+			avelocity range -70 60 range 50 -20 range 20 -20
+			fade
+			sphere
+			alignstretch 0.10	
+		)
+		tagemitter tag_barrel sparksmoke
+		(
+			spawnrate 23.00
+			model vsssource.spr
+			alpha 0.30
+			color 1.00 1.00 1.00
+			scale 0.10
+			life 1.00
+			scalerate 0.60
+			velocity 20.00
+			randvel range -1 3 range -15 3 range 15 -1
+			fade
+		)
+	}
+}
+
+
+
+animations
+{
+ 	idleon	 	weldingtorch.skc
+	{
+		client
+	        {
+			first loopsound	welding_torch	//ONE persistent source - see the header. Was `sound`,
+										//which queued a fresh one-shot on every re-entry.
+			enter emitteron colliders
+			enter emitteron flash
+			enter emitteron fountain
+			enter emitteron sparks1a
+			enter emitteron sparksmoke
+	        }
+	}
+
+ 	idleoff	 	weldingtorch.skc
+	{
+		client
+	        {
+			first stoploopsound welding_torch	//pairs with the loopsound above
+    			enter emitteroff colliders
+			enter emitteroff flash
+			enter emitteroff fountain
+			enter emitteroff sparks1a
+			enter emitteroff sparksmoke
+	        }
+	}
+
+}
+
+/*QUAKED static_equipment_welding-torch (0.0 0.75 0.5) (-36 -4 0) (8 4 56)
+*/

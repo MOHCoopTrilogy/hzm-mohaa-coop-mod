@@ -1,0 +1,118 @@
+TIKI
+// HZM coop [user 2026-09-02, bug-2359] BLOOD SUSPENDED IN WATER - the m3l1a underwater hold.
+//
+// "there doesnt seem to be a mix of blood in the water when we go down."
+//
+// WHY THIS HAD TO BE A NEW EFFECT. coop_underwaterKill was spawning coop_blooddrip.tik plus five
+// coop_gorechunk.tik, and neither can read as blood in water:
+//   coop_blooddrip  - both emitters carry `accel 0 0 -800` with collision + dietouch + bouncedecal,
+//                     and `collision` with no argument masks CONTENTS_SOLID only, so the particles
+//                     fall straight THROUGH the -520 surface at gravity and die as decals on the
+//                     -576 sand inside about 0.4s of their 1.2s life.
+//   coop_gorechunk  - no emitter at all; a static crossed-quad mesh that hangs motionless.
+// A red flicker, then nothing. This one has no `accel` anywhere and the engine adds no gravity of
+// its own, so a few units/sec of `randvel` wander is the only motion there is: it hangs and spreads.
+//
+// `wateronly` IS THE SAFETY STORY. It culls any particle that leaves the water, so the cloud cannot
+// follow the camera up through the surface during the 3.2s swim-up or survive into play. It also
+// means THE EMITTER MUST BE SPAWNED BELOW -520 or every particle is culled on its first physics tick
+// and the effect is silently invisible - which is exactly what the old `local.pos + (0 0 14)` did,
+// putting it six units into the air.
+//
+// NO collision, NO dietouch, NO bouncedecal: a decal is a mark on a surface, and this belongs in the
+// column - the sand at -576 is below the camera's own eye level of -562..-572 anyway.
+//
+// RATES ARE AUTHORED x5 ON PURPOSE. cg_effectdetail defaults to 0.2 and divides emitter output
+// directly, so spawnrate 9 is about 1.8 models/sec in a default install.
+setup
+{
+	scale 1.0
+	path models/fx/dummy
+	skelmodel dummy3.skd
+}
+
+init
+{
+	server
+	{
+		// [bug-2423] HIDE THE CARRIER MESH. This tik rides dummy3.skd, and dummy3 is NOT the
+		// invisible dummy: dummy2.skd is one 3-vert triangle (it draws ext=[0.2 0.2 0.0] in the
+		// live SKELDRAW trace) while dummy3.skd is FOUR 16x16 quads in two crossed pairs - and
+		// this one measured ext=[8.0 16.0 16.0] in the very session the user photographed.
+		// With no `surface ... shader ...` line those quads get numskins 0, so hShader[0] is 0,
+		// and tr.shaders[0] IS tr.defaultShader - opaque GLS_DEFAULT over tr.defaultImage, a
+		// 32-grey field with a white border. Four panels facing different ways, at different mip
+		// levels, read as pale faceted chunks with per-face shading: the photographed object,
+		// spawning at the dead centre of every blood cloud.
+		// 15 tiks in this mod ride dummy3.skd. 14 carry this flag. This was the 15th.
+		// +dontdraw still SENDS the entity (fgame/entity.cpp:881), so the client emitters below
+		// keep running - only the carrier stops drawing (cgame/cg_modelanim.c:2710).
+		classname effectentity
+		notsolid
+		rendereffects +dontdraw
+	}
+	client
+	{
+		cache coop_bloodcloud.spr
+		cache coop_blood_drop.spr
+
+		// the cloud itself - hangs, swells, dissolves
+		originemitter coop_bcloud
+		(
+			model coop_bloodcloud.spr
+			wateronly
+			// [user 2026-09-02, bug-2363] "the blood in the water we added actually is above the
+			// water too as a giant ball of blood basically". Two separate mistakes, both mine:
+			//
+			// SIZE. A sprite's world size is image width x spritescale x tempmodel scale, so a
+			// 32px sprite at scale 3.2 is a ~100-unit ball - taller than a man, in 56 units of
+			// water. 0.35-0.70 puts a puff at 11-22 units, which is a cloud around a wound.
+			//
+			// AND IT SWAM UP. `range 1 3` is a POSITIVE z velocity: every particle rose 1-3
+			// units/sec for a 9 second life, i.e. up to 27 units, which lifted them straight
+			// through a surface only ~14 units above the emitter. `wateronly` did not save it -
+			// only ONE retail effect in the whole game uses that flag, and whatever it culls it
+			// plainly did not cull this. Blood in water does not rise; it hangs and spreads. The
+			// z component is symmetric now and the life is shorter than the climb needs.
+			spawnrate 9
+			alpha 0.8
+			life 6
+			scalemin 0.35
+			scalemax 0.70
+			scalerate 0.08
+			offset crandom 14 crandom 14 crandom 6
+			randvel crandom 3 crandom 3 crandom 2
+			friction 0.35
+			angles 0 0 random 360
+			avelocity 0 0 crandom 9
+			fadein 0.6
+			fadedelay 3.5
+		)
+
+		// suspended particulate - what sells it as matter in water rather than a fogged sprite.
+		// Reuses the mod's existing coop_blood_drop shader, which needs no change.
+		originemitter coop_bmote
+		(
+			model coop_blood_drop.spr
+			wateronly
+			spawnrate 14
+			alpha 0.9
+			life 5
+			scalemin 0.06
+			scalemax 0.14
+			offset crandom 16 crandom 16 crandom 8
+			randvel crandom 4 crandom 4 crandom 2
+			friction 0.5
+			fadedelay 4
+		)
+	}
+}
+
+animations
+{
+	// Both point at the same clip. The emitters above live in init{client{}}, so they run from spawn
+	// and need no emitteron - `start` exists purely so a caller's `anim start` is always a real
+	// animation on this model rather than an unknown one.
+	idle  dummy3.skc
+	start dummy3.skc
+}
