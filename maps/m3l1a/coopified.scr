@@ -338,7 +338,12 @@ mg42_damage_player local.player:{
 	//[user 2026-08-28] MISS CHANCE, ported from m3l1a.scr:1917. That fix was written for exactly this
 	//complaint but lives in the SP-only mg42_damage_player, and coop ends the thread at m3l1a.scr:1790
 	//before ever reaching it - so it has been inert in coop since it was written.
-	if(level.coop_beachMiss == NIL){ level.coop_beachMiss = 0.4 }
+	//[user 2026-09-04] "whatever the percentage is that we found before adjust it" - this is that
+	//percentage, and it is the only one in the beach damage path. 0.40 -> 0.32 takes the landed-round
+	//rate from 60 to 68 percent: a flat +13 percent damage at every point on the run. Deliberately the
+	//SMALLER of the two levers - the curve base below is what actually fixes the dead lower beach, and
+	//stacking two large changes would overshoot "slightly".
+	if(level.coop_beachMiss == NIL){ level.coop_beachMiss = 0.32 }
 	if(randomfloat(1) < level.coop_beachMiss){
 		thread jitter_mg local.player
 		end
@@ -351,7 +356,39 @@ mg42_damage_player local.player:{
 	if(local.py > 3000){ local.py = 3000 }
 	//[user 2026-08-28] 0.10 at the waterline climbing to 1.0 at the seawall - the run-in should be
 	//survivable enough to actually play the landing; the danger belongs at the bunkers.
-	local.scale = 0.10 + (0.90 * (local.py / 3000))
+	//[user 2026-09-04] THE FOOT OF THAT CURVE WAS DEAD, AND THAT IS THE WHOLE "the beach is not
+	//dangerous" REPORT. `local.damage = 5 * scale` is a PERCENT of max_health (Entity::normal_damage,
+	//entity.cpp:6155) and the `if(local.damage < 1){ local.damage = 1 }` three lines below clamps it -
+	//so EVERY scale under 0.20 produced the IDENTICAL 7.5 HP at coop_health 750. With a base of 0.10
+	//that covered everything below y=333: the wade and the whole lower beach were one flat trivial
+	//number, and no amount of retuning the 0.90 slope could reach them, because the clamp ate the
+	//result before it ever became damage.
+	//
+	//0.20 is not a taste pick - 5 * 0.20 = 1.00 lands the foot EXACTLY on that floor. Lower is wasted
+	//(clamped away); higher starts making the water itself lethal, which the landing cannot afford.
+	//It is the unique value that makes the curve live across its whole domain. Measured, solo and
+	//exposed, in time-to-death from 750 HP:
+	//    y=0  138s -> 121s     y=500  110s -> 73s     y=1000  69s -> 52s
+	//    y=2000  39s -> 33s    y=3000   28s -> 24s
+	//The TOP of the curve is deliberately unchanged, so the seawall plays exactly as it does today.
+	//
+	//WHAT THIS DOES NOT FIX, and it is the bigger number in coop: the warning phase and the eight
+	//fire ticks both sit INSIDE the per-player `for` loop in mg42AttackBeach, and there is one shared
+	//$player_target that both guns aim at - so the beach services players SEQUENTIALLY and per-player
+	//DPS scales as 1/N. At y=1000 with this tuning that is 52s solo but ~189s for a squad of four.
+	//Left alone deliberately: it materially rebalances 4-player and deserves its own playtest.
+	//
+	//Level vars, NOT getcvar - a script getcvar creates the cvar EMPTY and permanently defeats the
+	//engine-side default (bug-1669), which is this file's standing convention. coop_beachRise is
+	//stored PRE-SUBTRACTED rather than written as ( 1 - base ), to keep a bare negative out of an
+	//argument slot.
+	if(level.coop_beachBase == NIL){ level.coop_beachBase = 0.20 }
+	if(level.coop_beachRise == NIL){ level.coop_beachRise = 0.80 }
+	if(level.coop_beachTuneSaid != 1){
+		level.coop_beachTuneSaid = 1
+		println("^~^~^ BEACHTUNE base=" + level.coop_beachBase + " rise=" + level.coop_beachRise + " miss=" + level.coop_beachMiss)
+	}
+	local.scale = level.coop_beachBase + (level.coop_beachRise * (local.py / 3000))
 	if(level.coop_beachDmg != NIL && level.coop_beachDmg > 0){
 		local.scale = local.scale * level.coop_beachDmg
 	}
@@ -894,48 +931,67 @@ coop_smokeSignal:{
 		end
 	}
 
+	//[user 2026-09-04] THE RADIOMAN, NOT A RADIO LYING ON THE SAND.
+	//
+	//"we rendevouz with the radio man, and he does his whole dialogue, and then he gets shot
+	//immediately after and dies (scripted) gore and all. Our objective then becomes to interact with
+	//his body to call in the support strike (he has a radio on his back) and we just remove our
+	//flashing radio object. The rest of the sequence fires as is."
+	//
+	//THE FICTION WAS ALREADY IN THE MAP AND NOTHING WAS USING IT. $center_radioman is retail's own
+	//man, spawned "models/human/dday_29th_private_radio" at m3l1a.scr:6719/:6831/:6917, and that TIK
+	//- inside the `case weapon "none"` branch he is actually spawned with - carries radio_backpack.skd
+	//plus a `phone` surface: a real set on his back and a real handset, as geometry. His retail line
+	//036h is "Shore party... Request additional supporting fire, over!" - he is ALREADY calling for
+	//the fire support that never comes. Killing him the moment he finishes IS the reason it never
+	//came, which is why this beat invents no dialogue: there is no wav anywhere in m3l1 of him saying
+	//it did not get through, and scripting a line with no wav is precisely the moving-mouth-and-
+	//silence defect this map has been chasing all week.
+	//
+	//IT ALSO FIXES A STAGING BUG. The set sat at (297, 312, -479), 344 units from him, while his own
+	//speak trigger is 160 - so a player could call the barrage having never heard the line that
+	//motivates it. One anchor now serves both.
+	//
+	//THE PROP IS NOT DELETED, IT IS DEMOTED. coop_smokeSignal_buildProp holds it verbatim and is used
+	//when there is no radioman to use (never spawned, or already dead when the landing ends) and when
+	//the beat fails to produce an interactable. This objective has a long history of leaving the map
+	//unfinishable - bugs 2192, 2322, 2330, 2365 - and the one outcome that must never happen is a
+	//current objective nobody can complete.
+	//HE DOES NOT EXIST YET, AND ASKING WHETHER HE DOES IS THE BUG.
+	//
+	//This label is threaded at m3l1a.scr:2390, during the boat run-in. $center_radioman is spawned by
+	//the BEACH trigger labels - player_sequence_5_center / _right / _left, m3l1a.scr:6706 / :6818 /
+	//:6904 - which do not fire until a player is well up the sand. The first cut of this tested
+	//`$center_radioman != NULL` right here and therefore ALWAYS took the fallback: the radioman beat
+	//was unreachable code sitting behind a prop that won every time.
+	//
+	//So the route is a policy decision, not an entity test, and the objective anchors on his SPAWN
+	//ORIGIN, which is a literal and is byte-identical in all three of those labels
+	//(m3l1a.scr:6721 / :6833 / :6919 all set (192.00 640.00 -456.00)). coop_radiomanBeat then waits
+	//for the man himself to appear, which is the only place that wait can correctly live.
+	local.useMan = 0
+	if( level.coop_radiomanOn == NIL ){ level.coop_radiomanOn = 1 }
+	if( level.coop_radiomanOn == 1 ){ local.useMan = 1 }
+
 	local.rpos = (0 0 0)
-	local.rpos[0] = 297
-	local.rpos[1] = 312
-	local.rpos[2] = 0 - 479
-
-	//spawn by TIK path, not `spawn script_model` + model: walkietalkie.tik declares its own
-	//`classname animate` in its init/server block, and that block only runs on the TIK-spawn path.
-	local.radio = spawn "models/items/walkietalkie.tik"
-	if( local.radio == NULL ){				//entity-pool guard, bug-914 family
-		waitthread coop_smokeSignal_releaseShingle
-		end
+	local.trig = NULL
+	if( local.useMan == 1 ){
+		local.rpos[0] = 192
+		local.rpos[1] = 640
+		local.rpos[2] = 0 - 456
+		println("^~^~^ RADIOMAN route on at=" + local.rpos[0] + "," + local.rpos[1])
 	}
-	//[user 2026-08-31] SIT IT ON THE SAND. The first version drove the origin straight to the viewpos
-	//mark minus 60, which left the set half-sunk in the beach. Spawn it clear of the ground and let the
-	//engine put it down.
-	local.radio.origin = local.rpos + (0 0 40)
-	local.radio.angles = (0 79 0)
-	local.radio notsolid
-	local.radio droptofloor
-	local.radio rendereffects "+fullbright"
-	level.coop_smokeRadio = local.radio
-
-	//[user 2026-08-31] THE RADIO ITSELF PULSES RED - no separate marker.
-	//The first version put a models/items/pulse_explosive.tik above it, which the user correctly called
-	//out twice over: it is a BOMB icon on a radio you are meant to talk into, and its red light was what
-	//made the radio look like it was flashing in the first place, so the two together read as one
-	//blinking thing with a bomb floating over it. A pulsing dynamic light on the radio does the whole
-	//job with one entity fewer, and it can be switched OFF the moment the call goes out - which a
-	//self-animating marker model cannot.
-	thread coop_smokeSignal_beacon local.radio
-
-	//trigger_use, not trigger_multiple: a solid trigger_multiple never fires on walk-over because
-	//G_TouchTriggers skips anything whose solid != SOLID_TRIGGER. Documented at objective_drop.scr:85.
-	local.trig = spawn trigger_use
-	if( local.trig == NULL ){
-		waitthread coop_smokeSignal_releaseShingle
-		end
+	else{
+		local.rpos[0] = 297
+		local.rpos[1] = 312
+		local.rpos[2] = 0 - 479
+		println("^~^~^ RADIOMAN route off - the set goes on the sand")
+		local.trig = waitthread coop_smokeSignal_buildProp local.rpos
+		if( local.trig == NULL || local.trig == NIL ){
+			waitthread coop_smokeSignal_releaseShingle
+			end
+		}
 	}
-	local.trig.origin = local.rpos + (0 0 10)
-	local.trig solid
-	local.trig setsize ( -32 -32 -10) (32 32 72)
-	level.coop_smokeTrig = local.trig
 
 	//[user 2026-09-02, bug-2322] "once we land in water it becomes 'Signal the smoke barrage.'"
 	//
@@ -972,6 +1028,26 @@ coop_smokeSignal:{
 	waitthread global/objectives.scr::add_objectives 1 2
 	wait .5
 	waitthread global/objectives.scr::current_objectives 1
+
+	//[user 2026-09-04] THE OBJECTIVE IS PUBLISHED FIRST, POINTING AT HIM, and only then does the beat
+	//run - so the marker is what leads the player into the 160-unit trigger that starts his line. The
+	//beat returns the thing the player interacts with; if it cannot produce one (he was never
+	//approached, or the entity pool is exhausted) the set goes on the sand at his position instead, so
+	//there is always something to use and the marker never moves away from where the player was sent.
+	if( local.useMan == 1 ){
+		local.trig = waitthread coop_radiomanBeat local.rpos
+		if( local.trig == NULL || local.trig == NIL ){
+			println("^~^~^ RADIOMAN beat produced no trigger - the set goes on the sand")
+			local.trig = waitthread coop_smokeSignal_buildProp local.rpos
+		}
+		if( local.trig == NULL || local.trig == NIL ){
+			//nothing left to interact with at all. Close the objective rather than leaving it current
+			//and impossible, then hand the mission on exactly as the switched-off path does.
+			waitthread global/objectives.scr::add_objectives 1 3
+			waitthread coop_smokeSignal_releaseShingle
+			end
+		}
+	}
 
 	//Wait for a real player to use it. parm.other is the toucher (objective_drop.scr:143).
 	while( 1 ){
@@ -1049,6 +1125,202 @@ coop_smokeSignal_beacon local.ent:{
 	}
 	if( local.ent != NULL ){ local.ent lightOff }
 }end
+
+
+//THE SET ON THE SAND, kept verbatim from the original beat and demoted to the radioman's fallback.
+//Returns the trigger the caller must wait on, or NULL if the entity pool is exhausted (bug-914
+//family). The caller owns the release-the-shingle decision, because by the second call site an
+//objective is already published and bailing out has to close it first.
+//=========================================================================
+coop_smokeSignal_buildProp local.rpos:{
+//=========================================================================
+	local.out = NULL
+	//spawn by TIK path, not `spawn script_model` + model: walkietalkie.tik declares its own
+	//`classname animate` in its init/server block, and that block only runs on the TIK-spawn path.
+	local.radio = spawn "models/items/walkietalkie.tik"
+	if( local.radio != NULL && local.radio != NIL ){
+		//[user 2026-08-31] SIT IT ON THE SAND - spawn it clear of the ground and let the engine put
+		//it down, rather than driving the origin to the viewpos mark, which left it half-sunk.
+		local.radio.origin = local.rpos + (0 0 40)
+		local.radio.angles = (0 79 0)
+		local.radio notsolid
+		local.radio droptofloor
+		local.radio rendereffects "+fullbright"
+		level.coop_smokeRadio = local.radio
+		thread coop_smokeSignal_beacon local.radio
+
+		//trigger_use, not trigger_multiple: a solid trigger_multiple never fires on walk-over because
+		//G_TouchTriggers skips anything whose solid != SOLID_TRIGGER (objective_drop.scr:85).
+		local.trig = spawn trigger_use
+		if( local.trig != NULL && local.trig != NIL ){
+			local.trig.origin = local.rpos + (0 0 10)
+			local.trig solid
+			local.trig setsize ( -32 -32 -10) (32 32 72)
+			level.coop_smokeTrig = local.trig
+			local.out = local.trig
+		}
+	}
+}end local.out
+
+
+//THE RENDEZVOUS, THE DEATH, AND THE BODY AS THE OBJECTIVE. [user 2026-09-04]
+//
+//Returns the trigger to interact with, or NULL if it could not build one.
+//
+//WHY THE DWELL IS SPELLED OUT IN SECONDS. coop_vbSay does NOT wait for a line to finish - it takes
+//the bus, calls `say`, and returns on the same frame - so chaining the death onto it would shoot him
+//about a second into a four-and-a-half second sentence. The numbers: 036h is 4.6s, and coop_vbRadio
+//latches level.coop_vbRadioDone on its FIRST statement and then waits 6s before saying 045a, which
+//is 4.51s, so the pair ends 10.51s after 036h starts. One second is long enough for that latch to be
+//readable, which is what lets this tell the two cases apart instead of always waiting for the longer.
+//
+//WHY THE FLAG IS THE RENDEZVOUS. retail's sequence_5_center_radioman sets isinsequence 1 at spawn
+//and holds it until a player closes to 160 units, then says his line and clears it. So watching the
+//flag fall costs nothing, races nothing, and cannot double-play a line we do not own. If the
+//sequence never ran at all the flag is NIL rather than 1 and this falls straight through to the
+//death - degraded, but never stuck.
+//
+//THE KILL IS THE MAP'S OWN RECIPE, not a new one: maps/m3l1a.scr::bhit plus coop_gorechunk,
+//coop_blooddrip and coop_bloodslick, exactly as coop_flankCutDown drops the men on the flanks. Two
+//staggers and then the round that puts him down, so it reads as being shot rather than as a despawn.
+//
+//THE FLASHING GOES ON HIM, which was the user's direct question. coop_smokeSignal_beacon only needs
+//an entity that answers light/lightRadius/lightOn/lightOff, and a dead actor is still an Entity -
+//MOHAA leaves the body in the world. If the corpse HAS gone (gibbed, or coop_corpseLife enabled and
+//expired) the beacon moves to the trigger, which sits at the same spot and is ours for the whole
+//objective, so the pulse is always somewhere. He is deliberately NOT given rendereffects
+//"+fullbright" the way the little walkietalkie was: on a human body it reads as a lit-up mannequin.
+//=========================================================================
+coop_radiomanBeat local.rpos:{
+//=========================================================================
+	local.out = NULL
+
+	//0. WAIT FOR HIM TO EXIST AT ALL. He is spawned by a beach trigger label, not at map load, so
+	//at the moment this beat starts he is usually still NULL - that is normal, not a failure. Seven
+	//minutes is a deliberate over-estimate of how long a squad might take to reach his part of the
+	//beach; on timeout the caller drops the set on the sand at his spawn point instead.
+	local.t = 0
+	while( local.t < 420 ){
+		if( $center_radioman != NULL && $center_radioman != NIL ){ break }
+		wait 1
+		local.t = local.t + 1
+	}
+	local.man = $center_radioman
+	if( local.man == NULL || local.man == NIL ){
+		println("^~^~^ RADIOMAN never spawned t=" + local.t)
+	}
+	else{
+		println("^~^~^ RADIOMAN spawned t=" + local.t)
+	}
+
+	//1. THE RENDEZVOUS.
+	local.t = 0
+	local.go = 1
+	while( local.go == 1 ){
+		if( local.man == NULL || local.man == NIL ){ local.go = 0 }
+		else if( !isalive local.man ){ local.go = 0 }
+		else if( local.man.isinsequence != 1 ){ local.go = 0 }
+		else if( local.t >= 300 ){ local.go = 0 }
+		else{
+			wait 0.5
+			local.t = local.t + 0.5
+		}
+	}
+	println("^~^~^ RADIOMAN rendezvous t=" + local.t)
+
+	//2. HIS WHOLE DIALOGUE, WAITED OUT IN FULL.
+	if( local.man != NULL && local.man != NIL ){
+		if( isalive local.man ){
+			//poll for the latch rather than sampling it once: coop_vbRadio sets coop_vbRadioDone on its
+			//first statement, but a single probe would depend on that staying wait-free forever, and
+			//reading it too early picks the short dwell and shoots him mid-sentence. The elapsed total is
+			//the same either way because the dwell subtracts whatever the poll spent.
+			local.w = 0
+			while( local.w < 3 && level.coop_vbRadioDone != 1 ){
+				wait 0.5
+				local.w = local.w + 0.5
+			}
+			local.dwell = 4.6 - local.w
+			if( level.coop_vbRadioDone == 1 ){ local.dwell = 10.6 - local.w }
+			if( local.dwell < 0.5 ){ local.dwell = 0.5 }
+			println("^~^~^ RADIOMAN dwell=" + local.dwell + " waited=" + local.w)
+			wait local.dwell
+		}
+	}
+
+	//3. AND THEN THEY SHOOT HIM.
+	if( local.man != NULL && local.man != NIL ){
+		if( isalive local.man ){
+			println("^~^~^ RADIOMAN down")
+			local.man takedamage
+			local.o = local.man.origin + (0 0 44)
+			local.man thread maps/m3l1a.scr::bhit 40 -1
+			local.b = spawn script_model model "models/fx/coop_gorechunk.tik"
+			if( local.b != NULL && local.b != NIL ){
+				local.b.origin = local.o
+				local.b notsolid
+				thread coop_fxCleanup local.b 25
+			}
+			wait 0.18
+			if( local.man != NULL && local.man != NIL ){
+				if( isalive local.man ){
+					local.o = local.man.origin + (0 0 40)
+					local.man thread maps/m3l1a.scr::bhit 1000 -1
+					local.sp = spawn script_model model "models/fx/coop_blooddrip.tik"
+					if( local.sp != NULL && local.sp != NIL ){
+						local.sp.origin = local.o
+						local.sp notsolid
+						local.sp anim start
+						thread coop_fxCleanup local.sp 6
+					}
+					local.g = spawn script_model model "models/fx/coop_bloodslick.tik"
+					if( local.g != NULL && local.g != NIL ){
+						local.g.origin = local.o - (0 0 40)
+						local.g notsolid
+						if( waitthread coop_placeGround local.g 170 ){ local.g anim start }
+					}
+				}
+			}
+			wait 0.6
+		}
+	}
+
+	//4. HIS BODY BECOMES THE OBJECTIVE.
+	local.bpos = local.rpos
+	if( local.man != NULL && local.man != NIL ){ local.bpos = local.man.origin }
+
+	local.trig = spawn trigger_use
+	if( local.trig != NULL && local.trig != NIL ){
+		local.trig.origin = local.bpos + (0 0 10)
+		local.trig solid
+		//a shade wider than the set on the sand was: this is a body lying down, not an upright prop,
+		//and the player should be able to reach the radio from either side of it.
+		local.trig setsize ( -40 -40 -10) (40 40 72)
+		level.coop_smokeTrig = local.trig
+
+		local.lit = local.trig
+		if( local.man != NULL && local.man != NIL ){ local.lit = local.man }
+		level.coop_smokeRadio = local.lit
+		thread coop_smokeSignal_beacon local.lit
+
+		//[bug-2330] the toast latch is one-shot per player per index, and index 1 is now used a THIRD
+		//time on this map (landing, then signal, now the body). Without this clear the announcement is
+		//silently swallowed and the user sees the objective text change with no notification at all.
+		local.i = 1
+		while( local.i <= $player.size ){
+			if( $player[local.i] != NULL && $player[local.i] != NIL ){
+				$player[local.i].flags["coop_objToastSeenm1"] = 0
+			}
+			local.i++
+		}
+		waitthread global/objectives.scr::add_objectives 1 1 "Use the radioman's set to call the barrage." local.bpos
+		waitthread global/objectives.scr::add_objectives 1 2
+		wait .5
+		waitthread global/objectives.scr::current_objectives 1
+		println("^~^~^ RADIOMAN objective on the body at=" + local.bpos[0] + "," + local.bpos[1])
+		local.out = local.trig
+	}
+}end local.out
 
 
 //Fires the barrage. Each round is its own thread with its own delay and its own scatter, so they land
@@ -7386,6 +7658,20 @@ coop_waterBullets local.wx local.wy:{
 			local.px = local.wx + ( 0 - 190 ) + ( randomint 380 )
 			local.py = local.wy + 40 + ( randomint 300 )
 
+			//[user 2026-09-04] ONE ROUND PER BURST COMES IN DIRECTLY OVERHEAD while the plunge is face-up,
+			//and NOT ONE ROUND IN THE WIDE BAND ABOVE EVER WAS. fov_y is 64.36 degrees at every aspect
+			//ratio (CG_CalcFov's aspect terms cancel exactly, cg_view.c:5402-5404; camera_fov is 80). At
+			//pitch -50 the bottom of frame is 18 degrees above horizontal, so with 22 units of water
+			//overhead an impact has to be inside about 60 units horizontally to appear at all - and the
+			//band above starts 96 units ahead of the camera and runs to 395. The bubble beads stop at -537,
+			//above the camera everywhere from -542 to -570, so they hang overhead exactly as wanted once
+			//the entry point is placed here. Self-limiting: one per burst, and only while coop_uwFaceUp is
+			//set (BEAT 2 sets it, the wake clears it).
+			if(local.b == 0 && level.coop_uwFaceUp == 1){
+				local.px = local.wx + ( 0 - 26 ) + ( randomint 52 )
+				local.py = local.wy + ( 0 - 96 ) + ( randomint 76 )
+			}
+
 			//--- the entry wound in the surface
 			local.hit = (0 0 0)
 			local.hit[0] = local.px
@@ -7896,7 +8182,11 @@ coop_rampIncoming:{
 coop_rampIncomingSafety:{
 //=========================================================================
 	local.t = 0
-	while(local.t < 60 && level.coop_rampCineDone != 1){
+	//[user 2026-09-04] 60 -> 75s, moving with coop_rampWatchdog's 45 -> 60 so the 15s
+	//watchdog-before-mortality gap is unchanged. This cap is only ever reached on a path where the
+	//WATCHDOG ITSELF died: on every other path coop_rampHandoff sets coop_rampCineDone and this loop
+	//breaks within one tick.
+	while(local.t < 75 && level.coop_rampCineDone != 1){
 		wait 0.5
 		local.t = local.t + 0.5
 	}
@@ -7996,6 +8286,12 @@ coop_rampHullFire:{
 	if(level.gametype == 0){ end }
 	if(level.coop_rampHullOn == NIL){ level.coop_rampHullOn = 1 }
 	if(!level.coop_rampHullOn){ end }
+	//[user 2026-09-04] THE VISIBLE HALF GETS ITS OWN SWITCH. bug-2259's lesson: coop_runInWaterDistant
+	//was buried behind its parent's toggle, so turning down one thing silently killed another. Setting
+	//level.coop_rampHullFxOn 0 restores today's audio-only behaviour exactly.
+	if(level.coop_rampHullFxOn == NIL){ level.coop_rampHullFxOn = 1 }
+	level.coop_rampHullFxCount = 0
+	if(level.coop_rampHullFxOn != 1){ println("^~^~^ RAMPHULLFX off") }
 	if(level.coop_rampHullDone == 1){ end }
 	level.coop_rampHullDone = 1
 	if($higgins1_playerspot == NULL || $higgins1_playerspot == NIL){ end }
@@ -8027,12 +8323,18 @@ coop_rampHullFire:{
 	//--- the ramp is travelling (0.65s): rounds start finding the widening gap.
 	local.k = 0
 	while(local.k < 4){
+		//[user 2026-09-04] ONE STRIKE PER AUDIBLE ROUND, and the fourth is a WhizBy (take 7..9), which
+		//hits nothing and so shows nothing. Singles here rather than bursts: the comment above says
+		//"rounds START finding the widening gap", and that is what one spark per round looks like.
 		if(local.k == 0){
 			local.a playsound ( "hedgehog_supression" + ( ( randomint 5 ) + 2 ) )
+			thread coop_rampHullHit local.a 0 1
 		}else if(local.k == 1){
 			local.c playsound ( "ramp_supression" + ( ( randomint 5 ) + 2 ) )
+			thread coop_rampHullHit local.c 2 1
 		}else if(local.k == 2){
 			local.b playsound ( "hedgehog_supression" + ( ( randomint 5 ) + 2 ) )
+			thread coop_rampHullHit local.b 1 1
 		}else{
 			local.c playsound ( "ramp_supression" + ( ( randomint 3 ) + 7 ) )
 		}
@@ -8052,6 +8354,12 @@ coop_rampHullFire:{
 	local.c playsound snd_bodyfall_metal
 	local.c playsound king_vehicle_crash3
 	local.a playsound door_metal_close_stop1
+	//[user 2026-09-04] THE MOMENT THE GAP OPENS, the guns find it. This is the one accent not tied to
+	//a sound of its own: the ramp going flat is the instant the boat stops being cover, so the mouth
+	//takes four and both walls take two, all threaded, so not a frame of the slam is delayed.
+	thread coop_rampHullHit local.c 2 4
+	thread coop_rampHullHit local.a 0 2
+	thread coop_rampHullHit local.b 1 2
 	if($higgins1_playerspot != NULL && $higgins1_playerspot != NIL){
 		local.q = $higgins1_playerspot.origin
 		thread coop_mod/main.scr::earthquake_radius local.q 0.45 0.55 500
@@ -8067,14 +8375,19 @@ coop_rampHullFire:{
 	while(local.el < 2.5 && level.coop_rampAudioCut != 1 && level.coop_rampCineDone != 1){
 		local.r = ( randomint 10 )
 		if(local.el < 1.9){
+			//[user 2026-09-04] the three IMPACT branches (takes 2..6) each get their picture; the two WhizBy
+			//branches below (takes 7..9) do not, because a round that goes past does not strike the hull.
+			//2-3 strikes per audible round, threaded, so the wait below is untouched.
 			if(local.r < 2){
 				local.a playsound ( "hedgehog_supression" + ( ( randomint 5 ) + 2 ) )
+				thread coop_rampHullHit local.a 0 ( 2 + ( randomint 2 ) )
 			}else if(local.r < 4){
 				local.b playsound ( "hedgehog_supression" + ( ( randomint 5 ) + 2 ) )
+				thread coop_rampHullHit local.b 1 ( 2 + ( randomint 2 ) )
 			}else if(local.r < 7){
 				local.c playsound ( "ramp_supression" + ( ( randomint 5 ) + 2 ) )
-			}else if(local.r < 9){
-				local.a playsound ( "ramp_supression" + ( ( randomint 3 ) + 7 ) )
+				thread coop_rampHullHit local.c 2 ( 2 + ( randomint 2 ) )
+			}else if(local.r < 9){				local.a playsound ( "ramp_supression" + ( ( randomint 3 ) + 7 ) )
 			}else{
 				local.b playsound ( "ramp_supression" + ( ( randomint 3 ) + 7 ) )
 			}
@@ -8098,6 +8411,7 @@ coop_rampHullFire:{
 	if(local.a != NULL && local.a != NIL){ local.a remove }
 	if(local.b != NULL && local.b != NIL){ local.b remove }
 	if(local.c != NULL && local.c != NIL){ local.c remove }
+	println("^~^~^ RAMPHULLFX hits=" + level.coop_rampHullFxCount)
 	println("^~^~^ RAMPHULL done")
 }end
 
@@ -8127,6 +8441,129 @@ coop_rampHullPlace local.a local.b local.c:{
 		local.p[1] = local.p[1] + 150
 		local.p[2] = local.p[2] + 40
 		local.c.origin = local.p
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-09-04] AND THE BOAT SHOWS IT. "i also dont see bullets hitting or ricocheting off the
+//higgins boat when the ramp opens."
+//
+//coop_rampHullFire is the incoming-fire beat and it is ALREADY correct about materials: emitters a
+//and b play hedgehog_supression2..6, which decode to wpn_impMETAL05/06/13/16/19/23 - the steel
+//gunwales. Emitter c plays ramp_supression2..6 = wpn_impWOOD03/05/06/08/10/14 - the timber ramp.
+//Takes 7..9 in BOTH pools are Wpn_WhizBy*, i.e. rounds that hit nothing. So the audio layer already
+//decided, per event, what was struck and what only went past. This adds the picture to each of those
+//decisions and to nothing else: a whiz-by gets no spark, because a whiz-by hits nothing.
+//
+//THE EFFECTS ARE THE ENGINE'S OWN. models/fx/bh_metal_hard/lite.tik and bh_wood_hard/lite.tik are
+//exactly what ClientSpecialEffectsManager::LoadEffects picks for SFX_BHIT_METAL_* and SFX_BHIT_WOOD_*
+//(cgame/cg_specialfx.cpp:107-116) - the effect the client spawns when a real round hits wood or metal.
+//Read out of main/Pak0.pk3: all four are `init { server { } }` - the server block is LITERALLY EMPTY.
+//No radiusdamage, no hitdamage, no classname, no bind. Contrast fx_tank_explosion.tik, whose server
+//block carries radiusdamage 120 and killed a player from a cosmetic set piece (bug-2244). These
+//cannot hurt anybody, cannot move, and are never bound to the boat. All four are already precached
+//by maps/m3l1a_precache.scr, so nothing new ships.
+//
+//AND THEY RENDER. Both bh_ families put every emitter in `init { client { } }`, which fires when the
+//entity first reaches a snapshot - by which time the server has set the origin, so spawn-then-position
+//is correct (bug-2339). The proof is in this same beat: bh_human_uniform_hard.tik is the identical
+//shape - dummy2 carrier, empty server block, pure `sfx originspawn` in init{client{}} - spawned this
+//exact way at coopified.scr:10289, and it is what the user can already SEE tearing into the rangers.
+//A verifier refuted this beat on the grounds that a `sfx` block is discarded when m_pCurrentSfx is
+//NULL; that reading cannot be right, because the thing it forbids is already on screen.
+//  - `spawn script_model model "<path>"` and NOT `spawn "<path>"`: an empty server block means no
+//    classname, and the bare form throws "You must specify an explicit classname" (bug-2366).
+//  - NO `anim start`. Their animations block defines `idle` only, so `anim start` would be an unknown
+//    animation - a skipped statement plus a Script Error line, for nothing.
+//
+//WHERE. The offsets are applied to coop_rampHullPlace's OWN emitter entities, so this inherits the
+//placement that beat already proved and re-uses its two seatings. What is added is a FORWARD PUSH
+//along +Y, because a sound emitter and a spark are not the same problem: emitter b sits 97 to
+//starboard and only 38 forward of the eye - fine for an omnidirectional sound, 69 degrees off the
+//view axis for something you are meant to SEE. The push walks each hit onto the stretch of hull
+//between the player and the mouth, and stops short of the hinge at y -7266 so nothing lands outside
+//the boat.
+//
+//AND IT DOES NOT ASSUME HE IS LOOKING FORWARD. coop_rampCamLock is not set until AFTER the shell, so
+//for this entire beat every camera is still copying its own player's viewangles. Four players can be
+//looking four ways, which is why the hits stay spread across all three anchors instead of being
+//concentrated dead ahead: wherever he turns, his boat is being hit. Every player's camera is at the
+//same origin, so no per-player placement is needed and 1-4 players see the same event.
+//
+//DENSITY. One audible impact becomes 2-3 visible strikes 0.05s apart, from a THREADED helper, so the
+//burst costs the caller nothing and cannot shift the audio pacing by a frame. The dense phase runs
+//0.10+rand(0.15) between events of which r<7 are impacts, so this is ~10 visible strikes a second on
+//a 130-unit-wide boat - sustained fire, not a firework display. The thin phase is WhizBy only and
+//stays visually silent by design, which leaves the air clear for the shell. ~30 spawns over ~2.7s at
+//1.0s life = ~12 live at peak; the 44 cap is a backstop.
+//=========================================================================
+coop_rampHullHit local.emit local.side local.rounds:{
+//=========================================================================
+	if(level.coop_rampHullFxOn != 1){ end }
+	if(local.emit == NULL || local.emit == NIL){ end }
+	if(local.rounds == NIL){ local.rounds = 2 }
+	if(level.coop_rampHullFxCount == NIL){ level.coop_rampHullFxCount = 0 }
+
+	local.i = 0
+	while(local.i < local.rounds){
+		if(level.coop_rampHullFxCount >= 44){ end }
+		if(level.coop_rampCineDone == 1){ end }
+		if(level.coop_rampAudioCut == 1){ end }
+		if(local.emit == NULL || local.emit == NIL){ end }
+
+		local.p = local.emit.origin
+		if(local.side == 0){
+			//PORT STEEL WALL. Emitter a is the wall at x ~319; +4..+10 puts the spark just inboard of the
+			//inner face so it is never on the far side of it. 30..139 forward keeps it between the player
+			//and the hinge; +-22 vertically spans the wall around the eye line.
+			local.p[0] = local.p[0] + 4 + (randomint 7)
+			local.p[1] = local.p[1] + 30 + (randomint 110)
+			local.p[2] = local.p[2] + ((randomint 45) - 22)
+			local.mdl = "models/fx/bh_metal_lite.tik"
+			if((randomint 3) == 0){ local.mdl = "models/fx/bh_metal_hard.tik" }
+		}else if(local.side == 1){
+			//STARBOARD STEEL WALL, x ~449, so the inboard nudge is negative. Pushed harder forward
+			//(90..139) than port because it is 97 off the centreline instead of 33 - that is what puts it
+			//on hull he can see rather than beside his ear. 139 lands at y -7263, just aft of the hinge.
+			local.p[0] = local.p[0] + ((randomint 7) - 10)
+			local.p[1] = local.p[1] + 90 + (randomint 50)
+			local.p[2] = local.p[2] + ((randomint 45) - 22)
+			local.mdl = "models/fx/bh_metal_lite.tik"
+			if((randomint 3) == 0){ local.mdl = "models/fx/bh_metal_hard.tik" }
+		}else{
+			//THE TIMBER RAMP. Emitter c is the mouth at 384 -7290 -424, on the centreline. +-44 in x is the
+			//aperture between the two walls; -10..+55 forward walks from the doorway onto the near end of
+			//the ramp once it is down; -30..+20 spans the ramp face while it is still travelling. One shape
+			//for both halves on purpose - the mouth is where the men are and where the eye goes, and keying
+			//a second placement off the ramp's own angle would be a new dependency on an entity mid-move.
+			local.p[0] = local.p[0] + ((randomint 89) - 44)
+			local.p[1] = local.p[1] + ((randomint 66) - 10)
+			local.p[2] = local.p[2] + ((randomint 51) - 30)
+			local.mdl = "models/fx/bh_wood_lite.tik"
+			if((randomint 3) == 0){ local.mdl = "models/fx/bh_wood_hard.tik" }
+		}
+
+		//lite 2 times in 3, hard 1 in 3 - the same mix and the same call form as the water hits above.
+		//hard adds a second delayed spark volley and a smoke wisp; an unbroken run of hard reads as
+		//pyrotechnics rather than as rounds.
+		local.e = spawn script_model model local.mdl
+		if(local.e != NULL && local.e != NIL){			//entity-pool guard, bugs 914-927
+			local.e.origin = local.p
+			local.e notsolid
+			//[bug-2259] HIDE THE CARRIER. The design argued this was unnecessary because these ride
+			//dummy2 rather than the dummy3 that draws grey quads - but bh_water_lite.tik is ALSO a dummy2
+			//carrier with an empty server block, and this same file sets +dontdraw on it for exactly this
+			//reason. That line also proves it hides only the CARRIER and not the effect: the splash still
+			//shows. One line, no cost, and it removes the last way this puts a grey box on the hull.
+			local.e rendereffects "+dontdraw"
+			//1.0s, not 1.6 or 2.0 as elsewhere: the carrier only has to outlive the `delayedsfx 0.1`
+			//volley plus one snapshot, so 1.0 is ~10x the requirement and holds peak concurrency near 12.
+			thread coop_fxCleanup local.e 1.0
+			level.coop_rampHullFxCount = level.coop_rampHullFxCount + 1
+		}
+		local.i++
+		wait 0.05
 	}
 }end
 
@@ -8305,7 +8742,7 @@ coop_underwaterDead local.wx local.wy local.pace:{
 			local.d.angles = ( local.rp local.ry 0 )
 			local.d droptofloor 120
 			local.d notsolid
-			thread coop_fxCleanup local.d ( 26 * local.pace )
+			thread coop_fxCleanup local.d ( 40 * local.pace )	//[2026-09-04] 26 -> 40, see the kill note below
 			local.made++
 
 			//[bug-2359] and blood standing in the water above him. The user asked for "a mix of blood
@@ -8319,7 +8756,7 @@ coop_underwaterDead local.wx local.wy local.pace:{
 				local.bc.origin = local.bq
 				local.bc notsolid
 				local.bc anim start
-				thread coop_fxCleanup local.bc ( 25 * local.pace )
+				thread coop_fxCleanup local.bc ( 38 * local.pace )
 			}
 		}
 		local.i++
@@ -8338,7 +8775,7 @@ coop_underwaterDead local.wx local.wy local.pace:{
 			local.fc.origin = local.dp
 			local.fc notsolid
 			local.fc anim start
-			thread coop_fxCleanup local.fc ( 25 * local.pace )
+			thread coop_fxCleanup local.fc ( 38 * local.pace )
 		}
 		local.i++
 	}
@@ -8347,15 +8784,20 @@ coop_underwaterDead local.wx local.wy local.pace:{
 	//-----------------------------------------------------------------
 	//AND THE ONES WHO ARE STILL ALIVE WHEN THE HOLD STARTS.
 	//-----------------------------------------------------------------
-	//[2026-09-03] SIX, NOT FOUR, AND PACE-SCALED. At the old 4 x (2.2 + rand 2.4) every kill was
-	//over by about 13s - i.e. the 10.3s swim that is now the centrepiece of the beat had nobody
-	//dying in it for its last seven seconds. Six kills at a 2.6 + rand 1.8 cadence put the expected
-	//kill times at 2.4 / 5.9 / 9.4 / 12.9 / 16.4 / 19.9s against a swim that runs 9.6 -> 20.1s, so
-	//three or four of them land inside it. The loop still exits the instant level.coop_underDeadOn
-	//clears at the break, so a late draw costs nothing.
+	//[2026-09-03] SIX, NOT FOUR, AND PACE-SCALED. At the old 4 x (2.2 + rand 2.4) every kill was over
+	//by about 13s - i.e. the swim that is the centrepiece of the beat had nobody dying in it for its
+	//last seven seconds. A 2.6 + rand 1.8 cadence puts the expected kill times 3.5s apart.
+	//[user 2026-09-04] SIX -> EIGHT, AND THE CLEANUPS ABOVE GO 26/25 -> 40/38. THIS IS A REQUIRED
+	//COMPANION TO THE REBUILT PLUNGE, not a taste change. That rewrite drops coop_uwPace 1.2 -> 1.0
+	//while making the submerged beat about 6s LONGER, so at the old numbers every one of these
+	//corpses and blood clouds would have been deleted ON CAMERA in the last third of the swim -
+	//exactly the failure the caller comment says the pace argument exists to prevent - and only the
+	//last of six kills would have landed inside a swim that now runs 18.7 -> 29.0s. At eight the
+	//expected times are 2.4 / 5.9 / 9.4 / 12.9 / 16.4 / 19.9 / 23.4 / 26.9s, so three land in the
+	//swim itself. The loop still exits the instant level.coop_underDeadOn clears at the break.
 	wait ( ( 1.8 + ( randomfloat 1.2 ) ) * local.pace )
 	local.k = 0
-	while(level.coop_underDeadOn == 1 && local.k < 6){
+	while(level.coop_underDeadOn == 1 && local.k < 8){
 		local.x = local.wx + ( 0 - 260 ) + ( randomint 520 )
 		local.y = local.wy + 90 + ( randomint 380 )
 		thread coop_underwaterKill local.x local.y local.bod[( randomint local.bodN ) + 1]
@@ -10227,6 +10669,18 @@ coop_rampAudioCut:{
 
 	waitthread coop_mod/replace.scr::coop_setClientCvar "s_sfxduck" 0.05
 	waitthread coop_mod/replace.scr::coop_setClientCvar "coop_voxCut" 0
+	//[user 2026-09-04] THE FIFTH LEVER - and the only one that is not a volume. "lets make all
+	//dialogue (pain, normal dialogue, etc.) kinda muffled as though we are sorta zoned out, it
+	//becomes clear by the time all audio has been restored from the duck effect."
+	//A SCALE, NOT A FADE. The engine computes the muffle as coop_muffle * (1 - s_sfxduck)^curve, so
+	//it rides the duck's own perceptual curve and reaches 0 on the exact frame the 34s s_sfxduck
+	//fade completes. There is nothing to time here, and nothing that can be stranded: with the duck
+	//at 1 this value is inert, and the engine also clears it on every map load.
+	//WHERE IT ACTUALLY READS: not much during the cut itself - almost everything audible then is
+	//already duck-exempt, and what is left is 26 dB down - but across the 34-second RECOVERY, while
+	//the world climbs back and the muffle is still falling. That IS the ask; set expectations as
+	//"the world comes back muffled and clears", not "underwater during the cutscene".
+	waitthread coop_mod/replace.scr::coop_setClientCvar "coop_muffle" 1
 	waitthread coop_mod/replace.scr::tmvolume 1.5
 	exec coop_mod/replace.scr::coop_cvarDuckStart "Ambient" 0.0 0.3 8
 
@@ -10334,10 +10788,14 @@ coop_rampAudioSafe:{
 //     "camera feels like it kinda just waves around left and right" - the user was describing the
 //     shell-shock sway, uncontested, because the choreography underneath it was static.
 //
-//THE FIX IS STAGING, and it is nine beats instead of four:
-//    plunge      0.55s   he goes under head first, still tumbling from the throw
-//    tumble      1.30s   a lazy half-turn in the column, ending pitched back at the light
-//    bottom      0.26s   HE HITS IT. hard stop, jolt, sand, and the frame stops dead
+//THE FIX IS STAGING, and it is THIRTEEN beats instead of four:
+//    plunge      0.55s   he goes under head first, still carrying the throw
+//    backfirst   1.00s   the water catches him and he comes over onto his back
+//    sink        4.90s   three legs, face-up, the surface receding. 28 units of fall
+//    bottom      0.30s   his back meets the sand. softened from the old head-first 0.26/1.9 crack
+//    eyes        2.00s   the fadeout runs CONCURRENTLY with this leg
+//    black       2.30s   held pose, screen out, unpaced on purpose
+//    wake        0.50s   fadein 0.18 + jolt + dizzy 0.9 + the breath hook
 //    sand        1.55s   the pause. he does not move. this beat has no equivalent today
 //    try 1       1.51s   pushes up, the arm gives, he goes back down
 //    try 2       1.70s   harder, gains ground, goes back down anyway
@@ -10345,25 +10803,27 @@ coop_rampAudioSafe:{
 //    push       10.32s   SIX STROKES toward shore, each with surge, pulse and roll
 //    gather      1.25s   plants and coils
 //    break       0.55s   straight up through the surface onto the handoff pose
-//MEASURED, not estimated: 2.66s of unpaced beats + 18.73s of paced ones = 21.39s nominal, and
-//running the CODED table at the 20Hz server tick gives 21.35s submerged and 21.90s to the handoff
-//at level.coop_uwPace 1 (the 0.5s difference is one frame of overshoot on each of the 21 legs),
-//against 17.95s today. The user explicitly authorised the extension. coop_uwPace scales the six
+//[user 2026-09-04] THE TABLE ABOVE IS THE REBUILT ONE. Derived from the CODED leg durations, not
+//quoted from a log: 4.20s of unpaced beats (plunge 0.55 + bottom 0.30 + black 2.30 + wake 0.50 +
+//break 0.55) + 26.63s of paced ones = 30.83s submerged at level.coop_uwPace 1.0, and 36.2s at the
+//1.2 ceiling. THE DEFAULT PACE IS NOW 1.0, not 1.2: the extension the user asked for is paid in
+//choreography here rather than by stretching the old beats. coop_uwPace scales the
 //MIDDLE beats only - never the plunge or the break, both of which are timing-critical against the
 //arc above and the handoff below.
 //
 //THE PACE CLAMP IS 0.5..1.2, AND THAT CEILING IS A SAFETY NUMBER, NOT A TASTE ONE. An earlier cut
 //of this rewrite clamped at 1.8 and raised coop_rampWatchdog from 90 half-second ticks (45s) to 140
 //(70s) to fit. That change is REMOVED, because it inverts an ordering that matters:
-//    coop_rampWatchdog        `local.t < 90`, +1   per 0.5s wait  ->  45s, then clearfade + handoff
-//    coop_rampIncomingSafety  `local.t < 60`, +0.5 per 0.5s wait  ->  60s, then takedamage
+//    coop_rampWatchdog        `local.t < 120`, +1   per 0.5s wait -> 60s, then clearfade + handoff
+//    coop_rampIncomingSafety  `local.t < 75`,  +0.5 per 0.5s wait -> 75s, then takedamage
 //Today the watchdog frees the player at 45s, fifteen seconds BEFORE mortality comes back. At a 70s
 //watchdog the player becomes damageable at ~61s while still glued, hidden and locked in a camera he
-//cannot leave, with no fade - a ten-second window that did not exist before. So the watchdog stays
-//at 90 and the pace is clamped instead. MEASURED worst case at 1.2: the beat itself runs 25.65s to
-//the handoff, plus 4.4s of butchery and arc ahead of it (0.3+0.3+0.1+0.3+0.6+0.12 of waits plus
-//coop_rampFly's 2.6s arc) = 30.1s, against a 45s watchdog. 14.9s of margin, and the ordering is
-//untouched. At pace 1 it is 26.3s, with 18.7s of margin.
+//cannot leave - a ten-second window that did not exist before. The pace is still clamped at 1.2,
+//and [user 2026-09-04] BOTH caps moved TOGETHER for the rebuilt plunge: 45 -> 60s and 60 -> 75s,
+//so the 15s watchdog-before-mortality gap is byte-identical to what it always was. Worst case at
+//pace 1.2: 36.2s submerged plus 4.4s of butchery and arc ahead of it (0.3+0.3+0.1+0.3+0.6+0.12 of
+//waits plus coop_rampFly's 2.6s arc) = 40.6s against a 60s watchdog, 19.4s of margin. At the new
+//default pace 1.0 it is 35.2s, with 24.8s of margin.
 //coop_uwPace is a LEVEL VAR and not a cvar - `set coop_uwPace 1.2` from the console does nothing;
 //it is edited here or it is 1.
 //
@@ -10402,6 +10862,11 @@ coop_rampAudioSafe:{
 //was therefore already outside it) and to pitch (server min -52 -> -48, on-screen -54.0 against the
 //-62 rail). ALL THREE NUMBERS ARE MEASURED, by running the coded table at the 20Hz tick and adding
 //CG_ApplyShellShock's own amplitude envelope at each frame - not reasoned from the peaks.
+//[user 2026-09-04] THE REBUILT SINK IS THE NEW WORST CASE and it is tighter: server pitch -56 at
+//the sink leg-2 key, about -58.2 on screen against the same -62 rail, so 3.8 degrees of margin
+//where the old beat had 14. Worth knowing before retuning: coop_dizzyTime is CVAR_ARCHIVE
+//(cg_view.c:659) and raising it raises the decay envelope at fixed t, which walks that margin down
+//- about -61.5 at coop_dizzyTime 20 and breaching -62 somewhere above 40.
 //
 //THE ONE PLACE WITH LESS THAN A DEGREE OF MARGIN IS DELIBERATE AND UNCHANGED: the entry pose is
 //pitch 52 against the 54 ceiling, because 52 is exactly what coop_rampFly ends on ( -30 + 82 - 0 )
@@ -10426,8 +10891,17 @@ coop_rampAudioSafe:{
 //sand rather than into it. coop_uwPose's floor stays at -572, two units below the deepest key, so
 //it is a backstop rather than a value the choreography leans on.
 //
-//NO FADE ANYWHERE IN HERE, unchanged, for the same reason: a fadeout whose fadein is lost is the
-//one softlock class in this set piece.
+//[user 2026-09-04] THERE IS NOW A FADE IN HERE - the eyes-closing blackout - AND IT IS STILL TRUE
+//that a fadeout whose fadein is lost is the one softlock class in this set piece. That is why it
+//has FOUR independent clears, any one of which is sufficient:
+//    1. coop_uwBlackSafety, a thread armed BEFORE the fadeout that shares nothing with this beat
+//       but one level flag, so it survives a Script Error, a dead thread or a forced handoff here.
+//    2. the beat's own `fadein 0.18` at the wake.
+//    3. `clearfade` at the head of coop_rampHandoff, on every path that releases a player.
+//    4. coop_rampWatchdog's own clearfade.
+//and the fadeout itself is guarded on coop_rampDone and coop_rampCineDone, so it can never start
+//after a path that has already let a player go. level.coop_uwBlackOn 0 removes the blackout
+//entirely and leaves the face-up sink standing.
 //
 //SAFETY, and every path traced:
 //  * A player who dies, spectates or disconnects mid-beat has his camera reaped by
@@ -10469,6 +10943,15 @@ coop_rampUnderwater:{
 	level.coop_rampFogRestore = 1
 	if(level.coop_rampUnderOn == NIL){ level.coop_rampUnderOn = 1 }
 	if(!level.coop_rampUnderOn){ end }
+	//[user 2026-09-04] "i feel like we should be under water a bit longer" - 1.0 -> 1.2, the
+	//documented HARD ceiling in this label's own header (above ~1.4 the beat eats the 45s
+	//watchdog margin). It scales the WHOLE choreography, so the strokes, the gear and the
+	//flashback voices all stretch together rather than each needing its own number.
+	//[user 2026-09-04] 1.2 -> 1.0. The 1.2 was bought earlier to answer "i feel like we should be
+	//under water a bit longer", and this rewrite pays that in CHOREOGRAPHY instead: 8.20s of new
+	//paced beats plus 2.80s of unpaced blackout. Keeping 1.2 on top would stretch a beat that is
+	//now 11s longer for no new content and cost watchdog margin. The 0.5..1.2 clamp below is
+	//UNCHANGED and 1.2 is still inside the budget; 1.0 is simply the right default now.
 	if(level.coop_uwPace == NIL){ level.coop_uwPace = 1.0 }
 	if(level.coop_uwSound == NIL){ level.coop_uwSound = 1 }
 	if(level.coop_uwGearOn == NIL){ level.coop_uwGearOn = 1 }
@@ -10476,6 +10959,20 @@ coop_rampUnderwater:{
 	//one-shot block in BEAT 8 only ever tests it - a level var, never getcvar, which creates the
 	//cvar empty and permanently defeats the engine default (bug-1669).
 	if(level.coop_uwBreathOn == NIL){ level.coop_uwBreathOn = 1 }
+	//[user 2026-09-04] THE PLUNGE, REBUILT: he lands on his back, watches the surface go away from
+	//him, his eyes close, and he wakes up on the bottom. level.coop_uwBlackOn 0 removes ONLY the
+	//blackout and leaves the face-up sink standing - that is the switch to reach for first if the
+	//fade ever misbehaves, because it takes the one softlock class out of the beat without losing
+	//the shot.
+	if(level.coop_uwBlackOn == NIL){ level.coop_uwBlackOn = 1 }
+	//THE OUT-OF-BREATH AUDIO THE USER IS SUPPLYING IS NOT HERE YET. The two coop_uwSay calls in the
+	//beat are UNRESOLVED-ALIAS NO-OPS until coop_uw_airout / coop_uw_wake exist: Entity::Sound
+	//DPrintfs and returns on an unknown alias (entity.cpp:3835), so they cannot throw and cannot
+	//kill the thread. Left ARMED rather than switched off so the beat starts working the moment the
+	//aliascache lines land, and a marker is printed once so a log census can see it is still pending
+	//- that is the difference between a deliberate placeholder and coop_uw_strain, which sat
+	//unaliased and silent in this same beat for its whole life because nothing ever reported it.
+	if(level.coop_uwAirOn == NIL){ level.coop_uwAirOn = 1 }
 
 	local.land = level.flags["coop_spawn1origin"]
 	if(local.land == NIL){ end }
@@ -10492,6 +10989,11 @@ coop_rampUnderwater:{
 	level.coop_uwClampY = 0
 	level.coop_uwClampZ = 0
 	level.coop_uwClampA = 0
+	//SET UNCONDITIONALLY, beside the clamp counters, for the same reason they are: an unset level var
+	//reads as type none, and `none != 1` would poison the belt-and-braces test at the end of the
+	//blackout block.
+	level.coop_uwBlackClear = 0
+	level.coop_uwFaceUp = 0
 
 	//0.5..1.2, and the ceiling is the watchdog/mortality ordering, not taste. See the header.
 	local.pace = level.coop_uwPace
@@ -10528,7 +11030,21 @@ coop_rampUnderwater:{
 	thread coop_underwaterWaders local.wx local.wy
 
 	//The bed itself is 2D and per-client - what his ears hear, not an object in the world.
+	//[user 2026-09-04] "Use this sound as soon as our body hits the water." The user supplied the
+	//recording; it is converted to 22050 mono 16-bit with the fade he asked for baked into the last
+	//2.11s of 6.60s, so it decays to silence by itself and cannot outlive the beat.
+	//BEFORE the ambient wash, not after: this IS the impact, the wash is the bed under it. And it
+	//goes through coop_uwSay because that uses `playsound` - which carries the alias volume, where
+	//playlocalsound discards it (Player::PlayLocalSound passes a hardcoded 1.0f, player.cpp:18190) -
+	//and because its `break` keeps this to ONE emission server-wide rather than one per player.
+	//There are TWO coop_underwater_wash plays in this label; this is the PLUNGE one, the other at
+	//~10704 re-establishes the bed during the ascent and must not get an impact.
+	waitthread coop_uwSay "coop_uw_impact"
 	waitthread coop_uwSay "coop_underwater_wash"
+	//[user 2026-09-04] "heart rate should play repeatedly until we are out of the water" - it starts
+	//on the same frame the body hits, under the impact, and does not stop until he breaks the surface
+	//in BEAT 8. See coop_uwHeartStart for why this is a loop rather than a retrigger.
+	waitthread coop_uwHeartStart
 
 	//--- BEAT 1. THE PLUNGE, 0.55s. He goes under head first and is still tumbling from the throw,
 	//so the roll that coop_rampFly left at 0 keeps going rather than stopping at the surface.
@@ -10558,41 +11074,105 @@ coop_rampUnderwater:{
 	waitthread coop_rampSuppressAll 0.72
 	waitthread coop_uwDizzy 2.4
 
-	//--- BEAT 2. THE TUMBLE, 1.30s, in two legs so the roll can swing THROUGH a peak instead of
-	//lerping to one. He turns over once, lazily, and ends pitched back at the light above him -
-	//which is the shot that establishes how far under he is. Roll peaks at 28 rather than the 41
-	//the first cut asked for, and the plunge's own end roll came back from -34 to -28 for the same
-	//reason: the dizzy stuffed one line above is at FULL weight across the first frames of this leg
-	//and adds +-13.2 degrees of client-side roll that no server clamp can see. Measured on-screen
-	//peak is 41.2 against the 46 comfort rail; the first cut measured 47.2 - i.e. it was already
-	//outside it - and 41 here would have put 54 on screen.
+	//--- BEAT 2. HE LANDS ON HIS BACK, 1.00s. [user 2026-09-04] "we land facing up to see the water".
+	//
+	//IT CANNOT BEGIN FACE-UP, and that is a constraint, not a taste call. The plunge's first frame
+	//must be EXACTLY pitch 52 / yaw 90 / roll 0, because coop_rampFly ends on ( 0 - 30 ) + 82 - 0 and
+	//a mismatch snaps the handover on the frame the player is most likely to be watching. So the
+	//face-up read is bought HERE, one second after the surface: the water catches him, the body goes
+	//flat, and he comes over onto his back. It is the better shot anyway - the water comes at you,
+	//and then the world inverts.
+	//
+	//THE Z RISES 7 UNITS DOING IT AND THAT IS NOT A FUDGE. A head-first entry has the head deepest;
+	//flattening onto the back lifts it. -542 is 8 units below the -534..-506 strobe band and 1.7
+	//below the -540.3 the swim already reaches and this label's header records as measured-safe.
+	//
+	//Ease 6 (ease-out quad): he carries the throw's energy into the water and the water takes it off
+	//him. Roll swings -28 -> +14 THROUGH zero rather than to a peak, so it reads as a body rolling
+	//over rather than a camera being tilted.
 	local.p0 = local.p1
 	local.a0 = local.a1
 	local.p1 = (0 0 0)
-	local.p1[0] = local.wx - 27
-	local.p1[1] = local.wy - 62
-	local.p1[2] = 0 - 561
+	local.p1[0] = local.wx - 22
+	local.p1[1] = local.wy - 50
+	local.p1[2] = 0 - 542
 	local.a1 = (0 0 0)
-	local.a1[0] = 0 - 20
-	local.a1[1] = 97
-	local.a1[2] = 28
-	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 0.70 1
+	local.a1[0] = 0 - 50
+	local.a1[1] = 93
+	local.a1[2] = 14
+	println("^~^~^ RAMPUW backfirst")
+	level.coop_uwFaceUp = 1		//coop_waterBullets sends one round per burst overhead while set
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.00 * local.pace ) 6
+
+	//--- BEAT 2b. THE SINK, 4.90s in three legs. "slowly fall to the ocean floor".
+	//
+	//THE WATER IS 56 UNITS DEEP AND THAT IS THE LIMIT ON THIS BEAT. Surface -520 (m3l1a.bsp brush
+	//787), sand -576, camera floor -570. The fall is 28 units and no rewrite makes it longer:
+	//coop_uwPose's y rail only reaches wy-130 and the seabed there is the same height.
+	//
+	//WHAT SELLS IT, MEASURED - AND IT IS NOT THE MURK. An earlier draft of this comment claimed the
+	//gl2 underwater pass is submersion-depth-driven so the murk, blur, motes and shafts all thicken
+	//as he sinks. THAT IS FALSE and the number matters, because a future session would tune against
+	//it: underwater_fp.glsl reconstructs PER-PIXEL EYE DISTANCE from the depth buffer and computes
+	//T = exp(-absorb * dist / vis) with vis 900 (r_ppUnderwaterVis, tr_postprocess.c). Face-up, the
+	//dominant surface is the water lid overhead, and eye distance to it goes only ~29 -> ~60 units
+	//across the whole sink: centre murk 0.032 -> 0.064, the scatter blur 0.29 -> 0.58 TEXELS (
+	//sub-pixel at both ends), motes +15% brightness, shafts effectively absent at that murk. What
+	//DOES change visibly is red loss on the oblique rays at the frame edges, where the slant range
+	//along the lid is long - on a 10-degree corner ray transmission falls 0.645 -> 0.371. So the
+	//frame is a near-clear opaque water lid overhead that DARKENS AND COOLS AT ITS EDGES as he
+	//descends, plus the helmet drifting down through the middle of it and rounds cracking in
+	//overhead. The lid does draw from below: deepbluesea is `cull none` with a GL_ONE GL_ZERO first
+	//stage, as coop_underwaterWaders' own header records.
+	//
+	//LINEAR ON THE FIRST TWO LEGS, DELIBERATELY. Every other beat in this label is eased. A body
+	//sinking at terminal velocity in still water is the one thing here that genuinely moves at a
+	//constant rate, and easing it would read as a camera being flown.
+	local.p0 = local.p1
+	local.a0 = local.a1
+	local.p1 = (0 0 0)
+	local.p1[0] = local.wx - 30
+	local.p1[1] = local.wy - 66
+	local.p1[2] = 0 - 553
+	local.a1 = (0 0 0)
+	local.a1[0] = 0 - 54
+	local.a1[1] = 88
+	local.a1[2] = 10
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.70 * local.pace ) 1
 
 	local.p0 = local.p1
 	local.a0 = local.a1
 	local.p1 = (0 0 0)
-	local.p1[0] = local.wx - 41
-	local.p1[1] = local.wy - 92
-	local.p1[2] = 0 - 568
+	local.p1[0] = local.wx - 38
+	local.p1[1] = local.wy - 84
+	local.p1[2] = 0 - 563
 	local.a1 = (0 0 0)
-	local.a1[0] = 0 - 48
+	local.a1[0] = 0 - 56
 	local.a1[1] = 92
-	local.a1[2] = 6
-	println("^~^~^ RAMPUW tumble")
-	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 0.60 6
+	local.a1[2] = 13
+	println("^~^~^ RAMPUW sink")
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.70 * local.pace ) 1
 
-	//--- BEAT 3. THE BOTTOM, 0.26s. A hard stop, not a settle. The head is arrested by the sand,
-	//so the pitch and roll SNAP rather than easing, and the jolt lands on the same frame.
+	//the last leg eases OUT - the seabed arrests him rather than stopping him dead - and the pitch
+	//comes back one degree as his shoulders take the ground before his head does.
+	//THE OLD "tumble" MARKER LIVES HERE NOW, so a log census sees the same markers in the same order
+	//it always has. This leg IS what the tumble used to be: the end of the turn and the fall.
+	local.p0 = local.p1
+	local.a0 = local.a1
+	local.p1 = (0 0 0)
+	local.p1[0] = local.wx - 44
+	local.p1[1] = local.wy - 98
+	local.p1[2] = 0 - 570
+	local.a1 = (0 0 0)
+	local.a1[0] = 0 - 55
+	local.a1[1] = 87
+	local.a1[2] = 17
+	println("^~^~^ RAMPUW tumble")
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.50 * local.pace ) 6
+
+	//--- BEAT 3. HIS BACK MEETS THE SAND, 0.30s. SOFTENED from the old 0.55 / 1.9 jolt, which was
+	//written for a head-first arrival at speed. He now arrives on his back after a five second drift,
+	//and a hard crack there would undo the whole beat. Marker and alias unchanged.
 	local.p0 = local.p1
 	local.a0 = local.a1
 	local.p1 = (0 0 0)
@@ -10600,13 +11180,105 @@ coop_rampUnderwater:{
 	local.p1[1] = local.wy - 104
 	local.p1[2] = 0 - 570
 	local.a1 = (0 0 0)
-	local.a1[0] = 0 - 37
+	local.a1[0] = 0 - 52
 	local.a1[1] = 88
 	local.a1[2] = 19
-	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 0.26 6
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 0.30 6
 	println("^~^~^ RAMPUW bottom")
-	waitthread coop_uwJolt 0.55 1.9 "coop_uw_hitsand"
+	waitthread coop_uwJolt 0.45 1.2 "coop_uw_hitsand"
 	waitthread coop_rampSuppressAll 0.88
+
+	//--- BEAT 3b. THE EYES CLOSE, 2.00s. [user 2026-09-04] "a fade (kinda like slowly closing eyes)
+	//for a bit after we land on our back, and then BOOM wide awake".
+	//
+	//THE GUARD ON THE NEXT LINE IS THE MOST IMPORTANT STATEMENT IN THIS BEAT. A fadeout in this
+	//engine is a LATCH, not a timer. Player::CalcBlend decrements level.m_fade_time once per frame,
+	//and the "we are done, clear the blend" early-out at player.cpp:7765 requires
+	//m_fade_type == fadein - so a fadeout that runs out of time holds at alpha 1 FOREVER. If
+	//coop_rampWatchdog had already fired (clearfade, unglue, hand the view back) and THEN this line
+	//darkened the screen, nothing left in the set piece could clear it and the player would walk up
+	//Omaha blind. level.coop_rampDone is set by coop_rampHandoff before it does anything else, so it
+	//is the one flag that is true on every path that has already let a player go.
+	if(level.coop_uwBlackOn == 1 && level.coop_rampDone != 1 && level.coop_rampCineDone != 1){
+		//THE INDEPENDENT CLEAR, armed BEFORE the fade. It shares nothing with this thread but one level
+		//flag, so a Script Error here, a dead thread, an empty $player, an empty $boatCamera or a forced
+		//handoff all leave it running. First of four clears - see its own header.
+		thread coop_uwBlackSafety ( ( 2.00 * local.pace ) + 2.30 + 0.50 + 4.0 )
+
+		//BLACK, not the blast's warm white. The shell already owns 1 0.92 0.75 (coopified.scr :9993 and
+		//:10044); reusing that colour twenty-five seconds later would read as a second explosion rather
+		//than as eyes closing. And eyelids from the inside are dark.
+		//The fade runs CONCURRENTLY with the leg below - fadeout does not block, it sets a level fade
+		//that decrements per frame - so the last thing he sees is the surface dimming while he is still
+		//settling, not a static frame going out.
+		fadeout ( 2.00 * local.pace ) 0 0 0 1
+		if(level.coop_uwAirOn == 1){
+			if(level.coop_uwAirSaid != 1){
+				level.coop_uwAirSaid = 1
+				println("^~^~^ RAMPUW airhook armed - coop_uw_airout/coop_uw_wake are no-ops until aliased")
+			}
+			waitthread coop_uwSay "coop_uw_airout"
+		}
+	}
+	local.p0 = local.p1
+	local.a0 = local.a1
+	local.p1 = (0 0 0)
+	local.p1[0] = local.wx - 48
+	local.p1[1] = local.wy - 106
+	local.p1[2] = 0 - 569
+	local.a1 = (0 0 0)
+	local.a1[0] = 0 - 49
+	local.a1[1] = 85
+	local.a1[2] = 22
+	println("^~^~^ RAMPUW eyes")
+	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 2.00 * local.pace ) 4
+
+	//--- BEAT 3c. BLACK, 2.30s, and UNPACED ON PURPOSE. This is the one interval with nothing on
+	//screen at all, so its length must not move when somebody turns a taste knob.
+	//
+	//IT IS A HELD POSE LOOP AND NOT A BARE `wait`, and that is a real fix rather than tidiness.
+	//movetopos and turnto are INSTANT SETS (Camera::MoveToPos / Camera::TurnTo, camera.cpp:1159-1180),
+	//so a bare wait would hold the camera - for everybody who already has one. A player who CONNECTS
+	//during the blackout gets a fresh camera from coop_startBoatSpawnManager's `level waittill
+	//playerspawn`, sitting at its spawn pose, and with nothing writing a pose he would come out of
+	//the black looking at the wrong thing. coop_uwLeg with p0 == p1 writes the absolute pose every
+	//frame and costs nothing.
+	if(level.coop_uwBlackOn == 1 && level.coop_rampDone != 1){
+		println("^~^~^ RAMPUW black")
+		waitthread coop_uwLeg local.p1 local.a1 local.p1 local.a1 2.30 1
+
+		//--- BEAT 3d. BOOM. Four things on one frame.
+		//0.18s is three or four frames at the 20Hz tick: a snap, not a fade. A true zero-frame cut IS
+		//available (clearfade) and is deliberately not used - it would put the image back on a frame the
+		//client has not drawn yet and the jolt would arrive without it.
+		//GUARDED ON coop_uwBlackClear: `fadein 0.18 0 0 0 1` STARTS at full black (alpha =
+		//m_fade_time/m_fade_time_start = 1 on its first frame, player.cpp:7777-7803). So if
+		//coop_uwBlackSafety had already fired and cleared the screen, an unguarded fadein here would
+		//re-black it for 0.18s - self-clearing, but it reads as a bug in a playtest.
+		if(level.coop_uwBlackClear != 1){ fadein 0.18 0 0 0 1 }
+		level.coop_uwBlackClear = 1
+		level.coop_uwFaceUp = 0
+		println("^~^~^ RAMPUW wake")
+		//the jolt is felt THROUGH the cinematic camera only because coop_spawnBoatCamera sets
+		//showquakes 1 (m3l1a.scr:8786 -> PMF_DAMAGE_ANGLES, player.cpp:8124). Both arguments are float
+		//literals: earthquake_player's first act is magnitude / duration, and int/int is C integer
+		//division in this language (scriptvariable.cpp:1671-1679).
+		waitthread coop_uwJolt 0.30 2.4 ""
+		//and the sway restarts LOW. CG_ApplyShellShock accepts a SMALLER severity only once 5000ms have
+		//passed since the last start (cg_view.c:661-665); the 2.4 was stuffed about nine seconds ago at
+		//pace 1, so this restarts cleanly. A small tight sway after a big loose one is what reads as
+		//clarity coming back.
+		waitthread coop_uwDizzy 0.9
+		if(level.coop_uwAirOn == 1){ waitthread coop_uwSay "coop_uw_wake" }
+		waitthread coop_uwLeg local.p1 local.a1 local.p1 local.a1 0.50 1
+	}
+	//BELT AND BRACES. Cheap, idempotent, and it closes the one case the two guards above do not:
+	//coop_uwBlackOn being cleared BETWEEN the fadeout and here, which would skip the fadein while the
+	//fadeout had already run. On every other path this is a clearfade onto a clear screen, which is a
+	//no-op (ScriptThread::ClearFade sets m_fade_time = -1 and m_fade_type = fadein,
+	//scriptthread.cpp:3316 - exactly the cleared state).
+	if(level.coop_uwBlackClear != 1){ level.coop_uwBlackClear = 1; clearfade }
+	level.coop_uwFaceUp = 0
 
 	//--- BEAT 4. FACE IN THE SAND. The beat the old version had no equivalent of: he does not move.
 	//Everything that is happening is happening TO him - the voices, the rounds coming in, the men
@@ -10673,7 +11345,10 @@ coop_rampUnderwater:{
 	local.a1[0] = 6
 	local.a1[1] = 88
 	local.a1[2] = 0 - 6
-	waitthread coop_uwSay "coop_uw_strain"
+	//[user 2026-09-04] was coop_uw_strain, which is not aliased anywhere in the mod and has been a
+	//silent no-op since this beat shipped - the same defect coop_uw_break had. This is a movement,
+	//so it gets the swim swoosh.
+	waitthread coop_uwSay "coop_uw_swim"
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.50 * local.pace ) 4
 
 	local.p0 = local.p1
@@ -10752,6 +11427,12 @@ coop_rampUnderwater:{
 
 		println("^~^~^ RAMPUW stroke " + local.i + " of " + local.n)
 		thread coop_uwJolt 0.22 0.55 "coop_uw_strain"
+		//[user 2026-09-04] "itll need to match the movement youve made" - one swoosh per stroke, on
+		//the catch, where the stroke front-loads 62% of its travel into the first 45%. 0.778s inside a
+		//1.72..2.06s stroke, pitch varying 0.94..1.06 per play so six of them do not read as a tape
+		//loop. Through coop_uwSay and NOT the jolt above: coop_uwJolt uses playlocalsound, which lands
+		//on the CHAN_LOCAL the shellshock wash is holding and throws the alias pitch and volume away.
+		waitthread coop_uwSay "coop_uw_swim"
 		waitthread coop_uwStroke local.p0 local.p1 local.a0 local.a1 local.pu ( 1.72 * local.pace )
 
 		local.sx = local.bx[local.i]
@@ -10784,7 +11465,10 @@ coop_rampUnderwater:{
 	local.a1[1] = 90
 	local.a1[2] = 0
 	println("^~^~^ RAMPUW gather")
-	waitthread coop_uwSay "coop_uw_strain"
+	//[user 2026-09-04] was coop_uw_strain, which is not aliased anywhere in the mod and has been a
+	//silent no-op since this beat shipped - the same defect coop_uw_break had. This is a movement,
+	//so it gets the swim swoosh.
+	waitthread coop_uwSay "coop_uw_swim"
 	waitthread coop_rampSuppressAll 0.80
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.25 * local.pace ) 5
 
@@ -10814,6 +11498,10 @@ coop_rampUnderwater:{
 		}
 		if(local.broke == 0 && local.pos[2] >= ( 0 - 514 )){
 			local.broke = 1
+			//[user 2026-09-04] OUT OF THE WATER - the heart stops here, and FIRST. coop_uwHeartStop takes
+			//CHAN_LOCAL down with it (StopLocalSound always does), so it has to run before coop_uw_break is
+			//played a few lines below, not after, or it would cut the gasp.
+			waitthread coop_uwHeartStop
 			level.coop_waterBulletsOn = 0		//[bug-2339] head is up - stop the rounds coming in
 			level.coop_memVoiceOn = 0		//[bug-2342] and the voices go with the water
 			level.coop_underDeadOn = 0		//[bug-2345] stop killing men in the water
@@ -10961,7 +11649,10 @@ coop_uwTry local.pfrom local.ppeak local.prest local.pace local.idx:{
 	}
 
 	//--- the push. ease-OUT, because he is straining and slowing, not accelerating.
-	waitthread coop_uwSay "coop_uw_strain"
+	//[user 2026-09-04] was coop_uw_strain, which is not aliased anywhere in the mod and has been a
+	//silent no-op since this beat shipped - the same defect coop_uw_break had. This is a movement,
+	//so it gets the swim swoosh.
+	waitthread coop_uwSay "coop_uw_swim"
 	waitthread coop_uwLeg local.pfrom local.a0 local.ppeak local.a1 ( local.d0 * local.pace ) 3
 
 	//--- and it gives. ease-IN, so it lets go slowly and then drops - which is what an arm folding
@@ -11128,6 +11819,105 @@ coop_uwSay local.alias:{
 }end
 
 
+//HIS OWN HEART, LOOPING UNTIL HE IS OUT OF THE WATER. [user 2026-09-04]
+//
+//`playlocalsound <alias> 1` and NOT a repeated one-shot. The loop branch of Player::PlayLocalSound
+//writes edict->s.loopSound and never touches a sound channel; every one-shot goes to CHAN_LOCAL,
+//which coop_rampShellPanOne owns for ~21 seconds across this very beat. A re-struck heartbeat would
+//therefore chop the underwater shellshock wash once a second - the sound the user asked to be made
+//louder. The loop also cannot drift out of time with itself, which a script-timed retrigger would.
+//
+//It is genuinely per-player and genuinely 2D: loopSoundFlags 1 is LOOPSOUND_FLAG_NO_PAN, which the
+//client routes to CHANNEL_FLAG_LOCAL_LISTENER - centred, no distance falloff. That is also why the
+//engine now refuses to emit ANOTHER player's local loop (CG_LoopSoundIsForeignLocal, cg_ents.c):
+//loopSound rides entityState to everyone, these never merge (bCombine is false for a zero-velocity
+//loop), and four men glued in one boat would otherwise stack four hearts in every man's head.
+//
+//The body being hidden for the whole beat does not matter - cg_modelanim.c adds the loop sound
+//above the RF_DONTDRAW gate - and being glued does not either, because glue() uses m_pGlueMaster
+//rather than bind, so s1->parent stays ENTITYNUM_NONE.
+//=========================================================================
+coop_uwHeartStart:{
+//=========================================================================
+	if(level.coop_uwSound != 1){ end }
+	if(level.coop_uwHeartOn == 1){ end }
+	level.coop_uwHeartOn = 1
+	local.i = 1
+	while(local.i <= $player.size){
+		local.pl = $player[local.i]
+		if(local.pl != NULL && local.pl != NIL){
+			if(local.pl.health > 0 && local.pl.dmteam != "spectator"){
+				local.pl playlocalsound coop_heartbeat 1
+			}
+		}
+		local.i++
+	}
+}end
+
+
+//AND THE HEART STOPS WHEN HE IS OUT OF THE WATER, not before.
+//
+//GUARDED AND IDEMPOTENT ON PURPOSE. Player::StopLocalSound clears loopSound AND calls
+//gi.StopSound(entnum, CHAN_LOCAL) - it cannot do one without the other. CHAN_LOCAL at that moment
+//is carrying the shellshock wash, and a frame later it carries coop_uw_break, the surfacing gasp.
+//So this must run ONCE, and it must run BEFORE the gasp is played rather than after it, or it would
+//cut the gasp it was supposed to make room for. The level.coop_uwHeartOn gate is what makes a
+//second call - from an abort path, or a re-entered beat - a no-op instead of a silence.
+//Health is deliberately NOT tested here: a man who died mid-beat still needs his loop cleared.
+//=========================================================================
+coop_uwHeartStop:{
+//=========================================================================
+	if(level.coop_uwHeartOn != 1){ end }
+	level.coop_uwHeartOn = 0
+	local.i = 1
+	while(local.i <= $player.size){
+		local.pl = $player[local.i]
+		if(local.pl != NULL && local.pl != NIL){
+			local.pl stoplocalsound coop_heartbeat
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+//THE ONE CLEAR THAT CANNOT BE LOST. [user 2026-09-04]
+//
+//A fadeout in this engine is a LATCH. Player::CalcBlend (player.cpp:7758-7791) decrements
+//level.m_fade_time once per frame, and the early-out that clears the blend (:7765) tests
+//`m_fade_type == fadein`. A fadeout whose timer expires therefore sits at alpha 1 indefinitely -
+//there is no self-expiry. This label's own header has said since the beat shipped that a fadeout
+//whose fadein is lost is the single softlock class in this set piece, which is why there was no
+//fade in here at all until now. So the blackout gets a clear that is not attached to the beat.
+//
+//WHAT MAKES IT SAFE IS WHAT IT DOES NOT TOUCH: no player, no camera, no entity, no other label -
+//only `wait`, one level flag and clearfade. A Script Error inside coop_rampUnderwater, a thread
+//that dies, an empty $player, an empty $boatCamera, a forced handoff and a server hitch all leave
+//it running, because it depends on none of them. It is the FIRST of four clears; the others are the
+//beat's own fadein, the clearfade at the head of coop_rampHandoff, and coop_rampWatchdog's.
+//
+//THE CAP IS THE INTENDED DARK TIME PLUS FOUR SECONDS, passed in rather than hardcoded so it moves
+//with the beat if the eyes/black/wake numbers are ever retuned. Four seconds is generous on purpose:
+//firing early cuts the blackout short on a hitching server, which is cosmetic, while firing late is
+//the failure that costs somebody the map.
+//=========================================================================
+coop_uwBlackSafety local.cap:{
+//=========================================================================
+	if(local.cap == NIL || local.cap == NULL){ local.cap = 12 }
+	if(local.cap < 4){ local.cap = 4 }
+	if(local.cap > 30){ local.cap = 30 }
+	local.t = 0
+	while(local.t < local.cap && level.coop_uwBlackClear != 1){
+		wait 0.25
+		local.t = local.t + 0.25
+	}
+	if(level.coop_uwBlackClear == 1){ end }
+	level.coop_uwBlackClear = 1
+	clearfade
+	println("^~^~^ RAMPUW blacksafety fired t=" + local.t + " - the beat did not clear its own fade")
+}end
+
+
 //RESTART THE SHELL-SHOCK SWAY. Consumed-and-cleared on the client, and it only restarts if the new
 //severity EXCEEDS the live one OR 5000ms have passed since the last start (cg_view.c:661-665) - so
 //this is a no-op if fired too soon after a bigger one, and the two call sites here are eleven
@@ -11169,7 +11959,9 @@ coop_uwGear local.wx local.wy local.pace:{
 	//the props expire about two seconds into play - long enough that nothing pops out mid-scene,
 	//short enough that three of them are not left lying in the surf. It scales with the pace for the
 	//same reason coop_underwaterDead's lifetimes now do.
-	local.life = 24 * local.pace
+	//[user 2026-09-04] 24 -> 36. The rebuilt plunge runs about 31s submerged at pace 1 against the
+	//21.4s this number was set for, so at 24 all three props vanished mid-swim.
+	local.life = 36 * local.pace
 	local.made = 0
 
 	//--- the rifle, torn out of his hands as he goes in. It enters just below the surface and to his
@@ -11185,7 +11977,7 @@ coop_uwGear local.wx local.wy local.pace:{
 		local.rf.origin = local.rp
 		local.rf notsolid
 		local.made++
-		thread coop_uwSink local.rf local.rx local.ry ( 0 - 526 ) ( 0 - 574 ) 2.6 62 local.life
+		thread coop_uwSink local.rf local.rx local.ry ( 0 - 526 ) ( 0 - 574 ) 3.4 62 local.life
 	}
 
 	//--- the helmet, off in the tumble. Slower, because a helmet holds air.
@@ -11197,11 +11989,17 @@ coop_uwGear local.wx local.wy local.pace:{
 		local.hp = (0 0 0)
 		local.hp[0] = local.hx
 		local.hp[1] = local.hy
-		local.hp[2] = 0 - 534
+		local.hp[2] = 0 - 530
 		local.hm.origin = local.hp
 		local.hm notsolid
 		local.made++
-		thread coop_uwSink local.hm local.hx local.hy ( 0 - 534 ) ( 0 - 573 ) 4.2 210 local.life
+		//[user 2026-09-04] THE HELMET IS THE ONE PROP ALREADY IN THE RIGHT PLACE FOR A FACE-UP SHOT AND
+		//IT WAS BEING WASTED. At (wx-6, wy-40) it sits about 27 units out and 19 up from the sink camera
+		//- 35 degrees of elevation at 33 units of slant, dead centre of a pitch -54 frame - and it fell
+		//past in 4.2s while the camera was still tumbling. A helmet holds air: -530 so it enters just
+		//under the surface, and 7.6s so it drifts down through the middle of the frame for the whole
+		//sink. Its XY is deliberately unchanged; any closer and it subtends more than half the frame.
+		thread coop_uwSink local.hm local.hx local.hy ( 0 - 530 ) ( 0 - 573 ) 7.6 210 local.life
 	}
 
 	//--- and one Thompson already on the sand, laid deliberately BESIDE the swim corridor rather
@@ -11303,6 +12101,18 @@ coop_memoryVoices local.wx local.wy:{
 	wait 1.4					//let the plunge land first - the voices start once he is under
 
 	local.said = 0
+	//[user 2026-09-04] "Some of the flashback dialogue repeats over and over again ...
+	//kinda jarring and awkward." Arithmetic, not design: SIX aliases, up to 30 plays at
+	//~1.9s apart over a ~21.5s hold = about eleven plays from a pool of six, and the only
+	//guard stopped a line repeating BACK TO BACK. Every voice was heard two or three
+	//times. Now it is a bag - each line drawn at most once, refilled only when empty.
+	local.bag = 0
+	local.u1 = 0
+	local.u2 = 0
+	local.u3 = 0
+	local.u4 = 0
+	local.u5 = 0
+	local.u6 = 0
 	while(level.coop_memVoiceOn == 1 && local.said < 30){
 		//--- a random offset in a box around him, and a random height. A box rather than a bearing
 		//and a radius on purpose: `cos`/`sin` exist (scriptthread.cpp:98,107) but their calling
@@ -11325,14 +12135,41 @@ coop_memoryVoices local.wx local.wy:{
 			//says, and there is no briefing audio in any pak: War Chest's briefings are pre-rendered
 			//video with the sound baked in). Six is enough for a twelve-second hold, but only if the
 			//same voice does not come back twice running - so never repeat the last one.
-			local.idx = ( randomint local.n ) + 1
-			if(local.n > 1){
-				local.guard = 0
-				while(local.idx == local.lastv && local.guard < 6){
-					local.idx = ( randomint local.n ) + 1
-					local.guard++
-				}
+			//Draw an UNUSED index. Six explicit flags rather than an array because a script
+			//array cannot be indexed by a variable here, and six IS the whole pool - the
+			//install ships exactly six main-character lines and that will not grow.
+			if(local.bag >= local.n){
+				local.bag = 0
+				local.u1 = 0
+				local.u2 = 0
+				local.u3 = 0
+				local.u4 = 0
+				local.u5 = 0
+				local.u6 = 0
 			}
+			local.idx = ( randomint local.n ) + 1
+			local.spin = 0
+			while(local.spin < 40){
+				local.taken = 0
+				if(local.idx == 1 && local.u1 == 1){ local.taken = 1 }
+				if(local.idx == 2 && local.u2 == 1){ local.taken = 1 }
+				if(local.idx == 3 && local.u3 == 1){ local.taken = 1 }
+				if(local.idx == 4 && local.u4 == 1){ local.taken = 1 }
+				if(local.idx == 5 && local.u5 == 1){ local.taken = 1 }
+				if(local.idx == 6 && local.u6 == 1){ local.taken = 1 }
+				//a fresh bag must still not open with the line that just played
+				if(local.idx == local.lastv && local.bag == 0){ local.taken = 1 }
+				if(local.taken == 0){ break }
+				local.idx = ( randomint local.n ) + 1
+				local.spin++
+			}
+			if(local.idx == 1){ local.u1 = 1 }
+			if(local.idx == 2){ local.u2 = 1 }
+			if(local.idx == 3){ local.u3 = 1 }
+			if(local.idx == 4){ local.u4 = 1 }
+			if(local.idx == 5){ local.u5 = 1 }
+			if(local.idx == 6){ local.u6 = 1 }
+			local.bag++
 			local.lastv = local.idx
 			if(local.idx < 10){ local.a = "coop_memvoice0" + local.idx }
 			else{ local.a = "coop_memvoice" + local.idx }
@@ -11342,7 +12179,9 @@ coop_memoryVoices local.wx local.wy:{
 		}
 
 		//shorter than the lines, so they pile up
-		wait ( 1.1 + ( randomfloat 1.6 ) )
+		//widened with the bag: six lines now cover the whole hold instead of eleven plays
+		//filling it, so they sit further apart and each one lands.
+		wait ( 2.3 + ( randomfloat 1.9 ) )
 	}
 }end
 
@@ -11488,6 +12327,21 @@ coop_rampHandoff:{
 //=========================================================================
 	if(level.coop_rampDone == 1){ end }
 	level.coop_rampDone = 1
+	//[user 2026-09-04] THE SCREEN COMES BACK ON EVERY PATH THAT LETS A PLAYER GO. The plunge now
+	//blacks the screen out, and a fadeout is a latch with no self-expiry (player.cpp:7765 clears the
+	//blend only when m_fade_type == fadein), so the one thing this label must never do is release a
+	//player from the cinematic with a fade still standing. A no-op when there is none: clearfade sets
+	//m_fade_time = -1 and m_fade_type = fadein, which is exactly the cleared state. Third of four.
+	level.coop_uwBlackClear = 1
+	clearfade
+
+	//[user 2026-09-04] AND THE HEARTBEAT, ON EVERY PATH. coop_uwHeartStart writes edict->s.loopSound,
+	//which nothing clears by itself, and its only other stop is inside the BEAT 8 surface branch - so
+	//a beat that ended any other way (the 45s watchdog, an abort) left the loop running for the rest
+	//of the map. This is the single funnel: the handoff is idempotent on level.coop_rampDone and the
+	//watchdog reaches it too. coop_uwHeartStop is itself gated on level.coop_uwHeartOn, so calling it
+	//twice is a no-op rather than a stolen CHAN_LOCAL.
+	thread coop_uwHeartStop
 
 	//[bug-2319] the dialogue floor comes back on EVERY path through the handoff, and a separate
 	//thread walks it back after 5s on the normal path. Both are idempotent.
@@ -11540,7 +12394,16 @@ coop_rampWatchdog:{
 	local.t = 0
 	//[bug-2332] 32 -> 60 half-second ticks (16s -> 30s). The revised set piece is ~13.5s from the
 	//blast, so a 16s watchdog left only 2.5s of margin and would have fired on a slow frame.
-	while(local.t < 90 && level.coop_rampCineDone != 1){
+	//[user 2026-09-04] 90 -> 120 half-second ticks (45s -> 60s), and coop_rampIncomingSafety goes
+	//60 -> 75 IN THE SAME CHANGE. The rewritten plunge runs about 35.4s from the top of the cinematic
+	//at coop_uwPace 1.0 and 40.7s at the 1.2 ceiling, derived from the CODED leg durations (unpaced
+	//4.20 + paced 26.63 submerged, plus the butchery waits and coop_rampFly's arc), so 45s left only
+	//about 4s of margin at the ceiling.
+	//THE ORDERING IS WHAT MATTERS AND IT IS PRESERVED EXACTLY. This label's own header rejected an
+	//earlier 45 -> 70 because it raised the watchdog ALONE, inverting watchdog-before-mortality and
+	//opening a window where a player is damageable while still glued, hidden and locked in a camera.
+	//Both numbers move together here, so the 15s gap is unchanged.
+	while(local.t < 120 && level.coop_rampCineDone != 1){
 		wait 0.5
 		local.t = local.t + 1
 	}
@@ -11800,9 +12663,63 @@ coop_underwaterHead local.wx local.wy local.pace:{
 	//the head mid-column, clear of the sand and well under the surface.
 	//
 	//PLACED CLOSE AND IN THE +Y CONE. coop_underwaterDead's own comment says +Y is "between the
-	//camera and the shore", so that is where the camera looks. coop_headgib is scale 2.6 and reads
-	//about 5 units across, so at the 330x430 spread the corpses use it would be a speck in the murk -
-	//it sits at 95-150 units instead, near enough to read as a head.
+	//camera and the shore", and coop_uwPose holds the camera yaw to 74..106 with the table inside
+	//82..97 (90 = +Y), so up that cone is dead ahead for the whole hold. The PLACEMENT offset is
+	//95-150 units; the camera then walks 106 units back down -Y during the hold, so the real
+	//head-to-camera range is roughly 95..255 plus up to 93 lateral. Do not tune against "95-150".
+	//
+	//[user 2026-09-04] "what is this floating in the water? is that supposed to be the head?"
+	//IT WAS AN IMPOSTOR AND HE WAS RIGHT. models/fx/coop_headgib.tik rides models/fx/xbeam/xbeam.skd
+	//- crossed double-sided quads at scale 2.6, about 5 units across. It was built for
+	//Sentient::CoopGoreTryDecapitate, where a head-mass sails past at speed for about a second.
+	//Drifting slowly for twenty-five seconds in dim water a card reads as an abstract shape, which is
+	//exactly what the screenshot showed. It is now REAL GEOMETRY: models/static/body_us04.tik with
+	//every surface nodrawn except `head` (818 tris) and `helmet` (221 tris).
+	//
+	//WHY A CORPSE TIK AND NOT models/human/heads/head1.skd (which is what models/fx/coop_severedhead
+	//.tik rides, and why that one is not used here either). head1.skd IS a real head, but it hangs off
+	//a seven-bone Bip01 chain and draws where that chain puts it: composing atease.skc frame 0
+	//(Bip01 pos = 0,0,104.325) puts Bip01 Head at model z +161.2, i.e. about +84 world units ABOVE the
+	//entity origin at the 0.52 the human tiks use. An entity at -548 would draw its head at -464 -
+	//well into the AIR above the -520 surface. `origin 0 0 -161` in the TIKI does NOT fix that:
+	//load_origin reaches only the cull point (renderergl1/tr_model.cpp:771, renderergl2 :1129); the
+	//bone matrices RB_SkelMesh draws from are copied straight from newFrame->bones and never see it.
+	//Retail wrote this down, inside models/equipment/usgear/helmet_ranger_private.tik:
+	//    //origin 0 0 -50   // This command is broken so I had to make a seperate model.
+	//which is why us_helmetflyoff.skd exists as a one-bone re-centred copy. There is no re-centred
+	//HEAD anywhere in AA, SH or BT. Second, independent reason: head1.skd's TWO surfaces are BOTH
+	//literally named `head`, so Surface_NameToNum can only ever address the first (62 of 916 tris).
+	//body_us04 is the one asset that already carries a separately-skinned head with its own surface
+	//name, is already cached by this map (maps/m3l1a_precache.scr:155), and is already spawned six
+	//times in THIS beat by coop_underwaterDead - its shaders are proven live in this exact water.
+	//
+	//THE HEAD IS NOT AT THE ENTITY ORIGIN, and that is the one thing that can go wrong here.
+	//body_us04.skd is a ONE-BONE static mesh posed by a one-frame body_us04.skc. THE POSE, READ FROM
+	//THE BYTES (frame 0, channels `body_us04 pos` then `body_us04 rot`, at .skc offset 96):
+	//    pos = (-1.373, -0.528, 0.0)   quat = (0, 0, -0.7071, +0.7071)
+	//and the engine applies that quat TRANSPOSED - SkelWeightGetXyz does
+	//`out[j] += offset[i]*bone->matrix[i][j] + bone->offset[j]` (renderergl2/tr_model.cpp:1465-1481,
+	//gl1 identical), index order [i][j], NOT [j][i] - so it is +90 degrees about Z, NOT -90.
+	//DO NOT "correct" that sign. Applying -90 mirrors the whole-model bounds against the SKC's own
+	//stored frame-0 bounds; +90 reproduces them exactly, and it puts the head at (+18,-5,+4) rather
+	//than 38 units away on the wrong side. Two verifiers re-derived this independently from the bytes.
+	//
+	//MEASURED at scale 0.52, angles (0 0 0): head+helmet union is a 14.5 x 15.0 x 11.0 box centred at
+	//(+18.3, -4.7, +4.2) from the entity origin -> the integers below. Head alone is (+17.6, -4.5,
+	//+4.1), the SAME integers, so dropping the helmet line needs no other change.
+	//
+	//SO THE ANGLES ARE HELD FIXED. An 18-unit lever means a yaw would swing the head on an arm rather
+	//than turn it in place: at the old 6 deg/s over 25s that is a 48-unit orbit, which would dominate
+	//the drift. The per-tick pitch and yaw stepping is gone for that reason and the beat loses nothing
+	//- coop_rampUnderwater walks the camera from (sx,sy) out to (sx-48, sy-106) and back during the
+	//hold, so the head is still seen from a changing angle. Only four yaws are usable without trig (a
+	//mis-called cos/sin is a COMPILE error that takes this whole file down, bug-2335), so local.yaw is
+	//0/90/180/270 with the offset rotated to match.
+	//
+	//AND THE HEAD IS TILTED ~30 DEGREES (crown up-and-forward; the crown axis measures
+	//(0.86, 0.06, 0.50)). If the TILT is what reads wrong rather than the azimuth, the yaw table
+	//cannot fix it - those four triples are Z-rotations ONLY, so adding a pitch or roll silently
+	//invalidates every one of them. Re-derive the offset before touching local.ang[0] or [2].
 	//
 	//ORIGIN-STEPPED, not moveto: moveto silently NO-OPS on a script_model (docs/TRAPS.md).
 	//No cos/sin anywhere - a mis-called trig command is a COMPILE error that takes down this entire
@@ -11813,52 +12730,101 @@ coop_underwaterHead local.wx local.wy local.pace:{
 	if(local.wx == NIL || local.wy == NIL){ end }
 	if(local.pace == NIL || local.pace <= 0){ local.pace = 1 }
 
-	local.h = spawn script_model model "models/fx/coop_headgib.tik"
+	//Two-step spawn, matching coop_underwaterDead in this same file: `model` loads the TIKI
+	//synchronously (ScriptVM::executeCommandInternal calls ProcessScriptEvent, not PostEvent), so
+	//Surface_NameToNum resolves on the very next statement. ORDER IS MANDATORY: Entity::setModel
+	//memsets edict->s.surfaces, so model FIRST and surfaces SECOND - reversing it silently wipes the
+	//nodraw bits. `surface all "+nodraw"` walks every surface and the two "-nodraw" calls put back
+	//the only ones wanted. QUOTE THE FLAG - an unquoted +nodraw is valid TIKI but a script parse
+	//killer that takes the whole file down (bugs 533, 1308). All 32 surface slots are netfields, so
+	//these bits reach every client and any late joiner; an unknown surface name only warns.
+	local.h = spawn script_model
 	if(local.h == NULL || local.h == NIL){ end }			//entity-pool guard
+	local.h model "models/static/body_us04.tik"
 	local.h notsolid
+	local.h surface all "+nodraw"
+	local.h surface head "-nodraw"
+	local.h surface helmet "-nodraw"
 
+	//WHICH WAY IT FACES, and the offset that must move with it. Change local.yaw ONLY - never the
+	//triples: each is the measured (+18, -5, +4) rotated about Z by that yaw.
+	//180 AND NOT 0. The face points +Y: the uncovered (unhelmeted) region of the head has mean
+	//lateral direction (-0.12, 0.99, 0.09), the head reaches y +2.8 where the helmet stops at +1.1
+	//(face past the brim) and the helmet reaches -12.1 past the head's -11.8 (it covers the occiput).
+	//The camera sits at (wx, wy) and walks to (wx-48, wy-106) while the head is placed at wy+95..149,
+	//so it is ALWAYS below the head looking +Y - it sees the -Y side. At yaw 0 that is the back of a
+	//steel helmet: a featureless dome, i.e. the exact abstract shape this change exists to answer.
+	//90 or 270 give a true profile if face-on reads as too much; 0 is the one value that shows nothing.
+	local.yaw = 180
+	local.ox = 18
+	local.oy = ( 0 - 5 )
+	local.oz = 4
+	if(local.yaw == 90){ local.ox = 5; local.oy = 18 }
+	if(local.yaw == 180){ local.ox = ( 0 - 18 ); local.oy = 5 }
+	if(local.yaw == 270){ local.ox = ( 0 - 5 ); local.oy = ( 0 - 18 ) }
+
+	//local.p is where the HEAD is wanted. local.o is where the ENTITY goes.
 	local.p = (0 0 0)
 	local.p[0] = local.wx + ( 0 - 45 ) + ( randomint 90 )
 	local.p[1] = local.wy + 95 + ( randomint 55 )
 	local.p[2] = 0 - 548
-	local.h.origin = local.p
-	local.h.angles = ( ( randomint 360 ) ( randomint 360 ) ( randomint 360 ) )
+	local.o = local.p
+	local.o[0] = local.p[0] - local.ox
+	local.o[1] = local.p[1] - local.oy
+	local.o[2] = local.p[2] - local.oz
+	local.h.origin = local.o
+	local.ang = (0 0 0)
+	local.ang[1] = local.yaw
+	local.h.angles = local.ang
 
 	//a slow drift ACROSS the view rather than toward it - something moving past you reads as adrift,
-	//something moving at you reads as thrown.
+	//something moving at you reads as thrown. NO ANGULAR TERM - see the lever-arm note above.
 	local.vx = ( 0 - 5 ) + ( randomint 11 )
 	local.vy = ( 0 - 4 )
-	local.ry = ( 0 - 6 ) + ( randomint 13 )
 
-	println("^~^~^ UNDERHEAD x=" + local.p[0] + " y=" + local.p[1] + " z=" + local.p[2])
+	//[user 2026-09-04] "it should be under the water and probably sinking until it rests on the
+	//ocean floor". So the loop tracks the HEAD's own height and walks it down, instead of holding
+	//one entity z forever. local.oz is still subtracted at the point of use, so there is exactly one
+	//source of truth for the model offset and a second hardcoded -548 cannot drift out of sync.
+	//  hz     where the head is RIGHT NOW. Starts 28 units under the -520 water lid.
+	//  hfloor where it comes to rest. The sand is -576 and the drawn head is ~11 units tall, so a
+	//         centre of -570 puts its underside on the bottom without sinking into it.
+	//  hlid   the ceiling, 8 units below the surface. The beach SHALLOWS in +Y and the head is
+	//         placed at wy+95..149 and drifts, so a fixed depth that is submerged at the spawn point
+	//         is not necessarily submerged where it ends up - which is what read as "floating above
+	//         water". This clamp makes that unreachable regardless of drift, slope or retuning.
+	local.hz = 0 - 548
+	local.hfloor = 0 - 570
+	local.hlid = 0 - 528
 
-	//[2026-09-03] THE TICK BUDGET FOLLOWS THE BEAT. 180 ticks x 0.1s = 18s covered the old 17.4s
-	//hold; coop_rampUnderwater's rewrite is 21.35s submerged at pace 1 and 25.1s at the 1.2 ceiling,
-	//so a fixed 180 deleted the head three to seven seconds before the break. 190*pace + 60 gives
-	//250 ticks / 25s at pace 1 and 288 / 28.8s at 1.2, and the break clears level.coop_underHeadOn
-	//anyway, so this is only ever the backstop.
-	local.ticks = ( 190 * local.pace ) + 60
+	println("^~^~^ UNDERHEAD x=" + local.p[0] + " y=" + local.p[1] + " z=" + local.p[2] + " yaw=" + local.yaw + " orgx=" + local.o[0] + " orgy=" + local.o[1] + " orgz=" + local.o[2] + " model=body_us04")
+
+	//[2026-09-03] THE TICK BUDGET FOLLOWS THE BEAT. 180 ticks x 0.1s = 18s covered the old 17.4s hold.
+	//[user 2026-09-04] AND THE BEAT GREW AGAIN: coop_rampUnderwater is now 30.8s submerged at pace 1.0
+	//and 36.2s at the 1.2 ceiling, so 190*pace + 60 (250 ticks / 25s) deleted the head five to eight
+	//seconds before the break. 300*pace + 60 gives 360 ticks / 36s at pace 1.0 and 420 / 42s at 1.2.
+	//The break clears level.coop_underHeadOn anyway, so this is only ever the backstop.
+	//[user 2026-09-04] 190 -> 300. The rebuilt plunge is about 31s submerged at pace 1 and 36s at
+	//1.2, so 250/288 ticks deleted the head five to eight seconds before the break.
+	local.ticks = ( 300 * local.pace ) + 60
 	local.k = 0
-	local.bob = 0
-	local.dir = 1
 	while(local.k < local.ticks){
 		if(local.h == NULL || local.h == NIL){ break }
 		if(level.coop_underHeadOn != 1){ break }
 
-		local.bob = local.bob + local.dir
-		if(local.bob >= 10){ local.dir = 0 - 1 }
-		if(local.bob <= ( 0 - 10 )){ local.dir = 1 }
+		//SINK, then settle. 0.2 units per 0.1s tick = 2 units/sec, so the 22 units from -548 to the
+		//floor take about eleven seconds - slow enough to read as sinking rather than dropping, and
+		//well inside the 36s tick budget so it is visibly at rest before the beat ends. The bob is
+		//gone: a thing that is sinking does not also hover.
+		if(local.hz > local.hfloor){ local.hz = local.hz - 0.2 }
+		if(local.hz < local.hfloor){ local.hz = local.hfloor }
+		if(local.hz > local.hlid){ local.hz = local.hlid }
 
 		local.q = local.h.origin
 		local.q[0] = local.q[0] + ( local.vx * 0.1 )
 		local.q[1] = local.q[1] + ( local.vy * 0.1 )
-		local.q[2] = ( 0 - 548 ) + ( local.bob * 0.35 )
+		local.q[2] = local.hz - local.oz
 		local.h.origin = local.q
-
-		local.a = local.h.angles
-		local.a[1] = local.a[1] + ( local.ry * 0.1 )
-		local.a[0] = local.a[0] + 0.4
-		local.h.angles = local.a
 
 		wait 0.1
 		local.k++
@@ -12539,15 +13505,15 @@ coop_underwaterWaders local.wx local.wy:{
 	//         it had to jitter around an obstacle self-corrects next leg instead of compounding.
 	//         That is what holds the "lateral" column of the header table at 0.89.
 	//  st     when he enters the water, sd when he is cut down, both in seconds from the START OF
-	//         THE PLUNGE. The camera is on the bottom from 2.20 to 17.40, so every death here has
+	//         THE PLUNGE. The camera is on the bottom from 6.45 to 18.71 (pace 1.0), so every death has
 	//         its full 1.1-3.4s death animation finish while the camera is still down there.
 	//  sd = 0 - 1 means he lives, and is handed to coop_disembarkRun.
 	local.n = 0
-	local.n++; local.sx[local.n] = 0 - 70;  local.sy[local.n] = 240; local.gx[local.n] = 0 - 25; local.gy[local.n] = 655; local.st[local.n] = 0;   local.sd[local.n] = 6.2
+	local.n++; local.sx[local.n] = 0 - 70;  local.sy[local.n] = 240; local.gx[local.n] = 0 - 25; local.gy[local.n] = 655; local.st[local.n] = 0;   local.sd[local.n] = 13.6
 	local.n++; local.sx[local.n] = 35;      local.sy[local.n] = 225; local.gx[local.n] = 10;     local.gy[local.n] = 640; local.st[local.n] = 0;   local.sd[local.n] = 0 - 1
-	local.n++; local.sx[local.n] = 0 - 105; local.sy[local.n] = 325; local.gx[local.n] = 0 - 50; local.gy[local.n] = 740; local.st[local.n] = 0;   local.sd[local.n] = 9.4
-	local.n++; local.sx[local.n] = 40;      local.sy[local.n] = 315; local.gx[local.n] = 15;     local.gy[local.n] = 730; local.st[local.n] = 3.6; local.sd[local.n] = 11.8
-	local.n++; local.sx[local.n] = 0;       local.sy[local.n] = 430; local.gx[local.n] = 0;      local.gy[local.n] = 845; local.st[local.n] = 6.8; local.sd[local.n] = 13.4
+	local.n++; local.sx[local.n] = 0 - 105; local.sy[local.n] = 325; local.gx[local.n] = 0 - 50; local.gy[local.n] = 740; local.st[local.n] = 0;   local.sd[local.n] = 15.2
+	local.n++; local.sx[local.n] = 40;      local.sy[local.n] = 315; local.gx[local.n] = 15;     local.gy[local.n] = 730; local.st[local.n] = 3.6; local.sd[local.n] = 17.4
+	local.n++; local.sx[local.n] = 0;       local.sy[local.n] = 430; local.gx[local.n] = 0;      local.gy[local.n] = 845; local.st[local.n] = 13.0; local.sd[local.n] = 19.6
 	local.seats = local.n
 
 	//ONE CLOCK. Spawn times used to be accumulated from the waits while death times were read from
@@ -12556,7 +13522,7 @@ coop_underwaterWaders local.wx local.wy:{
 	//in there yields they drift apart and the late seats die on the frame they spawn. Both come off
 	//local.t0 now, so there is nothing left to drift.
 	local.t0 = level.time
-	local.cap = local.t0 + 26		//hard wall-clock stop, see coop_underwaterWader
+	local.cap = local.t0 + 38		//[2026-09-04] 26 -> 38 for the rebuilt plunge; seat 5 dies at 19.6
 	local.made = 0
 
 	local.i = 1
@@ -13723,4 +14689,94 @@ coop_rampFogLift:{
 	$world farplane local.from
 	level.coop_rampFogWrote = local.from
 	println("^~^~^ RAMPFOG down at=" + local.from + " why=" + local.why + " t=" + local.t)
+}end
+
+//=========================================================================
+coop_bangTest:{
+//=========================================================================
+	//[user 2026-09-04] DRIVE A HEADLESS RUN TO THE BANGALORE BEAT.
+	//The auto-deployed test player never advances up the beach, so sequence 9 - where the captain
+	//calls for bangalores, and where the user reports the dialogue chain dying - is unreachable in
+	//the harness. This threads that sequence directly, once its speaker exists.
+	//INERT unless coop_st_bangtest is 1. Diagnostic only; it does not alter real play.
+	if(getcvar("coop_st_bangtest") != "1"){ end }
+
+	//$shingle_ranger1 is spawned by sequence_7_spawn_shingle, which is itself gated on the player
+	//reaching the shingle - so the auto-deployed test player never triggers it and the first run of
+	//this hook timed out at 240s with no speaker. Thread that sequence first, then wait for him.
+	wait 20
+	println("^~^~^ BANGTEST threading sequence_7_spawn_shingle to create the speaker")
+	thread maps/m3l1a.scr::sequence_7_spawn_shingle
+
+	local.t = 0
+	while(local.t < 240){
+		if($shingle_ranger1 != NULL && $shingle_ranger1 != NIL){ break }
+		wait 1
+		local.t = local.t + 1
+	}
+	if($shingle_ranger1 == NULL || $shingle_ranger1 == NIL){
+		println("^~^~^ BANGTEST no shingle_ranger1 after " + local.t + "s - cannot drive the beat")
+		end
+	}
+	println("^~^~^ BANGTEST shingle_ranger1 up at t=" + local.t + " - threading sequence 9")
+	thread maps/m3l1a.scr::sequence_9_shingle_start
+}end
+
+//=========================================================================
+coop_sayProbe local.who local.alias:{
+//=========================================================================
+	//[user 2026-09-04] IS THE LINE AUDIBLE AT THE MOMENT IT STARTS?
+	//
+	//The user reports the captain's "bring up some bangalores" and everything after it as silent.
+	//Two hypotheses are already DEAD, both by measurement rather than argument:
+	//  - the script does not hang. The block runs to completion; the shingle reinforcement wave it
+	//    threads at its END appears in the user's own log, nine actors of it, after the last say.
+	//  - the duck is not still down. coop_m3l1a_beachAudio's fade completes 130s after the cinematic
+	//    cut (^~^~^ BEACHAUD fade-done, measured), and the captain speaks at 172s - 42s of margin.
+	//What has never been measured is the state AT THE SAY. This prints it.
+	//
+	//WHY DISTANCE IS THE PRIME SUSPECT AND NOT A ROLLOFF: S_OPENAL_ShouldStart gates play() OUTRIGHT
+	//on Square(maxDist) > distSquared - beyond the alias's maxDist the sound never STARTS, it does
+	//not merely fade. Every m3l1 dialogue alias is 200/1500, so a speaker 1500 units away is silent
+	//with no error and no log line, and the mouth still moves because lipsync runs off the .skc and
+	//is completely independent of the audio.
+	//[user 2026-09-04] GATE REMOVED DELIBERATELY. The user ran `set coop_sayProbe 1` at level
+	//start and this still printed nothing, while CUTVOX either side of it printed - so the
+	//call site is reached and the gate was rejecting. Rather than theorise about why a script
+	//getcvar disagrees with a console set on a listen server, the probe now always reports and
+	//prints what getcvar actually returned, so that question is answered in the same line.
+	//[2026-09-04] THE HUNT THIS PROBE WAS BUILT FOR IS OVER, so it stops reporting by default. The
+	//captain's silence was the 2D sound path binding a MASKED entity number and testing an UNMASKED
+	//one (snd_openal_new.cpp, S_FLAG_DO_CALLBACK 0x400 colliding with entity numbers 1024-2047); the
+	//user has confirmed the dialogue plays. Gated on a LEVEL var and not back onto getcvar, because
+	//getcvar is what failed here before - and a script getcvar also CREATES the cvar empty, which
+	//permanently defeats the engine-side default (bug-1669). Set level.coop_sayProbeOn = 1 to re-arm.
+	if( level.coop_sayProbeOn != 1 ){ end }
+	local.gate = getcvar("coop_sayProbe")
+	if(local.gate == NIL){ local.gate = "NIL" }
+	if(local.who == NULL || local.who == NIL){
+		println("^~^~^ SAYPROBE alias=" + local.alias + " SPEAKER IS NULL - the say cannot fire gatewas=" + local.gate)
+		end
+	}
+
+	//nearest player, because the start gate is measured against the LISTENER, not the map origin.
+	local.d = 999999
+	local.i = 1
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			local.dd = vector_length ( local.p.origin - local.who.origin )
+			if(local.dd < local.d){ local.d = local.dd }
+		}
+		local.i++
+	}
+
+	//sanitise before concatenating: a thrown println prints NOTHING, which would look exactly like
+	//the silence being investigated.
+	local.tn = local.who.targetname
+	if(local.tn == NIL){ local.tn = "?" }
+	local.hp = local.who.health
+	if(local.hp == NIL){ local.hp = 0 - 1 }
+
+	println("^~^~^ SAYPROBE alias=" + local.alias + " by=" + local.tn + " hp=" + local.hp + " dist=" + local.d + " gate=1500 sfxduck=" + getcvar("s_sfxduck") + " voxCut=" + getcvar("coop_voxCut") + " cueCut=" + getcvar("coop_cueCut") + " players=" + $player.size + " gatewas=" + local.gate)
 }end
