@@ -3,7 +3,8 @@
 // USER: "it looks like there are several higgins boats that are underwater following us in."
 //
 // This is a WHOLE-BODY RESTATEMENT of textures/misc_outside/deepbluesea (main/Pak0.pk3,
-// scripts/misc_outside.shader). Exactly ONE token differs from retail and it is marked below.
+// scripts/misc_outside.shader). Two edits differ from retail, both marked below: the flap max
+// (bug-2478) and the first stage's blendFunc blend + depthwrite (bug-2507, the lid from below).
 // Two stages, well under the 8-stage cap - unlike zz_coop_shoreline.shader, which is at 8.
 //
 // WHAT WAS WRONG, as arithmetic rather than as taste:
@@ -54,7 +55,7 @@
 // carrying `flap t 10 sin 0 3 0 .10 0 3`, i.e. 9*rawT_runup where rawT_runup ramps 1.909x slower) -
 // which is the only value at which the two coplanar sheets cannot interpenetrate.
 //
-// NOTHING ELSE IS TOUCHED. Both stages below are byte-for-byte retail behaviour.
+// NOTHING ELSE IS TOUCHED. Apart from the two marked edits, both stages below are byte-for-byte retail.
 textures/misc_outside/deepbluesea
 {
 	qer_editorimage textures/misc_outside/ocean2.tga
@@ -72,7 +73,27 @@ textures/misc_outside/deepbluesea
 
 	{
 		nopicmip
+		// [user 2026-09-06, bug-2507] the lid from below. Retail deepbluesea has no blendFunc, so seen
+		// from under the sheet it is an opaque wall; retail deepbluesea_runup (same file) carries
+		// blendFunc blend + depthwrite on this stage, copied here. depthwrite is LOAD-BEARING: the
+		// gl2 water pass (underwater_fp.glsl:156-164) paints every pixel with no depth as far-plane
+		// silt, so a blended lid that wrote no depth would vanish into murk. The explicit keyword
+		// survives blendFunc (gl2 tr_shader.c:1037 clears the mask only when not explicit); the
+		// deform keeps this shader on the generic path, where the nextbundle pair still draws in one
+		// pass (tr_shade.c:2064). m3l1a-only: the name is referenced by m3l1a.bsp alone (bug-2478).
+		// MEASURED 2026-09-06: oceandday1 ships ONLY as .jpg (retail Pak2 256^2, coop tex pak 1024^2; no
+		// .tga/.dds anywhere), and the JPEG loader fills alpha 255 (renderercommon/tr_image_jpg.c:235),
+		// so blendFunc blend alone draws OPAQUE - retail runup is equally opaque. The alpha has to
+		// come from an alphaGen (zz_coop_shoreline.shader does the same on this jpg with tCoord).
+		// alphaGen entity reads $ocean_wavy's s.alpha (Entity default 1.0, entity.cpp:1754; cgame
+		// cg_modelanim.c:2650; gl2 generic tr_shade.c:722), so the sheet stays exactly as it was
+		// until the beat sets `$ocean_wavy alpha 0.6` and restores `alpha 1` at the break - no
+		// from-above cost: seaward of Y -2000 the BSP has no seabed, only the sky wall, so a
+		// permanently translucent sea would show sky through it from the beach.
+		depthwrite
 		map textures/misc_outside/oceandday1.tga
+		blendFunc blend
+		alphaGen entity
 		rgbGen identityLighting
 		tcMod scale 16 22
 		tcMod scroll 0.01 .03

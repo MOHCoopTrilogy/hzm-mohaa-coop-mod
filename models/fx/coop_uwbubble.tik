@@ -1,0 +1,78 @@
+TIKI
+// HZM coop [user 2026-09-06, bug-2507] BREATH LEAVING HIM - continuous bubble trail - the m3l1a drowning beat (drowning_2026-09-06 item 5).
+//
+// Built on the coop_bloodcloud.tik skeleton and retail models/fx/water_trail_bubble.tik (Pak0). Retail's
+// bubble is `sfx originspawn`, and an sfx block never renders on a script_model carrier (bug-2477:
+// StartSFXCommand returns when m_pCurrentSfx is NULL). This one is an `originemitter`, the one block kind a script carrier renders (coop_hullspark.tik is the precedent).
+//
+// SPRITE: retail `water_trail_bubble` from scripts/effects.shader (Pak0/mainta pak1/maintt pak1), and
+// maintt/zzzzzz_hd_fx.pk3 textures/sprites/effects.shader:157 redefines it IDENTICALLY (same block, and
+// that copy is the one that wins; re-verified 2026-09-06 - an earlier note here claimed no mounted shader
+// redefines it) - bh_water_drop.tga, blendFunc add,
+// alphaGen/rgbGen vertex, parallel_oriented. spritegridlighting is deliberately NOT set: rgbGen vertex
+// with the default white spawnthing colour renders full-bright additive, so the bubble is visible in a
+// dark light grid; the water pass tints it anyway.
+//
+// wateronly IS THE SAFETY STORY AND THE PLACEMENT RULE. cg_tempmodels.cpp:601 culls a particle on any
+// tick where CM_PointContents(origin) is not water, so bubbles that rise through the -520 lid die there
+// and nothing survives into play. It also means THE CARRIER MUST SIT INSIDE THE WATER BRUSH: below the
+// -520 surface AND above the -576 sand (the camera eye is -562..-572, so "camera minus 14 u down" is
+// IN THE SAND - clamp the carrier z to >= -570 or every particle culls on its first tick, silently).
+//
+// RATE IS AUTHORED FOR cg_effectdetail 1, NOT x5. [user 2026-09-06, bug-2507] The engine default is
+// 0.2 (cg_tempmodels.cpp:235) but the mod ships `seta cg_effectdetail 1` (coop_defaults.cfg:13), and
+// the emitter loop multiplies by it directly (count = dtime * cg_effectdetail / spawnRate,
+// cg_commands.cpp:5010; spawnRate is stored as 1000/rate ms per model, :2591) - so spawnrate 12 IS
+// 12 bubbles/s in the shipped config; the first cut's x5 (spawnrate 60) was five times too dense.
+//
+// No collision, no dietouch, no bouncedecal, no swarm (swarm drags particles back toward a moving
+// carrier). accel 0 0 72 is retail's; ~50 u of water is crossed in about 1.2 s, then wateronly culls.
+setup
+{
+	scale 1.0
+	path models/fx/dummy
+	skelmodel dummy2.skd
+}
+
+init
+{
+	server
+	{
+		// dummy2.skd is the one-triangle invisible dummy (bug-2423 measured it), and +dontdraw on top
+		// still SENDS the entity (fgame/entity.cpp:881) so the client blocks below run.
+		classname effectentity
+		notsolid
+		rendereffects +dontdraw
+	}
+	client
+	{
+		cache water_trail_bubble.spr
+
+		// continuous trail - runs from spawn (init client), follows the carrier origin each frame with
+		// lerp_emitter, so an origin-stepped carrier draws a smooth ribbon. spawnrate 12 = 12/s at the
+		// shipped cg_effectdetail 1 (2.4/s at the engine's 0.2; life 5 caps it at 60 live sprites).
+		// [user 2026-09-06, bug-2507] was 60, authored against the wrong detail level.
+		originemitter coop_uwbub
+		(
+			model water_trail_bubble.spr
+			wateronly
+			spawnrate 12
+			alpha 1.0
+			life 5
+			scalemin 0.2
+			scalemax 0.5
+			offset crandom 6 crandom 6 crandom 3
+			randvel crandom 4 crandom 4 range 2 6
+			accel 0 0 72
+			angles 0 0 random 360
+			fadedelay 4
+		)
+	}
+}
+
+animations
+{
+	// Both point at the same clip. `start` exists so a caller's `anim start` is a real animation.
+	idle  dummy2.skc
+	start dummy2.skc
+}

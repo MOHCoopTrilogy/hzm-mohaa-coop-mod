@@ -12894,6 +12894,19 @@ coop_rampUnderwater:{
 	//[user 2026-09-04] THE UNDERWATER BED and its trim. level.coop_uwBedPlay 0 removes the bed and
 	//nothing else - reach for that first if it ever reads wrong, it takes nothing else with it.
 	if(level.coop_uwBedPlay == NIL){ level.coop_uwBedPlay = 1 }
+	//[user 2026-09-06, bug-2507] THE DROWNING PASS: air ramp, heart cadence, bubbles, thrash, exit.
+	//One kill switch each, default on. coop_uwAirOn (above) gates the air ramp AND the two
+	//airout/wake say hooks - one story, one switch. State vars are ASSIGNED here so no reader
+	//ever meets type none (bug-1371).
+	if(level.coop_uwHeartOn == NIL){ level.coop_uwHeartOn = 1 }
+	if(level.coop_uwBubbleOn == NIL){ level.coop_uwBubbleOn = 1 }
+	if(level.coop_uwThrashOn == NIL){ level.coop_uwThrashOn = 1 }
+	if(level.coop_uwExitOn == NIL){ level.coop_uwExitOn = 1 }
+	level.coop_uwAir = 1
+	level.coop_uwAirLast = 0 - 1
+	level.coop_uwBurstN = 0
+	level.coop_uwExitDone = 0
+	level.coop_uwBubbleRun = 0
 	//THE TRIM, AND THE bug-1669 TRAP DOES NOT APPLY HERE - which is why this one file-level exception
 	//to "level vars, never getcvar" is safe. That trap is a script getcvar creating a cvar EMPTY and
 	//permanently defeating the ENGINE's own default (ScriptThread::Getcvar is gi.Cvar_Get(name, "", 0)).
@@ -12934,6 +12947,7 @@ coop_rampUnderwater:{
 	if(local.pace < 0.5){ local.pace = 0.5 }
 	if(local.pace > 1.2){ local.pace = 1.2 }
 	local.t00 = level.time
+	level.coop_uwT0 = level.time		//[bug-2507] the t= in every RAMPUW air= line
 	println("^~^~^ RAMPUW start pace=" + local.pace + " at=" + local.wx + "," + local.wy)
 
 	//[bug-2339] rounds coming into the water overhead, for as long as the head is under
@@ -12985,8 +12999,9 @@ coop_rampUnderwater:{
 	waitthread coop_uwSay "coop_underwater_wash"
 	//[user 2026-09-04] "heart rate should play repeatedly until we are out of the water" - it starts
 	//on the same frame the body hits, under the impact, and does not stop until he breaks the surface
-	//in BEAT 8. See coop_uwHeartStart for why this is a loop rather than a retrigger.
-	waitthread coop_uwHeartStart
+	//in BEAT 8. [bug-2507] One-shot beats on a carrier now, cadence driven by the air value - see
+	//coop_uwHeartStart; the spawn point is passed so the carrier has somewhere to sit.
+	waitthread coop_uwHeartStart local.wx local.wy
 	//[user 2026-09-04] AND THE BED UNDER ALL OF IT. Same frame as the wash, and one frame plus ~0.13s
 	//after the water-contact impact, which lives in coop_rampFly (search: "RAMPUW impact") and not
 	//here - nothing between this line and the first coop_uwLeg waits. Deliberately AFTER the two
@@ -13016,11 +13031,27 @@ coop_rampUnderwater:{
 	local.a1[1] = 86
 	local.a1[2] = 0 - 28
 	println("^~^~^ RAMPUW plunge")
+	//[bug-2507] THE LID FROM BELOW. zz_coop_ocean.shader's deepbluesea first stage is blendFunc blend +
+	//depthwrite + alphaGen entity now, so the sheet's own alpha is this entity's: 0.6 while he is under
+	//it (a lit ceiling instead of a wall), 1 again on every exit path (break, handoff, black safety).
+	if(level.coop_uwLidAlphaOn == NIL){ level.coop_uwLidAlphaOn = 1 }
+	if(level.coop_uwLidAlphaOn == 1 && $ocean_wavy != NULL && $ocean_wavy != NIL){
+		$ocean_wavy alpha 0.6
+		println("^~^~^ RAMPUW lid alpha=0.6")
+	}
+	//[bug-2507] air full at the plunge (edge-triggered, so this is the one stufftext that seeds the
+	//client), and the bubble carrier, seeded on the plunge pose so its first frame has a camera.
+	waitthread coop_uwAirSet 1
+	level.coop_uwCamPos = local.p0
+	level.coop_uwCamAng = local.a0
+	level.coop_uwBubbleRun = 1
+	thread coop_uwBubbleRun
 	if(level.coop_uwGearOn){ thread coop_uwGear local.wx local.wy local.pace }
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 0.55 5
 	level.coop_uwZTop = 0 - 536			//he is under. the envelope closes behind him.
 
 	waitthread coop_rampSuppressAll 0.72
+	waitthread coop_uwAirSet 0.92		//[bug-2507] tumble
 	//[user 2026-09-04] 2.4 -> 2.9, and this one IS rail-bounded so it is not a free knob. The
 	//tumble below peaks at server roll 28 and coop_uwPose clamps roll at +-46; the client adds
 	//sin(t*5.3)*5.5*severity that no server clamp can see. At 2.4 the measured on-screen peak was
@@ -13083,6 +13114,8 @@ coop_rampUnderwater:{
 	println("^~^~^ RAMPUW bottom")
 	waitthread coop_uwJolt 0.55 1.9 "coop_uw_hitsand"
 	waitthread coop_rampSuppressAll 0.88
+	waitthread coop_uwAirSet 0.85		//[bug-2507] bottom (eyes holds the same value)
+	waitthread coop_uwBurst			//[bug-2507] the impact knocks the breath out
 
 	//--- BEAT 3b. THE EYES CLOSE, 2.00s. [user 2026-09-04] "a fade (kinda like slowly closing eyes)
 	//for a bit after we land on our back, and then BOOM wide awake".
@@ -13127,6 +13160,7 @@ coop_rampUnderwater:{
 	local.a1[1] = 85
 	local.a1[2] = 22
 	println("^~^~^ RAMPUW eyes")
+	waitthread coop_uwBurst			//[bug-2507] the airout beat
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 2.00 * local.pace ) 4
 
 	//--- BEAT 3c. BLACK, 2.30s, and UNPACED ON PURPOSE. This is the one interval with nothing on
@@ -13141,6 +13175,7 @@ coop_rampUnderwater:{
 	//frame and costs nothing.
 	if(level.coop_uwBlackOn == 1 && level.coop_rampDone != 1){
 		println("^~^~^ RAMPUW black")
+		waitthread coop_uwAirSet 0.70	//[bug-2507] the heart is the only thing he has in the dark
 		waitthread coop_uwLeg local.p1 local.a1 local.p1 local.a1 2.30 1
 
 		//--- BEAT 3d. BOOM. Four things on one frame.
@@ -13154,6 +13189,7 @@ coop_rampUnderwater:{
 		if(level.coop_uwBlackClear != 1){ fadein 0.18 0 0 0 1 }
 		level.coop_uwBlackClear = 1
 		println("^~^~^ RAMPUW wake")
+		waitthread coop_uwAirSet 0.60	//[bug-2507]
 		//the jolt is felt THROUGH the cinematic camera only because coop_spawnBoatCamera sets
 		//showquakes 1 (m3l1a.scr:8786 -> PMF_DAMAGE_ANGLES, player.cpp:8124). Both arguments are float
 		//literals: earthquake_player's first act is magnitude / duration, and int/int is C integer
@@ -13191,6 +13227,7 @@ coop_rampUnderwater:{
 	local.a1[1] = 84
 	local.a1[2] = 24
 	println("^~^~^ RAMPUW sand")
+	waitthread coop_uwAirSet 0.50		//[bug-2507]
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.55 * local.pace ) 4
 	waitthread coop_rampSuppressAll 0.66
 
@@ -13213,6 +13250,7 @@ coop_rampUnderwater:{
 	local.f2[0] = local.wx - 47
 	local.f2[1] = local.wy - 104
 	local.f2[2] = 0 - 568
+	waitthread coop_uwAirSet 0.40		//[bug-2507] try1
 	waitthread coop_uwTry local.f0 local.f1 local.f2 local.pace 1
 
 	local.f0 = local.f2
@@ -13224,6 +13262,7 @@ coop_rampUnderwater:{
 	local.f2[0] = local.wx - 45
 	local.f2[1] = local.wy - 92
 	local.f2[2] = 0 - 566
+	waitthread coop_uwAirSet 0.28		//[bug-2507] try2
 	waitthread coop_uwTry local.f0 local.f1 local.f2 local.pace 2
 
 	//--- and he gets up. 1.50s of rise, then 0.90s on his knees swaying, and the pitch crosses zero
@@ -13246,6 +13285,7 @@ coop_rampUnderwater:{
 	//silent no-op since this beat shipped - the same defect coop_uw_break had. This is a movement,
 	//so it gets the swim swoosh.
 	waitthread coop_uwSay "coop_uw_swim"
+	waitthread coop_uwAirSet 0.22		//[bug-2507] the rise
 	waitthread coop_uwLeg local.p0 local.a0 local.p1 local.a1 ( 1.50 * local.pace ) 4
 
 	local.p0 = local.p1
@@ -13340,6 +13380,12 @@ coop_rampUnderwater:{
 
 		println("^~^~^ RAMPUW stroke " + local.i + " of " + local.n)
 		thread coop_uwJolt 0.22 0.55 "coop_uw_strain"
+		//[bug-2507] air 0.20 -> 0.08 across the strokes. `* 1.0` before the divide: int/int is C
+		//integer division here (TRAPS T4) and would pin every stroke at 0.20.
+		local.av = 0.20
+		if(local.n > 1){ local.av = 0.20 - ( 0.12 * ( ( ( local.i - 1 ) * 1.0 ) / ( local.n - 1 ) ) ) }
+		waitthread coop_uwAirSet local.av
+		waitthread coop_uwBurst			//[bug-2507] one burst on every stroke's catch
 		//[user 2026-09-04] "itll need to match the movement youve made" - one swoosh per stroke, on
 		//the catch, where the stroke front-loads 62% of its travel into the first 45%. 0.778s inside a
 		//1.72..2.06s stroke, pitch varying 0.94..1.06 per play so six of them do not read as a tape
@@ -13378,6 +13424,7 @@ coop_rampUnderwater:{
 	local.a1[1] = 90
 	local.a1[2] = 0
 	println("^~^~^ RAMPUW gather")
+	waitthread coop_uwAirSet 0.05		//[bug-2507] the last of it
 	//[user 2026-09-04] was coop_uw_strain, which is not aliased anywhere in the mod and has been a
 	//silent no-op since this beat shipped - the same defect coop_uw_break had. This is a movement,
 	//so it gets the swim swoosh.
@@ -13392,6 +13439,7 @@ coop_rampUnderwater:{
 	//the OPENING pitch changed, from -26 to +26, because a man who has spent a second coiled under
 	//the surface is looking at it, not away from it.
 	println("^~^~^ RAMPUW break")
+	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy alpha 1; println("^~^~^ RAMPUW lid alpha=1") }
 	local.broke = 0
 	local.t0 = level.time
 	while(1){
@@ -13411,11 +13459,14 @@ coop_rampUnderwater:{
 		}
 		if(local.broke == 0 && local.pos[2] >= ( 0 - 514 )){
 			local.broke = 1
-			//[user 2026-09-04] OUT OF THE WATER - the heart stops here, and FIRST. coop_uwHeartStop takes
-			//CHAN_LOCAL down with it (StopLocalSound always does), so it has to run before coop_uw_break is
-			//played a few lines below, not after, or it would cut the gasp.
+			//[user 2026-09-04] OUT OF THE WATER - the heart stops here, and FIRST. [bug-2507] It no
+			//longer touches CHAN_LOCAL (carrier one-shots, not a loopSound), so the order is kept for
+			//the exit sequence's sake - heart -> bed -> gasp -> flash/ring/inhale - not for the channel.
 			waitthread coop_uwHeartStop
 			waitthread coop_uwBedStop		//[user 2026-09-04] the water closes behind him
+			//[bug-2507] head out: air snaps to full (the client eases it), the bubble carrier stops
+			level.coop_uwBubbleRun = 0
+			waitthread coop_uwAirSet 1
 			level.coop_waterBulletsOn = 0		//[bug-2339] head is up - stop the rounds coming in
 			level.coop_memVoiceOn = 0		//[bug-2342] and the voices go with the water
 			level.coop_underDeadOn = 0		//[bug-2345] stop killing men in the water
@@ -13431,6 +13482,8 @@ coop_rampUnderwater:{
 				println("^~^~^ RAMPUW gasp")
 				waitthread coop_uwSay "coop_uw_break"
 			}
+			//[bug-2507] the first breath - flash, ring, inhale - threaded so this pose loop never waits
+			thread coop_uwExit local.wx local.wy
 			//the lens splash decays over 3.6s, so beads carry across the handoff into the first
 			//seconds of play - which is exactly the look wanted
 			local.i = 1
@@ -13578,6 +13631,10 @@ coop_uwTry local.pfrom local.ppeak local.prest local.pace local.idx:{
 	local.pc[2] = local.pc[2] - 1
 	waitthread coop_uwLeg local.ppeak local.a1 local.pc local.a2 ( local.d1 * local.pace ) 5
 	waitthread coop_uwJolt ( local.d1 * local.pace ) ( 1.2 + ( 0.3 * local.idx ) ) "coop_uw_hitsand"
+	//[user 2026-09-06, bug-2507] and he thrashes - three short silent jolts riding the lie-there leg
+	//(threaded: coop_uwThrash waits, this leg chain must not), plus the breath it costs him.
+	thread coop_uwThrash
+	waitthread coop_uwBurst
 
 	//--- and he lies there. The dead beat after a failure is what makes the next attempt cost
 	//something; without it two pushes in a row read as a bounce.
@@ -13969,7 +14026,7 @@ coop_uwBoatLook local.wx local.wy:{
 	}
 
 	//--- AND THE SEA COMES BACK, at the same measured-clean pitch it went out at.
-	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show }
+	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show; $ocean_wavy alpha 1 }		//[bug-2507] the lid lever cleared on this exit path too
 
 	//--- LEG F. Level off onto the pose BEAT 6 opens on. 0.70s.
 	local.t0 = level.time
@@ -14045,6 +14102,9 @@ coop_uwPose local.pos local.ang:{
 	if(local.a[2] < ( 0 - 46 )){ local.a[2] = 0 - 46; level.coop_uwClampA++ }
 	if(local.a[2] > 46){ local.a[2] = 46; level.coop_uwClampA++ }
 
+	//[bug-2507] the clamped pose, published for the bubble carrier and the bursts (read each frame)
+	level.coop_uwCamPos = local.p
+	level.coop_uwCamAng = local.a
 	waitthread coop_rampPose local.p local.a[0] local.a[1] local.a[2]
 }end
 
@@ -14143,63 +14203,279 @@ coop_uwSay local.alias:{
 }end
 
 
-//HIS OWN HEART, LOOPING UNTIL HE IS OUT OF THE WATER. [user 2026-09-04]
+//HIS OWN HEART, ONE BEAT AT A TIME, ON ITS OWN CARRIER. [user 2026-09-06, bug-2507]
 //
-//`playlocalsound <alias> 1` and NOT a repeated one-shot. The loop branch of Player::PlayLocalSound
-//writes edict->s.loopSound and never touches a sound channel; every one-shot goes to CHAN_LOCAL,
-//which coop_rampShellPanOne owns for ~21 seconds across this very beat. A re-struck heartbeat would
-//therefore chop the underwater shellshock wash once a second - the sound the user asked to be made
-//louder. The loop also cannot drift out of time with itself, which a script-timed retrigger would.
-//
-//It is genuinely per-player and genuinely 2D: loopSoundFlags 1 is LOOPSOUND_FLAG_NO_PAN, which the
-//client routes to CHANNEL_FLAG_LOCAL_LISTENER - centred, no distance falloff. That is also why the
-//engine now refuses to emit ANOTHER player's local loop (CG_LoopSoundIsForeignLocal, cg_ents.c):
-//loopSound rides entityState to everyone, these never merge (bCombine is false for a zero-velocity
-//loop), and four men glued in one boat would otherwise stack four hearts in every man's head.
-//
-//The body being hidden for the whole beat does not matter - cg_modelanim.c adds the loop sound
-//above the RF_DONTDRAW gate - and being glued does not either, because glue() uses m_pGlueMaster
-//rather than bind, so s1->parent stays ENTITYNUM_NONE.
+//Was `playlocalsound coop_heartbeat 1`, a loopSound: one int in entityState, fixed rate, fixed pitch,
+//and its stop took CHAN_LOCAL down with it (bug-2432/2437). A drowning heart has to ACCELERATE, so
+//it is one-shot beats of coop_uw_heart from a thread whose interval reads the air value that
+//coop_uwAirSet publishes: interval = 0.5 + 0.6 * air, 1.10 s at full air, 0.50 s near empty. The
+//beats land on a carrier entity (the coop_uwBedStart recipe: own entnum, +broadcast, never hidden)
+//so they cannot collide with the wash, the gasp or the bed on CHAN_LOCAL (bug-2436/2452/2505).
+//No loopsound and no playlocalsound anywhere in it.
+//level.coop_uwHeartOn is the kill switch (default 1); level.coop_uwHeartRun is the running state.
 //=========================================================================
-coop_uwHeartStart:{
+coop_uwHeartStart local.wx local.wy:{
 //=========================================================================
 	if(level.coop_uwSound != 1){ end }
-	if(level.coop_uwHeartOn == 1){ end }
-	level.coop_uwHeartOn = 1
-	local.i = 1
-	while(local.i <= $player.size){
-		local.pl = $player[local.i]
-		if(local.pl != NULL && local.pl != NIL){
-			if(local.pl.health > 0 && local.pl.dmteam != "spectator"){
-				local.pl playlocalsound coop_heartbeat 1
-			}
+	if(level.coop_uwHeartOn == NIL){ level.coop_uwHeartOn = 1 }
+	if(level.coop_uwHeartOn != 1){ end }
+	if(level.coop_uwHeartRun == 1){ end }
+	if(local.wx == NIL || local.wy == NIL){ end }
+	waitthread coop_uwCarrier "heart" local.wx local.wy 40 300 90
+	local.e = level.coop_uwCarEnt["heart"]
+	if(local.e == NULL || local.e == NIL){
+		println("^~^~^ RAMPUW heart SPAWN FAILED")
+		end
+	}
+	level.coop_uwHeartEnt = local.e
+	level.coop_uwHeartRun = 1
+	thread coop_uwHeartLoop
+}end
+
+
+//the beat thread. The run flag is tested BEFORE each beat, so a stop is honoured before the next
+//playsound and never after it; the bpm probe prints once per change, not once per beat.
+//=========================================================================
+coop_uwHeartLoop:{
+//=========================================================================
+	local.last = 0
+	while(level.coop_uwHeartRun == 1){
+		local.e = level.coop_uwHeartEnt
+		if(local.e == NULL || local.e == NIL){ break }
+		local.air = level.coop_uwAir
+		if(local.air == NIL || local.air == NULL){ local.air = 1 }
+		if(local.air < 0){ local.air = 0 }
+		if(local.air > 1){ local.air = 1 }
+		//[bug-2507, verifier] must equal tr_postprocess.c's pulse: bpm = 55 + 75*(1-air), or the picture
+		//throbs up to 19% faster than the audible heart.
+		local.bpm = int( 55 + ( 75 * ( 1 - local.air ) ) )
+		local.iv = 60.0 / local.bpm
+		if(local.bpm != local.last){
+			local.last = local.bpm
+			println("^~^~^ RAMPUW heart bpm=" + local.bpm + " air=" + local.air)
 		}
-		local.i++
+		local.e playsound coop_uw_heart
+		wait local.iv
 	}
 }end
 
 
-//AND THE HEART STOPS WHEN HE IS OUT OF THE WATER, not before.
-//
-//GUARDED AND IDEMPOTENT ON PURPOSE. Player::StopLocalSound clears loopSound AND calls
-//gi.StopSound(entnum, CHAN_LOCAL) - it cannot do one without the other. CHAN_LOCAL at that moment
-//is carrying the shellshock wash, and a frame later it carries coop_uw_break, the surfacing gasp.
-//So this must run ONCE, and it must run BEFORE the gasp is played rather than after it, or it would
-//cut the gasp it was supposed to make room for. The level.coop_uwHeartOn gate is what makes a
-//second call - from an abort path, or a re-entered beat - a no-op instead of a silence.
-//Health is deliberately NOT tested here: a man who died mid-beat still needs his loop cleared.
+//AND THE HEART STOPS WHEN HE IS OUT OF THE WATER, on every path: the BEAT 8 surface branch and
+//coop_rampHandoff (which the watchdog reaches too) both call it, idempotent on coop_uwHeartRun.
+//No CHAN_LOCAL on any player is touched, so its order relative to the gasp no longer matters.
 //=========================================================================
 coop_uwHeartStop:{
 //=========================================================================
-	if(level.coop_uwHeartOn != 1){ end }
-	level.coop_uwHeartOn = 0
+	if(level.coop_uwHeartRun != 1){ end }
+	level.coop_uwHeartRun = 0
+	local.e = level.coop_uwHeartEnt
+	level.coop_uwHeartEnt = NULL
+	if(local.e == NULL || local.e == NIL){ end }
+	local.e stopsound 5
+	thread coop_fxCleanup local.e 3
+	println("^~^~^ RAMPUW heart stop")
+}end
+
+
+//A 2D CARRIER, the coop_uwBedStart recipe (dummy.tik, notsolid, +broadcast, NEVER hidden - see the
+//bed header for why each of those is load-bearing). Parked local.dy up-beach of the spawn point
+//and local.dx across it, in the column, where nothing else spawns. Stored in
+//level.coop_uwCarEnt[tag] rather than returned: an entity crossing a thread boundary can arrive
+//NIL (TRAPS T5), a level array keyed by a string cannot. [bug-2507]
+//=========================================================================
+coop_uwCarrier local.tag local.wx local.wy local.dx local.dy local.life:{
+//=========================================================================
+	if(local.tag == NIL || local.tag == ""){ end }
+	level.coop_uwCarEnt[local.tag] = NULL
+	if(local.wx == NIL || local.wy == NIL){ end }
+	if(local.dx == NIL){ local.dx = 0 }
+	if(local.dy == NIL){ local.dy = 300 }
+	if(local.life == NIL || local.life < 1){ local.life = 90 }
+	local.e = spawn script_model model "models/fx/dummy.tik"
+	if(local.e == NULL || local.e == NIL){ end }	//entity-pool guard
+	local.p = (0 0 0)
+	local.p[0] = local.wx + local.dx
+	local.p[1] = local.wy + local.dy
+	local.p[2] = 0 - 520
+	local.e.origin = local.p
+	local.e notsolid
+	local.e svflags "+broadcast"
+	thread coop_fxCleanup local.e local.life
+	level.coop_uwCarEnt[local.tag] = local.e
+}end
+
+
+//THE AIR HE HAS LEFT, 1.0 full .. 0.0 none. [user 2026-09-06, bug-2507]
+//Stuffs `set coop_uwAir <v>` to each live player (coop_* passes cg_servercmds_filter.cpp:173;
+//unquoted, one statement per stufftext - TRAPS T8); cgame eases it and the gl2 underwater pass
+//closes the tunnel, desaturates and throbs on it. Edge-triggered: the same value twice sends
+//nothing. local.force 1 (the handoff) sends to EVERY player regardless of health so nobody is
+//ever left short of air. Also the value coop_uwHeartLoop reads.
+//=========================================================================
+coop_uwAirSet local.v local.force:{
+//=========================================================================
+	//[bug-2507, verifier] its own switch: level.coop_uwAirOn already gates the airout/wake say hooks.
+	if(level.coop_uwAirRampOn == NIL){ level.coop_uwAirRampOn = 1 }
+	if(level.coop_uwAirRampOn != 1){ end }
+	if(local.v == NIL || local.v == NULL){ end }
+	if(local.v < 0){ local.v = 0 }
+	if(local.v > 1){ local.v = 1 }
+	if(local.force != 1){
+		if(level.coop_uwAirLast != NIL && level.coop_uwAirLast == local.v){ end }
+	}
+	level.coop_uwAirLast = local.v
+	level.coop_uwAir = local.v
 	local.i = 1
 	while(local.i <= $player.size){
 		local.pl = $player[local.i]
 		if(local.pl != NULL && local.pl != NIL){
-			local.pl stoplocalsound coop_heartbeat
+			if(local.force == 1){
+				local.pl stufftext ("set coop_uwAir " + local.v)
+			}else{
+				if(local.pl.health > 0 && local.pl.dmteam != "spectator"){
+					local.pl stufftext ("set coop_uwAir " + local.v)
+				}
+			}
 		}
 		local.i++
+	}
+	local.t = 0
+	if(level.coop_uwT0 != NIL){ local.t = level.time - level.coop_uwT0 }
+	println("^~^~^ RAMPUW air=" + local.v + " t=" + local.t)
+}end
+
+
+//BUBBLES FROM HIS MOUTH. [user 2026-09-06, bug-2507]
+//models/fx/coop_uwbubble.tik (an originemitter - the only thing a script_model carrier renders,
+//bug-2477) rides 14 u ahead of and 6 u below the camera, re-placed EVERY FRAME by origin stepping
+//(moveto silently no-ops on script_model). Held below -520: the tik is wateronly and above the
+//surface every particle culls. Stops on level.coop_uwBubbleRun, which the break and the handoff
+//both clear; the 90 s cleanup is the leak guard only.
+//=========================================================================
+coop_uwBubbleRun:{
+//=========================================================================
+	if(level.coop_uwBubbleOn == NIL){ level.coop_uwBubbleOn = 1 }
+	if(level.coop_uwBubbleOn != 1){ end }
+	if(level.coop_uwBubbleEnt != NULL && level.coop_uwBubbleEnt != NIL){ end }
+	local.p = level.coop_uwCamPos
+	if(local.p == NIL){ end }
+	local.p[2] = local.p[2] - 6
+	if(local.p[2] > ( 0 - 522 )){ local.p[2] = 0 - 522 }
+	if(local.p[2] < ( 0 - 570 )){ local.p[2] = 0 - 570 }
+	local.e = spawn script_model model "models/fx/coop_uwbubble.tik"
+	if(local.e == NULL || local.e == NIL){	//entity-pool guard
+		println("^~^~^ RAMPUW bubbles SPAWN FAILED")
+		end
+	}
+	local.e.origin = local.p
+	local.e notsolid
+	local.e anim start
+	level.coop_uwBubbleEnt = local.e
+	thread coop_fxCleanup local.e 90
+	println("^~^~^ RAMPUW bubbles start")
+	while(level.coop_uwBubbleRun == 1){
+		if(local.e == NULL || local.e == NIL){ break }
+		local.c = level.coop_uwCamPos
+		local.a = level.coop_uwCamAng
+		if(local.c != NIL && local.a != NIL){
+			local.fwd = angles_toforward local.a
+			if(local.fwd != NIL){
+				local.p = local.c + ( local.fwd * 14 )
+				local.p[2] = local.p[2] - 6
+				if(local.p[2] > ( 0 - 522 )){ local.p[2] = 0 - 522 }
+				if(local.p[2] < ( 0 - 570 )){ local.p[2] = 0 - 570 }
+				local.e.origin = local.p
+			}
+		}
+		waitframe
+	}
+	level.coop_uwBubbleEnt = NULL
+	if(local.e != NULL && local.e != NIL){ local.e remove }
+	println("^~^~^ RAMPUW bubbles stop")
+}end
+
+
+//ONE BURST OF BUBBLES at the mouth: models/fx/coop_uwbubble_burst.tik (count 14) at the same point
+//the trail rides, self-removed after 6 s. Bottom, the airout beat, each failed try, each stroke's
+//catch. Counted so the log can tally them. [bug-2507]
+//=========================================================================
+coop_uwBurst:{
+//=========================================================================
+	if(level.coop_uwBubbleOn == NIL){ level.coop_uwBubbleOn = 1 }
+	if(level.coop_uwBubbleOn != 1){ end }
+	local.c = level.coop_uwCamPos
+	local.a = level.coop_uwCamAng
+	if(local.c == NIL || local.a == NIL){ end }
+	local.fwd = angles_toforward local.a
+	if(local.fwd == NIL){ end }
+	local.p = local.c + ( local.fwd * 14 )
+	local.p[2] = local.p[2] - 6
+	if(local.p[2] > ( 0 - 522 )){ local.p[2] = 0 - 522 }
+	if(local.p[2] < ( 0 - 570 )){ local.p[2] = 0 - 570 }
+	local.b = spawn script_model model "models/fx/coop_uwbubble_burst.tik"
+	if(local.b == NULL || local.b == NIL){	//entity-pool guard
+		println("^~^~^ RAMPUW bubbles burst SPAWN FAILED")
+		end
+	}
+	local.b.origin = local.p
+	local.b notsolid
+	local.b anim start
+	thread coop_fxCleanup local.b 6
+	if(level.coop_uwBurstN == NIL){ level.coop_uwBurstN = 0 }
+	level.coop_uwBurstN++
+	println("^~^~^ RAMPUW bubbles burst=" + level.coop_uwBurstN)
+}end
+
+
+//THE THRASH: three 0.12 s jolts at 0.6 / 0.9 / 0.6, 0.15 s apart, silent (an EMPTY alias so
+//coop_uwJolt plays nothing - no CHAN_LOCAL, bug-2436). Threaded from each failed try so it rides
+//the lie-there leg instead of stalling it. [user 2026-09-06, bug-2507]
+//=========================================================================
+coop_uwThrash:{
+//=========================================================================
+	if(level.coop_uwThrashOn == NIL){ level.coop_uwThrashOn = 1 }
+	if(level.coop_uwThrashOn != 1){ end }
+	waitthread coop_uwJolt 0.12 0.6 ""
+	wait 0.15
+	waitthread coop_uwJolt 0.12 0.9 ""
+	wait 0.15
+	waitthread coop_uwJolt 0.12 0.6 ""
+	println("^~^~^ RAMPUW thrash")
+}end
+
+
+//THE FIRST BREATH. [user 2026-09-06, bug-2507] Threaded from the break AFTER the gasp, so the pose
+//loop never waits on it. In order: a white flash (`fadein 0.25 1 1 1 1` - the level-wide form the
+//blast uses at the top of the ramp; a fadein starts at alpha 1 and SELF-CLEARS, player.cpp:7821,
+//so it is a flash and never the latch a fadeout is; guarded on coop_rampDone so it can never touch
+//a released player's screen) -> coop_tinnitus_ring re-fired on a carrier 0.1 s after the gasp
+//(bug-2456 kills the blast ring, so this is the first clean one) -> coop_uw_inhale (retail
+//breath_in.wav) on a SECOND carrier at +0.9 s. Two carriers because both aliases are CHAN_LOCAL
+//and one entnum would cut the ring with the inhale. The lens splash stays where it is, in the break.
+//=========================================================================
+coop_uwExit local.wx local.wy:{
+//=========================================================================
+	if(level.coop_uwExitOn == NIL){ level.coop_uwExitOn = 1 }
+	if(level.coop_uwExitOn != 1){ end }
+	if(level.coop_uwExitDone == 1){ end }
+	level.coop_uwExitDone = 1
+	if(level.coop_rampDone != 1){ fadein 0.25 1 1 1 1 }
+	println("^~^~^ RAMPUW exit flash")
+	if(level.coop_uwSound != 1){ end }
+	if(local.wx == NIL || local.wy == NIL){ end }
+	wait 0.1
+	waitthread coop_uwCarrier "ring" local.wx local.wy 80 300 14
+	local.r = level.coop_uwCarEnt["ring"]
+	if(local.r != NULL && local.r != NIL){
+		local.r playsound coop_tinnitus_ring
+		println("^~^~^ RAMPUW ring")
+	}
+	wait 0.8
+	waitthread coop_uwCarrier "inhale" local.wx local.wy 120 300 6
+	local.n = level.coop_uwCarEnt["inhale"]
+	if(local.n != NULL && local.n != NIL){
+		local.n playsound coop_uw_inhale
+		println("^~^~^ RAMPUW inhale")
 	}
 }end
 
@@ -15030,16 +15306,19 @@ coop_rampHandoff:{
 	//open sea missing for everyone. All three are idempotent.
 	level.coop_uwAstern = 0
 	level.coop_uwUnbind = 0
-	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show }
+	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show; $ocean_wavy alpha 1 }		//[bug-2507] the lid lever cleared on this exit path too
 
-	//[user 2026-09-04] AND THE HEARTBEAT, ON EVERY PATH. coop_uwHeartStart writes edict->s.loopSound,
-	//which nothing clears by itself, and its only other stop is inside the BEAT 8 surface branch - so
-	//a beat that ended any other way (the 45s watchdog, an abort) left the loop running for the rest
-	//of the map. This is the single funnel: the handoff is idempotent on level.coop_rampDone and the
-	//watchdog reaches it too. coop_uwHeartStop is itself gated on level.coop_uwHeartOn, so calling it
-	//twice is a no-op rather than a stolen CHAN_LOCAL.
+	//[user 2026-09-04] AND THE HEARTBEAT, ON EVERY PATH. Its only other stop is inside the BEAT 8
+	//surface branch, so a beat that ended any other way (the watchdog, an abort) would leave it
+	//running for the rest of the map. This is the single funnel: the handoff is idempotent on
+	//level.coop_rampDone and the watchdog reaches it too. coop_uwHeartStop is gated on
+	//level.coop_uwHeartRun (bug-2507: one-shot beats on a carrier now, no CHAN_LOCAL), so twice is a no-op.
 	thread coop_uwHeartStop
 	thread coop_uwBedStop
+	//[user 2026-09-06, bug-2507] AND THE DROWNING STATE: air back to full for EVERY player on every
+	//path (force 1 - a client must never be left short of air), the bubble carrier down. Idempotent.
+	waitthread coop_uwAirSet 1 1
+	level.coop_uwBubbleRun = 0
 
 	//[bug-2319] the dialogue floor comes back on EVERY path through the handoff, and a separate
 	//thread walks it back after 5s on the normal path. Both are idempotent.

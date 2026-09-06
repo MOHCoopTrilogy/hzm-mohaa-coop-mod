@@ -1,0 +1,99 @@
+TIKI
+// HZM coop [user 2026-09-06, bug-2507] AIR OUT - a single bubble burst - the m3l1a drowning beat (drowning_2026-09-06 item 5).
+//
+// Built on the coop_bloodcloud.tik skeleton and retail models/fx/water_trail_bubble.tik (Pak0). Retail's
+// bubble is `sfx originspawn`, and an sfx block never renders on a script_model carrier (bug-2477:
+// StartSFXCommand returns when m_pCurrentSfx is NULL). This one is a BARE `originspawn` as an ENTRY-frame
+// command of the `start` animation - the retail exp_flak_near.tik / dudImpact.tik form (mainta/pak1.pk3
+// models/fx/) - which dispatches through BeginOriginSpawn with the local emitter and needs no sfx manager.
+// [user 2026-09-06, bug-2507] The first cut put it in init{client{}}, which NEVER fires on a networked
+// carrier: a server model's init client block runs ONCE at REGISTRATION with no entity
+// (renderergl2/tr_model.cpp:518 CG_ProcessInitCommands(tiki, NULL); only RE_SpawnEffectModel :595, the
+// engine impact-message path, passes a real one), and BeginOriginSpawn returns at once when
+// current_entity is NULL (cg_commands.cpp:3224). The per-entity path is cg_modelanim.c:3226
+// CG_ProcessEntityCommands(TIKI_FRAME_ENTRY), which runs an animation's `enter` commands with
+// current_entity = the carrier's refEntity, origin copied from lerpOrigin at cg_modelanim.c:2065 BEFORE
+// the +dontdraw branch - so the hidden carrier still bursts at its own origin.
+//
+// SPRITE: retail `water_trail_bubble` from scripts/effects.shader (Pak0/mainta pak1/maintt pak1), and
+// maintt/zzzzzz_hd_fx.pk3 textures/sprites/effects.shader:157 redefines it IDENTICALLY (same block, and
+// that copy is the one that wins; re-verified 2026-09-06 - an earlier note here claimed no mounted shader
+// redefines it) - bh_water_drop.tga, blendFunc add,
+// alphaGen/rgbGen vertex, parallel_oriented. spritegridlighting is deliberately NOT set: rgbGen vertex
+// with the default white spawnthing colour renders full-bright additive, so the bubble is visible in a
+// dark light grid; the water pass tints it anyway.
+//
+// wateronly IS THE SAFETY STORY AND THE PLACEMENT RULE. cg_tempmodels.cpp:601 culls a particle on any
+// tick where CM_PointContents(origin) is not water, so bubbles that rise through the -520 lid die there
+// and nothing survives into play. It also means THE CARRIER MUST SIT INSIDE THE WATER BRUSH: below the
+// -520 surface AND above the -576 sand (the camera eye is -562..-572, so "camera minus 14 u down" is
+// IN THE SAND - clamp the carrier z to >= -570 or every particle culls on its first tick, silently).
+//
+// COUNT IS AUTHORED FOR cg_effectdetail 1, NOT x5. [user 2026-09-06, bug-2507] The engine default is
+// 0.2 (cg_tempmodels.cpp:235) but the mod ships `seta cg_effectdetail 1` (coop_defaults.cfg:13), and
+// SpawnTempModel multiplies `count` by it directly (mcount *= cg_effectdetail when > 1,
+// cg_tempmodels.cpp:1163) - so count 14 IS 14 bubbles in the shipped config; the first cut's x5
+// (count 70) was five times too dense.
+//
+// No collision, no dietouch, no bouncedecal, no swarm (swarm drags particles back toward a moving
+// carrier). accel 0 0 72 is retail's; ~50 u of water is crossed in about 1.2 s, then wateronly culls.
+setup
+{
+	scale 1.0
+	path models/fx/dummy
+	skelmodel dummy2.skd
+}
+
+init
+{
+	server
+	{
+		// dummy2.skd is the one-triangle invisible dummy (bug-2423 measured it), and +dontdraw on top
+		// still SENDS the entity (fgame/entity.cpp:881) so the client blocks below run.
+		classname effectentity
+		notsolid
+		rendereffects +dontdraw
+	}
+	client
+	{
+		cache water_trail_bubble.spr
+
+		// [user 2026-09-06, bug-2507] the burst itself is in animations/start below, NOT here: an
+		// init{client{}} originspawn runs once at model registration with no entity and is dropped
+		// (see the header). Only the cache belongs in this block (EV_CACHE, CG_ProcessCacheInitCommands).
+	}
+}
+
+animations
+{
+	idle  dummy2.skc
+
+	// [user 2026-09-06, bug-2507] ONE-SHOT BURST on the `start` anim's ENTRY frame, the retail
+	// exp_flak_near.tik / dudImpact.tik form. CG_ProcessEntityCommands runs these once when the entity's
+	// anim index changes to `start` (cg_modelanim.c:3226) - the first snapshot after the script's
+	// `anim start`; BeginOriginSpawn takes the carrier origin, `(`..`)` gather the block, and EndBlock ->
+	// EndOriginSpawn spawns `count` at once (cg_commands.cpp:2147, :3252). Spawn + position + `anim start`
+	// in the same frame, a FRESH carrier per burst, remove it ~6 s later (coop_uwBurst does all three).
+	start dummy2.skc
+	{
+		client
+		{
+			enter originspawn
+			(
+				model water_trail_bubble.spr
+				wateronly
+				count 14
+				alpha 1.0
+				life 3
+				scalemin 0.15
+				scalemax 0.45
+				sphere
+				radius 5
+				randvel crandom 18 crandom 18 range 12 36
+				accel 0 0 72
+				angles 0 0 random 360
+				fadedelay 2
+			)
+		}
+	}
+}
