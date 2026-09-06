@@ -215,6 +215,7 @@ level waittill prespawn
 	//[user 2026-08-31] blood under the map's baked-in beach dead. Threaded here rather than from
 	//mg42AttackBeach, which only runs after the ramp drops - too late for something the player is
 	//looking at during the run-in.
+	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_wetPostureSweep }
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_beachBlood }
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_beachDead }
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_waterBlood }
@@ -285,6 +286,12 @@ level waittill prespawn
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_navalGunfire }
 	//[user 2026-09-02] the drowned men and their kit, across the tidal flat.
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_beachWreckage }
+	//[user 2026-09-05] "can we make it so when water hits objects on the beach it splashes up against
+	//them like it would do in real life." 61 of this map's 143 hedgehog/minepole/ramp statics stand in
+	//the surf; coop_obstacleWash walks the generated obstacle table, keeps those, and surges retail's
+	//own fx_water_spray against the ones near a player. MUST be after coop_obstInit above - it reads
+	//level.coop_obst*, and it waits for the table rather than trusting this order.
+	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_obstacleWash }
 	//[user 2026-09-02] the landing keeps arriving after your own boat is gone.
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_lateBoats }
 	if(level.gametype != 0){ waitthread maps/m3l1a/coopified.scr::coop_userProps }
@@ -294,6 +301,11 @@ level waittill prespawn
 	//line can never land together in either direction.
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_beachVoiceBank }
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_bangTest }
+	//[user 2026-09-05] "the assault engineer ... has a handgun in his hand". Retail arms
+	//$left_engineer / $right_engineer / $dragger / $draggie with a spawn keyvalue and holsters
+	//them two lines later, and that holster does not stick in this build - see coop_holsterFix
+	//for the measurements and for the two mechanisms that are DISPROVEN. Not bug-2450.
+	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_holsterFix }
 
 	//chrissstrahl - temp fixme
 	while($player == NULL || $player.size < 1){
@@ -2709,6 +2721,21 @@ coop_m3l1a_beachAudio:{
 	//the score), 0.55 is here, 0.2 is where the captain starts to disappear. Set it in the console
 	//during the takeover to taste and tell me the number.
 	waitthread coop_mod/replace.scr::tmvolume 1.9
+	//[user 2026-09-04] "on the music when you go under and it starts it doesnt feel like it ever
+	//really gets loud." THE LINE ABOVE WAS THE LAST TIME THE MUSIC GAIN WAS COMPUTED FOR
+	//NINETY-FIVE SECONDS, and it was computed inside an open tinnitus cue window, so it baked the
+	//cue sidechain's -7.96 dB into the source and held it there. Full derivation on
+	//coop_rampMusicHold in coopified.scr; the short version is that chan_trig_music is not
+	//respatialized (S_OPENAL_Respatialize stops at 160 channels and it sits above them), so its
+	//gain only moves when something sets music_volume_changed - and between this line and the
+	//coop_cvarDuckEnd "Music" release, nothing ever did.
+	//THE 1.9 IS UNCHANGED AND MUST STAY MIRRORED WITH THE ARGUMENT BELOW. The hold re-issues
+	//exactly this value, so under a cue the mix is identical to today and only the GAPS between
+	//cues get the level the script has always been asking for. Retune both or neither.
+	//ON BOTH PATHS BY CONSTRUCTION: this is the line bug-2371 was moved out here to reach, so the
+	//hold covers the cinematic takeover and the no-cinematic fallback without having to know which
+	//one ran - which is the ownership question that made an earlier draft of this fix fragile.
+	thread maps/m3l1a/coopified.scr::coop_rampMusicHold 1.9
 
 	//[user 2026-09-02, bug-2356] "I also think we should extend how long the music plays with
 	//everything else ducked... the sound effects should slowly rise back to where they need to be
@@ -2718,7 +2745,18 @@ coop_m3l1a_beachAudio:{
 	//0.6/0.9. The 12s fade happens client-side (coop_duckAmbientOutDur/coop_duckMusicOutDur, both
 	//set to 12 at DuckStart above), so no wait/thread is needed here to time it out.
 	exec coop_mod/replace.scr::coop_cvarDuckEnd "Ambient"
-	exec coop_mod/replace.scr::coop_cvarDuckEnd "Music"
+	//[user 2026-09-04] THE MUSIC RELEASE MOVED TO THE BOTTOM OF THIS FUNCTION, and this was half
+	//the defect. It fired here, 1.2s BEFORE coop_rampMusicSwell, and the cgame release is an
+	//exponential lerp with outDur 12 (cg_view.c), so across the swell's 34 seconds s_musicvolume
+	//fell about 11 dB while the swell pushed 1.9 -> 2.6, about +2.5 dB. The swell was a fade-out
+	//with extra steps. It is released AFTER the 34s world recovery now, which is also the beat
+	//that was asked for: "by the time all the sounds are back to normal, the music should be
+	//louder than it is now".
+	//SECOND, LESS OBVIOUS REASON. While that lerp runs it writes a CHANGING s_musicvolume every
+	//frame, and a changing value is the only thing on this map that drives a per-frame set_gain on
+	//the music channel. Firing it at T+95 meant the one window in which the cue duck could not
+	//latch was the one window the music was being faded out in. coop_rampMusicHold owns that job
+	//for the whole takeover now, and coop_rampMusicSwell's own steps own it through the recovery.
 	//[user 2026-08-28] SHELL SHOCK ON THE WAY BACK IN. The concussion wash lands just BEFORE the
 	//battlefield un-ducks, so the ring arrives first and the world comes rushing back underneath it -
 	//the beat the scene was always reaching for. Per-player playlocalsound (2D, non-positional), the
@@ -2767,6 +2805,16 @@ coop_m3l1a_beachAudio:{
 	//the mechanism. Putting it beside the coop_voxCut/coop_cueCut restores would have cut the muffle
 	//dead at the START of the 34s recovery instead of letting it clear along with the world.
 	waitthread coop_mod/replace.scr::coop_setClientCvar "coop_muffle" 0
+	//[user 2026-09-04] the music release, moved down from beside the Ambient one - see the note
+	//there. SAFE HERE FOR THE SAME REASON coop_muffle 0 IS: same thread, no `end` and no
+	//conditional exit anywhere between the two, and everything in between is a waitthread that
+	//always returns. No new strand CLASS, about 35s more exposure on an existing one.
+	//s_musicvolume is registered in C (snd_dma_new.cpp:106, CVAR_ARCHIVE), so the bug-1669
+	//getcvar-creates-it-empty trap does not apply to the marker below. The readback is only
+	//meaningful on a listen server, where the client cvars are in-process; it prints blank on a
+	//dedicated one, exactly like the RAMPAUD probe, and that is not a failure.
+	exec coop_mod/replace.scr::coop_cvarDuckEnd "Music"
+	println("^~^~^ BEACHAUD music-release musicvol=" + getcvar("s_musicvolume"))
 }end
 
 //=========================================================================
@@ -2912,17 +2960,23 @@ higgins1_opening_sequence:{
 	$higgins1_clip_player move
 
 	wait 2
-	$higgins1_ranger6.isinsequence = 1
-	$higgins1_ranger7.isinsequence = 1
-	$higgins1_ranger8.isinsequence = 1
-	$higgins1_ranger9.isinsequence = 1
-	$higgins1_ranger10.isinsequence = 1
+	//[coop 2026-09-06] coopified.scr::coop_higginsBail already sent these five down the ramp when the
+	//boat began to roll (about 26 s before this line runs in coop), through these same threads and with
+	//this same isinsequence hold; threading them again would turn them round mid-run. NULL-guarded
+	//too: a man crushed or shot on the deck used to throw two Script Errors here.
+	if(level.coop_higginsBailed != 1){
+		if($higgins1_ranger6 != NULL){ $higgins1_ranger6.isinsequence = 1 }
+		if($higgins1_ranger7 != NULL){ $higgins1_ranger7.isinsequence = 1 }
+		if($higgins1_ranger8 != NULL){ $higgins1_ranger8.isinsequence = 1 }
+		if($higgins1_ranger9 != NULL){ $higgins1_ranger9.isinsequence = 1 }
+		if($higgins1_ranger10 != NULL){ $higgins1_ranger10.isinsequence = 1 }
 
-	$higgins1_ranger6 thread higgins1_disembark_ranger6
-	$higgins1_ranger7 thread higgins1_disembark_ranger7
-	$higgins1_ranger8 thread higgins1_disembark_ranger8
-	$higgins1_ranger9 thread higgins1_disembark_ranger9
-	$higgins1_ranger10 thread higgins1_disembark_ranger10
+		if($higgins1_ranger6 != NULL){ $higgins1_ranger6 thread higgins1_disembark_ranger6 }
+		if($higgins1_ranger7 != NULL){ $higgins1_ranger7 thread higgins1_disembark_ranger7 }
+		if($higgins1_ranger8 != NULL){ $higgins1_ranger8 thread higgins1_disembark_ranger8 }
+		if($higgins1_ranger9 != NULL){ $higgins1_ranger9 thread higgins1_disembark_ranger9 }
+		if($higgins1_ranger10 != NULL){ $higgins1_ranger10 thread higgins1_disembark_ranger10 }
+	}
 	wait 5
 
 	// kill the coxswain
@@ -3760,10 +3814,26 @@ higgins5_ranger2_0_center_squibmortar1 local.parm1 local.parm2 local.parm3 local
 higgins1_disembark_firstsequence:{
 //=========================================================================
 	//$higgins1_ranger6 nodamage //chrissstrahl - null
-	$higgins1_ranger7 nodamage
-	$higgins1_ranger8 nodamage
-	$higgins1_ranger9 nodamage
-	$higgins1_ranger10 nodamage
+	if($higgins1_ranger7 != NULL){ $higgins1_ranger7 nodamage }
+	if($higgins1_ranger8 != NULL){ $higgins1_ranger8 nodamage }
+	if($higgins1_ranger9 != NULL){ $higgins1_ranger9 nodamage }
+	if($higgins1_ranger10 != NULL){ $higgins1_ranger10 nodamage }
+	//[coop 2026-09-06, user] 'the captain and the surrounding soldiers no longer play the lines where he
+	//says if they stay there they are dead men ... make sure it plays out right after you come up from
+	//underwater.' This is only ever threaded from the END of ranger9's disembark run (:3035), and that
+	//run was not completing: the 2026-09-06 log has him crushed on the deck by the sinking boat, and
+	//earlier runs show the disembark 'blocked, doing failsafe' on the deck - so nothing here ever fired.
+	//Now: (a) coopified.scr::coop_higginsBail sends the five men down the ramp when the boat rolls and
+	//threads coop_firstSeqFallback, which starts this 12 s after the player surfaces if ranger9's own
+	//trigger has not; (b) whichever path gets here first waits for the surface (coop_rampDone) so the
+	//exchange is heard, and the other is refused. Probe: FIRSTSEQ start / FIRSTSEQ fallback.
+	if(level.gametype != 0){
+		if(level.coop_firstSeqStarted == 1){ end }
+		level.coop_firstSeqStarted = 1
+		local.w = 0
+		while(level.coop_rampDone != 1 && local.w < 75){ wait 0.5; local.w = local.w + 0.5 }
+		println("^~^~^ FIRSTSEQ start rampDone=" + level.coop_rampDone + " waited=" + local.w)
+	}
 	wait 3
 
 	// conversation between the private and the sergeant
@@ -4520,10 +4590,39 @@ sequence_5_center_radioman:{
 		end
 	}
 
-	self say streamed_dfr_scripted_M3L1_036h  //shore party, gap teams........
-	//[user 2026-09-03] and the answer that comes back over it - 045a, "any senior noncom, take
-	//the men off the beach", never played by anything. Threaded so his anim starts on time.
-	if(level.gametype != 0){ self thread maps/m3l1a/coopified.scr::coop_vbRadio }
+	//[user 2026-09-05] HE SAYS NOTHING NOW, AND HE IS SHOT WHERE HE KNEELS.
+	//
+	//"can we have him just be quiet and then get shot in the head when we get in the radius of him.
+	//And then when WE use the radio, we play this line instead."
+	//
+	//036h - "Shore party. Gap teams and assault infantry are pinned down at beach obstacles! Request
+	//additional supporting fire, over!" - is now the PLAYER's transmission, sent from the set on the
+	//dead man's back (maps/m3l1a/coopified.scr::coop_radiomanTransmit).  045a, division's answer,
+	//comes back to the player rather than to him.  So both halves of the exchange move together and
+	//neither is lost; what is removed here is only the speaker.
+	//
+	//THE ANIM STAYS.  `anim radioman` is what puts him on one knee with the handset up, and that
+	//posture is the whole read of the beat: a live man working a radio, hit before he transmits.  It
+	//is also what clears .isinsequence one statement later, which is the flag coop_radiomanBeat step 1
+	//watches to know the player has arrived.
+	//
+	//KILL SWITCH: level.coop_radiomanHushOn 0 restores this label byte-for-byte, and coop_vbRadio's
+	//own one-shot latch (level.coop_vbRadioDone) is what then stops the transmit beat saying 045a a
+	//second time.  Gated on gametype so single player is untouched.
+	local.hush = 0
+	if(level.gametype != 0){
+		if(level.coop_radiomanHushOn == NIL){ level.coop_radiomanHushOn = 1 }
+		if(level.coop_radiomanHushOn == 1){ local.hush = 1 }
+	}
+	if(local.hush == 1){
+		println("^~^~^ RADIOMAN hush - he transmits nothing")
+	}
+	else{
+		self say streamed_dfr_scripted_M3L1_036h  //shore party, gap teams........
+		//[user 2026-09-03] and the answer that comes back over it - 045a, "any senior noncom, take
+		//the men off the beach", never played by anything. Threaded so his anim starts on time.
+		if(level.gametype != 0){ self thread maps/m3l1a/coopified.scr::coop_vbRadio }
+	}
 	self anim radioman
 	self.isinsequence = 0
 	self takedamage
@@ -5313,12 +5412,15 @@ sequence_9_shingle_start:{
 		println( "^~^~^ CUTVOX 077a bring up some bangalores" )
 		waitthread maps/m3l1a/coopified.scr::coop_sayProbe $shingle_ranger1 "streamed_dfr_scripted_M3L1_077a"
 		$shingle_ranger1 say streamed_dfr_scripted_M3L1_077a  //bring up some bangalores, lets bring them in
+		println("^~^~^ BANGBI B1 after-say")
 
 		wait .2
 		$shingle_ranger2 lookat $shingle_ranger1
+		println("^~^~^ BANGBI B2 after-r2-lookat")
 
 		wait .1
 		$shingle_ranger3 lookat $shingle_ranger1
+		println("^~^~^ BANGBI B3 after-r3-lookat")
 		level.coop_bangSayN = level.coop_bangSayN + 1
 		println("^~^~^ BANGSAY wait n=" + level.coop_bangSayN)
 		$shingle_ranger1 waittill saydone
@@ -8304,7 +8406,18 @@ ai_execute_todo:{
 		//self.index == 1 is REQUIRED, not decorative: it means this is the LAST todo on the stack, so a
 		//man mid-chain keeps running. Without it, higgins3_landing and higgins5_landing - which each
 		//issue two consecutive plain moves - would dip ten rangers into cover mid landing-charge.
-		if(level.gametype != 0 && self.index == 1){ self exec global/crouch.scr }
+		//[user 2026-09-05] AND NOT IF CROUCHING WOULD PUT HIS HEAD UNDER THE SEA. "the captain talks
+		//to a few soldiers with lines 'you stay here youre a dead man' ... these soldiers are
+		//crouching in between dialogue which puts them directly underwater." This line is the one
+		//that reaches those men: $higgins5_ranger1, who speaks "you can either stay here and die", is
+		//measured in the 2026-09-05 log crouching at (1115,-1932,-575) with his head 20 units under.
+		//The retail PLACEMENT is right and stays - rangers wade these waypoints and stand there with
+		//their heads clear; only the crouch is ours. coop_poseDry returns 1 unconditionally shoreward
+		//of the tideline (coop_waterZ hands back -9999 above y -768), so nothing on dry sand changes
+		//and bug-2269 is untouched.
+		if(level.gametype != 0 && self.index == 1){
+			if(waitthread maps/m3l1a/coopified.scr::coop_poseDry self "crouch_beach_idle"){ self exec global/crouch.scr }
+		}
 		self.isbusy = 0
 	}
 	else if (self.nextaction[1] == "move_crouch"){

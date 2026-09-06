@@ -161,4 +161,79 @@ textures/misc_outside/deepbluesea_shoreline
 		tcMod scale 16 2
 		tcMod scroll 0.002 -0.008
 	}
+
+	// [user 2026-09-04] THE TRAVELLING CREST. "waves and physical white waves that crest".
+	//
+	// THIS STAGE IS LAST ON PURPOSE - do not move it up. On gl1 a stage disabled by ifCvarnot leaves
+	// an inactive slot (ParseStage still does s++, tr_shader.c:2251-2266) and FinishShader BREAKS at
+	// the first inactive slot in three separate loops. Sitting anywhere but last, `coop_noCrest 1`
+	// would silently take the blood-in-the-surf stage above with it. Terminal, the hole is harmless
+	// in both renderers. It is also the correct draw order: additive foam belongs on top of the
+	// alpha-blended blood, not under it.
+	//
+	// WHY THIS IS TEXTURE-SPACE AND NOT GEOMETRY. The deformVertexes flap above is a HINGE, not a
+	// wave: RB_CalcFlapVertexes (renderergl2/tr_shade_calc.c:169-238) computes its scale from TIME
+	// ALONE and multiplies by a per-vertex (max-min)*T + min, so every vertex on the band rises in
+	// the same instant and only the amplitude varies along T. Measured from the BSP: +/-0.08u at the
+	// seaward seam, +/-7.9u mid-band, +/-15.9u at the water's edge, on a 12.5s period. The waterline
+	// is 12 quads / 48 verts / 24 tris in total, so there is no per-vertex wave to be had at any
+	// parameter - and tessSize is a compiler keyword both renderers SkipRestOfLine at runtime.
+	// Retail hit this too: `deformvertexes wave` is commented out above the flap in deepbluesea.
+	//
+	// WHY THIS TEXTURE. textures/misc_outside/ocean2a_shore is retail art that NO shader references,
+	// checked across every .shader in main/mainta/maintt. It is the only shore-parallel BANDED image
+	// in the paks: row-luminance std 45.1 against 5.5 along columns, 8.2x anisotropy, where every
+	// textures/water/* candidate measures ~1.0 and is isotropic chop with no band in it. Its profile
+	// down T is a speckled spray field, then a crest core peaking at luminance 136, then ~28% pure
+	// black - and under an additive blend that black is the gap between one crest and the next.
+	// NOT wash2 (which this shader already uses four times): wash2 peaks at only 64, and on additive
+	// stages brightness is the whole budget. Its profile is also a symmetric spike where ocean2a is
+	// an asymmetric breaking section. (An earlier draft justified this by saying wash2 has no gap -
+	// that was wrong; wash2's gap is 56%, larger than ocean2a's. The choice stands on brightness and
+	// profile shape, not on the gap.) No .dds of this name exists in any mounted pak, so no HD pack
+	// shadows it and it never enters the LoadDDS path that crashed gl1 on this map (bug-2445).
+	//
+	// SIGNS, because this is the easy thing to ship backwards. tcMods compose in listing order and
+	// scroll ADDS to the coordinate, so the IMAGE travels toward DECREASING coordinate - which is why
+	// the retail base stages above read `tcMod scroll 0.01 -0.034`. This stage uses a NEGATIVE T
+	// scale to mirror the tile (ragged spray edge leading, smooth wash behind), and mirroring flips
+	// the sign with it: here POSITIVE 0.16 is shoreward. If it runs out to sea, negate that number.
+	//
+	// NUMBERS, from the BSP: T maps 0.005..0.994 across the 1392u band = 1409 world units per 1.0 T.
+	// scale 8/-6 puts a crest every 235u (5.9m); scroll 0.16 walks them shoreward at a mean 37.6 u/s
+	// and lands one every 6.25s - EXACTLY HALF the flap's 12.5s, so the two can never drift apart.
+	// wavetrant adds surge at the flap's own frequency at phase 0, so peak forward displacement falls
+	// on peak lift: a crest runs, stalls, and surges again rather than gliding. Amplitude 0.30 sits
+	// just under the 0.318 at which it would visibly slide backwards (at 60fps and the engine's
+	// 1024-entry function table it still dips ~0.24u once per cycle - sub-pixel at any range).
+	// rgbGen wave and the flap's scale are BOTH time-only and global, which is the only reason a
+	// phase lock means anything across a 15872u beach. Phase 0 = white peaks at the top of the wash.
+	//
+	// THE CAP. MAX_SHADER_STAGES is 8 in both renderers and this is the 8th. DO NOT ADD A NINTH: gl2
+	// rejects the whole shader and the waterline of every map using this name falls back to the
+	// default texture, and gl1 has no bound check at all and writes past the array. NUM_TEXTURE_
+	// BUNDLES is 2 on gl1 (7 on gl2), so gl1 is the binding constraint and there is no bundle route
+	// either - both bundles of every wash2 stage above are already spoken for.
+	//
+	// KILL SWITCH: `coop_noCrest 1` then vid_restart (or a map load) drops this stage. Phrased as a
+	// NEGATIVE cvar so it is ON out of the box with no cfg seed. Evaluated at SHADER PARSE time, so
+	// it is NOT a live toggle.
+	// TUNING, in the order to reach for it:
+	//   runs the wrong way  -> negate the 0.16 in tcMod scroll.
+	//   crests too close    -> the -6 in tcMod scale. Spacing = 1409/|value| world units. Arrival
+	//                          period stays 6.25s for ANY T scale (it is 1/scroll), and the phase
+	//                          lock is unaffected - so this knob is safe to move freely.
+	//   too bright/faint    -> rgbGen wave sin 0.55 0.45 ...; base+amp must stay <= 1.0.
+	//   white off-beat      -> the 3rd number (phase). 0.95 lags 0.6s, 0.05 leads. Never negative.
+	// NEVER change `sin` to `noise` here: TableForFunc has no GF_NOISE case and calls ri.Error(ERR_DROP).
+	{
+		ifCvarnot coop_noCrest 1
+		nopicmip
+		map textures/misc_outside/ocean2a_shore.jpg
+		blendFunc add
+		rgbGen wave sin 0.55 0.45 0 0.08
+		tcMod scale 8 -6
+		tcMod scroll 0.01 0.16
+		tcMod wavetrant sin 0 0.30 0 0.08
+	}
 }

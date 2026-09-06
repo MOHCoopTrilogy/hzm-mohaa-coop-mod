@@ -31,14 +31,47 @@
 //   scripts/effects.shader, with only the texture path changed. Same reasoning as every other
 //   borrowed definition in this project: copy the working recipe, do not invent one.
 
+// [user 2026-09-04] AND THEN IT WAS TOO MUCH. "when bullets hit walls they create an excessive
+// amount of smoke... was it from the ask to make the bullets hitting the bunkers visible yesterday?"
+// Yes - this file is that change, and defining the name did exactly what it was supposed to. The
+// problem is WHAT the name was pointing at.
+//
+// STONE IS THE DEFAULT IMPACT SURFACE. CG_ParseCGMessage's untyped case is SFX_BHIT_STONE_LITE
+// (cg_parsemsg.cpp:1812), so a round into any surface with no surfaceparm - which is most walls in
+// the game - runs the stone effect. And zzzzzz_hd_fx.pk3's rewrite of bh_stone_lite/hard is far
+// heavier than retail's: measured out of both tiks, the puff element goes alpha 0.2 -> 0.75, count
+// 3 -> 5 and scale .4-.7 -> .7-1. That is roughly 3.7x the opacity at twice the size, on every
+// wall hit in the game. While the shader was undefined nobody saw it (white squares instead); the
+// moment it resolved, it became smoke.
+//
+// WE CANNOT FIX THE TIKS - zzzzzz_hd_fx.pk3 sorts AFTER zzzzzz_co-op_hzm_mod_*, so it wins that
+// name and a coop-pak override could never load. Never edit a third-party pak in place either; the
+// next re-import reverts it. But the SHADER NAME IS OURS, uncontested, so what it draws is ours.
+//
+// SO IT DRAWS RETAIL'S OWN STONE DUST. This stanza is now a verbatim copy of `vsssource` from
+// main/Pak0.pk3 scripts/sprites.shader - the sprite retail's OWN bh_stone_lite uses for this exact
+// element - instead of the HD pack's solid snow puff. Two counter-rotating bundles of a soft dust
+// wisp rather than one opaque white ball, so the pack's heavy alpha and count land on art that is
+// meant to be faint. The white squares stay fixed (the name still resolves), the effect still reads
+// as a round striking stone, and it stops fogging the map.
+// To go back to the HD pack's look: restore the single `map textures/effects/bh_snow_puff1.tga`
+// stage below. To remove the effect entirely, delete this stanza - but that brings the white
+// squares back, so do not.
 bh_snow_puff1
 {
-	spritegen parallel_oriented
-	cull none
+	nopicmip
+	surfaceparm nolightmap
+	spritegen parallel
+	noMerge
+	cull twosided
 	{
-		map textures/effects/bh_snow_puff1.tga
-		blendFunc blend
-		alphaGen vertex
+		clampmap textures/sprites/vsssource.tga
+		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+		tcMod rotate 20
 		rgbGen vertex
+		alphaGen vertex
+	nextbundle
+		map textures/sprites/vsssource2.tga
+		tcMod rotate -20
 	}
 }

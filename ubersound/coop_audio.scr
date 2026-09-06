@@ -51,6 +51,26 @@ aliascache thunder3 sound/amb/Amb_Thunder_03.wav soundparms 1.0 0.0 1.0 0.05 300
 // HZM coop - batch 2 (2026-07-04): sprint gear loop + radio static (assets ready, wiring later)
 aliascache coop_gear_run sound/coop_fx/gear_run_loop.wav soundparms 1.0 0.0 1.0 0.0 120 800 auto loaded maps "m e t dm obj train"
 aliascache coop_radio_static sound/coop_fx/radio_static1.wav soundparms 1.0 0.05 1.0 0.02 200 2000 auto loaded maps "m e t dm obj train"
+//
+// HZM coop [user 2026-09-05] m3l1a THE PLAYER'S TRANSMISSION.  Two retail Omaha dialogue wavs
+// re-declared under coop_* names so the exchange carries further up the beach than the retail 1500.
+// SAME PATH AS THE RETAIL PARENTS, DELIBERATELY: `dialog streamed`. S_OPENAL_StartSound diverts a
+// streamed alias to the 2D path BEFORE the 3D start gate (snd_openal_new.cpp:2083), so there is no
+// maxDist cut-off at all - the 2D branch fades LINEARLY from minDist to maxDist (:3305-3310) and
+// pans by entity position. That path honours the alias volume, rides the Dialogue slider and OWNS
+// the vox sidechain. The first draft of these lines was `voice loaded`, the 3D path, where the
+// alias volume is discarded by set_3d (bug-2452), the line rides the SFX bus and is ducked x0.65
+// under every German bark - quieter than the radioman it replaced, on the wrong slider.
+// 3000, NOT 9000: on a linear fade 9000 is near-full volume across the whole map with only pan for
+// position; 3000 is audible along the beach and gone at the bluff.
+// SAFE TO RE-ALIAS BECAUSE NOTHING SAYS THESE - the standing rule (`say` resolves the lipsync anim
+// BY ALIAS NAME) applies to `say` only; these are played with playsound off the radio set. The
+// retail aliases streamed_dfr_scripted_M3L1_036h / _045a are untouched and still used by the
+// hush-off path. Confirm in the log with the VOXSTART line (chan=dialog) when the set is used.
+// LENGTHS, MEASURED, because the beat's waits are spelled out in seconds: 036h 5.841s, 045a 4.506s
+// (22050Hz mono, from the shipped wavs).
+alias coop_radio_m3l1_036h sound/dialogue/m3l1/A/dfr_scripted_M3L1_036h.wav soundparms 1.5 0.0 1.0 0.0 200 3000 dialog streamed maps "m e t"	//5.841s
+alias coop_radio_m3l1_045a sound/dialogue/m3l1/A/dfr_scripted_M3L1_045a.wav soundparms 1.5 0.0 1.0 0.0 200 3000 dialog streamed maps "m e t"	//4.506s
 aliascache coop_radio_static_loop sound/coop_fx/radio_static_loop.wav soundparms 1.0 0.0 1.0 0.0 200 2000 auto loaded maps "m e t dm obj train"
 
 // HZM coop - DISTANCE GUNFIRE TAILS: additive report layered on far-away shots by the cgame
@@ -251,6 +271,29 @@ aliascache coop_underwater_wash sound/coop_tinnitus/coop_underwater01.wav soundp
 //1.3: the sample peaks at 24794/32767 = 0.757 full scale, so this lands at 0.98 - just inside.
 //It sits over coop_underwater_wash (1.5) and the memory voices (1.7) and should be the loudest
 //thing in the beat for its first second, which is what a body hitting water at speed sounds like.
+//[2026-09-04 #2] CHANNEL `local` AGAIN, AND THE SUPERSEDED NOTE BELOW IS WRONG ON ITS CONCLUSION.
+//`auto` did cure the steal - CHAN_AUTO is 0 and S_OPENAL_PickChannelBase's steal branch is gated on
+//a NON-ZERO iEntChannel (snd_openal_new.cpp:1687), so a `local` sound can never evict it - but it
+//moved this onto the 3D path, where three things go wrong at once:
+//  1. THE ALIAS VOLUME IS DISCARDED. S_OPENAL_StartSound does set_gain(base * 1.3) at :2079 and
+//     THEN calls set_3d() at :2083, whose last act is set_gain(S_GetBaseVolume()) at :4247 - with
+//     no volume term. It overwrites the line above. The 2D path runs the same two calls in the
+//     opposite order (set_no_3d :1959/:1963, set_gain(fRealVolume) :1967, play :1968), so 2D
+//     honours the alias and 3D does not. Respatialize re-applies gain ONLY for channels
+//     i >= MAX_SOUNDSYSTEM_CHANNELS_3D (:3264), so on 3D the wrong gain is frozen for all 6.60s.
+//     The "1.3 x 0.757 = 0.98" arithmetic below never happened; it played at 0.757.
+//  2. A 3D source sits at the PLAYER'S BODY (entity.cpp:3741 copies edict->s.origin), which is
+//     still glued in the Higgins - measured 343 units BEHIND the cinematic camera at the landing
+//     point - so the splash arrived from over your shoulder instead of around you.
+//  3. For every non-host player it is then occlusion-traced through the boat hull (gain x0.55,
+//     HF x0.12); occlusion is only skipped for the listener's OWN entity, snd_openal_new.cpp:3020.
+//THE STEAL IS NOW AVOIDED BY THE EMITTER, NOT BY THE CHANNEL: this plays from
+//$higgins1_playerspot, and coop_underwater_wash plays from $player[1], so the
+//(iEntNum, iEntChannel) pair never matches and :1691-1697 cannot reach it. Nothing else plays
+//`local` on $higgins1_playerspot (higgins_explosion is `weapon`, arty_exp_water is `weapon`,
+//higgins_blowup_guys is `dialog`). If this ever moves back to a player entity, it must NOT be the
+//same player entity the wash uses.
+//--- superseded note, kept because its channel-steal analysis is still correct: ---
 //[2026-09-04] CHANNEL `auto`, NOT `local`, AND THAT IS THE WHOLE REASON THIS IS AUDIBLE.
 //coop_underwater_wash is played on the very next line, through the same coop_uwSay, so it resolves
 //to the SAME player entity - and it also declares `local`. S_OPENAL_StartSound stops any channel
@@ -258,7 +301,7 @@ aliascache coop_underwater_wash sound/coop_tinnitus/coop_underwater01.wav soundp
 //so as `local` this 6.60s impact was killed on the frame it started and had never once been heard.
 //The wash stays on `local`: the surfacing gasp is MEANT to cut it that way, and that is documented
 //at the BEAT 8 call site.
-aliascache coop_uw_impact sound/coop_tinnitus/coop_uw_impact01.wav soundparms 1.3 0.0 1.0 0.0 500 3000 auto loaded maps "m e t dm obj train"
+aliascache coop_uw_impact sound/coop_tinnitus/coop_uw_impact01.wav soundparms 1.3 0.0 1.0 0.0 500 3000 local loaded maps "m e t dm obj train"
 
 //[user 2026-09-04] THE DROWNING MAN'S HEART. User-supplied recording; ONE lub-dub cycle cut out of
 //it (1.370s..2.575s of the source = 1.205s, ~50bpm) and looped, rather than the whole 8.16s clip -
@@ -296,6 +339,55 @@ aliascache coop_heartbeat sound/coop_heart/coop_heart01.wav soundparms 1.0 0.0 1
 //that channel would cut the wash six times. minDist 500 matches the other underwater aliases - the
 //bodies sit ~200 units from the camera, so that is full volume.
 aliascache coop_uw_swim sound/coop_swim/coop_uw_swim01.wav soundparms 1.0 0.0 0.94 0.12 500 3000 auto loaded maps "m e t dm obj train"
+
+//[user 2026-09-04] THE UNDERWATER BED - the ambience under the whole ramp-drop plunge, from the
+//frame the body hits the water to the frame he breaks the surface. Started by
+//maps/m3l1a/coopified.scr::coop_uwBedStart, stopped by coop_uwBedStop.
+//
+//sound/coop_swim/ IS LOAD-BEARING AND THE COUPLING IS INVISIBLE FROM HERE. coop_rampAudioCut holds
+//s_sfxduck at 0.05 for this entire beat, and the ONLY thing that exempts this sample is the
+//substring match on "coop_swim/" in S_HZM_DuckExempt (client/snd_openal_new.cpp, :3988 on
+//2026-09-04). Move this wav to any other folder and the bed plays at FIVE PERCENT with no console
+//error of any kind - the identical trap written up for coop_uw_break further down this file.
+//coop_swim/ rather than coop_tinnitus/ on purpose: a tinnitus path is a TIER 1 CUE
+//(S_HZM_CueTier), and a tier arms the sidechain, so a 26-second bed would hold the music and the
+//flashback voices down for the whole sequence. Exempt from the duck, arming nothing.
+//
+//CHANNEL `local`, AND THAT IS THE ENTIRE REASON THE 1.8 BELOW MEANS ANYTHING. `local` is one of
+//the two tokens that force the client 2D path (S_OPENAL_StartSound routes CHAN_MENU / CHAN_LOCAL /
+//streamed / NO_OFFSET to S_OPENAL_Start2DSound), and that is the only path that carries the alias
+//volume to AL_GAIN: Start2DSound calls set_no_3d() - which itself resets gain to the base - and
+//THEN set_gain(fRealVolume) as the last write, and S_OPENAL_Respatialize re-applies it every frame
+//for 2D channels. On `auto` the sound takes the 3D path, where set_3d() ends with
+//set_gain(S_GetBaseVolume()) and the alias volume is simply gone - which is why coop_uw_swim's 1.0
+//just above and coop_memvoice's 1.7 further down are NOT real numbers. (coop_uw_impact IS `local`,
+//so ITS 1.3 is real - do not lump it in with those two.) `menu` would also reach 2D but set_gain
+//skips the SFX slider for CHAN_MENU, so the player's Effects dial would not touch it.
+//IT IS SAFE ON `local` ONLY BECAUSE IT IS PLAYED ON ITS OWN SPAWNED CARRIER ENTITY: on a player
+//entnum it would steal CHAN_LOCAL from the wash and then be stolen by the surfacing gasp
+//(S_OPENAL_PickChannelBase end_sample()s a live channel when iEntNum AND iEntChannel both match),
+//which is bug-2436 exactly.
+//
+//dist 10000 / maxDist 12000 = LEVEL_WIDE_MIN_DIST (qcommon/q_shared.h:1585). The carrier sits 1200
+//units up-beach purely so it is NOT on a player entity; the distance itself buys nothing on the
+//CHANNEL_FLAG_LOCAL_LISTENER branch, where the pan is forced to dead centre by S_HZM_LocalPanAmount
+//(it returns 0 for any sample whose name does not contain "coop_shellshock"). On the other branch
+//the bearing pan applies and 1200 < dist 10000 gives full volume, so it is centred and loud either
+//way. THE LOAD-BEARING PART OF THE PLACEMENT IS THE SEPARATE ENTITY, NOT THE DISTANCE.
+//
+//VOLUME 1.8 IS DERIVED, NOT PICKED, and it was re-derived on 2026-09-04 against the wav that
+//actually ships. coop_uw_bed01.wav measures I = -23.9 LUFS integrated / -9.9 dBFS peak, so 1.8
+//(+5.11 dB) puts it at -18.8 LUFS effective and -4.79 dBFS effective peak. Measured against the
+//rest of this beat, all of which are `local` so their alias volumes are real: coop_underwater_wash
+//-25.1 + 3.52 = -21.6, coop_shellshock_uw -23.5 + 4.61 = -18.9, coop_uw_break -16.5 + 1.58 = -14.9.
+//So the bed sits 2.8 dB OVER the wash, level with the shellshock, and 4.1 dB UNDER the gasp that
+//ends the beat - "up pretty high" without ever being the loudest thing. The 4.79 dB of remaining
+//headroom is what bounds level.coop_uwBedVol to 1.5 in coop_uwBedStart. That headroom is measured
+//at s_sfxvolume 1.0; CHAN_LOCAL follows the Effects slider (set_gain, 2026-08-07 change), and a
+//player running it at 2.0 doubles this and everything else in the beat alike - coop_uw_break is
+//already at -0.3 dBFS effective, so the bed is not the element that breaks first. If the wav is
+//ever re-cut, re-derive: V = 10^((-18.9 - I_LUFS)/20), and check peak + 20*log10(V) <= -3.0 dBFS.
+aliascache coop_uw_bed sound/coop_swim/coop_uw_bed01.wav soundparms 1.8 0.0 1.0 0.0 10000 12000 local loaded maps "m e t dm obj train"
 
 //[user 2026-09-03] THE SURFACING BREATH. "when he comes out of the water use the
 //existing breath exhale noise that we have from HOLDING SHIFT IN ADS to steady/hold
@@ -351,6 +443,12 @@ aliascache coop_uw_swim sound/coop_swim/coop_uw_swim01.wav soundparms 1.0 0.0 0.
 //CHAN_LOCAL also renders unattenuated pinned to each client's own listener (:1835), which
 //is what makes one broadcast play land as one copy in every player's ears.
 aliascache coop_uw_break sound/coop_tinnitus/coop_uwbreath01.wav soundparms 1.2 0.0 1.0 0.0 500 3000 local loaded maps "m e t dm obj train"
+//[2026-09-06] coop_uw_hitsand / coop_uw_strain were called by the plunge (coopified.scr coop_uwJolt at
+//three sites) and aliased nowhere: 7x "Player::PlayLocalSound: ... needs to be aliased" per run, silent.
+//Placeholders on wavs that already ship, pitched down, until the user records the real ones (the
+//same rule as coop_uw_airout / coop_uw_wake, which stay armed no-ops until their wavs exist).
+aliascache coop_uw_hitsand sound/coop_tinnitus/coop_uw_impact01.wav soundparms 0.6 0.0 0.86 0.0 500 3000 local loaded maps "m e t dm obj train"
+aliascache coop_uw_strain sound/coop_tinnitus/coop_uwbreath01.wav soundparms 0.8 0.0 0.92 0.05 500 3000 local loaded maps "m e t dm obj train"
 aliascache coop_memvoice01 sound/coop_memory/coop_memvoice01.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
 aliascache coop_memvoice02 sound/coop_memory/coop_memvoice02.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"
 aliascache coop_memvoice03 sound/coop_memory/coop_memvoice03.wav soundparms 1.7 0.05 1.0 0.05 400 2600 auto loaded maps "m e t dm obj train"

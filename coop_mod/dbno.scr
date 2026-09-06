@@ -12,11 +12,11 @@ dbno_start local.player:{
 	ihuddraw_alpha local.player 38 0
 	ihuddraw_alpha local.player 39 0
 
-	local.player stoplocalsound coop_dbno_breath1
-	local.player stoplocalsound coop_dbno_breath2
-	local.player stoplocalsound coop_dbno_breath3
-	local.player stoplocalsound coop_dbno_heartbeat
-	local.player stoplocalsound coop_shellshock_dbno
+	//[2026-09-05, bug-2432] one bed, one stop. stoploopsound takes NO argument
+	//(EV_StopLoopSound is declared with a NULL format, entity.cpp:748) so this stops whichever
+	//stage is loaded without the caller knowing which - and unlike stoplocalsound it does NOT
+	//also fire gi.StopSound(entnum, CHAN_LOCAL), which would kill the revive gasp (bug-2437).
+	waitthread coop_dbnoBedStop local.player
 
 	// safety-net: make sure the cgame "downed" view flag is cleared on (re)spawn, so a player who died while
 	// downed never respawns with the bleed-out vignette/sway stuck on.
@@ -451,18 +451,32 @@ dbno_fade_manager:{
 		else if( local.frac >= 0.72 ){ local.vol = "0.45" }
 		else if( local.frac >= 0.55 ){ local.vol = "0.7" }
 		if( local.vol != local.lastVol ){
-			self stufftext ( "s_volume " + local.vol )
+			self stufftext ( "s_sfxduck " + local.vol )
 			local.lastVol = local.vol
 		}
 		wait 0.5
 	}
 
 	// downed state ended (revived / let go / died) - clear the cgame downed flag so the vignette + sway revert
-	if( self != NULL ){ self stufftext "set coop_dbnoView 0" }
+	if( self != NULL ){
+		self stufftext "set coop_dbnoView 0"
+		//[2026-09-05, bug-2432] THE WORLD COMES BACK ON EVERY EXIT, not only on revive. The old
+		//restore lived inside the revived-and-not-dead branch below, so death and give-up left the
+		//duck latched; s_sfxduck is CVAR_ARCHIVE, so that persisted across restarts (bug-2298).
+		//Restored to 1, the engine default (snd_dma_new.cpp:108) - never to a server cvar.
+		self stufftext "s_sfxduck 1"
+	}
 
 	if( self != NULL && self.flags["coop_dbno_dead"] != 1 && self.flags["coop_dbno_letgo"] != 1 ){
-		// revived (not dead) - bring SFX back to the baseline
-		self stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )
+		//[2026-09-05, bug-2432] THE s_volume STOMP IS GONE. s_volume is the MASTER bus -
+		//S_GetBaseVolume() = s_volume * s_fFadeVolume (snd_openal_new.cpp:1319) multiplies
+		//one-shots, loops AND music, sits above every slider and above set_gain where the duck
+		//exemptions live, so nothing could ever be carved out of it: at frac >= 0.95 this fade
+		//wrote s_volume 0 and silenced the heartbeat it exists to play under. Worse, s_volume is
+		//CVAR_ARCHIVE and this restored it to the SERVER's coop_tinnitusBaseVol, so a player who
+		//set his master to 0.5 had it rewritten to 0.9 in his own config on every revive - the
+		//bug-1502 lesson (restore the client's own live value) never applied to master. The fade
+		//is s_sfxduck now and it is restored unconditionally above, so nothing is needed here.
 		//[user 2026-08-18] apply-trace F3: an armory apply made while DOWN was silently dropped and
 		//the revive re-gave the OLD registered kit. Re-kick the queued regive now the player is up -
 		//the rebuild already ran at click time, this just re-runs the debounced give.
@@ -491,47 +505,109 @@ dbno_heartbeat local.player:{
 	local.stage = 0
 	local.player.flags["coop_dbno_heartbeat_active"] = 1
 
-	// HZM coop - breathing + heartbeat are the DOWNED player's OWN body sounds, so play them as 2D PER-CLIENT
-	// LOOPS via playlocalsound <alias> 1: ONLY the downed player hears them, never nearby teammates (the old
-	// entity loopsound + emitter was 3D and audible to others). The bleed-out s_volume duck (dbno_fade_manager)
-	// is stuffed to this same client, so they still fade down as death nears. Each local loop is stopped BY
-	// NAME on every exit (here + the explicit stop blocks in dbno_start/die/letgo/ai_revive).
-	local.player playlocalsound coop_dbno_heartbeat 1
-	local.player playlocalsound coop_dbno_breath1 1
-	// [user 07-12] atmospheric SHELLSHOCK wash for the whole downed state: loops as the bed that (with
-	// the bleed-out s_volume duck) drowns the battlefield out; heartbeat + breathing stay on top of it.
-	// Stop a still-playing explosion one-shot first so the same sample never phases against itself.
+	// HZM coop - breathing + heartbeat are the DOWNED player's OWN body sounds. playlocalsound
+	// <alias> 1 keeps them private: the loop rides the PLAYER's own entity, and
+	// CG_LoopSoundIsForeignLocal (cg_ents.c:163-172) drops a flag-1 loop on every client whose
+	// own clientNum is not that entity - so a teammate's machine never renders it, at any
+	// distance. That is what the old 3D entity-loopsound emitter got wrong in 2016. A spawned
+	// CARRIER entity would not fix it either: cg_ents.c:168 returns qfalse for
+	// number >= cgs.maxclients, so a carrier is BROADCAST to everyone in the snapshot.
+	//
+	//[user 2026-09-05, bug-2432] ONE BED, NOT THREE LOOPS.
+	//
+	//This started three loops on one player. edict->s.loopSound is a SINGLE INT in entityState -
+	//not a channel and not a list - so each call overwrote the last and at most one could ever
+	//survive. And none did: loopSoundMinDist was hardcoded 0 (player.cpp:19113), which makes
+	//S_OPENAL_AddLoopSounds compute 0*0*v/d^2 == 0 and cut the channel at its epsilon. The whole
+	//feature has been silent since it shipped, which is why the overwrite was never noticed.
+	//The engine now honours the alias (see the game.dll comment) and the slot carries one bed.
+	//
+	//THE SHELLSHOCK WASH IS GONE ON PURPOSE. coop_shellshock02.wav is 10s with a single onset at
+	//0.05s decaying monotonically to 6% of peak - a one-shot envelope, not a bed. Looped it
+	//re-bangs every ten seconds, which is the m3l1a lesson exactly: a stopping gesture repeated
+	//on a timer reads as a bug, not as atmosphere. The world receding is what sells the
+	//bleed-out, and dbno_fade_manager's s_sfxduck ladder does that with no sample at all.
+	//
+	//OFF SWITCH: coop_dbnoBed 0. Tested against "0" and not for "1", so an unregistered cvar
+	//leaves the feature ON - the shape that silently killed coop_aiDynamic (bug-1811) and
+	//coop_aiBound (bug-1815). Nothing in the engine reads it, so there is no engine default for
+	//an empty getcvar to defeat (bug-1669) and it needs no G_InitGame registration.
+	if( getcvar( "coop_dbnoBed" ) == "0" ){
+		local.player.flags["coop_dbno_heartbeat_active"] = NIL
+		end
+	}
+
+	//stop a still-playing explosion one-shot so it cannot phase against the bed
 	local.player stoplocalsound coop_shellshock
-	local.player playlocalsound coop_shellshock_dbno 1
+	local.player playlocalsound coop_dbno_bed1 1
+	local.player.flags["coop_dbno_bed"] = 1
 	local.stage = 1
+	//[2026-09-05] MACHINE-PARSEABLE LIFECYCLE. The whole reason this feature stayed broken for
+	//months is that it was invisible from the server: a loop prints nothing, so silence and
+	//working looked identical in qconsole.log. Exactly one `bed stop` must follow every
+	//`bed start` - if the counts differ, a loop outlived its owner. Parenthesised concat: an
+	//unparenthesised println + is a parse killer and takes the whole file with it.
+	println ( "^~^~^ DBNO bed start stage=1 p=" + local.player.netname )
 
 	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
 		local.elapsed  = local.player.flags["coop_dbno_elapsed"]
 		local.progress = local.elapsed * 1.0 / local.timer
 
-		// heartbeat keeps looping untouched; only swap which BREATH stage loops as the bleed-out deepens
+		//[2026-09-05] SWAP, DO NOT STOP-THEN-START. Writing the next bed's alias straight over the
+		//slot is the whole transition: playlocalsound overwrites loopSound, and a preceding
+		//stoplocalsound would only add gi.StopSound(entnum, CHAN_LOCAL) - a side effect on the
+		//player's one-shot channel that this thread has no business firing (bug-2437).
+		//When the stages share one wav at different pitches, gi.soundindex returns the SAME index,
+		//so S_OPENAL_UpdateLoopSound never tears the loop down (it only does that when pSfx
+		//changes) and simply re-rates it: the heart speeds up mid-beat with no click.
 		if( local.progress >= 0.75 && local.stage != 3 ){
 			local.stage = 3
-			local.player stoplocalsound coop_dbno_breath1
-			local.player stoplocalsound coop_dbno_breath2
-			local.player playlocalsound coop_dbno_breath3 1
+			local.player playlocalsound coop_dbno_bed3 1
+			println ( "^~^~^ DBNO bed stage=3 p=" + local.player.netname )
 		}
 		else if( local.progress >= 0.4 && local.stage < 2 ){
 			local.stage = 2
-			local.player stoplocalsound coop_dbno_breath1
-			local.player playlocalsound coop_dbno_breath2 1
+			local.player playlocalsound coop_dbno_bed2 1
+			println ( "^~^~^ DBNO bed stage=2 p=" + local.player.netname )
 		}
 		waitframe
 	}
 
+	waitthread coop_dbnoBedStop local.player
 	if( local.player != NULL ){
-		local.player stoplocalsound coop_dbno_heartbeat
-	local.player stoplocalsound coop_shellshock_dbno
-		local.player stoplocalsound coop_dbno_breath1
-		local.player stoplocalsound coop_dbno_breath2
-		local.player stoplocalsound coop_dbno_breath3
+		local.player.flags["coop_dbno_heartbeat_active"] = NIL
 	}
-	local.player.flags["coop_dbno_heartbeat_active"] = NIL
+}end
+
+
+//[user 2026-09-05, bug-2432] THE ONE PLACE THE BED IS STOPPED.
+//
+//Called unconditionally from every DBNO exit - revive, team revive, AI medic revive, medkit
+//self-revive, bled out, gave up, spectate, respawn - so the ordering between those paths cannot
+//matter. Idempotent: the flag makes a second call a no-op, and a stale flag costs one redundant
+//stoploopsound, which is harmless. A stuck loop on a revived player is worse than silence, so
+//this is deliberately over-called rather than carefully called.
+//
+//stoploopsound, NOT stoplocalsound, and that is the reason this is a label rather than a line.
+//Entity::StopLoopSound (entity.cpp:3363) zeroes edict->s.loopSound and nothing else.
+//Player::StopLocalSound (player.cpp:19238) zeroes the same field AND calls
+//gi.StopSound(entnum, CHAN_LOCAL), which kills whatever one-shot holds that channel - and
+//coop_exhale1, the revive gasp, is a `local` alias on the player. That is bug-2437 exactly, and
+//it is why coop_uwHeartStop on m3l1a must run BEFORE the surfacing gasp. This removes the
+//ordering constraint instead of documenting it. EV_StopLoopSound's format is NULL
+//(entity.cpp:748-756), so the bare call stops whichever stage is loaded and no caller needs to
+//know which - passing an alias name to it, as medkit.scr and player.scr used to, was a
+//ScriptError on a NULL-format event and stopped nothing by name in any case.
+//
+//NIL and NULL are different (see the script notes): a flag that was never set reads NIL, an
+//entity that has gone away reads NULL, and neither test implies the other.
+coop_dbnoBedStop local.player:{
+	if( local.player == NULL ){ end }
+	if( local.player == NIL ){ end }
+	if( local.player.flags["coop_dbno_bed"] == NIL ){ end }
+	local.player.flags["coop_dbno_bed"] = NIL
+	local.player stoploopsound
+	println ( "^~^~^ DBNO bed stop p=" + local.player.netname )
 }end
 
 
@@ -612,11 +688,7 @@ dbno_die local.player:{
 	//this one also touches sounds/height/damage on the player, so an absent player throws on several
 	//lines rather than one. The loop above exits precisely when the player goes away.
 	if( local.player != NULL ){
-		local.player stoplocalsound coop_dbno_breath1
-		local.player stoplocalsound coop_dbno_breath2
-		local.player stoplocalsound coop_dbno_breath3
-		local.player stoplocalsound coop_dbno_heartbeat
-		local.player stoplocalsound coop_shellshock_dbno
+		waitthread coop_dbnoBedStop local.player
 		ihuddraw_alpha local.player 31 0
 		ihuddraw_alpha local.player 32 0
 		ihuddraw_alpha local.player 33 0
@@ -1095,11 +1167,7 @@ dbno_ai_revive local.player:{
 	ihuddraw_alpha local.player 33 0
 	ihuddraw_string local.player 33 ""
 
-	local.player stoplocalsound coop_dbno_breath1
-	local.player stoplocalsound coop_dbno_breath2
-	local.player stoplocalsound coop_dbno_breath3
-	local.player stoplocalsound coop_dbno_heartbeat
-	local.player stoplocalsound coop_shellshock_dbno
+	waitthread coop_dbnoBedStop local.player
 
 	local.player modheight "stand"
 	println ( "^~^~^ DBNO getup_teamrevive p=" + local.player.netname )
@@ -1285,11 +1353,7 @@ dbno_letgo_monitor:{
 						println "^~^~^ DBNO death_letgo"
 						self.flags["coop_dbno_dead"]   = 1
 						self forcelegsstate DBNO_BLEEDOUT	//[213] slump during the give-up fade
-						self stoplocalsound coop_dbno_breath1
-						self stoplocalsound coop_dbno_breath2
-						self stoplocalsound coop_dbno_breath3
-						self stoplocalsound coop_dbno_heartbeat
-					self stoplocalsound coop_shellshock_dbno
+						waitthread coop_dbnoBedStop self
 						self playsound m1l1_death
 						ihuddraw_alpha self 20 1.0
 						wait 1.5

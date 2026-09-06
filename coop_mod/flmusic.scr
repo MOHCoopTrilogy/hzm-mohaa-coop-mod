@@ -110,11 +110,21 @@ coop_flmusic_filler:{
 		end
 	}
 
-	// Conservative filler pool: understated tension/ambient cues only. Adding
-	// AfterTheDrop.mp3 / BorderTown.mp3 is a one-line bump of the count.
+	// Conservative filler pool: understated tension/ambient cues only. Adding a track is
+	// TWO lines, not one - a new [n] entry AND the count bump - and the indices must stay
+	// contiguous from 1, because randomint(count)+1 spans [1,count] and a gap leaves
+	// local.file unset -> replace.scr::tmstartloop raises "parameter 1 was NIL".
+	// NOT AfterTheDrop.mp3: that is Omaha's cinematic score (maps/m3l1a.scr:2580).
+	// psx_gallery_a/b are the PSX Medal of Honor (1999) mission-gallery score, same composer as
+	// the retail soundtrack, de-duplicated and gain-matched to this pool by EBU R128 integrated
+	// loudness: all four measure -18.0 to -18.1 LUFS (measured 2026-09-04). Do NOT match music
+	// by mono-downmix RMS - these two are much narrower than Emmerich/Kleveburg, so an RMS match
+	// on the mid channel left them 3.5 LU quiet while the numbers looked right.
 	level.coop_flmusic_tracks[1] = "sound/music/Emmerich.mp3"
 	level.coop_flmusic_tracks[2] = "sound/music/Kleveburg.mp3"
-	level.coop_flmusic_track_count = 2
+	level.coop_flmusic_tracks[3] = "sound/music/psx_gallery_a.mp3"
+	level.coop_flmusic_tracks[4] = "sound/music/psx_gallery_b.mp3"
+	level.coop_flmusic_track_count = 4
 
 	level.coop_flmusic_lastCombat = 0 - 1000		// long ago = start calm
 	level.coop_flmusic_playing = NIL			// exact tmstartloop command we last issued (NIL = nothing of ours playing)
@@ -157,6 +167,20 @@ coop_flmusic_filler:{
 		local.pick = randomint( level.coop_flmusic_track_count ) + 1
 		local.file = level.coop_flmusic_tracks[local.pick]
 		waitthread coop_mod/replace.scr::tmstartloop local.file
+		// [2026-09-04] AFTER the start, never before. S_TriggeredMusic_SetupHandle declares
+		// `float fVolume = 1.0` and unconditionally assigns chan_trig_music.fVolume from it on every
+		// successful start (snd_openal_new.cpp:5510 and :5547 on 2026-09-04), so a tmvolume sent BEFORE
+		// a tmstartloop is discarded two lines later and is a pure no-op. Same ordering as
+		// maps/m3l1a.scr:2580 then :2585.
+		// What this line actually buys: replace.scr::tmvolume also writes level.coop_musicCommandVol,
+		// and coop_mod/player.scr:1696-1697 re-stuffs that to a LATE JOINER after the tmstop/tmstartloop
+		// at :1692-1693 - the one place a stale music volume survives a start. Without this, a joiner
+		// arriving after any tmvolume 0 (e.g. officer.scr:3922's death fade, when the conditional restore
+		// at :3938 is skipped) hears silence while everyone else hears the track, with no log line
+		// anywhere. Not reachable on today's allow list - coop_officer_policy returns "none" for t1l1
+		// (officer.scr:47), t2l3 (:57) and m3l1b (:59), so no officer spawns there - but it costs one
+		// line and closes the class.
+		waitthread coop_mod/replace.scr::tmvolume 1
 		level.coop_flmusic_playing = "tmstartloop " + local.file
 		println ( "^~^~^ FLMUSIC filler start " + local.file )
 	}
