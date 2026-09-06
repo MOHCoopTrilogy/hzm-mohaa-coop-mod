@@ -197,6 +197,7 @@ isInCover local.player:{
 	if(level.coop_losCoverOn && level.coop_losN > 0){
 		local.eye = local.player.origin + (0 0 40)
 		local.seen = 0
+		local.smk = 0
 		local.gi = 1
 		while(local.gi <= level.coop_losN && local.seen == 0){
 			local.gun = level.coop_losGun[local.gi]
@@ -215,17 +216,44 @@ isInCover local.player:{
 				//trace (arg 0, which is what sees the tank-wreck boxes bug-2211 wanted) to a point pulled
 				//48 units back toward the gun - outside his box in every direction.
 				local.gpos = local.gun.origin + (0 0 24)
+				local.gs = 0
 				if(sighttrace local.gpos local.eye 1){
 					local.dv = local.eye - local.gpos
 					local.dlen = vector_length local.dv
 					if(local.dlen > 64){
 						local.inv = 48 / local.dlen
 						local.eye2 = local.eye - ( local.dv * local.inv )
-						if(sighttrace local.gpos local.eye2 0){ local.seen = 1 }
+						if(sighttrace local.gpos local.eye2 0){ local.gs = 1 }
 					}else{
-						local.seen = 1
+						local.gs = 1
 					}
 				}
+				//[user 2026-09-06, bug-2501] SMOKE IS COVER. 'we can't take damage if we are behind the smoke
+				//that gets called in during the drop - it should be stopping them from seeing us.' Each landed
+				//column (coop_smokeSignal_round keeps its emitter in level.coop_smokeCloud[slot] for the life of
+				//the barrage) is a sphere of level.coop_smokeCoverR at 70 u up its stem; if this gun's line to
+				//the player passes inside one, the gun is blind. Probe: BEACHLOS smoke=<n blinded>.
+				if(local.gs == 1 && level.coop_smokeUp != NIL && level.coop_smokeUp > 0){
+					if(level.coop_smokeCoverR == NIL){ level.coop_smokeCoverR = 200 }
+					local.gd = local.eye - local.gpos
+					local.gl = vector_length local.gd
+					local.k = 1
+					while(local.k <= 13 && local.gs == 1 && local.gl > 1){
+						local.sc = level.coop_smokeCloud[local.k]
+						if(local.sc != NULL && local.sc != NIL){
+							local.cc = local.sc.origin + (0 0 70)
+							local.sv = local.cc - local.gpos
+							local.tt = ( vector_dot local.sv local.gd ) / ( local.gl * local.gl )
+							if(local.tt > 0.03 && local.tt < 0.97){
+								local.cp = local.gpos + ( local.gd * local.tt )
+								local.cd = vector_length ( local.cp - local.cc )
+								if(local.cd < level.coop_smokeCoverR){ local.gs = 0; local.smk++ }
+							}
+						}
+						local.k++
+					}
+				}
+				if(local.gs == 1){ local.seen = 1 }
 			}
 			local.gi++
 		}
@@ -233,7 +261,7 @@ isInCover local.player:{
 		if(level.coop_losSaid == NIL){ level.coop_losSaid = 0 }
 		if(level.time > ( level.coop_losSaid + 4 )){
 			level.coop_losSaid = level.time
-			println("^~^~^ BEACHLOS seen=" + local.seen + " y=" + int( local.player.origin[1] ) + " hp=" + local.player.health)
+			println("^~^~^ BEACHLOS seen=" + local.seen + " smoke=" + local.smk + " y=" + int( local.player.origin[1] ) + " hp=" + local.player.health)
 		}
 		if(local.seen == 0){ end 1 }
 	}
@@ -3250,7 +3278,10 @@ coop_boatBurn local.pos:{
 			local.fp = (0 0 0)
 			local.fp[0] = local.pos[0] + ((randomint 200) - 100)
 			local.fp[1] = local.pos[1] + ((randomint 260) - 130)
-			local.fp[2] = local.pos[2] + 20 + (randomint 60)
+			//[user 2026-09-06, bug-2504] +20..80 -> +100..134: local.pos is the hull's origin = its KEEL on the
+			//seabed (bounds: deck top = origin+140.53), so the flames sat below the deck floor and, for the hulls
+			//in the water, 9 u above the surface - 'fires underwater' from the plunge. Deck height, above the gunwale.
+			local.fp[2] = local.pos[2] + 100 + (randomint 34)
 			local.f.origin = local.fp
 			local.f notsolid
 			local.f anim start
@@ -3264,13 +3295,13 @@ coop_boatBurn local.pos:{
 	//--- the column. superlong is the tall one; linger_smoke alone barely clears the gunwale.
 	local.sm = spawn "models/emitters/tehao_firesmoke_superlong.tik"
 	if(local.sm != NULL && local.sm != NIL){
-		local.sm.origin = local.pos + (0 0 50)
+		local.sm.origin = local.pos + (0 0 130)		//[bug-2504] deck height
 		local.sm notsolid
 		local.sm anim start
 	}
 	local.sm2 = spawn "models/emitters/linger_smoke.tik"
 	if(local.sm2 != NULL && local.sm2 != NIL){
-		local.sm2.origin = local.pos + (0 0 70)
+		local.sm2.origin = local.pos + (0 0 150)		//[bug-2504] deck height
 		local.sm2 notsolid
 		local.sm2 scale 2.4
 		local.sm2 anim start
@@ -10901,7 +10932,7 @@ coop_higginsSinkBurn local.pos local.band:{
 			local.fp = (0 0 0)
 			local.fp[0] = local.pos[0] + ( ( randomint 90 ) - 45 )
 			local.fp[1] = local.pos[1] + ( ( randomint 220 ) - 110 )
-			local.fp[2] = local.pos[2] + 20 + ( randomint 40 )
+			local.fp[2] = local.pos[2] + 100 + ( randomint 34 )		//[bug-2504] deck height, not the bilge
 			local.f.origin = local.fp
 			local.f notsolid
 			local.f bind $higgins1
@@ -10914,7 +10945,7 @@ coop_higginsSinkBurn local.pos local.band:{
 	if(local.band == 1){
 		local.fm = spawn "models/emitters/fireandsmoke.tik"
 		if(local.fm != NULL && local.fm != NIL){
-			local.fm.origin = local.pos + (0 0 34)
+			local.fm.origin = local.pos + (0 0 118)		//[bug-2504] deck height
 			local.fm notsolid
 			local.fm bind $higgins1
 			local.fm anim start
@@ -12012,7 +12043,7 @@ coop_rampCinematic:{
 	//the PLACEMENT moves early; the men who are shot in the water still die on the old cue.
 	if(level.flags["coop_spawn1origin"] != NIL){
 		local.dl = level.flags["coop_spawn1origin"]
-		if(level.coop_uwPace == NIL){ level.coop_uwPace = 1.0 }
+		if(level.coop_uwPace == NIL){ level.coop_uwPace = 0.9 }
 		thread coop_underwaterDead local.dl[0] ( local.dl[1] - 190 ) level.coop_uwPace
 	}
 	//[user 2026-09-02, bug-2343] and the fire that is doing it, visibly, from the emplacements
@@ -12839,7 +12870,7 @@ coop_rampUnderwater:{
 	//paced beats plus 2.80s of unpaced blackout. Keeping 1.2 on top would stretch a beat that is
 	//now 11s longer for no new content and cost watchdog margin. The 0.5..1.2 clamp below is
 	//UNCHANGED and 1.2 is still inside the budget; 1.0 is simply the right default now.
-	if(level.coop_uwPace == NIL){ level.coop_uwPace = 1.0 }
+	if(level.coop_uwPace == NIL){ level.coop_uwPace = 0.9 }
 	if(level.coop_uwSound == NIL){ level.coop_uwSound = 1 }
 	if(level.coop_uwGearOn == NIL){ level.coop_uwGearOn = 1 }
 	//[user 2026-09-03] the surfacing breath. Defaulted HERE, beside the other beat switches, so the
@@ -13235,6 +13266,14 @@ coop_rampUnderwater:{
 	//shock here is the 1.2 stuffed at the wake, decayed to about a third, which is what the pitch
 	//rail's margin is budgeted against. It is UNPACED because it threads the sink itself and the
 	//heel is timed against its own legs; coop_uwGear's prop lifetime is widened to match.
+	//[user 2026-09-06] 'remove the boat stare when underwater, and shorten the segment a bit.' The look
+	//(coop_uwBoatLook, 11.5 s measured in both 09-06 runs) is off by default - level.coop_uwBoatLookOn 1
+	//brings it back - and the sink it used to start is started here, with the camera taken off the boat
+	//rig first (coop_uwPose honours coop_uwUnbind) so the roll cannot carry the camera.
+	level.coop_higginsSinkLeg = 0
+	level.coop_higginsSinkDelay = 0.05
+	level.coop_uwUnbind = 1
+	thread coop_higginsSink
 	waitthread coop_uwBoatLook local.wx local.wy
 
 	//the shock eases as he gets his bearings. This RESTARTS rather than being swallowed: the client
@@ -13793,7 +13832,7 @@ coop_rampBoatLook local.wx local.wy:{
 //=========================================================================
 coop_uwBoatLook local.wx local.wy:{
 //=========================================================================
-	if(level.coop_uwBoatLookOn == NIL){ level.coop_uwBoatLookOn = 1 }
+	if(level.coop_uwBoatLookOn == NIL){ level.coop_uwBoatLookOn = 0 }		//[user 2026-09-06] the boat stare is out
 	if(!level.coop_uwBoatLookOn){ end }
 	if($boatCamera == NULL || $boatCamera == NIL){ end }
 	if($higgins1_model == NULL || $higgins1_model == NIL){ end }
@@ -13812,11 +13851,8 @@ coop_uwBoatLook local.wx local.wy:{
 	local.ph = 0 - 20		//while she is in frame
 	local.ph2 = 0 - 22
 
-	//--- start her going over, and take the camera off the rig before she moves
-	level.coop_higginsSinkLeg = 0
-	level.coop_higginsSinkDelay = 0.05
-	level.coop_uwUnbind = 1
-	thread coop_higginsSink
+	//[user 2026-09-06] the sink is started by coop_rampUnderwater at 'up' now, look or no look; this label
+	//only runs when level.coop_uwBoatLookOn is 1 again.
 	println("^~^~^ UWLOOK start lid=" + level.coop_uwLidHide + " at=" + local.cam)
 
 	//--- L0. He drops his head to the sand. 0.70s.
@@ -14775,7 +14811,9 @@ coop_hedgeCrowd:{
 	if(level.coop_hedgeCrowdKill == NIL){ level.coop_hedgeCrowdKill = 0.45 }
 	wait 4
 	local.hn = 0
-	local.hn++; local.hx[local.hn] = 208; local.hy[local.hn] = 626
+	//[user 2026-09-06] 'remove the two allies that are right on top of our radioman' - (208 626) was his own
+	//hedgehog, 21 u from him; the pair now sits at the next cover_trigger up the beach (610 1032).
+	local.hn++; local.hx[local.hn] = 610; local.hy[local.hn] = 1032
 	local.hn++; local.hx[local.hn] = 0 - 76; local.hy[local.hn] = 558
 	local.hn++; local.hx[local.hn] = 84; local.hy[local.hn] = 350
 	local.hn++; local.hx[local.hn] = 476; local.hy[local.hn] = 484
@@ -16478,13 +16516,13 @@ coop_underwaterWaders local.wx local.wy:{
 	//has three early-outs (its switch, no $boatCamera, no $higgins1_model); with the look gone, BEAT 6
 	//opens at B and every seat below would spawn in the middle of the strokes, in frame, 280-480u out.
 	//The same three tests, so the beat degrades to "no waders" rather than to "men appearing".
-	if(level.coop_uwBoatLookOn == NIL){ level.coop_uwBoatLookOn = 1 }
+	if(level.coop_uwBoatLookOn == NIL){ level.coop_uwBoatLookOn = 0 }		//[user 2026-09-06] the boat stare is out
+	//[user 2026-09-06, bug-2503] the look is off by default now and the seat table is timed to the strokes,
+	//so the look is no longer a precondition - only the sequence camera is.
 	local.look = 1
-	if(!level.coop_uwBoatLookOn){ local.look = 0 }
 	if($boatCamera == NULL || $boatCamera == NIL){ local.look = 0 }
-	if($higgins1_model == NULL || $higgins1_model == NIL){ local.look = 0 }
 	if(local.look == 0){
-		println("^~^~^ UNDERWADE skip reason=no_boat_look")
+		println("^~^~^ UNDERWADE skip reason=no_camera")
 		end
 	}
 
@@ -16552,6 +16590,12 @@ coop_underwaterWaders local.wx local.wy:{
 	if(local.pc < 0.65){ local.pc = 0.65 }
 	if(local.pc > 1.2){ local.pc = 1.2 }
 	local.b = 4.91 + ( 9.16 * local.pc )
+	//[user 2026-09-06] the seat and deadline times below are all `local.b + k`, where b was the start of
+	//the boat look and the strokes began 11.5 s later. The look is off by default now, the strokes
+	//begin at b, so the table slides with them: same seats, same kills-between-stroke-1-and-gather.
+	local.lk = 11.5
+	if(level.coop_uwBoatLookOn == 1){ local.lk = 0 }
+	local.b = local.b - local.lk
 	local.n = 0
 	local.n++; local.sx[local.n] = 0 - 70;  local.sy[local.n] = 240; local.gx[local.n] = 0 - 565; local.gy[local.n] = 1600; local.st[local.n] = ( local.b + 7.0 ); local.sd[local.n] = ( local.b + 7.0 + 6.0 )
 	local.n++; local.sx[local.n] = 35;      local.sy[local.n] = 225; local.gx[local.n] = 535;     local.gy[local.n] = 1600; local.st[local.n] = ( local.b + 7.4 ); local.sd[local.n] = 0 - 1
@@ -16566,7 +16610,7 @@ coop_underwaterWaders local.wx local.wy:{
 	//in there yields they drift apart and the late seats die on the frame they spawn. Both come off
 	//local.t0 now, so there is nothing left to drift.
 	local.t0 = level.time
-	local.cap = local.t0 + 44		//[2026-09-05] 38 -> 44 with the retime above. coop_underwaterWader
+	local.cap = local.t0 + ( 44 - local.lk )		//[2026-09-05] 38 -> 44 with the retime above. coop_underwaterWader
 						//tests this cap BEFORE it tests the deadline, so it must clear the
 						//last deadline outright: at pace 1.2 that is 31.1 + up to 1.35s of
 						//stagger + a 3.4s flail = 35.9. 44 leaves 8s of headroom and is
