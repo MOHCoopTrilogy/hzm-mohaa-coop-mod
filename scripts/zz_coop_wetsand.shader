@@ -111,7 +111,7 @@ textures/mohtest/omaha_set4_shoreline
 		clampmapy textures/coop_fx/wetsand_swash.tga
 		blendFunc filter
 		rgbGen identity
-		tcMod wavetrant sin 0.45 0.75 0 0.08
+		tcMod wavetrant sin -0.10 0.40 0 0.08		//[bug-2514] land edge: swing 0.659-1.000 -> 0.910-1.000
 	}
 
 	// [user 2026-09-06, bug-2508] STAGE 3 - BLOOD IN THE SWASH. The waterline sheet no longer draws its blood
@@ -133,7 +133,7 @@ textures/mohtest/omaha_set4_shoreline
 		blendFunc blend
 		rgbGen identity
 		tcMod scale 1 1
-		tcMod wavetrant sin 0.45 0.75 0 0.08
+		tcMod wavetrant sin -0.10 0.40 0 0.08		//[bug-2514] land edge: swing 0.659-1.000 -> 0.910-1.000
 	}
 
 	// [coop 2026-09-05] STAGE 4 - FOAM WHERE THE SHEET TURNS. Retail's wash2 with the reach baked into
@@ -151,6 +151,6 @@ textures/mohtest/omaha_set4_shoreline
 		rgbGen wave sin 0.12 0.20 0 0.08
 		tcMod scale 1 1
 		tcMod scroll 0.02 0
-		tcMod wavetrant sin 0 0.12 0 0.08
+		tcMod wavetrant sin 0.213 0.40 0 0.08		//[bug-2514] foam rides the wet line, 30 u seaward, unclamped
 	}
 }

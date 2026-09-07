@@ -66,7 +66,12 @@ textures/misc_outside/deepbluesea_shoreline
 
 	// [coop 2026-08-28] the vertical wash at the sand's edge (header: THE FLAP). Also what keeps this
 	// shader on gl2's generic program, where alphaGen tCoord exists. Do not remove.
-	deformVertexes flap t 10 sin 0 4 0 .08 0 4
+	//[user 2026-09-06, bug-2514] 4/4 -> 2/2. This sheet's own edge is a plane-plane intersection line
+	//that swept y -768..-965 in perfect unison along all 15872 u - dead straight, zero rag, by
+	//construction. Halving amplitude AND max moves the crossing to y -812.3: sweep 197 u -> 44 u,
+	//keeping a quarter of the heave. (1/1 kills 94% of the motion and leaves 0.0067 u at the trough.)
+	//This is the SHORELINE flap. The ocean's flap max is 1 by bug-2478 and must stay there.
+	deformVertexes flap t 10 sin 0 2 0 .08 0 2
 
 	// [user 2026-09-06, bug-2508] STAGE 1 - BASE WATER TINT, reclaimed. Retail's two-parameter alphaGen
 	// left const at -1 = alpha 0 on both renderers (LANE-A s.4), so this stage drew nothing and the
@@ -107,6 +112,20 @@ textures/misc_outside/deepbluesea_shoreline
 		blendFunc GL_SRC_ALPHA GL_ONE
 		rgbGen wave sin 0.3 0.25 0 0.08
 		tcMod scale 62 1
+		//[user 2026-09-06, bug-2518] ALONG-SHORE CELL MASK. Everything on this beach is driven by
+		//tCoord, which cannot vary along the shore, so every band was a straight stripe running all
+		//15872 u ("a lot of perfect symmetry ... it all looks like a straight line"). A second bundle
+		//is the only channel that can carry along-shore variation without spending a stage: both
+		//renderers multiply bundle 1's ALPHA into the stage (gl2 generic_fp.glsl, gl1 GL_MODULATE),
+		//and the mask is RGB 255 so colour is untouched. No tcMod: bundle 1 defaults to TCGEN_TEXTURE,
+		//the raw texcoords, which is the mapping docs/tools/gen_surfcell.py authors in. 17 cells at
+		//~23.7 m plus five embayments at 16-28 m, sheared 0.015 across the surf zone so the outer and
+		//inner gaps do not stack. The embayments are megacusp / runnel drainage, NOT rips: rips at
+		//Omaha are unattested and a dissipative terrace is the least likely bed to carry them.
+		//Kill switch: python docs/tools/gen_surfcell.py --flat (alpha 255, a no-op multiply, no
+		//shader edit and no vid_restart).
+	nextbundle
+		map textures/coop_fx/surfcell.tga
 		tcMod wavetrant sin 0 -0.06 0 0.08		// [bug-2508, verifier] negative amplitude: furthest shoreward ON the lift, with the flap
 	}
 
@@ -208,12 +227,33 @@ textures/misc_outside/deepbluesea_shoreline
 		// rise is gone: the blood is 0.6 x texture alpha from y -2160 in. The swash blood moves to the sand
 		// strip (coop_fx/swashblood.tga on zz_coop_wetsand.shader). KNOB: the 4th number is the ceiling -
 		// lower it (with the 1st = 8.2 x ceiling, 2nd = -1.8 x ceiling) if the seam reads again.
-		alphaGen tCoord 4.92 -1.08 0 0.6
+		//[user 2026-09-06, bug-2514] halved. The blood reddens the shore side of the y -2160 line by
+		//+0.030 R / -0.011 G and reads as a maroon carpet the length of the beach from above. This
+		//sheet has THREE vertex t rows (0.00497 / 0.49361 / 0.99361) and alphaGen is per-vertex, so a
+		//monotonic ramp cannot be clean at both ends: keep the clean sand edge, halve everything else.
+		//Vertex triple 0.6 / 0.6 / 0.0 -> 0.3 / 0.3 / 0.0.
+		alphaGen tCoord 2.46 -0.54 0 0.3
 		// Was 0.42/0.16 - less than one repeat across a 16,000-unit beach, i.e. one smooth blob, i.e. a
 		// red filter over the sea. 16 x 2 puts a repeat every ~1000 units across and ~700 deep, so the
 		// texture's clear water (58% of it now) actually reads as gaps between slicks.
 		tcMod scale 16 2
 		tcMod scroll 0.002 -0.008
+		//[user 2026-09-06, bug-2518] ALONG-SHORE CELL MASK. Everything on this beach is driven by
+		//tCoord, which cannot vary along the shore, so every band was a straight stripe running all
+		//15872 u ("a lot of perfect symmetry ... it all looks like a straight line"). A second bundle
+		//is the only channel that can carry along-shore variation without spending a stage: both
+		//renderers multiply bundle 1's ALPHA into the stage (gl2 generic_fp.glsl, gl1 GL_MODULATE),
+		//and the mask is RGB 255 so colour is untouched. No tcMod: bundle 1 defaults to TCGEN_TEXTURE,
+		//the raw texcoords, which is the mapping docs/tools/gen_surfcell.py authors in. 17 cells at
+		//~23.7 m plus five embayments at 16-28 m, sheared 0.015 across the surf zone so the outer and
+		//inner gaps do not stack. The embayments are megacusp / runnel drainage, NOT rips: rips at
+		//Omaha are unattested and a dissipative terrace is the least likely bed to carry them.
+		//The SOFT mask here, floor 0.55 not 0.20: blood is deposited ON SAND and should vary with the
+		//surf, not switch off with it.
+		//Kill switch: python docs/tools/gen_surfcell.py --flat (alpha 255, a no-op multiply, no
+		//shader edit and no vid_restart).
+	nextbundle
+		map textures/coop_fx/surfcell_soft.tga
 	}
 
 	// [user 2026-09-04] THE TRAVELLING CREST. "waves and physical white waves that crest".
@@ -289,8 +329,24 @@ textures/misc_outside/deepbluesea_shoreline
 		blendFunc GL_SRC_ALPHA GL_ONE
 		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin 0.55 0.45 0 0.08
-		tcMod scale 8 -6
+		//[user 2026-09-06, bug-2514] 8 -> 5: the crest stopped tiling on 1984 u (autocorrelation at that
+		//lag +0.956 -> -0.307). The transform below is a SHEAR, t' = 0.10*(5s) - 6t, which tilts the
+		//crest line off shore-parallel by 117 u across the beach so it arrives ~7 s apart at the two
+		//ends instead of the whole 15872 u flashing white at once. tcMods compose in LISTED ORDER, so
+		//this must sit between the scale and the scroll. FOUR tcMods here is TR_MAX_TEXMODS: a fifth
+		//is ri.Error(ERR_DROP) at parse time. This stage is closed.
+		tcMod scale 5 -6
+		tcMod transform 1 0.10 0 1 0 0
 		tcMod scroll 0.01 0.16
 		tcMod wavetrant sin 0 0.30 0 0.08
+		//[user 2026-09-06, bug-2518] the cell mask on the crest too, and this one is MANDATORY, not
+		//optional: stage 2's foam contributes ~0.11 of framebuffer while this stage is ocean2a_shore
+		//under rgbGen wave 0.55 0.45, roughly 5x brighter and the thing that actually reads as a line
+		//of surf. Gating the faint layer and leaving the bright one whole would inverse the intent.
+		//Bundle 1 carries no tcMod, so it samples the raw texcoords the mask is authored in. The
+		//nextbundle also marks this stage ST_GLSL (tr_shader.c:5238), which keeps its alphaGen tCoord
+		//off the lightall collapse that would drop it (bug-2486) - a free side benefit.
+	nextbundle
+		map textures/coop_fx/surfcell.tga
 	}
 }

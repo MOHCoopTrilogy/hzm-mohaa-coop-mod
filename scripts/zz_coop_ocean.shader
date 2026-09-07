@@ -107,7 +107,14 @@ textures/misc_outside/deepbluesea
 	{
 		nopicmip
 		map textures/misc_outside/oceandday1.tga
-		blendFunc add
+		//[user 2026-09-06, bug-2514] THE SEAM. This additive sheen had no counterpart on the shore
+		//sheet, so it was 0.240 of max channel of pure step across the straight line at y -2160.
+		//`blendFunc add` parses to ONE|ONE and ignores alpha (tr_shader.c:1007), so the blendFunc
+		//change is a PREREQUISITE of the alphaGen, not decoration. alphaGen tCoord 0 4 0 1 = 4T
+		//clamped, which on this patch's eight drawn vertex rows (t = k/7, y -2160 .. -8000) reads
+		//0.000 / 0.571 / 1.000 and is bit-identical to what shipped from y -3828.6 seaward.
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 0 4 0 1
 		tcMod scale .2 .5
 		tcMod scroll 0 .005
 	nextbundle
@@ -138,6 +145,20 @@ textures/misc_outside/deepbluesea
 		tcMod scale 4 1
 		tcMod scroll 0 0.004
 		tcMod turb 0 0.02 0 0.05
+		//[user 2026-09-06, bug-2518] ALONG-SHORE CELL MASK. Everything on this beach is driven by
+		//tCoord, which cannot vary along the shore, so every band was a straight stripe running all
+		//15872 u ("a lot of perfect symmetry ... it all looks like a straight line"). A second bundle
+		//is the only channel that can carry along-shore variation without spending a stage: both
+		//renderers multiply bundle 1's ALPHA into the stage (gl2 generic_fp.glsl, gl1 GL_MODULATE),
+		//and the mask is RGB 255 so colour is untouched. No tcMod: bundle 1 defaults to TCGEN_TEXTURE,
+		//the raw texcoords, which is the mapping docs/tools/gen_surfcell.py authors in. 17 cells at
+		//~23.7 m plus five embayments at 16-28 m, sheared 0.015 across the surf zone so the outer and
+		//inner gaps do not stack. The embayments are megacusp / runnel drainage, NOT rips: rips at
+		//Omaha are unattested and a dissipative terrace is the least likely bed to carry them.
+		//Kill switch: python docs/tools/gen_surfcell.py --flat (alpha 255, a no-op multiply, no
+		//shader edit and no vid_restart).
+	nextbundle
+		map textures/coop_fx/surfcell_m.tga
 	}
 	// [user 2026-09-06, bug-2508] ITEM 5b - SKY SHEEN (README s.0 item 4 / s.4: Omaha's sun is
 	// vertical, so a sun glint sits at the nadir; what an overcast sea catches at grazing angles is
@@ -161,6 +182,39 @@ textures/misc_outside/deepbluesea
 		blendFunc GL_SRC_ALPHA GL_ONE
 		tcGen environment
 		rgbGen identity
-		alphaGen const 0.25
+		//[user 2026-09-06, bug-2514] was `alphaGen const 0.25` - a flat quarter everywhere, including
+		//the seam row where the shore sheet has no sheen at all. clamp(T,0,0.25) fades it in over the
+		//first 1/4 of the patch; 255*0.25 = 63 exactly, so the far field is unchanged to the byte.
+		alphaGen tCoord 0 1 0 0.25
+	}
+	// [user 2026-09-06, bug-2514] ITEM 5c - THE SAME CREST AS THE SHORE, SO IT CROSSES THE SEAM.
+	// The travelling crest existed on exactly one side of a straight line, which was the largest
+	// single component of the step at y -2160. Every number here is DERIVED from the shore stage,
+	// not chosen: `24.887` = 5840 * 6/1408 is the scale at which this patch's texture coordinate is
+	// the same function of world y as the shoreline sheet's, so both crests have the same 234.67 u
+	// spacing and the same 37.55 u/s shoreward run; `5` matches the shore's S scale so both tile at
+	// 3174 u along shore; the transform matches the shore's shear and gives dy/ds = +117.33 u with
+	// the SAME sign (the sea's t rises seaward, and the sign flip between -6 and +24.887 already
+	// accounts for it). alphaGen tCoord 1 -1 0 1 = 1-2T, which on this patch's real vertex rows is
+	// 1.000 / 0.714 / 0.429 / 0.143 / 0.000 at y -2160 / -2994 / -3829 / -4663 / -5497 and seaward,
+	// so the crest lives in the near strip and never reaches the fleet.
+	// MUST BE LAST: gl1 leaves an inactive slot for a failed ifCvarnot and FinishShader breaks at the
+	// first inactive stage, so a cvar-gated stage anywhere else silently drops everything below it.
+	// ocean2a_shore.jpg exists once, main/Pak2.pk3, 256^2, with no .dds and no .tga anywhere in
+	// main/mainta/maintt, so no HD pack can shadow it. Ocean goes 4 -> 5 stages of 8.
+	// Kill switch: coop_noSeaCrest 1 + vid_restart (parse time, not live).
+	// IF IT RUNS OUT TO SEA INSTEAD OF IN, negate the 0.16 in tcMod scroll - that sign is the one
+	// thing here derived rather than observed.
+	{
+		ifCvarnot coop_noSeaCrest 1
+		nopicmip
+		map textures/misc_outside/ocean2a_shore.jpg
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 1 -1 0 1
+		rgbGen wave sin 0.55 0.45 0 0.08
+		tcMod scale 5 24.887
+		tcMod transform 1 0.10 0 1 0 0
+		tcMod scroll 0.01 0.16
+		tcMod wavetrant sin 0 0.30 0 0.08
 	}
 }
