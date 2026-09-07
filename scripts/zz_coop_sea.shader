@@ -7,14 +7,15 @@
 // the 64-vert patch a wave is under-sampled; on the coop_sea mesh (121.7 u rows) it is not.
 //
 // `deformVertexes wave <div> sin <base> <amp> <phase> <freq>` phases each vertex by (x+y+z)/div in
-// entity space. The mesh is pre-rotated for yaw 225, so x+y = -sqrt(2)*(Y - oy): the wavelength
-// along world Y is div/sqrt(2) = 2401 / 983 u and a positive freq moves the crests toward +Y = the beach.
+// entity space. NOTE the crest-normal wavelength is div/sqrt(2) = 2401 / 983 / 1061 u, but the spacing along world
+// X and along world Y is div itself - text here once said otherwise, and that is exactly the sort of
+// sentence a later session uses to pick a wavelength.
 // The per-vertex amplitude is the mesh's own normal length (0 on the seam row, 1 from 1200 u out),
 // so nothing here needs to know where the seam is. Two deforms put this shader on the CPU deform
 // path (tr_local.h:2846), where both are applied (tr_shade_calc.c:704-715); 1,617 verts, trivial.
 //
 // KILL SWITCH for the look: this file (the script switch is level.coop_seaMeshOn). To tune: amp is
-// vertical units at full taper (summed 20.049), div = wavelength * 1.4142, freq = 1 / period.
+// vertical units at full taper (summed 32.4105), div = wavelength * 1.4142, freq = 1 / period.
 // Keep the summed amplitude near the retail sheet's own +/-8.5 at the fleet (bug-2478) or the boats
 // drown again. One name, one coop file (TRAPS T6). No lightmap stage: this is an entity.
 coop_sea_deep
@@ -29,8 +30,9 @@ coop_sea_deep
 	surfaceparm nolightmap
 	cull none
 
-	deformVertexes wave 3396 sin 0 14.145 0 0.16		// swell: lambda 2401 u = 61.0 m, T 6.25 s - the shore crest's own arrival period
-	deformVertexes wave 1390 sin 0 5.904 0 0.25		// chop:  lambda  983 u = 25.0 m, T 4.00 s
+	deformVertexes wave 3396 sin 0 17.825 0 0.16		// swell: lambda 2401 u = 61.0 m, T 6.25 s - the shore crest's own arrival period
+	deformVertexes wave 1390 sin 0 7.44 0 0.25		// chop:  lambda  983 u = 25.0 m, T 4.00 s
+	deformVertexes wave 1500 sin 0 7.1455 0 0.24		// steepener: lambda 1061 u = 26.9 m, T 4.17 s - bought for slope, not height
 
 	{
 		nopicmip
@@ -49,7 +51,8 @@ coop_sea_deep
 	{
 		nopicmip
 		map textures/misc_outside/oceandday1.tga
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 0 4 0 1
 		tcMod scale .2 .5
 		tcMod scroll 0 .005
 	nextbundle
