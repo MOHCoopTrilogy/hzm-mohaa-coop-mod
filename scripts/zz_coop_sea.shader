@@ -8,13 +8,13 @@
 //
 // `deformVertexes wave <div> sin <base> <amp> <phase> <freq>` phases each vertex by (x+y+z)/div in
 // entity space. The mesh is pre-rotated for yaw 225, so x+y = -sqrt(2)*(Y - oy): the wavelength
-// along world Y is div/sqrt(2) = 3600 / 1200 u and a positive freq moves the crests toward +Y = the beach.
+// along world Y is div/sqrt(2) = 2401 / 983 u and a positive freq moves the crests toward +Y = the beach.
 // The per-vertex amplitude is the mesh's own normal length (0 on the seam row, 1 from 1200 u out),
 // so nothing here needs to know where the seam is. Two deforms put this shader on the CPU deform
 // path (tr_local.h:2846), where both are applied (tr_shade_calc.c:704-715); 1,617 verts, trivial.
 //
 // KILL SWITCH for the look: this file (the script switch is level.coop_seaMeshOn). To tune: amp is
-// vertical units at full taper (summed 8.5), div = wavelength * 1.4142, freq = 1 / period.
+// vertical units at full taper (summed 20.049), div = wavelength * 1.4142, freq = 1 / period.
 // Keep the summed amplitude near the retail sheet's own +/-8.5 at the fleet (bug-2478) or the boats
 // drown again. One name, one coop file (TRAPS T6). No lightmap stage: this is an entity.
 coop_sea_deep
@@ -29,8 +29,8 @@ coop_sea_deep
 	surfaceparm nolightmap
 	cull none
 
-	deformVertexes wave 5091 sin 0 6 0 0.1		// long swell: lambda 3600 u, 10 s (the sheet's flap period, bob-sync stays valid), 360 u/s
-	deformVertexes wave 1697 sin 0 2.5 0 0.18		// short chop: lambda 1200 u, 5.6 s, 216 u/s; 10 rows per wavelength
+	deformVertexes wave 3396 sin 0 14.145 0 0.16		// swell: lambda 2401 u = 61.0 m, T 6.25 s - the shore crest's own arrival period
+	deformVertexes wave 1390 sin 0 5.904 0 0.25		// chop:  lambda  983 u = 25.0 m, T 4.00 s
 
 	{
 		nopicmip

@@ -111,7 +111,14 @@ textures/misc_outside/deepbluesea_shoreline
 		clampmapy textures/coop_fx/breakfoam.tga
 		blendFunc GL_SRC_ALPHA GL_ONE
 		rgbGen wave sin 0.3 0.25 0 0.08
-		tcMod scale 62 1
+		//[user 2026-09-07, bug-2519] 62 -> 1. breakfoam.tga is no longer a 256 u tile repeated 62 times
+		//along the beach - it is a 2048-wide procedural bake that spans the whole 15872 u ONCE, with
+		//14 scallops of +/-2.7 m cross-shore wander, a sharp seaward breaking face, a spilling trail
+		//whose length varies along the shore, and foam that warms as it ages. At scale 1 it is also in
+		//phase with the cell mask on this stage's second bundle, which is authored in the same raw
+		//texcoords. 7.75 u per texel. Kill switch: gen_breakfoam.py --flat rebakes the old straight band
+		//with no shader edit.
+		tcMod scale 1 1
 		//[user 2026-09-06, bug-2518] ALONG-SHORE CELL MASK. Everything on this beach is driven by
 		//tCoord, which cannot vary along the shore, so every band was a straight stripe running all
 		//15872 u ("a lot of perfect symmetry ... it all looks like a straight line"). A second bundle

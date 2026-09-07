@@ -150,7 +150,15 @@ textures/mohtest/omaha_set4_shoreline
 		blendFunc GL_SRC_ALPHA GL_ONE
 		rgbGen wave sin 0.12 0.20 0 0.08
 		tcMod scale 1 1
-		tcMod scroll 0.02 0
+		//[user 2026-09-07, bug-2519] LONGSHORE DRIFT. 0.02 -> 0.0672 S/s = 17.2 u/s, and the sign is
+		//EAST: the flood tide at Omaha on 6 June ran east at up to 2.7 kt offshore and about 0.44 m/s
+		//inside the surf, and it is the named cause of the landing craft coming ashore off their
+		//sectors. So the foam slides steadily to the right as you face the sea, about a body-length
+		//and a half per wave, while the wet line and the stains printed on the sand stay put - which
+		//is why only THIS stage takes an S scroll and stages 2 and 3 keep zero.
+		//RISK: one 256 u tile passes every 14.9 s, so this is the one place a conveyor read is
+		//possible. Check it while MOVING along the beach, not standing still. Fallback 0.034.
+		tcMod scroll 0.0672 0
 		tcMod wavetrant sin 0.213 0.40 0 0.08		//[bug-2514] foam rides the wet line, 30 u seaward, unclamped
 	}
 }
