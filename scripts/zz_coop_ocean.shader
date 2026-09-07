@@ -5,7 +5,8 @@
 // This is a WHOLE-BODY RESTATEMENT of textures/misc_outside/deepbluesea (main/Pak0.pk3,
 // scripts/misc_outside.shader). Two edits differ from retail, both marked below: the flap max
 // (bug-2478) and the first stage's blendFunc blend + depthwrite (bug-2507, the lid from below).
-// Two stages, well under the 8-stage cap - unlike zz_coop_shoreline.shader, which is at 8.
+// Two retail stages plus two coop stages (bug-2508: foam streaks, sky sheen) = 4 of the 8-stage cap -
+// unlike zz_coop_shoreline.shader, which is at 8.
 //
 // WHAT WAS WRONG, as arithmetic rather than as taste:
 //
@@ -55,7 +56,8 @@
 // carrying `flap t 10 sin 0 3 0 .10 0 3`, i.e. 9*rawT_runup where rawT_runup ramps 1.909x slower) -
 // which is the only value at which the two coplanar sheets cannot interpenetrate.
 //
-// NOTHING ELSE IS TOUCHED. Apart from the two marked edits, both stages below are byte-for-byte retail.
+// NOTHING ELSE IS TOUCHED in the retail body: apart from the two marked edits, stages 1-2 are byte-for-byte
+// retail. Stages 3-4 are coop additions (bug-2508), each documented where it sits.
 textures/misc_outside/deepbluesea
 {
 	qer_editorimage textures/misc_outside/ocean2.tga
@@ -112,5 +114,53 @@ textures/misc_outside/deepbluesea
 		map textures/misc_outside/oceandday1.tga
 		tcMod scale .2 .5
 		tcMod scroll 0 .01
+	}
+	// [user 2026-09-06, bug-2508] ITEM 5a - FOAM STREAKS ON THE OPEN SEA (ocean_2026-09-06 README s.2).
+	// Coop-only stage 3 of 8. Retail froth2 = main/Pak2 256^2 RGBA. The install's winning copy is
+	// maintt/zzzzzzz_dds_hdmem.pk3's 1024^2 DXT5 (gl2, r_ext_compressed_textures 1 loads .dds first,
+	// tr_image.c:2481), else zzzzz-AA_HD_Project_Pak3's 1024^2 tga; the mod source tree ships none and
+	// a TEXTURE name is not contested (T6 is about shader names), so no private copy. Per-pixel, so
+	// the 8x8 drawn patch does not matter (README s.1).
+	//   rgbGen wave sin 0.3 0.2 0 0.10 = 0.1..0.5, locked to the flap's .10 Hz above so the streaks
+	//   brighten on the lift. tcMod scale 4 1 = 4 tiles across S, 1 across T (T = 0 at the y -2160
+	//   seam, 1 at y -8000). scroll 0 0.004 = texcoord t rising = pattern drifting toward T 0 =
+	//   SHOREWARD, ~23 u/s (same sign as retail stage 2's 'rolling in'). turb = a lazy per-vertex
+	//   wobble (gl2 tr_shade.c:218, a smooth term on 64 verts), ~80 u at 20 s.
+	//   Additive budget = 0.5 x texel(max channel x alpha): winning HD copy p99 0.31 -> 0.155, mean
+	//   0.085 -> 0.04; retail-only p99 0.72 -> 0.36; absolute peak (a white speck) 0.5.
+	//   Global fog fades additive stages toward black with distance (tr_shade.c:1450-1458), so the
+	//   streaks die at range on their own. Kill switch: delete this stage (shader-only item).
+	{
+		nopicmip
+		map textures/misc_outside/froth2.tga
+		blendFunc GL_SRC_ALPHA GL_ONE
+		rgbGen wave sin 0.3 0.2 0 0.10
+		tcMod scale 4 1
+		tcMod scroll 0 0.004
+		tcMod turb 0 0.02 0 0.05
+	}
+	// [user 2026-09-06, bug-2508] ITEM 5b - SKY SHEEN (README s.0 item 4 / s.4: Omaha's sun is
+	// vertical, so a sun glint sits at the nadir; what an overcast sea catches at grazing angles is
+	// the sky). Coop-only stage 4 of 8. textures/coop_fx/sky_sheen.tga is a 256^2 sphere map baked
+	// from the map's own sky faces (env/dday2 = textures/sky/d-day2, maintt/pak1 sky.shader) by
+	// docs/tools/gen_skysheen.py, which also bakes a Fresnel-shaped ALPHA (0.30 at the nadir, 1.0 at
+	// the horizon) because alphaGen dot/oneMinusDot are dead on gl2. tcGen environment runs in the
+	// vertex program on gl2 (generic_vp.glsl:149-155) and on gl1's CPU path with the same algebra:
+	// per-vertex, a smooth grazing gradient on the 8x8 patch, the right look from a Higgins.
+	//   Additive budget = 0.25 x alpha x sky max-channel: 0.033 looking straight down, 0.162 at the
+	//   horizon, absolute max 0.166.
+	//   SUM with 5a: typical 0.04 + 0.06 = 0.10; bright streak (HD) 0.155 + 0.162 = 0.32; worst
+	//   case (retail white speck at the horizon) 0.50 + 0.166 = 0.67 < 0.7. NOTE the shipped knee is
+	//   r_ppBloomThreshold 0.35 (coop_defaults.cfg:54), not the engine default 0.6, and
+	//   bloom_bright_fp.glsl:38-40 tests the FINAL pixel's max channel on a base that is already
+	//   ~0.69 (stage 1 oceandday1 0.35 + stage 2 add 0.35) - toggle r_ppBloom to A/B.
+	//   Kill switch: delete this stage (shader-only item).
+	{
+		nopicmip
+		map textures/coop_fx/sky_sheen.tga
+		blendFunc GL_SRC_ALPHA GL_ONE
+		tcGen environment
+		rgbGen identity
+		alphaGen const 0.25
 	}
 }

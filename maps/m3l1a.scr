@@ -748,8 +748,24 @@ higgins_boat_bind local.higgins_origin local.higgins_model local.higgins_clip lo
 higgins_wave_motions local.higgins_number:{
 //=========================================================================
 	self.stop = 0
+	self.coop_bobDone = 0		//[user 2026-09-06, bug-2508] 1 once the loop below has drained; higgins1_landing waits on it
 	local.flip = 0
-	self time 1
+	//[user 2026-09-06, bug-2508] BOB SYNCED TO THE SHEET. The open sea (zz_coop_ocean.shader:72,
+	//`flap t 10 sin 0 10 0 .10 0 1`) heaves on a 10 s cycle; these six legs ran 1 s each, a 6 s
+	//cycle, so half of every minute the hull and the water moved against each other - the last
+	//of the "boats underwater" report (docs/proposals/ocean_2026-09-06 section 2, item 4). Six
+	//legs at 10/6 s each is a 10 s cycle with the same 12 u peak-to-peak, roll and pitch; the
+	//phase is still arbitrary (shader time is absolute server ms, level.time is rebased, and
+	//script must not read client cvars - getcvar creates them empty, bug-1669) but it is now
+	//CONSTANT instead of beating. Retail 1 s legs on the else branch; level.coop_bobSyncOn 0
+	//restores them. SP (gametype 0) is untouched.
+	if(level.coop_bobSyncOn == NIL){ level.coop_bobSyncOn = 1 }
+	if(level.gametype != 0 && level.coop_bobSyncOn){
+		self time 1.6667
+		println("^~^~^ BOATBOB period=10 boat=" + local.higgins_number)
+	}else{
+		self time 1
+	}
 	local.first_test = 1
 
 	local.random = randomfloat 3
@@ -843,6 +859,7 @@ higgins_wave_motions local.higgins_number:{
 			local.flip = 0
 		}
 	}
+	self.coop_bobDone = 1		//[user 2026-09-06, bug-2508] the net-zero cycle finished; the mover is at rest
 }end
 
 //  Higgins boat forward / backward motions
@@ -1338,7 +1355,8 @@ progress_player local.index:{
 		forcemusic aux4 aux4
 
 		// show the water
-		$ocean_wavy show
+		//[user 2026-09-06, bug-2508] unless the coop sea mesh is up - it and this sheet are coplanar (coopified.scr::coop_seaMeshStart)
+		if(level.coop_seaMesh == NIL || level.coop_seaMesh == NULL){ $ocean_wavy show }
 
 		// change the world fog
 		if(level.gametype == 0){	//chrissstrahl - make sure we get the maximum in coop and keep the original in sp
@@ -2415,6 +2433,8 @@ main_boat_ride_go:{
 
 	//[user 2026-08-31] shells in the water around the boats for the length of the run-in.
 	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_runInShelling }
+	//[user 2026-09-06, bug-2508] and the wake she leaves - bound to $higgins1 at the stern for the ride
+	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_higginsWake }
 
 	// move the higgins fleet to first point
 	// original fleet time here should be 20
@@ -2520,12 +2540,26 @@ higgins1_landing:{
 	//put the AI into disembarking positions
 	thread higgins1_ready
 
+	//[user 2026-09-06, bug-2508] THE BOB RACE. .stop landed ~7 s ago but the 10 s cycle above can still
+	//be mid-leg, and a new LinearInterpolate on the mover cancels the in-flight leg from a mid-move
+	//snapshot (pose off by up to 6 u / 2.5 deg, and it keeps bobbing). Let the cycle drain first -
+	//worst case +3.3 s on the ride, bounded at 11 s. SP untouched.
+	if(level.gametype != 0){
+		local.w = 0
+		while($higgins1.coop_bobDone != 1 && local.w < 11){
+			wait 0.1
+			local.w = local.w + 0.1
+		}
+		println("^~^~^ BOATBOB drained wait=" + local.w)
+	}
 	$higgins1 time 2
 	$higgins1 rotatezup 2
 	$higgins1 movedown 8
 	$higgins1 waitmove
 
 	$ocean_wavy show
+	//[user 2026-09-06, bug-2508] the dense sea mesh replaces that sheet until the ramp plunge (coop_seaMeshStop)
+	if(level.gametype != 0){ thread maps/m3l1a/coopified.scr::coop_seaMeshStart }
 	wait .5
 	$ocean_calm hide
 

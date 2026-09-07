@@ -68,11 +68,15 @@ textures/mohtest/omaha_set4_covered
 	// [user 2026-09-06, bug-2507] the caustic: one single-bundle additive stage, see the header for why
 	// not the two-bundle retail form and for what each renderer does with it.
 	{
-		map textures/misc_outside/caustic.tga
+		// [user 2026-09-06, bug-2509] 'giant greenish/white squares under the water': the first cut used retail
+		// caustic.jpg at full brightness with rgbGen const 0.35, and on gl2 it drew as bright bands. The
+		// brightness now lives in a private 18% copy (docs/tools/gen_caustic.py) with rgbGen identity, so no
+		// renderer path can ignore it; scale 8 8 = one caustic cell per 32 u on this 256 u/repeat seabed.
+		map textures/coop_fx/caustic_dim.tga
 		blendfunc add
-		rgbGen const ( 0.35 0.35 0.35 )
+		rgbGen identity
 		tcMod scroll 0 .05
 		tcMod turb 0 .2 0 .1
-		tcMod scale 4 4
+		tcMod scale 8 8
 	}
 }

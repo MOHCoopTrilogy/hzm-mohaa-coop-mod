@@ -1,22 +1,55 @@
-// MOH Trilogy Coop - shoreline wave motion
+// MOH Trilogy Coop - Omaha's waterline sheet: the 12 planar faces between the open sea and the sand
 //
-// WHY THIS FILE IS NAMED zz_: ScanAndLoadShaderFiles concatenates the shader files in REVERSE
-// listing order (tr_shader.c: `for (i = numShaderFiles - 1; i >= 0; i--)`), and FindShaderInShaderText
-// returns the FIRST match in that text. FS_ListFiles returns a sorted list, so the file that sorts
-// LAST ends up FIRST in the text and wins the name. The highest existing name in this install is
-// y_hzm_maptour3.shader, so zz_ beats it. Rename this below that and the retail definition silently
-// wins again with no error anywhere - the documented contested-shader trap (bug-922).
+// PRECEDENCE (TRAPS T6, bug-2485): this override wins because the coop pak outranks main/mainta/maintt,
+// NOT because of the zz_ name - within one pak both renderers give a duplicated name to the alphabetically
+// FIRST shader file, so define this name in exactly ONE coop file. An override REPLACES the retail block,
+// it does not merge (drop a surfaceparm and the surface collides, fogs or sorts differently), so the body
+// restates textures/misc_outside/deepbluesea_shoreline from main/Pak0.pk3 scripts/misc_outside.shader and
+// marks every change.
 //
-// WHY THE WHOLE BODY IS RESTATED: an override replaces the definition outright, it does not merge.
-// Dropping a single surfaceparm here would change how the surface collides, fogs or sorts. This is a
-// verbatim copy of textures/misc_outside/deepbluesea_shoreline from main/Pak0.pk3 scripts/misc_outside.shader
-// with exactly ONE line added - the deformVertexes below.
+// GEOMETRY (LANE-A, measured from the BSP, m3l1b identical): y -2160 (the seam with deepbluesea) to -768
+// (the quad edge on the sand strip), 1392 u, z -520 rising to -479. Raw T = 0.005 at the SEAM and 0.994
+// at the LAND edge, one continuous 0..1 across both quad rows = 1408 u per 1.0 T. S is one continuous
+// 0..1 over the whole 15872 u beach, so `tcMod scale 62 1` is a seamless 256 u tile, the sand strip's
+// own period (its S phase leads this sheet's by 0.25). The sand strip (zz_coop_wetsand.shader) is
+// y -1024..-768 = T 0.816..0.994 of this sheet; at rest the sheet sits 17.5 u above it at the sea edge
+// and 1 u at the land edge.
 //
-// WHAT IT FIXES: m3l1a's waterline is 12 faces of this shader and it has no deform at all, while the
-// only animated water (deepbluesea, deepbluesea_runup) is ONE face each. So the surf moves on a sliver
-// and the waterline you actually look at is static - which reads as "there are no waves".
-// The flap parameters are deliberately gentler than deepbluesea's own (amplitude 4 vs 10): this is the
-// wash at the sand's edge, not open ocean.
+// THE FLAP [coop 2026-08-28]: retail had no deform on these 12 faces while the only animated water was
+// one face each of deepbluesea / deepbluesea_runup, so the water you actually look at was static.
+// `flap t` is a time-only hinge scaled by T: +/-0.08 u at the seam, +/-7.9 mid-band, +/-15.9 at the
+// land edge, 12.5 s period; amplitude 4 against deepbluesea's 10 because this is the wash at the
+// sand's edge, not open ocean. Because the shader has a deform, gl2 sends it down the GENERIC program,
+// the only one that evaluates alphaGen sCoord/tCoord (bug-1249; the lightall gap is bug-2486).
+//
+// THE HAND-OFF FADE [user 2026-09-06, bug-2508] (ocean report s.3, "the smallest change that rags it").
+// The sheet's edge was a straight line for two reasons: during the flood it ends at the quad edge
+// y -768 (an alpha cut), and during the ebb it dips under the sand plane for T > ~0.87 and its visible
+// edge is plane-meets-plane. Additive stages cannot be masked after the fact, so every live stage now
+// fades ITSELF along raw T (alphaGen reads the texcoord BEFORE tcMods, so the wavetrant surges do not
+// move the fade). The formula, from the code (renderergl1 tr_shade_calc.c RB_CalcAlphaFromTexCoords,
+// gl2 generic_vp.glsl CalcColor, identical):
+//     alphaGen tCoord <min> <max> <constMin> <const>  ->  alpha = clamp((max - min) * T + min, constMin, const)
+// ALWAYS FOUR PARAMETERS: the two-parameter form leaves const at its -1 sentinel = alpha 0 on both
+// renderers (LANE-A s.4, bug-2226), which is why two retail stages here drew nothing for four years.
+// The fade is `alphaGen tCoord 8.2 -1.8 0 1` = -10 T + 8.2: alpha 1 for T <= 0.72 (y -1146), 0 at
+// T 0.82 (y -1006), seaward of the strip's sea edge (0.816) and of the ebb crossing (~0.87). (The ocean
+// report wrote `8.2 -10` for this knee; under the real formula that is alpha 0 from T 0.45, mid-band.
+// The code wins.) The four wash stages and the crest moved from `blendFunc add` to `GL_SRC_ALPHA
+// GL_ONE` (identical while alpha is 1) so their own alpha can end them; the blood keeps `blend` with
+// the same fade scaled to its 0.6 ceiling. The sheet now has no alpha at the y -768 quad edge and is
+// invisible before it dips under the sand, the crest's shoreward run dies at one line - the break -
+// and the swash on the strip is the strip's job (zz_coop_wetsand.shader, ragged by bug-2493).
+//
+// STAGES, 8 of 8 (MAX_SHADER_STAGES is 8 in both renderers; gl2 rejects a 9th and drops the whole
+// shader, gl1 has no bound check and writes past the array - NEVER ADD A NINTH):
+//   1  base water tint   oceandday1 x2   blend                  tCoord 1.8 -0.01 0 1  (reclaimed, was alpha 0)
+//   2  break-line foam   coop_fx/breakfoam.tga  GL_SRC_ALPHA GL_ONE  alpha baked         (reclaimed, was alpha 0)
+//   3-6 wash2 x oceandday1 (retail)      GL_SRC_ALPHA GL_ONE   tCoord 8.2 -1.8 0 1
+//   7  blood in the surf bloodwash.tga   blend                  tCoord 4.92 -1.08 0 0.6
+//   8  travelling crest  ocean2a_shore   GL_SRC_ALPHA GL_ONE   tCoord 8.2 -1.8 0 1   (ifCvarnot coop_noCrest, LAST)
+// gl1 has 2 texture bundles (gl2 7); stages 1 and 3-6 use both, so there is no bundle route either.
+// Kill switches for shader-only items are this file (and `coop_noCrest 1` for stage 8).
 
 textures/misc_outside/deepbluesea_shoreline
 {
@@ -31,14 +64,22 @@ textures/misc_outside/deepbluesea_shoreline
 	surfaceparm nolightmap
 	cull none
 
-	// [coop 2026-08-28] THE ONE ADDED LINE - vertical wash at the sand's edge.
+	// [coop 2026-08-28] the vertical wash at the sand's edge (header: THE FLAP). Also what keeps this
+	// shader on gl2's generic program, where alphaGen tCoord exists. Do not remove.
 	deformVertexes flap t 10 sin 0 4 0 .08 0 4
 
+	// [user 2026-09-06, bug-2508] STAGE 1 - BASE WATER TINT, reclaimed. Retail's two-parameter alphaGen
+	// left const at -1 = alpha 0 on both renderers (LANE-A s.4), so this stage drew nothing and the
+	// waterline never had a water colour of its own - only additive foam over the seabed. The fourth
+	// parameter is the whole fix: alpha = -1.81 T + 1.8, 1 from the seam to T 0.44, 0 at the land edge
+	// (0.994), the ocean fading in from the seam as the retail comment always claimed. It runs past the
+	// hand-off knee on purpose (0.32 at T 0.82, 0.24 at the ebb crossing ~0.87): that is the assigned
+	// retail ramp. KNOB: if a faint blended line shows at the trough, `1.8 -0.4 0 1` ends it at T 0.82.
 	{
 		nopicmip
 		map textures/misc_outside/oceandday1.tga
 		blendFunc blend
-		alphaGen tCoord 1.8 -0.01
+		alphaGen tCoord 1.8 -0.01 0 1
 		tcMod scale 16 5
 		tcMod scroll 0.01 -0.034
 	nextbundle
@@ -46,22 +87,39 @@ textures/misc_outside/deepbluesea_shoreline
 		tcMod scale -16 5
 		tcMod scroll 0.01 -0.034
 	}
+	// [user 2026-09-06, bug-2508] STAGE 2 - BREAK-LINE FOAM, reclaimed (retail: `alphaGen tCoord 1.01 -0.5`,
+	// two parameters, alpha 0, drew nothing; its second oceandday1 bundle went with it).
+	// textures/coop_fx/breakfoam.tga is wetsand_foam.tga's wash2 band read back out of the shipped rows
+	// (docs/tools/gen_breakfoam.py, per-row RGB*alpha dump, 18-byte header) and resampled to T 0.55-0.72
+	// of THIS sheet (y -1386..-1146) - right where the crests die at the hand-off knee. The reach is
+	// BAKED into its alpha (the sand foam's ragged window, resampled with the band) and its columns are
+	// rolled 0.25 S, so at `tcMod scale 62 1` (one seamless 256 u tile, header: GEOMETRY) its rag is the
+	// strip's rag at every x. `clampmapy` clamps T only; the t=0 and t=1 rows are black AND transparent
+	// so the clamp cannot smear. No alphaGen: the band lives under the 0.72 knee and the +/-0.06 T
+	// (84 u) surge keeps it under 0.82. rgbGen wave and wavetrant both run at the flap's 0.08 Hz, phase
+	// 0 = brightest and furthest shoreward on the lift, so it pulses with the crest, the flap and the
+	// strip's foam for free (one renderer clock). Peak add ~0.11 framebuffer, under the bloom threshold.
+	// TUNING: brightness = rgbGen amplitude (base + amp <= 1); band position = regenerate (DST_T0/T1);
+	// surge = wavetrant amplitude, keep base + amp + 0.72 < 0.82.
 	{
 		nopicmip
-		map textures/misc_outside/oceandday1.tga
+		clampmapy textures/coop_fx/breakfoam.tga
 		blendFunc GL_SRC_ALPHA GL_ONE
-		alphaGen tCoord 1.01 -0.5
-		tcMod scale 0.2 0.105
-		tcMod scroll 0 -0.005
-	nextbundle
-		map textures/misc_outside/oceandday1.tga
-		tcMod scale 0.2 0.105
-		tcMod scroll 0 -0.009
+		rgbGen wave sin 0.3 0.25 0 0.08
+		tcMod scale 62 1
+		tcMod wavetrant sin 0 -0.06 0 0.08		// [bug-2508, verifier] negative amplitude: furthest shoreward ON the lift, with the flap
 	}
+
+	// [user 2026-09-06, bug-2508] STAGES 3-6 - retail's four wash2 layers, two mirrored antiphase pairs,
+	// the only thing that painted the waterline until today. `blendFunc add` -> `GL_SRC_ALPHA GL_ONE`
+	// plus the hand-off fade (header); identical output wherever alpha is 1, i.e. everywhere seaward of
+	// T 0.72. Both bundles' textures carry alpha 1 (wash2.dds is DXT1, oceandday1 is a jpg), so the
+	// stage alpha is exactly the fade. Nothing else in these four blocks changed.
 	{
 		nopicmip
 		map textures/misc_outside/wash2.tga
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin .15 .525 .35 -.04
 		tcMod scale 8 1.1
 		tcMod scroll 0.01 .0
@@ -74,7 +132,8 @@ textures/misc_outside/deepbluesea_shoreline
 	{
 		nopicmip
 		map textures/misc_outside/wash2.tga
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin .15 .525 .325 -.04
 		tcMod scale -8 1.1
 		tcMod scroll 0.01 .0
@@ -87,7 +146,8 @@ textures/misc_outside/deepbluesea_shoreline
 	{
 		nopicmip
 		map textures/misc_outside/wash2.tga
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin .15 .525 .85 -.04
 		tcMod scale 8 1.1
 		tcMod scroll 0.01 .0
@@ -100,7 +160,8 @@ textures/misc_outside/deepbluesea_shoreline
 	{
 		nopicmip
 		map textures/misc_outside/wash2.tga
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin .15 .525 .825 -.04
 		tcMod scale -8 1.1
 		tcMod scroll 0.01 .0
@@ -124,9 +185,8 @@ textures/misc_outside/deepbluesea_shoreline
 	// near end on a ~12.5s cycle, and no separate entity can follow a per-vertex deform. A static plane
 	// would sink under the wash and surface through it every cycle. A stage inherits the deform.
 	//
-	// Kept to ONE extra blended stage on a surface that is already 6 stages x 2 bundles. alphaGen const
-	// rather than the tCoord ramps above, so the wash reads evenly along the whole waterline instead of
-	// banding; the texture's own alpha does the shaping. Slow, near-perpendicular scroll so it drifts
+	// One blended stage on a surface at its 8-stage cap; the texture's own alpha does the slick shaping
+	// and the stage alpha below does the reach. Slow, near-perpendicular scroll so it drifts
 	// with the surf without ever looking like it is flowing in one direction.
 	{
 		nopicmip
@@ -137,24 +197,18 @@ textures/misc_outside/deepbluesea_shoreline
 		// with blood in the water". Alpha up to 0.82 and the texture stretched much wider (0.42/0.16, so
 		// each repeat covers roughly twice the surface) turns it from a tint into standing blood in the
 		// wash. Still ONE stage on a 6-stage surface.
-		// [user 2026-08-31] RAMPED ALONG T, and that is what fixes the seam.
-		//
-		// The user: "the blood is overwhelming in the water once you get off the boat, you can tell the
-		// clear difference between where the water textures separate between the higgins drive in and
-		// the actual landing in the water area, it does not blend well at all."
-		//
-		// Both halves of that are this stage's fault. This shader covers ONLY the wading band; the
-		// run-in is textures/misc_outside/deepbluesea, a different shader with no blood in it. So a
-		// flat `alphaGen const` painted the wading band evenly and stopped dead at the join - drawing
-		// the boundary rather than hiding it. Measured from the BSP, that join is at Y = -2160, and on
-		// these 12 faces T runs 0.005 at the seaward edge to 0.994 at the water's edge. So T is exactly
-		// the axis to ramp on: near zero at the seam, strongest where the user asked for it.
-		//
-		// FOUR PARAMETERS, not two. alphaGen sCoord/tCoord takes min, max, constMin, const - and the
-		// last two are the clamps. Every retail use of this keyword supplies only two, which leaves
-		// alphaConst at its -1 sentinel and drives the stage to alpha 0 in gl1 and to an
-		// undefined-order clamp in gl2 (bug-2226). Supplying all four keeps it well defined in both.
-		alphaGen tCoord 0.02 0.60 0 0.60
+		// [user 2026-08-31] bug-2230 ramped this along T (0.02 at the seam -> 0.60 at the sand) to hide the
+		// join with deepbluesea, which has no blood: 'you can tell the clear difference between where the
+		// water textures separate between the higgins drive in and the actual landing'.
+		// [user 2026-09-06, bug-2508] THE RAMP IS NOW THE HAND-OFF FADE (header). The ramp put a 60%-alpha
+		// red sheet on the quad edge at y -768 and was the loudest part of the straight line; `tcMod scale
+		// 16 2` tiles T twice so no bake could pin its edge. Same knee as every other stage, scaled to this
+		// stage's tuned 0.6 ceiling (bug-2249): alpha = -6 T + 4.92 clamped [0, 0.6] = 0.6 for T <= 0.72,
+		// 0 at 0.82. One linear ramp cannot both rise from the seam and fall at the knee, so the seam-hiding
+		// rise is gone: the blood is 0.6 x texture alpha from y -2160 in. The swash blood moves to the sand
+		// strip (coop_fx/swashblood.tga on zz_coop_wetsand.shader). KNOB: the 4th number is the ceiling -
+		// lower it (with the 1st = 8.2 x ceiling, 2nd = -1.8 x ceiling) if the seam reads again.
+		alphaGen tCoord 4.92 -1.08 0 0.6
 		// Was 0.42/0.16 - less than one repeat across a 16,000-unit beach, i.e. one smooth blob, i.e. a
 		// red filter over the sea. 16 x 2 puts a repeat every ~1000 units across and ~700 deep, so the
 		// texture's clear water (58% of it now) actually reads as gaps between slicks.
@@ -225,12 +279,15 @@ textures/misc_outside/deepbluesea_shoreline
 	//                          lock is unaffected - so this knob is safe to move freely.
 	//   too bright/faint    -> rgbGen wave sin 0.55 0.45 ...; base+amp must stay <= 1.0.
 	//   white off-beat      -> the 3rd number (phase). 0.95 lags 0.6s, 0.05 leads. Never negative.
+	//   dies too early/late -> the shared hand-off fade (header): alphaGen tCoord 8.2 -1.8 0 1. It is
+	//                          raw-T, so the scroll and the surge never move it [bug-2508].
 	// NEVER change `sin` to `noise` here: TableForFunc has no GF_NOISE case and calls ri.Error(ERR_DROP).
 	{
 		ifCvarnot coop_noCrest 1
 		nopicmip
 		map textures/misc_outside/ocean2a_shore.jpg
-		blendFunc add
+		blendFunc GL_SRC_ALPHA GL_ONE
+		alphaGen tCoord 8.2 -1.8 0 1
 		rgbGen wave sin 0.55 0.45 0 0.08
 		tcMod scale 8 -6
 		tcMod scroll 0.01 0.16

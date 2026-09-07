@@ -71,7 +71,7 @@
 // where gl1 draws it flat additive; and `rgbGen wave` is scaled by identityLight on both, so the
 // wave numbers below are relative knobs, not framebuffer values.
 //
-// STAGE BUDGET: 3 of 8 used. NO deform on this shader, on purpose - any deform would drop it out of
+// STAGE BUDGET: 4 of 8 used. NO deform on this shader, on purpose - any deform would drop it out of
 // gl2's whole lighting path (tr_shader.c CollapseStagesToLightall), and it is lightmapped. Do not
 // add `alphaGen sCoord/tCoord` to any stage of a deform-free shader on gl2; bake it into the texture.
 //
@@ -87,8 +87,10 @@
 //
 // KNOBS, all in this file: the wet line's shape is stage 2's wavetrant (base 0.45 = where the edge
 // sits at rest, amplitude 0.75 = how far it drains); its darkness is the grey in the gradient texture;
-// the foam's brightness is stage 3's rgbGen wave amplitude; its reach is the alpha ramp baked into
-// wetsand_foam.tga. Nothing here runs a script or costs an entity.
+// the foam's brightness is stage 4's rgbGen wave amplitude; its reach is the alpha ramp baked into
+// wetsand_foam.tga. The blood's coverage, colour and reach window are all in docs/tools/gen_swashblood.py
+// (TARGET_COVERAGE, RED_*, REACH_*) - stage 3 only places the texture and moves it with the wet line.
+// Nothing here runs a script or costs an entity.
 
 textures/mohtest/omaha_set4_shoreline
 {
@@ -112,7 +114,29 @@ textures/mohtest/omaha_set4_shoreline
 		tcMod wavetrant sin 0.45 0.75 0 0.08
 	}
 
-	// [coop 2026-09-05] STAGE 3 - FOAM WHERE THE SHEET TURNS. Retail's wash2 with the reach baked into
+	// [user 2026-09-06, bug-2508] STAGE 3 - BLOOD IN THE SWASH. The waterline sheet no longer draws its blood
+	// over the strip (ocean pass item 1: the sheet's blood tiles T twice, so its edge could never be ragged);
+	// the slicks live here instead, clamped in T with the REACH BAKED INTO THE TEXTURE'S ALPHA - no
+	// alphaGen tCoord, this shader is deform-free and gl2's lightall drops it (bug-2486). The bake
+	// (docs/tools/gen_swashblood.py): gen_bloodwash's seamless integer-frequency slicks, alpha 0 landward of
+	// the wet line's rest position (t 0.30..0.45 ramp), full to t 0.80, 0 by t 0.88, every row t >= 0.96
+	// black AND transparent so both clamp rows draw nothing; its ragged edge is o(s) from gen_wetsand.py at
+	// 1.0x, so it is the wet line's own rag. Translated by stage 2's EXACT wave: at rest the slicks sit on
+	// the landward T 0..0.45 behind the wet line, at the trough they ride out to T 0.65..1.0 with the
+	// draining water, and through the flood they slide landward under the sheet - blood carried by the
+	// swash. `tcMod scale 1 1` = one 256 u tile, seamless at every quad join (integer S spans). Drawn
+	// BEFORE the foam so the foam floats over the slicks; lightall multiplies it by the lightmap like
+	// the sand. Kill switch: delete this block.
+	{
+		nopicmip
+		clampmapy textures/coop_fx/swashblood.tga
+		blendFunc blend
+		rgbGen identity
+		tcMod scale 1 1
+		tcMod wavetrant sin 0.45 0.75 0 0.08
+	}
+
+	// [coop 2026-09-05] STAGE 4 - FOAM WHERE THE SHEET TURNS. Retail's wash2 with the reach baked into
 	// its alpha (see the header for why not alphaGen), additive and alpha-scaled, pulsed by a 0.08 Hz
 	// wave that peaks WITH the water (phase 0) so the foam is brightest as the sheet comes in and
 	// gone at the trough; it rides landward with the wet line (small wavetrant, same phase) and drifts
