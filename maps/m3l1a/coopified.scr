@@ -2510,6 +2510,41 @@ coop_seaMeshStart:
 end
 
 //=========================================================================
+//[user 2026-09-07, bug-2521] THE SURF ZONE'S MOVING CREST. "if we could have those happening near the
+//shoreline too after we are getting out of the cinematic piece". The shore water there is WORLD
+//geometry with THREE rows of vertices across the whole 1408 u band, so it can never be deformed and it
+//cannot be hidden from a shader either - so this floats a generated layer 6 u above its plane carrying
+//the same break-line texture, on geometry that actually rises and runs up the beach. Additive, no
+//depthwrite: it must never occlude the eight tuned stages underneath.
+//STARTS at coop_rampHandoff, the single exit from the cinematic on every path.
+//KILL SWITCH: level.coop_surfMeshOn 0. PROBE: '^~^~^ SURFMESH on/off'.
+coop_surfMeshStart:
+//=========================================================================
+	if(level.coop_surfMeshOn == NIL){ level.coop_surfMeshOn = 1 }
+	if(!level.coop_surfMeshOn){ println("^~^~^ SURFMESH off (coop_surfMeshOn 0)"); end }
+	if(level.coop_surfMesh != NIL && level.coop_surfMesh != NULL){ end }		//already up
+	local.m = spawn script_model model "models/fx/coop_surf.tik"
+	if(local.m == NULL || local.m == NIL){ println("^~^~^ SURFMESH FAIL spawn returned NULL"); end }
+	//MUST match ORIGIN and YAW in docs/tools/gen_coop_surf.py - the mesh is pre-rotated for that yaw
+	//and the bore's travel direction depends on it. The generator prints both on every run.
+	local.m.origin = ( 64 -1490 -520 )
+	local.m.angles = ( 0 215 0 )
+	local.m notsolid		//T9: after the tik landed, never before
+	local.m.targetname = "coop_surfmesh"
+	level.coop_surfMesh = local.m
+	println("^~^~^ SURFMESH on origin=64,-1490,-520 yaw=215")
+end
+
+//=========================================================================
+coop_surfMeshStop:
+//=========================================================================
+	if(level.coop_surfMesh == NIL || level.coop_surfMesh == NULL){ end }
+	level.coop_surfMesh remove
+	level.coop_surfMesh = NULL
+	println("^~^~^ SURFMESH off")
+end
+
+//=========================================================================
 coop_seaMeshStop:
 //=========================================================================
 	if(level.coop_seaMesh == NIL || level.coop_seaMesh == NULL){ end }
@@ -15372,6 +15407,155 @@ coop_cineHudPoke local.cmd:{
 //or wherever a 28 s cap finds them (the wire at y ~3000 has swallowed retail's runners before,
 //STANDCOUNT atWire). Probes: HEDGECROWD spawned= / charge / killed idx= / prone idx=.
 //Kill switch level.coop_hedgeCrowdOn 0. Nothing here touches retail's sequence tiers.
+//=========================================================================
+//[user 2026-09-07, bug-2522] MEDICS IN COVER. "Can we place a few more medics just staying behind
+//hedgehogs (crouched) in cover. Add medic kits around their head that spin (just like we use for DBNO).
+//Include the existing medics on the map. They should all be wired to heal you if you approach."
+//
+//The spawn recipe is coop_hedgeCrowdSpawn's, because that one is already proven: ai off so retail's
+//ai_execute_todo cannot stand the man back up a frame later, and the pose HELD by coop_vigHold, which
+//re-issues it on animdone. `crouch_beach_idle` is a `random` group whose member digits the engine
+//strips at load (bug-2214), so the bare name is the only one that resolves.
+//
+//The floating kit is dbno.scr::dbno_marker_manager's, with two changes: it is BOUND to the medic
+//instead of chasing his origin every frame, and it turns on a 0.05 s tick rather than every frame -
+//these live for the whole map, where DBNO's live for seconds.
+//
+//The map's own medics ($left_medic / $right_medic, one of which retail deletes) already heal on
+//approach inside sequence_5_medic, so they get the kit only. Do not add a second heal loop to them:
+//it would fight the sequence that owns them.
+//
+//KILL SWITCH: level.coop_beachMedicsOn 0. Count: level.coop_beachMedicsN (default 4).
+//PROBES: '^~^~^ BEACHMEDIC spawned= kits=' and '^~^~^ BEACHMEDIC heal by= to= hp='.
+coop_beachMedics:{
+	if(level.gametype == 0){ end }
+	if(level.coop_beachMedicsOn == NIL){ level.coop_beachMedicsOn = 1 }
+	if(!level.coop_beachMedicsOn){ end }
+	if(level.coop_beachMedicsDone == 1){ end }
+	level.coop_beachMedicsDone = 1
+	if(level.coop_beachMedicsN == NIL){ level.coop_beachMedicsN = 4 }
+	wait 5
+	//the same cover_trigger anchors the hedgehog crowd uses, but LANDWARD of them so a medic is behind
+	//the hedgehog rather than in among the men sheltering at its seaward face
+	local.hn = 0
+	local.hn++; local.hx[local.hn] = 610; local.hy[local.hn] = 1032
+	local.hn++; local.hx[local.hn] = 0 - 76; local.hy[local.hn] = 558
+	local.hn++; local.hx[local.hn] = 476; local.hy[local.hn] = 484
+	local.hn++; local.hx[local.hn] = 300; local.hy[local.hn] = 304
+	local.hn++; local.hx[local.hn] = 84; local.hy[local.hn] = 350
+	local.made = 0
+	local.i = 0
+	local.h = 0
+	while(local.i < level.coop_beachMedicsN){
+		local.h++
+		if(local.h > local.hn){ local.h = 1 }
+		local.p = (0 0 0)
+		local.p[0] = local.hx[local.h] + ( 0 - 40 ) + ( randomint 80 )
+		local.p[1] = local.hy[local.h] + 30 + ( randomint 26 )
+		local.p[2] = 0 - 400
+		local.a = waitthread coop_beachMedicSpawn local.p
+		if(local.a != NULL && local.a != NIL){ local.made++ }
+		local.i++
+	}
+	//the map's own pair: the kit only, their healing is retail's and already running
+	local.kits = 0
+	if($left_medic != NULL && $left_medic != NIL){
+		if(isalive $left_medic){ thread coop_medicKit $left_medic 62; local.kits++ }
+	}
+	if($right_medic != NULL && $right_medic != NIL){
+		if(isalive $right_medic){ thread coop_medicKit $right_medic 62; local.kits++ }
+	}
+	println("^~^~^ BEACHMEDIC spawned=" + local.made + " kits=" + ( local.made + local.kits ))
+}end
+
+
+//=========================================================================
+coop_beachMedicSpawn local.pos:{
+	local.a = spawn "models/human/dday_ranger_medic" gun "none"
+	if(local.a == NULL || local.a == NIL){ end NULL }		//entity-pool guard
+	local.a exec global/disable_ai.scr
+	local.a dontdropweapons
+	local.a.coop_noChatter = 1
+	local.a.origin = local.pos
+	local.a.angles = ( 0 ( ( randomint 60 ) + 60 ) 0 )
+	local.a droptofloor
+	local.a.isinsequence = 1
+	local.a.isbusy = 1
+	local.a.coop_vigOwned = 1		//coop_vigHold breaks on isbusy unless the holder owns him
+	local.a.coop_beachMedic = 1
+	local.a.no_idle = 1
+	local.a nodamage		//a medic who dies to the beach fire before you reach him is worse than no medic
+	//coop_vigHold takes the actor as the RECEIVER and the anim as its one argument - the crowd and
+	//the vignettes all call it this way. `crouch_beach_idle` is a `random` group whose member digits
+	//the engine strips at load (bug-2214), so the bare name is the only one that resolves.
+	local.a.coop_pose = "crouch_beach_idle"
+	local.a thread coop_vigHold "crouch_beach_idle"
+	thread coop_medicKit local.a 52
+	thread coop_medicHeal local.a
+	end local.a
+}end
+
+
+//=========================================================================
+//The DBNO marker, bound and on a slower tick. `item_50_healthbox` is the model dbno.scr uses, so the
+//shape already reads as "medic" to anyone who has been revived once.
+coop_medicKit local.who local.zoff:{
+	if(local.who == NULL || local.who == NIL){ end }
+	local.kit = spawn script_model model "models/items/item_50_healthbox.tik"
+	if(local.kit == NULL || local.kit == NIL){ end }		//entity-pool guard
+	local.kit notsolid
+	local.kit scale 0.5
+	local.kit.origin = local.who.origin + ( 0 0 local.zoff )
+	local.kit bind local.who
+	local.spin = 0
+	while(local.who != NULL && local.who != NIL){
+		if(!(isalive local.who)){ break }
+		local.spin = local.spin + 12
+		if(local.spin >= 360){ local.spin = 0 }
+		local.kit.angles = ( 90 local.spin 0 )
+		wait 0.05
+	}
+	if(local.kit != NULL && local.kit != NIL){ local.kit delete }
+}end
+
+
+//=========================================================================
+//Heal on approach. Retail's own medic gives 30% at 110 units inside sequence_5_medic; this matches it
+//and adds a cooldown, because this one is not a one-shot sequence - it stands there for the rest of
+//the map. `health` on a player is a percent of max_health nowhere: it is absolute (main.scr:584 sets
+//max_health from coop_health), so the arithmetic is the paradrop medic's.
+coop_medicHeal local.who:{
+	if(local.who == NULL || local.who == NIL){ end }
+	if(level.coop_medicHealFrac == NIL){ level.coop_medicHealFrac = 0.30 }
+	if(level.coop_medicHealDist == NIL){ level.coop_medicHealDist = 110 }
+	if(level.coop_medicHealWait == NIL){ level.coop_medicHealWait = 10 }
+	while(local.who != NULL && local.who != NIL){
+		if(!(isalive local.who)){ break }
+		local.i = 1
+		while(local.i <= $player.size){
+			local.p = $player[local.i]
+			if(local.p != NULL && local.p != NIL){
+				if(local.p.health > 0 && local.p.max_health > 0 && local.p.dmteam != "spectator"){
+					if(local.p.health < ( local.p.max_health * 0.92 )){
+						local.d = vector_length ( local.p.origin - local.who.origin )
+						if(local.d <= level.coop_medicHealDist){
+							local.nh = local.p.health + ( local.p.max_health * level.coop_medicHealFrac )
+							if(local.nh > local.p.max_health){ local.nh = local.p.max_health }
+							local.p.health = local.nh
+							local.who playsound med_kit
+							println("^~^~^ BEACHMEDIC heal by=" + local.who.entnum + " to=" + local.p.entnum + " hp=" + local.p.health)
+							wait level.coop_medicHealWait
+						}
+					}
+				}
+			}
+			local.i++
+		}
+		wait 0.5
+	}
+}end
+
+
 coop_hedgeCrowd:{
 	if(level.gametype == 0){ end }
 	if(level.coop_hedgeCrowdOn == NIL){ level.coop_hedgeCrowdOn = 1 }
@@ -15586,6 +15770,8 @@ coop_rampHandoff:{
 	if(level.coop_rampDone == 1){ end }
 	level.coop_rampDone = 1
 	thread coop_hedgeCrowd		//[user 2026-09-06] the hedgehog crowd, see above
+	thread coop_surfMeshStart		//[user 2026-09-07, bug-2521] the surf zone's moving crest, see the label
+	thread coop_beachMedics		//[user 2026-09-07, bug-2522] medics in cover with a spinning kit, see the label
 	//[user 2026-09-04] THE SCREEN COMES BACK ON EVERY PATH THAT LETS A PLAYER GO. The plunge now
 	//blacks the screen out, and a fadeout is a latch with no self-expiry (player.cpp:7765 clears the
 	//blend only when m_fade_type == fadein), so the one thing this label must never do is release a
