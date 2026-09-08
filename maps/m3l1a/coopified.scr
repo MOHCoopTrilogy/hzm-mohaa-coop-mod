@@ -3223,7 +3223,9 @@ coop_boatLand local.hull local.door local.doomed local.slot:{
 		//report is not cut off by the remove below.
 		local.hull playsound higgins_explosion
 		thread coop_mod/main.scr::earthquake_radius local.hit 0.8 1.1 1500
-		thread coop_boatBurn local.hull.origin
+		//[bug-2532] PASS THE HULL. Unbound, this fire was stamped at the hull's origin and left
+		//there - and both callers move or delete the hull afterwards.
+		thread coop_boatBurn local.hull.origin local.hull
 		local.hull model "models/vehicles/higgins_damage.tik"
 		local.hull notsolid		//[bug-2496] a .tik `model` swap sets SOLID_BBOX; notsolid must FOLLOW it
 		//6s, not 1.2s: at 1.2 the smoke originemitter has barely started (~6 sources) and the
@@ -3457,9 +3459,20 @@ coop_disembarkRun:{
 
 //A burning hull: fire, smoke and a long column, for the rest of the map.
 //=========================================================================
-coop_boatBurn local.pos:{
+coop_boatBurn local.pos local.owner:{
 //=========================================================================
 	if(local.pos == NIL){ end }
+	//[user 2026-09-08, bug-2532] "there are random fires in the ocean out at sea". THE BURN NOW
+	//BELONGS TO ITS WRECK. local.pos is a snapshot of where the hull was at the instant it blew,
+	//and two of the callers move or delete that hull afterwards: the fleet lanes are bound to
+	//$higgins_fleet and get carried +2400 in y a minute LATER, and coop_lateBoatRun removes its
+	//hull at 90 s. Unbound and uncleaned, the flames stayed behind on open water with nothing
+	//under them. Passed an owner, the emitters bind to it and are removed when it goes - the
+	//pattern coop_higginsSinkBurn already uses at :11279. Passed none (the ashore and farBattle
+	//wrecks, which never move and are meant to burn) the behaviour is byte-for-byte as before.
+	local.own = NULL
+	if(local.owner != NIL && local.owner != NULL){ local.own = local.owner }
+	local.fxn = 0
 
 	//[user 2026-09-01] "if any higgins boats are getting destroyed they need to be obviously hit and
 	//exploded, ideally with fires and bodies and gore." One small fire and one smoke puff read as a
@@ -3483,6 +3496,7 @@ coop_boatBurn local.pos:{
 			local.fp[2] = local.pos[2] + 100 + (randomint 34)
 			local.f.origin = local.fp
 			local.f notsolid
+			if(local.own != NULL){ local.f bind local.own; local.fxn++; local.fx[local.fxn] = local.f }
 			local.f anim start
 			//ONE loop sound between them - three overlapping fire loops on one boat is mush, and
 			//there can be several wrecks up at once
@@ -3496,12 +3510,14 @@ coop_boatBurn local.pos:{
 	if(local.sm != NULL && local.sm != NIL){
 		local.sm.origin = local.pos + (0 0 130)		//[bug-2504] deck height
 		local.sm notsolid
+		if(local.own != NULL){ local.sm bind local.own; local.fxn++; local.fx[local.fxn] = local.sm }
 		local.sm anim start
 	}
 	local.sm2 = spawn "models/emitters/linger_smoke.tik"
 	if(local.sm2 != NULL && local.sm2 != NIL){
 		local.sm2.origin = local.pos + (0 0 150)		//[bug-2504] deck height
 		local.sm2 notsolid
+		if(local.own != NULL){ local.sm2 bind local.own; local.fxn++; local.fx[local.fxn] = local.sm2 }
 		local.sm2 scale 2.4
 		local.sm2 anim start
 	}
@@ -3566,12 +3582,29 @@ coop_boatBurn local.pos:{
 		local.sp[1] = local.pos[1] + ((randomint 240) - 120)
 		local.sp[2] = local.pos[2] + 60
 		local.sp = waitthread coop_dropSpot local.sp 190
-		if(local.sp == NULL){ end }
-		local.s.origin = local.sp
-		local.s.angles = (0 (randomint 360) 0)
-		local.s scale (1.4 + (randomfloat 1.2))
-		local.s notsolid
-		local.s droptofloor
+		//[bug-2532] a guarded block, NOT an `end`: this label now has work after it, and an early
+		//exit here would leak exactly the fires this fix exists to remove.
+		if(local.sp != NULL){
+			local.s.origin = local.sp
+			local.s.angles = (0 (randomint 360) 0)
+			local.s scale (1.4 + (randomfloat 1.2))
+			local.s notsolid
+			local.s droptofloor
+		}
+	}
+
+	//[bug-2532] THE FIRE OUTLIVES THE WRECK BY EXACTLY NOTHING. Polled rather than timed, because
+	//neither caller knows the hull's lifetime at the point it lights the fire: the fleet wrecks are
+	//never removed and simply burn where they end up, and coop_lateBoatRun removes its hull at 90 s.
+	//Only runs when an owner was passed, so the static beach wrecks are untouched.
+	if(local.own != NULL){
+		while(local.own != NULL && local.own != NIL){ wait 5 }
+		local.q = 1
+		while(local.q <= local.fxn){
+			if(local.fx[local.q] != NULL && local.fx[local.q] != NIL){ local.fx[local.q] remove }
+			local.q++
+		}
+		println("^~^~^ BOATBURN wreck gone - cleared " + local.fxn + " fx")
 	}
 }end
 
@@ -3670,18 +3703,27 @@ coop_beachWar:{
 	if(level.coop_beachWarGap == NIL){ level.coop_beachWarGap = 2.2 }
 
 	//standing fires scattered over the sand - lit once, they burn all map
+	//[user 2026-09-08, bug-2532] AND ON THE SAND IS NOW ENFORCED, NOT JUST ASSERTED. The y roll
+	//was -2400..+599 while coop_waterZ calls everything with y <= -768 water, so about five of
+	//these nine were lit on the sea every map - the largest single population of the "random
+	//fires in the ocean" the user reported. The band below is entirely landward of -768. z was a
+	//hard-coded -500 with no trace, which hovered above the surface where the sea is flat and sat
+	//UNDER it further in; droptofloor puts it on whatever is actually there, as coop_bunkerFires
+	//already does at :4206.
 	local.i = 0
 	while(local.i < 9){
 		local.p = (0 0 0)
 		local.p[0] = ( 0 - 3000 ) + (randomint 6200)
-		local.p[1] = ( 0 - 2400 ) + (randomint 3000)
-		local.p[2] = 0 - 500
+		local.p[1] = ( 0 - 700 ) + (randomint 1300)
+		local.p[2] = 0 - 300
 		//keep the run-up lane clear so a fire never blocks the player's route
 		if(local.p[0] > (0 - 900) && local.p[0] < 1300){ local.p[0] = local.p[0] + 2200 }
 		local.f = spawn "models/emitters/tehao_fire.tik"
 		if(local.f != NULL && local.f != NIL){
 			local.f.origin = local.p
 			local.f notsolid
+			local.f droptofloor		//[bug-2532] onto the sand, whatever height it is there
+			local.p = local.f.origin	//and the column follows the flame, not the guess
 			local.f anim start
 			//[user, bug-2313] fire loopsound removed - visual only, and it was holding a channel
 		}
