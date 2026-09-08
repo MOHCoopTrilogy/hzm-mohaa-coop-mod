@@ -1862,6 +1862,20 @@ coop_vbBeachPush:{
 //=========================================================================
 coop_smokeSignal_drop:{
 //=========================================================================
+	//[user 2026-09-08, bug-2529] "The smoke barrage shouldnt start dropping until AFTER the dialogue
+	//is thru from shore party." This label was threaded in the same frame as coop_radiomanTransmit,
+	//so the first canisters landed over the top of the player's own call and division's answer - the
+	//~13.0 s exchange (036h 5.841 + 2.0 of dead air + 045a 4.506 + two squelches). The flag it now
+	//waits on is the one coop_advanceOnSmoke already waits on (:2174), stamped 0 by the caller BEFORE
+	//the thread is started precisely so a reader cannot see a stale 1.
+	//The 20 s ceiling is the anti-strand: a busy voicebank can hold the exchange, and a barrage that
+	//never falls because one line never played would strand the whole advance behind it.
+	local.tw = 0
+	while(level.coop_radiomanTxDone != 1 && local.tw < 20){
+		wait 0.25
+		local.tw = local.tw + 0.25
+	}
+	println("^~^~^ SMOKEDROP waited=" + local.tw + " txdone=" + level.coop_radiomanTxDone)
 	local.sx[1] = 0 - 865
 	local.sy[1] = 1685
 	local.sz[1] = 0 - 415
@@ -9920,7 +9934,7 @@ coop_rampIncomingSafety:{
 	//watchdog-before-mortality gap is unchanged. This cap is only ever reached on a path where the
 	//WATCHDOG ITSELF died: on every other path coop_rampHandoff sets coop_rampCineDone and this loop
 	//breaks within one tick.
-	while(local.t < 75 && level.coop_rampCineDone != 1){
+	while(local.t < ( 75 + ( level.coop_qteWatchBump / 2 ) ) && level.coop_rampCineDone != 1){
 		wait 0.5
 		local.t = local.t + 0.5
 	}
@@ -13203,6 +13217,26 @@ coop_rampUnderwater:{
 	//UNCHANGED and 1.2 is still inside the budget; 1.0 is simply the right default now.
 	if(level.coop_uwPace == NIL){ level.coop_uwPace = 0.9 }
 	if(level.coop_uwSound == NIL){ level.coop_uwSound = 1 }
+	//[user 2026-09-08, bug-2528] THE DROWNING QTE. Assigned UNCONDITIONALLY, not with a NIL test:
+	//a knob that is only defaulted when NIL reads NIL on the first pass through a fresh level and
+	//every branch on it silently takes the wrong side. Never getcvar - that creates the cvar EMPTY
+	//and permanently defeats the engine default (bug-1669).
+	level.coop_qteOn = 1			//the whole feature; 0 restores exactly what shipped before it
+	level.coop_qteHud = 1			//0 = the mechanic with no bar
+	level.coop_qteLethal = 1		//0 = everything except the death. FIRST knob to flip if it reads badly
+	level.coop_qteWin = 18.0		//seconds of air once the lead-in ends
+	level.coop_qteLead = 1.5		//teaching window: no drain and no clock
+	level.coop_qteCap = 22.0		//the segment wall - the beat moves on regardless
+	level.coop_qteGain = 0.070		//meter per tap; break-even is 1.43 taps/s, 3/s clears in 9.1 s
+	level.coop_qteDrain = 0.10		//meter per second the current takes back
+	level.coop_qteT0 = 0
+	level.coop_qteCleared = 0
+	level.coop_qteWatchBump = 0
+	level.coop_qteSwimSaid = 0
+	//[bug-2527] the input probe answered its question - a hold gives ONE edge, a mash gives one per
+	//press - and it must not run beside the QTE, because both enable the same bridge and both clear
+	//coop_lobbyInput, so the probe would eat the taps. Off by default, kept for re-measuring.
+	if(level.coop_qteProbeOn == NIL){ level.coop_qteProbeOn = 0 }
 	if(level.coop_uwGearOn == NIL){ level.coop_uwGearOn = 1 }
 	//[user 2026-09-03] the surfacing breath. Defaulted HERE, beside the other beat switches, so the
 	//one-shot block in BEAT 8 only ever tests it - a level var, never getcvar, which creates the
@@ -13662,6 +13696,13 @@ coop_rampUnderwater:{
 	waitthread coop_uwDizzy 1.8
 	waitthread coop_uwSay "coop_underwater_wash"
 	waitthread coop_rampSuppressAll 0.58
+
+	//[user 2026-09-08, bug-2528] FIGHT THE CURRENT. A new held-pose leg between BEAT 5 and BEAT 6:
+	//he is on his knees on the bottom, the boat is going down behind him, and he has to claw his way
+	//off the seabed before he can strike out for shore. BEAT 6, 7 and 8 are NOT modified - they run
+	//afterwards unchanged, as the reward, which preserves BEAT 6's endpoint guarantee, BEAT 8's
+	//deliberate coop_rampPose bypass to z -488, and the bubble carrier's coop_uwCamPos.
+	if(level.coop_qteOn == 1){ waitthread coop_qteRun local.wx local.wy local.pace }
 
 	//--- BEAT 6. THE PUSH FOR SHORE. Six strokes, and every one of them is a body: 62% of its own
 	//travel in the first 45% then a coast, a z pulse up and back, a roll toward the pulling side, and
@@ -15929,6 +15970,321 @@ coop_qteProbe:{
 }end
 
 
+//=========================================================================
+//[user 2026-09-08, bug-2528] THE DROWNING QTE - "a Tape Use QTE to Fight the Current".
+//
+//Tap Use to claw off the seabed. Stop tapping and the current takes it back. Run out of air and you
+//drown - alone. The design behind every number here was produced by a nineteen-agent study and its
+//two adversarial verifiers, and the input path was PROVEN in game before a line of this was written
+//(bug-2527: a five-second hold produced exactly ONE edge, a mash produced 77 at about three a second).
+//
+//WHY THE INPUT IS coop_lobbyInput AND NOT useheld. Player::TickCoopLobbyInput (player.cpp:18022) runs
+//inside ClientThink once per USERCMD and publishes 33 on a BUTTON_USE RISING EDGE; the per-player
+//enable is `coop_lobbyinput 1` (player.cpp:713) and it is NOT gated on being in the lobby. `useheld`
+//by contrast is a LEVEL sampled once per script frame, so a fast masher would register FEWER taps than
+//a slow one. Test == 33 only: A and D publish 31 and 32 into the same variable. The bridge survives the
+//cinematic because Player::TickCoopBrace, which is the one thing that strips BUTTON_USE, returns early
+//on FL_IMMOBILE and on having no groundentity - and the plunge sets both. If m3l1a ever glues by
+//string instead of by entity that gate silently disappears.
+//
+//WHY THE MISSION NEVER FAILS. `missionfailed` in this mod is not a message: replace.scr:2644 ->
+//main.scr:2015 issues stuffsrv "map m3l1a", a full server reload, and the reload re-arms this same QTE
+//for the same player who just failed it. That is the forever-loop already root-caused on two other
+//maps (m3l3 looped twelve times). The failing player alone sees the words, alone dies, and respawns
+//with everybody else.
+//
+//WHY THE FADE IS A HUD SLOT AND NOT `fadeout`. fadein/fadeout/clearfade write level.m_fade_* and
+//Player::CalcBlend (player.cpp:7844) copies that level state to EVERY client, so one player's expiry
+//would black out all four. Slot 123 is script-owned, cannot latch, and is torn down by the same loop
+//that raises it.
+//
+//WHY THE KILL HAPPENS AFTER THE HANDOFF. Killing a player mid-beat is refused six ways: he is nodamage
+//from :9855, coop_maintainBoatCameras reaps his camera mid-shot, playerspawn re-hides and re-cameras
+//him, playerGlue re-glues him, and the DBNO branch strands him unrevivable under water. See coop_qteKill.
+//
+//KILL SWITCHES: level.coop_qteOn 0 (whole feature, byte-identical to before), coop_qteHud 0 (mechanic
+//with no bar), coop_qteLethal 0 (no death). PROBES: ^~^~^ RAMPQTE.
+coop_qteRun local.wx local.wy local.pace:{
+	local.on = level.coop_qteOn		//snapshotted: clearing it mid-loop must not strand half a state
+	if(local.on != 1){ end }
+	if(level.gametype == 0){ end }
+
+	//the held pose is BEAT 6's OPENING pose, written every frame rather than waited through, because a
+	//mid-beat joiner gets a fresh camera and needs an absolute pose on his first frame (the BEAT 3c
+	//pattern: p0 == p1).
+	local.hp = (0 0 0)
+	local.hp[0] = local.wx - 38
+	local.hp[1] = local.wy - 66
+	local.hp[2] = 0 - 543
+	local.ha = (0 0 0)
+	local.ha[0] = 11
+	local.ha[1] = 84
+	local.ha[2] = 4
+
+	//--- arm
+	level.coop_qteT0 = level.time
+	level.coop_qteCleared = 0
+	local.n = 0
+	local.i = 1
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			if(local.p.health > 0 && local.p.dmteam != "spectator" && local.p.flags["coop_isActive"] == 1){
+				local.p.flags["coop_qteState"] = "pending"
+				local.p.flags["coop_qteMeter"] = 0
+				local.p.flags["coop_qteTaps"] = 0
+				local.p.flags["coop_qtePrevT"] = level.time
+				local.p.flags["coop_qteDrawn"] = 0
+				local.p.flags["coop_qteMark"] = 4
+				local.p coop_lobbyinput 1
+				local.p.coop_lobbyInput = 0
+				local.n++
+			}
+		}
+		local.i++
+	}
+	level.coop_qteWatchBump = 44		//+22 s watchdog, +11 s incoming safety; cleared at the handoff
+	println("^~^~^ RAMPQTE arm n=" + local.n + " cap=" + level.coop_qteCap + " win=" + level.coop_qteWin)
+	if(local.n < 1){ println("^~^~^ RAMPQTE off why=nobody"); end }
+
+	//--- the loop
+	local.t = 0
+	local.rep = 0
+	while(level.coop_qteCleared != 1){
+		//STOP 1: the beat has already been released by another thread (the watchdog reaches
+		//coop_rampHandoff from :16026). Without this the curtain would be redrawn on the next tick and
+		//the player would walk up Omaha behind a full-screen black plate with nothing left to clear it.
+		if(level.coop_rampDone == 1 || level.coop_rampCineDone == 1 || level.coop_rampUnderOn != 1){
+			println("^~^~^ RAMPQTE off why=abort t=" + local.t)
+			waitthread coop_qteResolveAll
+			end
+		}
+		//STOP 2: the segment wall. level.coop_qteT0 was assigned at arm, before this loop - reading an
+		//unassigned level var throws, and a Script Error skips the statement without killing the thread,
+		//which is exactly how an anti-softlock wall ships inert.
+		if(( level.time - level.coop_qteT0 ) > level.coop_qteCap){
+			println("^~^~^ RAMPQTE wall fired t=" + local.t)
+			waitthread coop_qteResolveAll
+			end
+		}
+
+		local.done = 0
+		local.live = 0
+		local.i = 1
+		while(local.i <= $player.size){
+			local.p = $player[local.i]
+			if(local.p != NULL && local.p != NIL){
+				local.st = local.p.flags["coop_qteState"]
+				if(local.st == NIL){
+					//joined after the arm: he never saw it, so he never owed it
+					local.p.flags["coop_qteState"] = "passed"
+					println("^~^~^ RAMPQTE join byE" + local.p.entnum + " action=autopass")
+				}else{
+					if(local.st == "pending"){
+						if(local.p.health <= 0 || local.p.dmteam == "spectator"){
+							local.p.flags["coop_qteState"] = "passed"		//he left the set; he cannot owe it
+							println("^~^~^ RAMPQTE reap byE" + local.p.entnum)
+						}else{
+							local.live++
+							waitthread coop_qteTick local.p local.t
+
+							local.p thread coop_rampPose local.hp local.ha
+						}
+					}
+					if(local.p.flags["coop_qteState"] != "pending"){ local.done++ }
+				}
+			}
+			local.i++
+		}
+		if(local.live < 1){ level.coop_qteCleared = 1 }
+
+		local.rep++
+		if(local.rep >= 40){
+			local.rep = 0
+			println("^~^~^ RAMPQTE tick t=" + local.t + " done=" + local.done + " live=" + local.live)
+		}
+		waitframe
+		local.t = local.t + 0.05
+	}
+	println("^~^~^ RAMPQTE cleared t=" + local.t)
+	waitthread coop_qteResolveAll
+}end
+
+
+//=========================================================================
+//One player, one frame of the struggle.
+coop_qteTick local.p local.t:{
+	if(local.p == NULL || local.p == NIL){ end }
+	local.m = local.p.flags["coop_qteMeter"]
+	if(local.m == NIL){ local.m = 0 }
+
+	//dt measured here: level.frametime is NOT a script property and reading it throws.
+	if(local.p.flags["coop_qtePrevT"] == NIL){ local.p.flags["coop_qtePrevT"] = level.time }
+	local.dt = level.time - local.p.flags["coop_qtePrevT"]
+	if(local.dt > 0.25){ local.dt = 0.25 }
+	if(local.dt < 0){ local.dt = 0 }
+	local.p.flags["coop_qtePrevT"] = level.time
+
+	//the tap. == 33 only; A and D publish 31 and 32 into the same variable.
+	if(local.p.coop_lobbyInput == 33){
+		local.p.coop_lobbyInput = 0
+		local.m = local.m + level.coop_qteGain
+		local.p.flags["coop_qteTaps"] = local.p.flags["coop_qteTaps"] + 1
+	}
+
+	//the current. The lead-in holds BOTH the drain and the clock, so the first exposure is teachable.
+	local.el = level.time - level.coop_qteT0
+	if(local.el > level.coop_qteLead){
+		local.m = local.m - ( level.coop_qteDrain * local.dt )
+	}
+	if(local.m < 0){ local.m = 0 }
+	if(local.m > 1){ local.m = 1 }
+	local.p.flags["coop_qteMeter"] = local.m
+
+	//losing ground has to be FELT, not just seen: a jolt on each downward crossing of 3/4, 1/2, 1/4.
+	//Float literals both - int/int is C division here. Called directly and never through coop_uwJolt,
+	//which loops $player and would broadcast one man's slip to everybody.
+	local.mk = local.p.flags["coop_qteMark"]
+	if(local.mk == NIL){ local.mk = 4 }
+	if(local.m < 0.75 && local.mk > 3){ local.mk = 3; local.p thread coop_mod/main.scr::earthquake_player 0.35 0.45 }
+	if(local.m < 0.50 && local.mk > 2){ local.mk = 2; local.p thread coop_mod/main.scr::earthquake_player 0.35 0.45 }
+	if(local.m < 0.25 && local.mk > 1){ local.mk = 1; local.p thread coop_mod/main.scr::earthquake_player 0.35 0.45 }
+	if(local.m > 0.80){ local.mk = 4 }
+	local.p.flags["coop_qteMark"] = local.mk
+
+	if(level.coop_qteHud == 1){ waitthread coop_qteBar local.p local.m 0 }
+
+	//--- won
+	if(local.m >= 1){
+		local.p.flags["coop_qteState"] = "passed"
+		println("^~^~^ RAMPQTE pass byE" + local.p.entnum + " t=" + local.t + " taps=" + local.p.flags["coop_qteTaps"])
+		local.p iprint "You break free of the current." 1
+		if(level.coop_qteSwimSaid != 1){
+			level.coop_qteSwimSaid = 1
+			waitthread coop_uwSay "coop_uw_swim"
+		}
+		end
+	}
+
+	//--- out of air
+	if(local.el > ( level.coop_qteLead + level.coop_qteWin )){
+		local.p.flags["coop_qteState"] = "failed"
+		println("^~^~^ RAMPQTE expire byE" + local.p.entnum + " t=" + local.t + " taps=" + local.p.flags["coop_qteTaps"])
+		local.p iprint "MISSION FAILED - YOU DROWNED" 1
+		local.p thread coop_qteBlackout
+	}
+}end
+
+
+//=========================================================================
+//The curtain, on his screen alone. Slot 123 draws UNDER 124/125/179 because CG_HudDrawElements walks
+//0..255 in order. This is not `fadeout`: that writes level state and would black out all four.
+coop_qteBlackout:{
+	if(self == NULL || self == NIL){ end }
+	if(self.flags["coop_everActive"] != 1){ end }
+	local.a = 0
+	while(local.a < 1 && level.coop_rampDone != 1){
+		local.a = local.a + 0.05
+		if(local.a > 1){ local.a = 1 }
+		ihuddraw_virtualsize self 123 1
+		ihuddraw_align self 123 left top
+		ihuddraw_shader self 123 "textures/hud/coop_bar_white"
+		ihuddraw_color self 123 0 0 0
+		ihuddraw_rect self 123 0 0 640 480
+		ihuddraw_alpha self 123 local.a
+		wait 0.1
+	}
+}end
+
+
+//=========================================================================
+//The bar. Four slots per client, and a slot on one client is different memory from the same slot on
+//another (iHudDraw* calls gi.MSG_SetClient and HudDrawElements is per client), so these are NOT
+//per-player allocations the way the DBNO label had to be. All four are >= 100 or cg_drawtools.cpp:696
+//multiplies them by the HUD fade alpha, which is 0 by this point in the beat.
+//A slot is a shader element OR a string element, never both, and the last of shader/string/font wins.
+coop_qteBar local.p local.m local.force:{
+	if(local.p == NULL || local.p == NIL){ end }
+	if(local.p.flags["coop_everActive"] != 1){ end }		//ihuddraw on an uninitialised HUD throws
+	local.w = int( local.m * 200 )
+	local.prev = local.p.flags["coop_qteDrawn"]
+	if(local.prev == NIL){ local.prev = 0 - 1 }
+	if(local.w == local.prev && local.force != 1){ end }		//integer change only
+	local.p.flags["coop_qteDrawn"] = local.w
+
+	//the whole plate is dragged seaward as he loses, and springs back on a tap
+	local.dx = 0 - int( 12 * ( 1 - local.m ) )
+
+	ihuddraw_virtualsize local.p 124 1
+	ihuddraw_align local.p 124 center bottom
+	ihuddraw_shader local.p 124 "textures/hud/coop_bar_white"
+	ihuddraw_color local.p 124 0.06 0.07 0.08
+	ihuddraw_rect local.p 124 local.dx ( 0 - 60 ) 200 10
+	ihuddraw_alpha local.p 124 0.85
+
+	ihuddraw_virtualsize local.p 125 1
+	ihuddraw_align local.p 125 center bottom
+	ihuddraw_shader local.p 125 "textures/hud/coop_bar_white"
+	if(local.m < 0.15){ ihuddraw_color local.p 125 0.72 0.22 0.18 }
+	else{ ihuddraw_color local.p 125 0.35 0.78 0.42 }
+	ihuddraw_rect local.p 125 ( local.dx + ( ( local.w - 200 ) / 2 ) ) ( 0 - 60 ) local.w 10
+	ihuddraw_alpha local.p 125 1
+
+	ihuddraw_virtualsize local.p 179 1
+	ihuddraw_align local.p 179 center bottom
+	ihuddraw_font local.p 179 "facfont-20"
+	ihuddraw_color local.p 179 0.92 0.92 0.88
+	ihuddraw_rect local.p 179 local.dx ( 0 - 78 ) 200 14
+	ihuddraw_alpha local.p 179 1
+	ihuddraw_string local.p 179 "TAP  F  - FIGHT THE CURRENT"
+}end
+
+
+//=========================================================================
+//Everyone still pending is released. Called on every exit path, including both stops.
+coop_qteResolveAll:{
+	local.i = 1
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			if(local.p.flags["coop_qteState"] == "pending"){ local.p.flags["coop_qteState"] = "passed" }
+		}
+		local.i++
+	}
+	level.coop_qteCleared = 1
+}end
+
+
+//=========================================================================
+//The kill, AFTER coop_rampHandoff has released him. Every reason a mid-beat kill is refused is gone by
+//here: he is no longer nodamage, no longer glued, no longer hidden, and his camera is no longer reaped
+//and rebuilt under him. coop_dbno_dead stops dbno.scr routing him to a downed state nobody can reach.
+coop_qteKill:{
+	if(level.coop_rampDone != 1){ end }
+	local.i = 1
+	local.k = 0
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			if(local.p.flags["coop_everActive"] == 1){ ihuddraw_alpha local.p 123 0 }		//the curtain, always
+			if(local.p.flags["coop_qteState"] == "failed" && local.p.health > 0 && level.coop_qteLethal == 1){
+				local.p.flags["coop_dbno_dead"] = 1
+				local.p.flags["coop_dbno_cumulative"] = 0
+				local.p.flags["coop_qteLmsExempt"] = 1
+				local.p takedamage
+				local.p normal_damage 101		//a PERCENT of max_health (entity.cpp:6248), not a number of points
+				local.k++
+				println("^~^~^ RAMPQTE kill byE" + local.p.entnum)
+			}
+
+			local.p.flags["coop_qteState"] = NIL
+		}
+		local.i++
+	}
+	if(local.k > 0){ println("^~^~^ RAMPQTE killed n=" + local.k) }
+}end
+
+
 coop_rampHandoff:{
 //=========================================================================
 	if(level.coop_rampDone == 1){ end }
@@ -15943,6 +16299,31 @@ coop_rampHandoff:{
 	//m_fade_time = -1 and m_fade_type = fadein, which is exactly the cleared state. Third of four.
 	level.coop_uwBlackClear = 1
 	clearfade
+	//[user 2026-09-08, bug-2528] THE QTE COMES DOWN HERE, at the single funnel every path reaches
+	//including the watchdog abort. Unconditional, iterating $player LIVE with no health or spectator
+	//filter, but guarded per player on coop_everActive: ihuddraw on a client whose HUD has never been
+	//initialised throws (player.scr:894), and a mid-beat joiner is exactly that player.
+	local.qi = 1
+	local.qn = 0
+	while(local.qi <= $player.size){
+		local.qp = $player[local.qi]
+		if(local.qp != NULL && local.qp != NIL){
+			local.qp coop_lobbyinput 0
+			if(local.qp.flags["coop_everActive"] == 1){
+				//slot 123, the curtain, is NOT cleared here: a player who drowned keeps it until he
+				//actually drops, and that happens in coop_qteKill at the end of this label, after the
+				//body release. coop_qteKill clears it for everybody, lethal or not.
+				ihuddraw_alpha local.qp 124 0
+				ihuddraw_alpha local.qp 125 0
+				ihuddraw_string local.qp 179 ""
+				ihuddraw_alpha local.qp 179 0
+				local.qn++
+			}
+		}
+		local.qi++
+	}
+	println("^~^~^ RAMPQTE hud clear n=" + local.qn)
+	level.coop_qteWatchBump = 0
 
 	//[user 2026-09-05] AND THE UNDERWATER LOOK'S STATE COMES DOWN ON EVERY PATH, including the
 	//watchdog abort, which reaches this label too. Left set, coop_uwAstern replaces the shipped
@@ -16001,6 +16382,13 @@ coop_rampHandoff:{
 
 	//[user 2026-09-02, bug-2361] the boat we came in on burns, heels over and settles.
 	thread coop_higginsSink
+
+	//[user 2026-09-08, bug-2528] AND THE DROWNED DROP - LAST, after everything above has released
+	//them. A mid-beat kill is refused six ways (nodamage from :9855, the camera reaped and rebuilt
+	//under him, playerspawn re-hiding him, playerGlue re-gluing him, Entity::Kill's zero-health
+	//zombie, and the DBNO branch stranding him unrevivable under water); by this line every one of
+	//those is gone. It also clears the curtain for everybody, lethal or not.
+	waitthread coop_qteKill
 }end
 
 
@@ -16025,7 +16413,10 @@ coop_rampWatchdog:{
 	//earlier 45 -> 70 because it raised the watchdog ALONE, inverting watchdog-before-mortality and
 	//opening a window where a player is damageable while still glued, hidden and locked in a camera.
 	//Both numbers move together here, so the 15s gap is unchanged.
-	while(local.t < 120 && level.coop_rampCineDone != 1){
+	//[bug-2528] the QTE legitimately adds up to coop_qteCap seconds to the beat, so the watchdog
+	//and coop_rampIncomingSafety move TOGETHER - raising this one alone inverts watchdog-before-
+	//mortality and makes a player damageable while glued, hidden and locked in a camera.
+	while(local.t < ( 120 + level.coop_qteWatchBump ) && level.coop_rampCineDone != 1){
 		wait 0.5
 		local.t = local.t + 1
 	}
