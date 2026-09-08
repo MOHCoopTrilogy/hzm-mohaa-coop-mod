@@ -15511,8 +15511,11 @@ coop_beachMedicSpawn local.pos:{
 		local.pat setsynctime 0
 		local.pat thread coop_vigHold "patient01"
 	}
-	if((randomint 2) == 0){ local.a thread coop_vigHold "medic01" }
-	else{ local.a thread coop_vigHold "medic02" }
+	//[bug-2526] remember the clip: coop_vigHold issues `anim` ONCE and then parks in a waittill
+	//animdone that never fires for a loop, so whoever interrupts the pose owns putting it back.
+	if((randomint 2) == 0){ local.a.coop_pose = "medic01"; local.a.coop_poseAlt = "medic02" }
+	else{ local.a.coop_pose = "medic02"; local.a.coop_poseAlt = "medic01" }
+	local.a thread coop_vigHold local.a.coop_pose
 	thread coop_medicKit local.a 52
 	thread coop_medicHeal local.a
 	end local.a
@@ -15536,6 +15539,17 @@ coop_medicKit local.who local.zoff:{
 		local.spin = local.spin + 12
 		if(local.spin >= 360){ local.spin = 0 }
 		local.kit.angles = ( 90 local.spin 0 )
+		//[bug-2526] the kit swells for a beat on every heal, so the moment reads even if the medic's
+		//posture change is behind him or off screen
+		if(local.who.coop_medicPulse == 1){
+			local.who.coop_medicPulse = 0
+			local.kit scale 0.85
+			local.pulse = 12
+		}
+		if(local.pulse != NIL && local.pulse > 0){
+			local.pulse--
+			if(local.pulse == 0){ local.kit scale 0.5 }
+		}
 		wait 0.05
 	}
 	if(local.kit != NULL && local.kit != NIL){ local.kit delete }
@@ -15547,6 +15561,39 @@ coop_medicKit local.who local.zoff:{
 //and adds a cooldown, because this one is not a one-shot sequence - it stands there for the rest of
 //the map. `health` on a player is a percent of max_health nowhere: it is absolute (main.scr:584 sets
 //max_health from coop_health), so the arithmetic is the paradrop medic's.
+//=========================================================================
+//[user 2026-09-08, bug-2526] "Medics dont seem to animate the heal." The medic was already kneeling
+//over his casualty and kept kneeling over his casualty while your health went up, so the only signal
+//was a sound. He now BREAKS OFF: looks up at you, changes posture to the other medic clip, pulses the
+//kit over his head, then goes back to the patient.
+//
+//Why it has to restore the pose by hand: coop_vigHold issues `anim` exactly ONCE and then parks in
+//`waittill animdone`, which never fires for a looping clip (Animate::NewAnim only schedules AnimDone
+//for a non-loop, animate.cpp:275-278). So the holder will never re-issue anything, and anyone who
+//interrupts the pose owns putting it back. Both clips are the map's own - medic01 and medic02, the
+//pair m3l1a.scr:4842 and :6884 use - so the swap is proven on this model.
+coop_medicHealAnim local.who local.p:{
+	if(local.who == NULL || local.who == NIL){ end }
+	if(!(isalive local.who)){ end }
+	local.who playsound med_kit
+	local.who.coop_medicPulse = 1		//the kit thread reads this and swells for a beat
+	if(local.p != NULL && local.p != NIL){ local.who lookat local.p }
+	if(local.who.coop_poseAlt != NIL){
+		local.pz = waitthread coop_dryPose local.who local.who.coop_poseAlt
+		local.who anim local.pz
+	}
+	wait 2.2
+	if(local.who == NULL || local.who == NIL){ end }
+	if(!(isalive local.who)){ end }
+	local.who lookat NULL
+	if(local.who.coop_pose != NIL){
+		local.pz = waitthread coop_dryPose local.who local.who.coop_pose
+		local.who anim local.pz		//back to the casualty; the holder is parked and will not do this
+	}
+}end
+
+
+//=========================================================================
 coop_medicHeal local.who:{
 	if(local.who == NULL || local.who == NIL){ end }
 	if(level.coop_medicHealFrac == NIL){ level.coop_medicHealFrac = 0.30 }
@@ -15565,7 +15612,7 @@ coop_medicHeal local.who:{
 							local.nh = local.p.health + ( local.p.max_health * level.coop_medicHealFrac )
 							if(local.nh > local.p.max_health){ local.nh = local.p.max_health }
 							local.p.health = local.nh
-							local.who playsound med_kit
+							waitthread coop_medicHealAnim local.who local.p
 							println("^~^~^ BEACHMEDIC heal by=" + local.who.entnum + " to=" + local.p.entnum + " hp=" + local.p.health)
 							wait level.coop_medicHealWait
 						}
