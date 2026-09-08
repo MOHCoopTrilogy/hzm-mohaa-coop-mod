@@ -15435,24 +15435,37 @@ coop_beachMedics:{
 	level.coop_beachMedicsDone = 1
 	if(level.coop_beachMedicsN == NIL){ level.coop_beachMedicsN = 4 }
 	wait 5
-	//the same cover_trigger anchors the hedgehog crowd uses, but LANDWARD of them so a medic is behind
-	//the hedgehog rather than in among the men sheltering at its seaward face
-	local.hn = 0
-	local.hn++; local.hx[local.hn] = 610; local.hy[local.hn] = 1032
-	local.hn++; local.hx[local.hn] = 0 - 76; local.hy[local.hn] = 558
-	local.hn++; local.hx[local.hn] = 476; local.hy[local.hn] = 484
-	local.hn++; local.hx[local.hn] = 300; local.hy[local.hn] = 304
-	local.hn++; local.hx[local.hn] = 84; local.hy[local.hn] = 350
+	//[user 2026-09-07, bug-2523] "Two of your medics are spawned right near each other and are spawning
+	//on top of hedgehogs, they need to be spread out more across the beach." BOTH WERE MINE, and the
+	//first cut got the geometry wrong twice over. It reused the FIVE anchors the hedgehog crowd uses,
+	//which are one cluster inside x -76..610 - so four medics cycling them could only ever bunch. And it
+	//offset them +30..+56 in y, which is (a) far less than the hedgehog's own ~260 u width, so a man
+	//landed inside the obstacle, and (b) the wrong SIDE: +y is landward, toward the bluff and the German
+	//guns, so that was the exposed face.
+	//
+	//These five are SOLVED, not chosen. The map carries 55 trigger_multiple entities with
+	//$cover_type "hedgehog" (BSP entity lump; the key has a $ prefix, which is why a first grep for
+	//"cover_type" found none). Each candidate is the anchor offset 190 u SEAWARD, keeping the obstacle
+	//between the pair and the guns; rejected unless the medic AND his patient clear every hedgehog, ramp
+	//and crater trigger by 150 u, sit landward of y -600 so nobody kneels in the surf, and stand 600 u
+	//off every crowd anchor. Of 14 survivors these five maximise the smallest gap along the beach.
+	//Real clearances are on each row; the pair is 1408 u from its nearest neighbour and they span 3540 u.
+	local.n = 0
+	local.n++; local.mx[local.n] = 0 - 2112; local.my[local.n] = 1472; local.mz[local.n] = 0 - 366	//clear 190u
+	local.n++; local.mx[local.n] = 0 - 804; local.my[local.n] = 0 - 592; local.mz[local.n] = 0 - 414	//clear 190u
+	local.n++; local.mx[local.n] = 36; local.my[local.n] = 1782; local.mz[local.n] = 0 - 358	//clear 190u
+	local.n++; local.mx[local.n] = 622; local.my[local.n] = 0 - 550; local.mz[local.n] = 0 - 418	//clear 154u
+	local.n++; local.mx[local.n] = 1428; local.my[local.n] = 1568; local.mz[local.n] = 0 - 390	//clear 157u
+	if(level.coop_beachMedicsN > local.n){ level.coop_beachMedicsN = local.n }
+	//coop_vigSpawn is capped; this beat adds two actors per medic, the same way the other vignettes do
+	if(level.coop_vigCap != NIL){ level.coop_vigCap = level.coop_vigCap + ( local.n * 2 ) }
 	local.made = 0
-	local.i = 0
-	local.h = 0
-	while(local.i < level.coop_beachMedicsN){
-		local.h++
-		if(local.h > local.hn){ local.h = 1 }
+	local.i = 1
+	while(local.i <= level.coop_beachMedicsN){
 		local.p = (0 0 0)
-		local.p[0] = local.hx[local.h] + ( 0 - 40 ) + ( randomint 80 )
-		local.p[1] = local.hy[local.h] + 30 + ( randomint 26 )
-		local.p[2] = 0 - 400
+		local.p[0] = local.mx[local.i]
+		local.p[1] = local.my[local.i]
+		local.p[2] = local.mz[local.i] + 40
 		local.a = waitthread coop_beachMedicSpawn local.p
 		if(local.a != NULL && local.a != NIL){ local.made++ }
 		local.i++
@@ -15471,25 +15484,28 @@ coop_beachMedics:{
 
 //=========================================================================
 coop_beachMedicSpawn local.pos:{
-	local.a = spawn "models/human/dday_ranger_medic" gun "none"
+	//[user 2026-09-07, bug-2523] "theyre also posed like they are holding a gun when they arent." The
+	//first cut spawned the medic with gun "none" and then held him in `crouch_beach_idle`, which is a
+	//RIFLE idle - so he cradled a weapon that was not there. The map already ships the right answer:
+	//its own medic vignette (see A1 above) pairs `dday_ranger_medic` posed `medic01`/`medic02` with a
+	//`dday_29th_private_patient` posed `patient01`, all unarmed and all kneeling. Reuse it exactly,
+	//including the shipped geometry - the medic sits at patient + (48 -20) with yaw 90 against the
+	//patient's 0 - so the two read as one group instead of a man miming first aid on empty sand.
+	local.q = (0 0 0)
+	local.q[0] = local.pos[0] - 48
+	local.q[1] = local.pos[1] + 20
+	local.q[2] = local.pos[2]
+	local.pat = waitthread coop_vigSpawn "models/human/dday_29th_private_patient" "none" local.q 0
+	local.a = waitthread coop_vigSpawn "models/human/dday_ranger_medic" "none" local.pos 90
 	if(local.a == NULL || local.a == NIL){ end NULL }		//entity-pool guard
-	local.a exec global/disable_ai.scr
-	local.a dontdropweapons
-	local.a.coop_noChatter = 1
-	local.a.origin = local.pos
-	local.a.angles = ( 0 ( ( randomint 60 ) + 60 ) 0 )
-	local.a droptofloor
-	local.a.isinsequence = 1
-	local.a.isbusy = 1
-	local.a.coop_vigOwned = 1		//coop_vigHold breaks on isbusy unless the holder owns him
 	local.a.coop_beachMedic = 1
-	local.a.no_idle = 1
-	local.a nodamage		//a medic who dies to the beach fire before you reach him is worse than no medic
-	//coop_vigHold takes the actor as the RECEIVER and the anim as its one argument - the crowd and
-	//the vignettes all call it this way. `crouch_beach_idle` is a `random` group whose member digits
-	//the engine strips at load (bug-2214), so the bare name is the only one that resolves.
-	local.a.coop_pose = "crouch_beach_idle"
-	local.a thread coop_vigHold "crouch_beach_idle"
+	local.a setsynctime 0
+	if(local.pat != NULL && local.pat != NIL){
+		local.pat setsynctime 0
+		local.pat thread coop_vigHold "patient01"
+	}
+	if((randomint 2) == 0){ local.a thread coop_vigHold "medic01" }
+	else{ local.a thread coop_vigHold "medic02" }
 	thread coop_medicKit local.a 52
 	thread coop_medicHeal local.a
 	end local.a
