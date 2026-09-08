@@ -7,7 +7,7 @@
 //
 // ONE deform, and it is inversesawtooth rather than sin on purpose. A broken bore is a steep face
 // with a long tail, and a sawtooth's face collapses to one sample step so its slope is amp divided by
-// the row spacing (6.0/39.4 = 0.152, about 8.7 degrees) instead of a sine's gentle k*a. It also runs
+// the row spacing (20.0/39.4 = 0.507, about 26.9 degrees) instead of a sine's gentle k*a. It also runs
 // 0..1 rather than -1..1, so this layer NEVER dips below its rest plane and stays clear of the
 // sheet's own +/-3.97 u flap.
 //
@@ -23,15 +23,39 @@ coop_surf_bore
 	surfaceparm nolightmap
 	cull none
 
-	deformVertexes wave 792.0 inversesawtooth 0 6.0 0 0.20		// bore: lambda 560 u = 14.2 m, T 5.0 s, 112 u/s up the beach
+	deformVertexes wave 792.0 inversesawtooth 0 20.0 0 0.20		// bore: lambda 560 u = 14.2 m, T 5.0 s, 112 u/s up the beach
 
 	{
 		nopicmip
 		map textures/coop_fx/breakfoam.tga
 		blendFunc GL_SRC_ALPHA GL_ONE
-		rgbGen wave sin 0.20 0.18 0 0.08
-		tcMod scale 1 1
+		rgbGen wave sin 0.30 0.06 0 0.08
 		tcMod wavetrant sin 0 -0.06 0 0.08
+	nextbundle
+		map textures/coop_fx/surfcell.tga
+	}
+
+	// [bug-2524] THE BORE TRAIN. Stage 1 above is the authored break-line band and stays put.
+	// This tiles the same texture ONCE PER GEOMETRIC BORE, so every crest carries foam and every
+	// trough is clear water; before it, ~63% of this mesh's cross-shore span drew alpha 0 for
+	// ever. breakfoam.tga's t=0 and t=1 rows are both alpha 0 and luminance 0, so it tiles with
+	// no seam, and its 35% duty cycle becomes 35% foam / 65% clear per crest.
+	// The T scale is the mesh's own deform phase gradient measured on the shipped geometry with
+	// the yaw-215 pre-rotation and the sheet's z-ramp included: 2.4238 cycles per 1.0 t. This
+	// stage's t-scale is POSITIVE, so shoreward is NEGATIVE scroll - the mirror of the shore
+	// sheet's crest stage, from the same derivation.
+	// alphaGen tCoord reads the RAW texcoord before every tcMod, so the scroll cannot drag it:
+	// it kills the train at t 0.82 (y -1006) before the wet-sand strip, and costs no tcMod slot.
+	// surfcell on bundle 1 is MANDATORY: the deform's phase is linear in position, so its crest
+	// is a mathematically straight 15872 u line and nothing else can rag it.
+	{
+		nopicmip
+		map textures/coop_fx/breakfoam.tga
+		blendFunc GL_SRC_ALPHA GL_ONE
+		rgbGen identity
+		alphaGen tCoord 8.2 -1.8 0 1
+		tcMod scale 1 2.4238
+		tcMod scroll 0 -0.2000
 	nextbundle
 		map textures/coop_fx/surfcell.tga
 	}

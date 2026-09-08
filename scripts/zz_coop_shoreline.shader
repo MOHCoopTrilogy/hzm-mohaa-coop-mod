@@ -342,9 +342,19 @@ textures/misc_outside/deepbluesea_shoreline
 		//ends instead of the whole 15872 u flashing white at once. tcMods compose in LISTED ORDER, so
 		//this must sit between the scale and the scroll. FOUR tcMods here is TR_MAX_TEXMODS: a fifth
 		//is ri.Error(ERR_DROP) at parse time. This stage is closed.
-		tcMod scale 5 -6
+		//[user 2026-09-07, bug-2524] CELERITY. -6 -> -2.4238 and 0.16 -> 0.2000 put this painted crest
+		//on the same spacing and the same speed as the geometric bore in the surf mesh below it. It was
+		//running at 37.6 u/s = 0.95 m/s, which is the shallow-water celerity of 9 cm of water, in water
+		//0.4-1.7 m deep; the bore moves at 116.2 u/s. Two crest trains 3.1x apart in speed and 2.5x in
+		//spacing beat against each other, and a low-contrast grating crawling at 3.2 px/s at 20 m is at
+		//the floor of detectable coherent motion. That is what "flat" was. Now 8.5 px/s, in lockstep.
+		//Arrival goes 6.25 -> 5.00 s, still commensurate with the 12.5 s flap on a 25 s super-period, so
+		//nothing drifts; crests now meet five flap phases in rotation instead of one.
+		//The wavetrant backslide threshold is scroll/(2*pi*freq), which RISES 0.318 -> 0.398, so the
+		//shipped 0.30 amplitude gains margin rather than losing it.
+		tcMod scale 5 -2.4238
 		tcMod transform 1 0.10 0 1 0 0
-		tcMod scroll 0.01 0.16
+		tcMod scroll 0.01 0.2000
 		tcMod wavetrant sin 0 0.30 0 0.08
 		//[user 2026-09-06, bug-2518] the cell mask on the crest too, and this one is MANDATORY, not
 		//optional: stage 2's foam contributes ~0.11 of framebuffer while this stage is ocean2a_shore
