@@ -13362,6 +13362,7 @@ coop_rampUnderwater:{
 	local.a1[1] = 86
 	local.a1[2] = 0 - 28
 	println("^~^~^ RAMPUW plunge")
+	thread coop_qteProbe		//[user 2026-09-08, bug-2527] log-only input probe, see the label
 	//[user 2026-09-06, bug-2508] the dense sea mesh comes down and the retail sheet comes back BEFORE
 	//the lid below sets its alpha - the mesh replaced $ocean_wavy at the landing (coop_seaMeshStart).
 	waitthread coop_seaMeshStop
@@ -15832,6 +15833,99 @@ coop_hedgeCrowdPin local.m local.idx local.pin:{
 			local.m droptofloor
 		}
 	}
+}end
+
+
+//=========================================================================
+//[user 2026-09-08, bug-2527] THE DROWNING-QTE INPUT PROBE. Log only: no HUD, no gameplay change,
+//nothing the player can see or feel.
+//
+//The QTE design turns on one unknown that no shipped code answers: can a player's Use key be read AT
+//ALL while he is glued, hidden, notsolid, physics_off and inside a script camera all at once? Every
+//existing consumer of the input bridge polls a player who is standing on the ground in the lobby.
+//If the answer is no, the entire feature is unbuildable as designed and the right thing is to know
+//that before writing two hundred lines against it - this project's most expensive failure mode is a
+//change that is wired, plausible, and does nothing.
+//
+//WHAT IT USES. Player::TickCoopLobbyInput (player.cpp:18022) runs inside ClientThink once per
+//USERCMD, not once per script frame, and publishes self.coop_lobbyInput = 33 on a BUTTON_USE RISING
+//EDGE. It is enabled per player by `coop_lobbyinput 1` (player.cpp:713) and is NOT gated on being in
+//the lobby - the only gate is that flag. That per-usercmd edge is what a tap detector needs;
+//`useheld` is a LEVEL sampled once per script frame, so a fast masher would register FEWER taps than
+//a slow one. The probe records both so the two can be compared on real input.
+//
+//HOW TO READ IT. Play the plunge normally, then during the underwater sequence HOLD Use for a few
+//seconds and then MASH it. In G:\mohaa-gl2\home\maintt\qconsole.log:
+//    a hold should produce ONE edge and many held frames
+//    a mash should produce roughly one edge per press
+//    edges=0 with held>0 means the bridge is not publishing while glued
+//    held=0 and edges=0 means the usercmd is not reaching script at all here, and the QTE as
+//    designed cannot be built - it would need a different input entirely
+//`developer 1` is required or println returns immediately (scriptthread.cpp:2891); it is archived on
+//in this profile.
+//
+//KILL SWITCH: level.coop_qteProbeOn 0.
+coop_qteProbe:{
+	if(level.gametype == 0){ end }
+	if(level.coop_qteProbeOn == NIL){ level.coop_qteProbeOn = 1 }
+	if(!level.coop_qteProbeOn){ end }
+	if(level.coop_qteProbeDone == 1){ end }
+	level.coop_qteProbeDone = 1
+
+	//enrol everyone active. The bridge is per player and costs one usercmd branch while it is on.
+	local.n = 0
+	local.i = 1
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			local.p coop_lobbyinput 1
+			local.p.coop_lobbyInput = 0
+			local.p.flags["coop_qteSamples"] = 0
+			local.p.flags["coop_qteHeld"] = 0
+			local.p.flags["coop_qteEdges"] = 0
+			local.n++
+		}
+		local.i++
+	}
+	println("^~^~^ QTEPROBE arm n=" + local.n)
+	if(local.n < 1){ end }
+
+	//sample until the cinematic releases. coop_rampDone is set by coop_rampHandoff on EVERY path,
+	//including the watchdog abort, so this can never outlive the beat.
+	local.t = 0
+	while(level.coop_rampDone != 1 && local.t < 120){
+		local.i = 1
+		while(local.i <= $player.size){
+			local.p = $player[local.i]
+			if(local.p != NULL && local.p != NIL){
+				if(local.p.flags["coop_qteSamples"] != NIL){
+					local.p.flags["coop_qteSamples"] = local.p.flags["coop_qteSamples"] + 1
+					if(local.p.useheld == 1){ local.p.flags["coop_qteHeld"] = local.p.flags["coop_qteHeld"] + 1 }
+					if(local.p.coop_lobbyInput == 33){
+						local.p.coop_lobbyInput = 0
+						local.p.flags["coop_qteEdges"] = local.p.flags["coop_qteEdges"] + 1
+						println("^~^~^ QTEPROBE edge byE" + local.p.entnum + " n=" + local.p.flags["coop_qteEdges"] + " t=" + local.t)
+					}
+				}
+			}
+			local.i++
+		}
+		waitframe
+		local.t = local.t + 0.05
+	}
+
+	local.i = 1
+	while(local.i <= $player.size){
+		local.p = $player[local.i]
+		if(local.p != NULL && local.p != NIL){
+			if(local.p.flags["coop_qteSamples"] != NIL){
+				println("^~^~^ QTEPROBE result byE" + local.p.entnum + " samples=" + local.p.flags["coop_qteSamples"] + " held=" + local.p.flags["coop_qteHeld"] + " edges=" + local.p.flags["coop_qteEdges"])
+			}
+			local.p coop_lobbyinput 0
+		}
+		local.i++
+	}
+	println("^~^~^ QTEPROBE done t=" + local.t)
 }end
 
 
