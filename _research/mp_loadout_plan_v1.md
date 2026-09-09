@@ -14,9 +14,9 @@ USER DECISIONS ALREADY MADE (2026-09-09):
     free at least only on mp." Implemented in `loadout_isUnlocked` behind `level.coop_mpFreeKit`,
     which nothing sets yet, so it is inert until `mp.scr` exists. This is the narrow version of
     section 1's recommendation: progression decorates the MP kit, it never sets the floor.
-    STILL OPEN inside that decision - the STIELHANDGRANATE is not in the free set, so an Axis floor
-    kit has no grenade while the Allied one does (m2frag has been an unconditional free starter
-    since 2026-07-16). One line to add if wanted.
+    The STIELHANDGRANATE is included too ("yes give them the grenade too"), so the Axis floor is
+    rifle + smg + sidearm + grenade, exactly matching the Allied free four that have shipped since
+    2026-07-16. The MP floor question is now CLOSED.
 
 Read section 1 first - it is the reason the floor question existed at all.
 
