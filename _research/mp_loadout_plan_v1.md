@@ -10,8 +10,15 @@ USER DECISIONS ALREADY MADE (2026-09-09):
   * Axis COSMETICS are ungated - pick German and you may use any German outfit, helmet or gloves.
     Axis WEAPONS keep the challenge unlocks they already have. See docs/DECISIONS.md.
 
-STILL OPEN: the MP floor policy in section 5, which is the one decision that changes the code rather
-than the content. Read section 1 first - it is the reason the floor question exists at all.
+  * THE MP FLOOR (decided 2026-09-09, bug-2557): "make sure the kar98, mp40 and walther p38 come
+    free at least only on mp." Implemented in `loadout_isUnlocked` behind `level.coop_mpFreeKit`,
+    which nothing sets yet, so it is inert until `mp.scr` exists. This is the narrow version of
+    section 1's recommendation: progression decorates the MP kit, it never sets the floor.
+    STILL OPEN inside that decision - the STIELHANDGRANATE is not in the free set, so an Axis floor
+    kit has no grenade while the Allied one does (m2frag has been an unconditional free starter
+    since 2026-07-16). One line to add if wanted.
+
+Read section 1 first - it is the reason the floor question existed at all.
 
 ---
 
