@@ -46,101 +46,236 @@ mg42AttackBeach:{
 	}
 
 	level.coop_mg42Fiering = 1
+
+	//[user 2026-09-08, bug-2442] ONE LANE PER PLAYER. The 1.2 s warning walk and the eight fire ticks
+	//used to sit INSIDE this per-player `for`, and every wait in them was a wait for the whole beach -
+	//6.0 s of shared-thread time per EXPOSED player per pass - so a man's own damage clock ran at 6.6 s
+	//solo and 24.0 s in a squad of four, and per-player DPS fell as 1/N. Measured at y=1000, coop_health
+	//750, base 0.35 / rise 0.65 / miss 0.32: 42.8 / 78.2 / 117.1 / 156.1 s to death at N=1..4.
+	//This loop now only RECRUITS. It starts a beachLane thread per eligible player and never waits on
+	//anyone's behalf, so every lane runs at the solo period whatever N is.
+	//AIM IS NOT DAMAGE HERE, which is what makes the split safe: mg42_damage_player calls normal_damage
+	//directly on the player it is handed and never reads $player_target, and the guns deliberately run
+	//coop_beachSpread so their real bullets are not the lethal path. The single shared $player_target
+	//therefore goes to ONE conductor thread, beachAim, and lethality is untouched by it.
+	if(level.target_offset == NIL){ level.target_offset = 55 }
+	if(level.coop_beachExposed == NIL){ level.coop_beachExposed = 0 }
+	thread beachAim
+
 	while(level.coop_mg42Fiering){
-
-		local.alivePlayers=0	//chrissstrahl - keep track of players being alive
-		local.explosedPlayers=0	//chrissstrahl - keep track of players not in cover
-
 		for(local.pNum = 1;local.pNum<=$player.size;local.pNum++){
 			local.player = $player[local.pNum]
-			local.playerNotIncover = 1
 
 			//chrissstrahl - skip if player is missing or dead or spec
-			//[200] Smithy - local.player.dmteam condition typo fixed
 			if(local.player == NULL || local.player.health <= 0 || local.player.dmteam == "spectator" || local.player.flags["coop_isActive"] != 1){
 				continue
 			}
-			//-832.00 3648.00 -344.00
 			local.pos = local.player.origin
 			if(local.pos[1] > 4000 ){//everything above 4000 make it a little to hard tro reach the captain
 				continue
 			}
 
-			local.alivePlayers++	//chrissstrahl - keep track of players being alive
-			//iprintlnbold_noloc("mg42AttackBeach warning: " + local.pNum)
-
-			// bullet run-up warning
-			for (local.i = 4 ; local.i >= 1 ; local.i --){
-				local.temp_origin = local.player.origin
-				local.temp_origin[1] += (128 * local.i)
-				local.temp_origin[2] += level.target_offset
-
-				$player_target.origin = local.temp_origin
-				$mg42_middle1 setaimtarget $player_target
-				$mg42_middle2 setaimtarget $player_target
-
-				wait 0.3 // was 0.2 might needs better adjustment for coop
-			}
-
-			//chrissstrahl - fire at cover or player
-			//chrissstrahl - make it a bit harder for the player if playing alone
-			//chrissstrahl - otherwise it will be to easy, because the damage is multiplied by players
-			//iprintlnbold_noloc("mg42AttackBeach fire: " + local.pNum)
-			for (local.j = 1 ; local.j <= 8 ; local.j ++){
-				//chrissstrahl - stop if player disconnected or dead
-				if(local.player == NULL || local.player.health <= 0 ){
-					break
-				}
-
-				// set the aim target to be a the player while hitting
-				local.temp_origin = local.player.origin
-				local.temp_origin[2] += level.target_offset
-
-				$player_target.origin = local.temp_origin
-
-				//chrissstrahl - not in cover
-				if!(waitthread isInCover local.player){
-					thread mg42_damage_player local.player
-					local.explosedPlayers++;
-					//[user 2026-08-28] THE MISSING WAIT. Single player spaces these 8 ticks with
-					//`wait (randomfloat(0.6) + 0.3)` INSIDE this loop (m3l1a.scr:1861). The coop rewrite
-					//dropped it, so all 8 fired in ONE FRAME. normal_damage is a PERCENTAGE of max_health
-					//(entity.cpp:6079), so at coop_health 750 each tick is 37.5 HP and the burst was 300 HP
-					//- 40 percent of the pool, instantly, with no gap to react in. That is the instakill,
-					//and it is why tuning the MG42 weapon never changed anything.
-					wait (randomfloat(0.6) + 0.3)
-				}
-				else{//chrissstrahl - in cover
-					local.playerNotIncover = 0
-					thread mg42_incover_player local.player.flags["coop_coverTrigger"]
+			//already has a lane, and that lane has ticked inside the last 12 s
+			if(local.player.flags["coop_beachLane"] == 1){
+				if(local.player.flags["coop_beachLaneT"] != NIL){
+					if(level.time < ( local.player.flags["coop_beachLaneT"] + 12 )){
+						continue
+					}
 				}
 			}
-			//play get down/take cover/put your head down... dialogs
-			if(local.player != NULL && local.playerNotIncover ){
-				local.player playsound warn_player_cover
-			}
 
+			local.player.flags["coop_beachLane"] = 1
+			local.player.flags["coop_beachLaneT"] = level.time
+			thread beachLane local.player
+		}
+		wait 0.5
+	}
+}end
+
+
+//[user 2026-09-08, bug-2442] ONE PLAYER'S BEACH CLOCK. The body is the old per-player block moved
+//almost verbatim, but it is the only man this thread services, so its period does not depend on how
+//many others are on the sand. Solo is bit for bit what shipped: 4 x wait 0.3, then 8 x
+//(randomfloat(0.6) + 0.3).
+//=========================================================================
+beachLane local.player:{
+//=========================================================================
+	if(local.player == NULL){ end }
+	if(level.target_offset == NIL){ level.target_offset = 55 }
+	if(level.coop_beachExposed == NIL){ level.coop_beachExposed = 0 }
+	//THE knob for "too lethal with four". It stretches this man's cadence only while 2 or more players
+	//are actually being shot at, so solo can never be touched by it. 1 = shipped solo timing.
+	if(level.coop_beachSquadGap == NIL){ level.coop_beachSquadGap = 1 }
+
+	while(level.coop_mg42Fiering){
+		if(local.player == NULL || local.player.health <= 0 || local.player.dmteam == "spectator" || local.player.flags["coop_isActive"] != 1){
+			break
+		}
+		local.pos = local.player.origin
+		if(local.pos[1] > 4000){
+			break
 		}
 
+		local.player.flags["coop_beachLaneT"] = level.time
+		local.playerNotIncover = 1
 
-		//chrissstrahl - keep timing of singleplayer in mp if there is just 1 player
-		if(local.alivePlayers < 2){
-			wait (randomfloat(0.6) + 0.3)
-		}else{
-			waitframe
+		local.gap = 1
+		if(level.coop_beachExposed > 1){ local.gap = level.coop_beachSquadGap }
+
+		// bullet run-up warning
+		for (local.i = 4 ; local.i >= 1 ; local.i --){
+			if(local.player == NULL || local.player.health <= 0){ break }
+			local.temp_origin = local.player.origin
+			local.temp_origin[1] += (128 * local.i)
+			local.temp_origin[2] += level.target_offset
+			//publish where this lane wants the guns; beachAim owns the entity
+			local.player.flags["coop_beachAim"] = local.temp_origin
+			local.player.flags["coop_beachAimT"] = level.time
+			wait 0.3
 		}
 
-		//chrissstrahl - fire on other targets if there are no players to fire at
-		if( local.explosedPlayers == 0){
-			//iprintlnbold_noloc("mg42AttackBeach fire: normal targets")
-			// set the MG42 turrets to fire at normal targets
-			local.index = (randomint 4 + 1)
-			$mg42_middle1 setaimtarget $mg42_target_left[local.index]
-			$mg42_middle2 setaimtarget $mg42_target_right[local.index]
-			wait 4 //was 3
+		//chrissstrahl - fire at cover or player
+		for (local.j = 1 ; local.j <= 8 ; local.j ++){
+			if(local.player == NULL || local.player.health <= 0 ){
+				break
+			}
+
+			local.temp_origin = local.player.origin
+			local.temp_origin[2] += level.target_offset
+			local.player.flags["coop_beachAim"] = local.temp_origin
+			local.player.flags["coop_beachAimT"] = level.time
+
+			//isInCover contains no wait, so this call cannot be preempted and two lanes can never
+			//interleave inside it - coop_coverTrigger is written and read in the same frame.
+			if!(waitthread isInCover local.player){
+				thread mg42_damage_player local.player
+				local.player.flags["coop_beachExpT"] = level.time
+			}
+			else{//chrissstrahl - in cover
+				local.playerNotIncover = 0
+				thread mg42_incover_player local.player.flags["coop_coverTrigger"]
+			}
+
+			//[bug-2442] retail spaces BOTH branches with this wait (m3l1a.scr:1990). The coop rewrite left
+			//it inside the not-in-cover branch only, so a man IN COVER burned all eight ticks in one frame.
+			local.hold = randomfloat(0.6) + 0.3
+			local.hold = local.hold * local.gap
+			wait local.hold
+			local.player.flags["coop_beachLaneT"] = level.time
+		}
+
+		//play get down/take cover/put your head down... dialogs
+		if(local.player != NULL && local.playerNotIncover ){
+			local.player playsound warn_player_cover
+		}
+
+		local.hold = randomfloat(0.6) + 0.3
+		local.hold = local.hold * local.gap
+		wait local.hold
+	}
+
+	if(local.player != NULL){
+		local.player.flags["coop_beachLane"] = 0
+		local.player.flags["coop_beachAimT"] = 0
+		local.player.flags["coop_beachExpT"] = 0
+	}
+}end
+
+
+//[bug-2442] THE CONDUCTOR. $player_target is a SINGLE script_origin and both middle guns hold a live
+//pointer to it, so exactly one thread may write it. This one holds a man in focus for
+//coop_beachAimHold seconds, then rotates round-robin, and falls back to the scenery targets when
+//nobody is taking rounds - which is what the old `explosedPlayers == 0` branch did.
+//=========================================================================
+beachAim:{
+//=========================================================================
+	if(level.coop_beachAimHold == NIL){ level.coop_beachAimHold = 3 }
+	if(level.coop_beachExposed == NIL){ level.coop_beachExposed = 0 }
+	local.focus = NULL
+	local.focusT = 0
+	local.lastIdx = 0
+
+	while(level.coop_mg42Fiering){
+		local.n = $player.size
+		//an empty $player array reports size 0 - 1, so test "less than one", never "== 0"
+		if(local.n < 1){
+			wait 1
+		}
+		else{
+			//how many men are actually being shot at right now (was local.explosedPlayers)
+			local.exposed = 0
+			for(local.pNum = 1;local.pNum<=local.n;local.pNum++){
+				local.p = $player[local.pNum]
+				if(local.p != NULL){
+					if(local.p.flags["coop_beachExpT"] != NIL){
+						if(level.time < ( local.p.flags["coop_beachExpT"] + 2 )){ local.exposed++ }
+					}
+				}
+			}
+			level.coop_beachExposed = local.exposed
+
+			//hold the current focus while it is still fresh and its turn is not up
+			local.keep = 0
+			if(waitthread beachAimOk local.focus){
+				if(level.time < ( local.focusT + level.coop_beachAimHold )){ local.keep = 1 }
+			}
+
+			if(local.keep == 0){
+				local.best = NULL
+				for(local.pNum = local.lastIdx + 1 ; local.pNum <= local.n ; local.pNum ++){
+					if(waitthread beachAimOk $player[local.pNum]){
+						local.best = $player[local.pNum]
+						local.lastIdx = local.pNum
+						break
+					}
+				}
+				if(local.best == NULL){
+					for(local.pNum = 1 ; local.pNum <= local.lastIdx ; local.pNum ++){
+						if(waitthread beachAimOk $player[local.pNum]){
+							local.best = $player[local.pNum]
+							local.lastIdx = local.pNum
+							break
+						}
+					}
+				}
+				local.focus = local.best
+				local.focusT = level.time
+			}
+
+			if(local.focus != NULL && local.exposed > 0){
+				local.a = local.focus.flags["coop_beachAim"]
+				if(local.a != NIL && local.a != NULL && $player_target != NULL){
+					$player_target.origin = local.a
+					$mg42_middle1 setaimtarget $player_target
+					$mg42_middle2 setaimtarget $player_target
+				}
+				wait 0.25
+			}
+			else{
+				//nobody is taking rounds - work the scenery (this was mg42AttackBeach's own tail)
+				local.index = (randomint 4 + 1)
+				$mg42_middle1 setaimtarget $mg42_target_left[local.index]
+				$mg42_middle2 setaimtarget $mg42_target_right[local.index]
+				wait 4 //was 3
+			}
 		}
 	}
 }end
+
+
+//[bug-2442] is this player publishing a fresh aim point?
+//=========================================================================
+beachAimOk local.p:{
+//=========================================================================
+	if(local.p == NULL){ end 0 }
+	if(local.p == NIL){ end 0 }
+	if(local.p.health <= 0){ end 0 }
+	if(local.p.flags["coop_beachAimT"] == NIL){ end 0 }
+	if(local.p.flags["coop_beachAimT"] == 0){ end 0 }
+	if(level.time > ( local.p.flags["coop_beachAimT"] + 1.5 )){ end 0 }
+	end 1
+}end
+
 
 
 //chrissstrahl - check if this player is behind cover
@@ -12556,8 +12691,12 @@ coop_rampCinematic:{
 				//The ring and the wash are both under sound/coop_tinnitus/, which S_HZM_CueTier gives
 				//tier 1, so they ride OVER the cinematic duck without any help from s_volume. Playing
 				//them directly gets the whole concussion beat and leaves the music alone.
-				local.pl playlocalsound coop_tinnitus_ring
+				//[user 2026-09-08, bug-2540] STAGGERED. These are both CHAN_LOCAL one-shots on the same
+				//player, fired in consecutive statements, and snd_openal_new.cpp:1720-1725 end_sample()s
+				//the first - so the ring has never been audible. The wash is the impact and keeps the
+				//instant; the ring follows it, which is also the order a real concussion arrives in.
 				local.pl playlocalsound coop_shellshock_uw
+				thread coop_uwRingLate local.pl
 				//[user 2026-09-04] "I still dont feel like the dizziness effect during the ramp coming down
 				//and underwater is strong enough". 1 -> 2.2. CG_ApplyShellShock scales its amplitudes by the
 				//severity - roll sin(t*5.3)*5.5, pitch sin(t*3.9+1.3)*2.8, yaw sin(t*2.9+2.1)*1.6 - so at 1 a
@@ -16139,6 +16278,16 @@ coop_qteProbe:{
 //from :9855, coop_maintainBoatCameras reaps his camera mid-shot, playerspawn re-hides and re-cameras
 //him, playerGlue re-glues him, and the DBNO branch strands him unrevivable under water. See coop_qteKill.
 //
+//=========================================================================
+//[bug-2540] the ring, a beat after the wash. A separate thread because the caller is inside a
+//per-player loop that must not stall, and because CHAN_LOCAL only holds one sample at a time.
+coop_uwRingLate local.pl:{
+	wait 0.35
+	if(local.pl == NULL || local.pl == NIL){ end }
+	local.pl playlocalsound coop_tinnitus_ring
+}end
+
+
 //KILL SWITCHES: level.coop_qteOn 0 (whole feature, byte-identical to before), coop_qteHud 0 (mechanic
 //with no bar), coop_qteLethal 0 (no death). PROBES: ^~^~^ RAMPQTE.
 coop_qteRun local.wx local.wy local.pace:{
