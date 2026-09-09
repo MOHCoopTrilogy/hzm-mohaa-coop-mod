@@ -11691,9 +11691,226 @@ coop_lateBoatRun local.lane local.slot:{
 	//and from here it is the map's own landing, unchanged
 	waitthread coop_boatLand local.hull local.door local.doomed 0
 
-	thread coop_fxCleanup local.hull 90
-	if(local.door != NULL && local.door != NIL){ thread coop_fxCleanup local.door 90 }
+	//[user 2026-09-08, bug-2543] she is now a candidate for a shell. Registered AFTER the landing,
+	//so a boat is only ever picked once she is in the water in front of the player and done moving.
+	waitthread coop_boatSinkReg local.hull local.door
+	//the cleanup WAITS OUT a sink rather than deleting the hull mid-motion - which is the one way
+	//this feature could have made a boat vanish in front of the player.
+	thread coop_boatLateCleanup local.hull local.door 90
 }end
+
+//=========================================================================
+//[user 2026-09-08, bug-2543] THE SEABED, as drawn. omaha_set4_covered is FLAT at z -576 from y -2816
+//to -1792; seaward of -2816 the map draws no bed at all, so there is nothing out there to clip and a
+//hull may go right under. Returns the sentinel when there is no bottom.
+coop_boatBedZ local.y:{
+	if(local.y >= ( 0 - 2816 )){ end ( 0 - 576 ) }
+	end ( 0 - 9999 )
+}end
+
+
+//=========================================================================
+//[bug-2543] Register a hull as shell-able. Kept in a level array because there is no way to
+//enumerate script_models by model in this language, and the striker needs a candidate list.
+coop_boatSinkReg local.hull local.door:{
+	if(local.hull == NULL || local.hull == NIL){ end }
+	if(level.coop_sinkN == NIL){ level.coop_sinkN = 0 }
+	level.coop_sinkN++
+	level.coop_sink[level.coop_sinkN] = local.hull
+	level.coop_sinkDoor[level.coop_sinkN] = local.door
+	local.hull.coop_sinkable = 1
+	local.hull.coop_sinking = 0
+}end
+
+
+//=========================================================================
+//[bug-2543] The late-boat cleanup, made sink-aware. It used to be a plain coop_fxCleanup at 90 s,
+//which would have deleted a hull in the middle of going down.
+coop_boatLateCleanup local.hull local.door local.life:{
+	if(local.hull == NULL || local.hull == NIL){ end }
+	wait local.life
+	local.g = 0
+	while(local.g < 40){
+		if(local.hull == NULL || local.hull == NIL){ break }
+		if(local.hull.coop_sinking != 1){ break }
+		wait 1
+		local.g++
+	}
+	if(local.hull != NULL && local.hull != NIL){ local.hull remove }
+	if(local.door != NULL && local.door != NIL){ local.door remove }
+}end
+
+
+//=========================================================================
+//[user 2026-09-08, bug-2543] "after a while some of those bombs ... hit some of the higgins boats
+//near you and caused them to sink in real time."
+//
+//A round from the barrage that is already falling finds a landing craft near the player and takes
+//her down. Cadence is deliberately slow and capped: this is a thing you SEE happen once or twice and
+//remember, not weather. Kill switch level.coop_shellBoatsOn. Probe: ^~^~^ SHELLBOAT.
+coop_shellBoats:{
+	if(level.gametype == 0){ end }
+	if(level.coop_shellBoatsOn == NIL){ level.coop_shellBoatsOn = 1 }
+	if(!level.coop_shellBoatsOn){ end }
+	if(level.coop_shellBoatsDone == 1){ end }
+	level.coop_shellBoatsDone = 1
+	if(level.coop_shellBoatsMax == NIL){ level.coop_shellBoatsMax = 3 }
+	if(level.coop_shellBoatsFirst == NIL){ level.coop_shellBoatsFirst = 50 }
+	if(level.coop_shellBoatsGap == NIL){ level.coop_shellBoatsGap = 34 }
+	if(level.coop_shellBoatsRange == NIL){ level.coop_shellBoatsRange = 4200 }
+	if(level.coop_sinkN == NIL){ level.coop_sinkN = 0 }
+
+	wait level.coop_shellBoatsFirst
+	local.sunk = 0
+	local.tries = 0
+	while(local.sunk < level.coop_shellBoatsMax && local.tries < 60){
+		local.tries++
+		local.pick = NULL
+		local.pickI = 0
+		local.best = level.coop_shellBoatsRange
+		local.i = 1
+		while(local.i <= level.coop_sinkN){
+			local.h = level.coop_sink[local.i]
+			if(local.h != NULL && local.h != NIL){
+				if(local.h.coop_sinkable == 1 && local.h.coop_sinking != 1){
+					local.hp = local.h.origin
+					local.pl = exec coop_mod/replace.scr::player_closestTo NIL local.hp
+					if(local.pl != NULL && local.pl != NIL){
+						local.d = vector_length( local.pl.origin - local.hp )
+						//near enough to be worth watching, far enough not to be on top of him
+						if(local.d < local.best && local.d > 500){
+							local.best = local.d
+							local.pick = local.h
+							local.pickI = local.i
+						}
+					}
+				}
+			}
+			local.i++
+		}
+		if(local.pick == NULL){
+			wait 6
+		}
+		else{
+			local.pick.coop_sinkable = 0
+			waitthread coop_boatShellHit local.pick level.coop_sinkDoor[local.pickI] local.best
+			local.sunk++
+			wait level.coop_shellBoatsGap
+		}
+	}
+	println("^~^~^ SHELLBOAT done sunk=" + local.sunk + " tries=" + local.tries)
+}end
+
+
+//=========================================================================
+//[bug-2543] The hit. Every effect and alias here is one this map already spawns elsewhere.
+coop_boatShellHit local.hull local.door local.dist:{
+	if(local.hull == NULL || local.hull == NIL){ end }
+	local.pos = local.hull.origin
+
+	//the round on its way - the same lead-in the naval barrage uses
+	local.n = ( randomint 6 ) + 1
+	local.hull playsound ( "coop_arty_leadin_far" + local.n )
+	wait ( 1.1 + ( randomfloat 0.5 ) )
+	if(local.hull == NULL || local.hull == NIL){ end }
+	local.pos = local.hull.origin
+
+	//the strike: a column of water off her side, the report, and a shove you feel
+	local.e = spawn "models/animate/fx_mortar_water.tik"
+	if(local.e != NULL && local.e != NIL){
+		local.ep = local.pos
+		local.ep[0] = local.ep[0] + ( ( randomint 120 ) - 60 )
+		local.ep[1] = local.ep[1] + ( ( randomint 120 ) - 60 )
+		local.ep[2] = 0 - 520
+		local.e.origin = local.ep
+		local.e notsolid
+		local.e anim start
+		thread coop_fxCleanup local.e 6
+	}
+	local.hull playsound higgins_explosion
+	thread coop_mod/main.scr::earthquake_radius local.pos 0.9 1.2 1800
+	println("^~^~^ SHELLBOAT hit at " + local.pos + " dist=" + local.dist)
+
+	//she is a wreck from here: the damaged model, and the burn OWNS her so the fire goes down with
+	//her instead of standing on the water afterwards (bug-2532)
+	local.hull model "models/vehicles/higgins_damage.tik"
+	local.hull notsolid		//[bug-2496] a .tik `model` swap sets SOLID_BBOX; notsolid must FOLLOW it
+	local.hull anim idle
+	thread coop_boatBurn local.pos local.hull
+	if(local.door != NULL && local.door != NIL){ local.door notsolid }
+
+	waitthread coop_boatSinkMotion local.hull local.door
+}end
+
+
+//=========================================================================
+//[bug-2543] SHE GOES DOWN. Stepped per frame rather than commanded, because moveto and move silently
+//no-op on a script_model - which is the thing that makes this work on an arbitrary hull at all: the
+//pivot is the hull's own origin, so there is no 277-unit offset to compensate for and none of
+//coop_higginsSink's constants have to be re-derived.
+//
+//HOW FAR SHE SINKS IS MEASURED, NOT CHOSEN. The keel is the origin and the deck top is origin+140.53.
+//On the drawn shelf the sand is at z -576, so a hull floating at -563.7 has 12.3 units under her and
+//56 of water over a 150-unit hull: she CANNOT submerge, and forcing her would put the deck through
+//the sand. She lists, settles onto the bottom and burns awash - which is what a holed LCVP did on
+//that bar. Seaward of y -2816 the map draws no bed at all, so there she goes right under and is gone.
+coop_boatSinkMotion local.hull local.door:{
+	if(local.hull == NULL || local.hull == NIL){ end }
+	local.hull.coop_sinking = 1
+	local.p0 = local.hull.origin
+	local.a0 = local.hull.angles
+	local.bed = waitthread coop_boatBedZ local.p0[1]
+
+	//the list is the drama and costs no depth; the drop is whatever the water actually allows
+	if(level.coop_shellSinkRoll == NIL){ level.coop_shellSinkRoll = 38 }
+	if(level.coop_shellSinkPitch == NIL){ level.coop_shellSinkPitch = 11 }
+	if(level.coop_shellSinkTime == NIL){ level.coop_shellSinkTime = 13.0 }
+	local.drop = 240
+	local.gone = 1
+	if(local.bed > ( 0 - 9000 )){
+		//there is a bottom here: settle onto it and no further
+		local.drop = local.p0[2] - local.bed
+		if(local.drop < 0){ local.drop = 0 }
+		local.gone = 0
+	}
+	local.roll = level.coop_shellSinkRoll
+	if((randomint 2) == 0){ local.roll = 0 - local.roll }		//she goes over whichever way she was hit
+
+	local.t0 = level.time
+	while(1){
+		if(local.hull == NULL || local.hull == NIL){ end }
+		local.f = ( level.time - local.t0 ) / level.coop_shellSinkTime
+		if(local.f > 1){ local.f = 1 }
+		//ease IN: she holds, then goes. A boat does not start sinking at full rate.
+		local.u = local.f * local.f
+		local.np = local.p0
+		local.np[2] = local.p0[2] - ( local.drop * local.u )
+		local.na = local.a0
+		local.na[0] = local.a0[0] + ( level.coop_shellSinkPitch * local.u )
+		local.na[2] = local.a0[2] + ( local.roll * local.u )
+		local.hull.origin = local.np
+		local.hull.angles = local.na
+		if(local.door != NULL && local.door != NIL){
+			local.door.origin = local.np
+			local.door.angles = local.na
+		}
+		if(local.f >= 1){ break }
+		waitframe
+	}
+
+	println("^~^~^ SHELLBOAT down drop=" + local.drop + " roll=" + local.roll + " gone=" + local.gone)
+	if(local.gone == 1){
+		//nothing under her out there - she is away, and the burn goes with her (owner poll, bug-2532)
+		wait 3
+		if(local.door != NULL && local.door != NIL){ local.door remove }
+		if(local.hull != NULL && local.hull != NIL){ local.hull remove }
+	}
+	else{
+		//aground and awash. She stays, burning, as a piece of the beach.
+		if(local.hull != NULL && local.hull != NIL){ local.hull.coop_sinking = 0 }
+	}
+}end
+
 
 //Put the map's own hidden MG42 crews back on their guns as inert scenery.
 //=========================================================================
@@ -16623,6 +16840,7 @@ coop_rampHandoff:{
 	//`thread` is SYNCHRONOUS to the target's first wait, and coop_seaMeshStart has no wait, so
 	//starting it earlier would hide the sheet and this label would show it again underneath.
 	thread coop_seaMeshStart
+	thread coop_shellBoats		//[user 2026-09-08, bug-2543] shells find the boats, see the label
 	thread coop_beachMedics		//[user 2026-09-07, bug-2522] medics in cover with a spinning kit, see the label
 	//[user 2026-09-04] THE SCREEN COMES BACK ON EVERY PATH THAT LETS A PLAYER GO. The plunge now
 	//blacks the screen out, and a fadeout is a latch with no self-expiry (player.cpp:7765 clears the
