@@ -1,0 +1,200 @@
+//=========================================================================
+// MP.SCR - the multiplayer entry point. NOT the coop framework.
+//
+// [user 2026-09-09] "id like to plan out the multiplayer to work with the Loadout... just selecting
+// a Team Axis or Allies and spawn in with your loadout" / "I cannot stress this enough we need to
+// make sure this does not in any way impact the coop mod or experience itself."
+//
+// Full design: _research/mp_loadout_plan_v1.md. Isolation contract, enforced by
+// docs/tools/check_mp_isolation.py and gated in build.ps1: docs/tools/check_mp_isolation.py.
+//
+//=========================================================================
+// WHAT THIS FILE DELIBERATELY DOES NOT DO, each one a measured hazard
+//=========================================================================
+// * It does NOT call coop_mod/main.scr::main. That path force-joins allies (main.scr:411-437
+//   throbtexts "Only allies are allowed in Coop!" and joins for you) with no gametype gate
+//   anywhere in coop_mod - every level.gametype test in the whole mod is == 0 / != 0.
+// * It does NOT call itemhandler.scr::giveInventory. That wraps its give in
+//   main.scr::changeGameType 0 0 / 2 0, which ends in setcvar g_gametype <n> - so on a live MP
+//   server it would briefly zero the gametype and then restore it to a HARDCODED 2, silently
+//   converting an Objective, Round, TOW or Liberation server into Team Match on the first spawn.
+//   A plain takeall + give is used instead.
+// * It does NOT write the coop_health CVAR. server.scr:238 re-seeds level.coop_health from that
+//   cvar on EVERY map with a prevCoopHealth memo, so writing it would follow the player into the
+//   next COOP map and give every coop player MP health. Health is set PER PLAYER at spawn.
+// * It does NOT write coop_lockLoadout. server.scr:28 seeds it only when EMPTY, so once an MP map
+//   set it to 0 it would stay 0 for every coop map for the life of the server process.
+// * It does NOT touch any ui/*.urc. The stock weapon picker is left exactly as it is and simply
+//   never gets a chance to matter, because this file sets the weapon class itself. That keeps the
+//   blast radius on coop at literally zero files.
+//=========================================================================
+
+
+//=========================================================================
+// Entry. Hooked from global/ambient.scr, which BOTH coop maps and stock MP maps exec - so the
+// refusal guard below is load-bearing, not decoration.
+//=========================================================================
+main:{
+	//THE REFUSAL GUARD. Clause 2 of the isolation contract. Even if the ambient.scr hook is ever
+	//edited wrongly, this file will not run on a coop map. A guard that exists only at the call
+	//site is one careless edit away from being gone.
+	if( level.coop_mainScriptLoaded == 1 ){
+		println( "^~^~^ MP refused to start - coop is loaded on this map" )
+		end
+	}
+
+	//Never single-player. ambient.scr sets level.gametype from g_gametype immediately above the
+	//hook, so this reads a value that is already correct and costs no getcvar.
+	if( level.gametype == NIL || level.gametype == 0 ){ end }
+
+	//Idempotent - ambient.scr has its own run-once flag, but a map that execs it twice must not
+	//start two pollers.
+	if( level.coop_mpRun == 1 ){ end }
+	level.coop_mpRun = 1
+
+	//THE AXIS FLOOR goes live here and nowhere else. loadoutpick.scr::loadout_isUnlocked reads
+	//this to make the Kar98, MP40, P38 and Stielhandgranate free, because stock MP hands an Axis
+	//player an MP40 for nothing while the armory gates it behind fifty MP40 kills - enforcing SP
+	//unlocks unchanged would spawn a rank-0 Axis player with no primary, no smg and no sidearm.
+	level.coop_mpFreeKit = 1
+
+	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script )
+	thread mp_manage
+}end
+
+
+//=========================================================================
+// The per-player poll.
+//
+// DELIBERATELY A POLL, not the engine's player_spawned delegate. The delegate exists
+// (scriptthread.cpp registers registerev / event_subscribe) and would give a cleaner post-equip
+// hook, but the label-argument form is unverified in this codebase - nothing in the mod's whole
+// .scr tree uses it - and an unverified builtin in the one file that must never misbehave is a bad
+// trade. Polling is the shape player.scr::manage has used since [200]. Revisit once the delegate
+// has been proven on a throwaway label.
+//=========================================================================
+mp_manage:{
+	//let the first clients finish connecting
+	wait 1
+
+	while( 1 ){
+		//$player.size is -1 on an EMPTY array, never 0, so this loop simply does not run with
+		//nobody connected. Never test .size == 0 in this engine.
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			waitthread mp_tickPlayer local.p
+		}
+		wait 0.5
+	}
+}end
+
+
+//=========================================================================
+// One player, one tick. Two edges are watched: the TEAM flip, and the SPAWN.
+//=========================================================================
+mp_tickPlayer local.p:{
+	if( local.p == NULL ){ end }
+
+	// ---- edge 1: the player picked a team -------------------------------------------------
+	local.team = local.p.dmteam
+	if( local.team == NIL ){ local.team = "" }
+
+	local.prevTeam = local.p.flags["coop_mpTeam"]
+	if( local.prevTeam == NIL ){ local.prevTeam = "" }
+
+	if( local.team != local.prevTeam ){
+		local.p.flags["coop_mpTeam"] = local.team
+
+		if( local.team != "" && local.team != "spectator" ){
+			//Pull the player's archived armory picks across. On a LISTEN host these are readable
+			//immediately; for a remote client the volley replays them over the name bus. This is
+			//the existing, validated pipeline - roster check, slot legality, unlock gate - not a
+			//second copy of it.
+			thread coop_mod/loadoutpick.scr::loadout_resendVolley local.p 1
+
+			//And deploy him. The engine will not let a player leave spectator until dm_primary
+			//holds a legal CLASS, and the mod's own ui override leaves the stock picker empty -
+			//so set the class here rather than making him find a menu that has no content.
+			//EventPrimaryDMWeapon self-deploys (EndSpectator + Respawn) in the same command.
+			waitthread mp_deploy local.p
+		}
+	}
+
+	// ---- edge 2: he just came alive -------------------------------------------------------
+	local.alive = 0
+	if( local.p.health > 0 ){ local.alive = 1 }
+
+	local.wasAlive = local.p.flags["coop_mpAlive"]
+	if( local.wasAlive == NIL ){ local.wasAlive = 0 }
+
+	local.p.flags["coop_mpAlive"] = local.alive
+
+	if( local.alive == 1 && local.wasAlive == 0 ){
+		waitthread mp_onSpawn local.p
+	}
+}end
+
+
+//=========================================================================
+// Get him out of spectate with a legal weapon class.
+//
+// "rifle" is the safe default: it is the one class no shipped dmflags configuration bans, and
+// EventPrimaryDMWeapon REFUSES and returns without writing dm_primary if the class is banned -
+// which would park the player in spectate permanently rather than fail loudly.
+//=========================================================================
+mp_deploy local.p:{
+	if( local.p == NULL ){ end }
+
+	//the empty stock picker may already be on his stack and holding the cursor
+	local.p stufftext "popmenu 0"
+	wait 0.05
+
+	if( local.p == NULL ){ end }
+	local.p primarydmweapon "rifle"
+
+	//If that was refused he is still a spectator a moment later. "auto" picks a random ALLOWED
+	//class and self-deploys, so it cannot be refused by a ban.
+	wait 1
+	if( local.p == NULL ){ end }
+	if( local.p.dmteam == "spectator" ){ end }
+	if( local.p.health > 0 ){ end }
+
+	println( "^~^~^ MP deploy fallback for e" + local.p.entnum + " - rifle was refused" )
+	local.p primarydmweapon "auto"
+}end
+
+
+//=========================================================================
+// Every respawn, after the engine has already handed out the stock class kit.
+//
+// Health FIRST, because `health <n>` also writes max_health (entity.cpp:1938 - the same behaviour
+// dbno.scr:191 documents from the other direction, where a bare `health 100` silently collapsed a
+// coop player's max from 750). That is exactly what is wanted here: MP is a 100 HP game.
+//=========================================================================
+mp_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+
+	//[user 2026-09-09] MP health is 100, not coop's 750. PER PLAYER - see the header for why the
+	//cvar route would follow him into the next coop map.
+	local.p health 100
+
+	//ONE PRIMARY [user 2026-09-09]. The armory kit is two primaries plus sidearm and grenade;
+	//retail MP gives one primary, and shipping two would be a straight power increase over every
+	//stock server. Slot 2 is deliberately not read here. Coop keeps both.
+	local.g1 = local.p.flags["coop_loSlot1"]
+	local.g3 = local.p.flags["coop_loSlot3"]
+	local.g4 = local.p.flags["coop_loSlot4"]
+
+	//Nothing picked yet - a fresh client whose volley has not landed. Leave him with the stock
+	//class kit the engine already gave him rather than stripping him to nothing.
+	if( ( local.g1 == NIL || local.g1 == "" ) && ( local.g3 == NIL || local.g3 == "" ) ){ end }
+
+	local.p takeall
+
+	if( local.g1 != NIL && local.g1 != "" ){ local.p give local.g1 }
+	if( local.g3 != NIL && local.g3 != "" ){ local.p give local.g3 }
+	if( local.g4 != NIL && local.g4 != "" ){ local.p give local.g4 }
+
+	println( "^~^~^ MP kit e" + local.p.entnum + " team=" + local.p.dmteam + " p=" + local.g1 + " s=" + local.g3 + " g=" + local.g4 )
+}end
