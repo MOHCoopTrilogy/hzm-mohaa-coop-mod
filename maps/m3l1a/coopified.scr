@@ -3674,7 +3674,23 @@ coop_farBattle:{
 		local.p[1] = ( 0 - 3600 ) + (randomint 4200)
 		local.p[2] = 0 - 500
 
-		local.e = spawn "models/animate/fx_mortar_dirt.tik"
+		//[user 2026-09-08, bug-2536] A ROUND THAT FALLS IN THE SEA THROWS WATER, NOT SAND.
+		//bug-2532 fixed the nine static fires above and stopped one statement short of this loop,
+		//which still guesses z and still rolls its y across the tideline. fx_mortar_dirt is a SAND
+		//geyser, and its `enter originspawn ( volumetric model mist ... life 15 )` tempmodels are
+		//DETACHED from the spawner - the remove below does not take them - so every seaward burst
+		//left a grey column standing on open water for up to 15 s. That is the fire the user kept
+		//seeing after the fix. The threshold form is the file's own, from :7849 and :8049.
+		//This does NOT re-open the :3997 rejection of fx_mortar_water: that was coop_waterShots,
+		//firing arty_exp_water 2-6 times a burst on a fast loop. This is 1:1 at an unchanged rate.
+		local.wz = waitthread coop_waterZ local.p[1]
+		local.mdl = "models/animate/fx_mortar_dirt.tik"
+		if(local.wz > ( 0 - 9000 )){
+			local.mdl = "models/animate/fx_mortar_water.tik"
+			local.p[2] = local.wz
+		}
+
+		local.e = spawn local.mdl
 		if(local.e != NULL && local.e != NIL){
 			local.e.origin = local.p
 			local.e notsolid
@@ -3744,7 +3760,23 @@ coop_beachWar:{
 		local.p[1] = ( 0 - 2600 ) + (randomint 3400)
 		local.p[2] = 0 - 500
 
-		local.e = spawn "models/animate/fx_mortar_dirt.tik"
+		//[user 2026-09-08, bug-2536] A ROUND THAT FALLS IN THE SEA THROWS WATER, NOT SAND.
+		//bug-2532 fixed the nine static fires above and stopped one statement short of this loop,
+		//which still guesses z and still rolls its y across the tideline. fx_mortar_dirt is a SAND
+		//geyser, and its `enter originspawn ( volumetric model mist ... life 15 )` tempmodels are
+		//DETACHED from the spawner - the remove below does not take them - so every seaward burst
+		//left a grey column standing on open water for up to 15 s. That is the fire the user kept
+		//seeing after the fix. The threshold form is the file's own, from :7849 and :8049.
+		//This does NOT re-open the :3997 rejection of fx_mortar_water: that was coop_waterShots,
+		//firing arty_exp_water 2-6 times a burst on a fast loop. This is 1:1 at an unchanged rate.
+		local.wz = waitthread coop_waterZ local.p[1]
+		local.mdl = "models/animate/fx_mortar_dirt.tik"
+		if(local.wz > ( 0 - 9000 )){
+			local.mdl = "models/animate/fx_mortar_water.tik"
+			local.p[2] = local.wz
+		}
+
+		local.e = spawn local.mdl
 		if(local.e != NULL && local.e != NIL){
 			local.e.origin = local.p
 			local.e notsolid
@@ -10973,7 +11005,13 @@ coop_higginsSink:{
 	//~20 u proud, which is a boat going down rather than a boat propped on a rock.
 	if(level.coop_higginsSinkRoll  == NIL){ level.coop_higginsSinkRoll  = 30 }
 	if(level.coop_higginsSinkPitch == NIL){ level.coop_higginsSinkPitch = 6 }
-	if(level.coop_higginsSinkDrop  == NIL){ level.coop_higginsSinkDrop  = 72 }
+	//[user 2026-09-08, bug-2537] 72 -> 98 because 72 DELIVERED 45.5. The hull model sits 277.18 u
+	//forward of the pivot on +Y and `rotatezup` turns about the pivot's forward axis, so the
+	//6-degree bow-up trim LIFTS the hull 26.46 u against the movedown. 98 - 26.46 = the 72 the
+	//design meant. NOT a flip to rotatezdown: that delivers 96.4 and buries the keel 84 u into
+	//the sand. And she still does not go under - see this label's header: 56 units of water
+	//(surface -520, sand -576) under a hull ~150 tall. She lists and settles; she cannot submerge.
+	if(level.coop_higginsSinkDrop  == NIL){ level.coop_higginsSinkDrop  = 98 }
 	if(level.coop_higginsSinkPort  == NIL){ level.coop_higginsSinkPort  = 0 }
 
 	if($higgins1 == NULL || $higgins1 == NIL){ end }
@@ -14460,7 +14498,12 @@ coop_uwBoatLook local.wx local.wy:{
 	}
 
 	//--- AND THE SEA COMES BACK, at the same measured-clean pitch it went out at.
-	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show; $ocean_wavy alpha 1 }		//[bug-2507] the lid lever cleared on this exit path too
+	//[bug-2538] ...UNLESS the coop sea mesh is up. These two are coplanar at z -520 and exactly
+	//one may be visible, which is the guard m3l1a.scr:1359 already carries and these two did not.
+	if($ocean_wavy != NULL && $ocean_wavy != NIL){
+		if(level.coop_seaMesh == NIL || level.coop_seaMesh == NULL){ $ocean_wavy show; $ocean_wavy alpha 1 }
+		else{ $ocean_wavy alpha 1 }		//[bug-2507] the lid lever comes down either way
+	}
 
 	//--- LEG F. Level off onto the pose BEAT 6 opens on. 0.70s.
 	local.t0 = level.time
@@ -16423,6 +16466,14 @@ coop_rampHandoff:{
 	level.coop_rampDone = 1
 	thread coop_hedgeCrowd		//[user 2026-09-06] the hedgehog crowd, see above
 	thread coop_surfMeshStart		//[user 2026-09-07, bug-2521] the surf zone's moving crest, see the label
+	//[user 2026-09-08, bug-2538] AND THE SWELL COMES BACK FOR THE BEACH FIGHT. It was deleted at
+	//the plunge (:13457) and nothing ever restarted it, so from the moment he stands up the whole
+	//seaward view was $ocean_wavy: 8x8 drawn vertices over 15,872 x 5,840 u on one time-only
+	//`flap` hinge - a breathing plane. 495 u of zero added relief in front of him, then 310 more
+	//before the surf bore carries 10. Started AFTER the $ocean_wavy restore above, not before it:
+	//`thread` is SYNCHRONOUS to the target's first wait, and coop_seaMeshStart has no wait, so
+	//starting it earlier would hide the sheet and this label would show it again underneath.
+	thread coop_seaMeshStart
 	thread coop_beachMedics		//[user 2026-09-07, bug-2522] medics in cover with a spinning kit, see the label
 	//[user 2026-09-04] THE SCREEN COMES BACK ON EVERY PATH THAT LETS A PLAYER GO. The plunge now
 	//blacks the screen out, and a fadeout is a latch with no self-expiry (player.cpp:7765 clears the
@@ -16464,7 +16515,12 @@ coop_rampHandoff:{
 	//open sea missing for everyone. All three are idempotent.
 	level.coop_uwAstern = 0
 	level.coop_uwUnbind = 0
-	if($ocean_wavy != NULL && $ocean_wavy != NIL){ $ocean_wavy show; $ocean_wavy alpha 1 }		//[bug-2507] the lid lever cleared on this exit path too
+	//[bug-2538] ...UNLESS the coop sea mesh is up. These two are coplanar at z -520 and exactly
+	//one may be visible, which is the guard m3l1a.scr:1359 already carries and these two did not.
+	if($ocean_wavy != NULL && $ocean_wavy != NIL){
+		if(level.coop_seaMesh == NIL || level.coop_seaMesh == NULL){ $ocean_wavy show; $ocean_wavy alpha 1 }
+		else{ $ocean_wavy alpha 1 }		//[bug-2507] the lid lever comes down either way
+	}
 
 	//[user 2026-09-04] AND THE HEARTBEAT, ON EVERY PATH. Its only other stop is inside the BEAT 8
 	//surface branch, so a beat that ended any other way (the watchdog, an abort) would leave it
