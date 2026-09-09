@@ -285,8 +285,10 @@ alarmsounder:{
 	local.lastClosestOrigin = (0 0 0) //chrissstrahl - coop/mp
 	while (1){
 		if (level.alarm_on == 1){
-			local.range = 1400
-	
+			//[user 2026-09-09, bug-2545] "I dont think I am hearing the alarm noise play" (m4l3).
+			//Was 1400 - see the volume curve below for why that number silenced the bell in coop.
+			local.range = 6000
+
 			for (local.i=1;local.i<$alarm.size+1;local.i++){
 				local.player = exec coop_mod/replace.scr::player_closestTo $alarm[local.i] //chrissstrahl - grab player closest to alarmer
 				if(local.player != NULL){
@@ -299,14 +301,37 @@ alarmsounder:{
 				}
 //				waitframe
 			}
-			local.vol = (1.5 / 1350) * (local.range)
-			local.vol = 1.5 - local.vol
-			if (local.vol < 0.2){
-				local.vol = 0.2
+			//[user 2026-09-09, bug-2545] AUDIBLE ACROSS A COOP-SIZED PLAY AREA.
+			//Retail sized this curve for one player standing at the switch: local.range starts at
+			//1400 and only ever shrinks, so the moment nobody is within 1400 units of any alarm the
+			//volume clamps to the 0.2 floor - 1.2 (alias volume) x 0.2 = 0.24 gain, and levelwide
+			//means no direction either, so it reads as nothing at all under gunfire.
+			//Measured from the 2026-09-09 playtest: m4l3 has 13 alarm switches and the nearest one
+			//to where the fight actually happened was 1459 units away - 59 past the cutoff. The
+			//bell sat on the floor value for the entire alarm while reinforcements kept spawning.
+			//Two segments, so close range keeps the retail feel and the tail carries:
+			//  0..1400    1.50 -> 0.50   (retail slope, near-identical up close)
+			//  1400..6000 0.50 -> 0.28   (a distant klaxon, still clearly there)
+			local.vol = 0.28
+			if (local.range < 1400){
+				local.vol = 1.5 - (local.range / 1400)
+			}else if (local.range < 6000){
+				local.vol = 0.5 - ((local.range - 1400) / 20909)
+			}
+			if (local.vol < 0.28){
+				local.vol = 0.28
 			}else if (local.vol > 1.5){
 				local.vol = 1.5
 			}
-				
+
+			//[user 2026-09-09] One line every 5 s while it rings, so the next playtest says outright
+			//whether the bell is reaching a client and at what gain, instead of us inferring it.
+			if (level.coop_alarmBellT == NIL){ level.coop_alarmBellT = 0 }
+			if (level.time > level.coop_alarmBellT){
+				level.coop_alarmBellT = level.time + 5
+				println ( "^~^~^ ALARMBELL range=" + local.range + " vol=" + local.vol + " ent=" + level.alarm_sound.entnum )
+			}
+
 			level.alarm_sound loopsound alarmbell local.vol "levelwide"
 		}
 		waitframe
