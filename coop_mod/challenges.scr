@@ -3302,11 +3302,68 @@ chal_pin_toggle local.player local.cid:{
 }end
 
 //=========================================================================
+// [user 2026-09-09, bug-2544] Drop any pin whose challenge is already complete, and compact the
+// list. Called only from chal_pin_push, which is what makes it self-healing.
+//
+// Compacted INLINE rather than by calling chal_pin_toggle: toggle ends by calling
+// chal_pin_push, and this runs from inside push. chal_pin_save is safe to call - it writes the
+// cvar and the .dat and calls nothing back.
+//=========================================================================
+chal_pin_dropDone local.player:{
+	if( local.player == NULL ){ end }
+	local.n = local.player.flags["coop_pinN"]
+	if( local.n == NIL ){ local.n = 0 }
+	if( local.n < 1 ){ end }
+	local.w = 0
+	local.dropped = 0
+	local.i = 1
+	while( local.i <= local.n ){
+		local.cid = local.player.flags["coop_pin" + local.i]
+		local.keep = 1
+		if( local.cid == NIL || local.cid == "" ){ local.keep = 0 }
+		else{
+			if( local.player.flags["coop_chalD_" + local.cid] == 1 ){
+				local.keep = 0
+				local.dropped++
+				//clear the gold marker too, or the Service Record and the objectives menu disagree
+				waitthread chal_pin_mark local.player local.cid 0
+			}
+		}
+		if( local.keep == 1 ){
+			local.w++
+			local.player.flags["coop_pin" + local.w] = local.cid
+		}
+		local.i++
+	}
+	if( local.dropped < 1 ){ end }
+	local.j = local.w + 1
+	while( local.j <= local.n ){
+		local.player.flags["coop_pin" + local.j] = ""
+		local.j++
+	}
+	local.player.flags["coop_pinN"] = local.w
+	waitthread chal_pin_save local.player
+	println( "^~^~^ CHALPIN dropped=" + local.dropped + " finished pin(s) byE" + local.player.entnum + " left=" + local.w )
+}end
+
+//=========================================================================
 // Publish the five rows to ONE player. Values are pushed unquoted (bug-758: quoted stufftext
 // values get truncated on the wire).
 //=========================================================================
 chal_pin_push local.player:{
 	if( local.player == NULL ){ end }
+	//[user 2026-09-09, bug-2544] A FINISHED CHALLENGE IS NEVER IN THE PIN LIST. Enforced HERE,
+	//because this is the only pin routine that runs unprompted - chal_pin_monitor calls it every
+	//3 s for every player - so a list that has already gone wrong heals itself with no action from
+	//the player and no migration step.
+	//The two guards that existed were both ONE-SHOT and both missed it: toggle refuses to ADD a
+	//done challenge, and the completion path drops the pin at the instant it finishes but only if
+	//it was pinned at that instant. Anything that lands a done cid in the list afterwards - the
+	//disconnected menu's pin path racing the server, or chal_pin_load restoring a pins_<id>.dat
+	//entry for a challenge completed since it was written - stuck there for good. Measured live:
+	//coop_cp1 "The Tell-Tale Ping - 150/150" with coop_cp1d 1 and coop_pinCount 1/5, while every
+	//coop_uiP marker was 0.
+	waitthread chal_pin_dropDone local.player
 	local.n = local.player.flags["coop_pinN"]
 	if( local.n == NIL ){ local.n = 0 }
 	//[user 08-07] "N/5" pinned summary for the Service Record - mirrors CL_PinToggle_f's own
