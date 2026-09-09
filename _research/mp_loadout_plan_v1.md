@@ -18,6 +18,17 @@ USER DECISIONS ALREADY MADE (2026-09-09):
     rifle + smg + sidearm + grenade, exactly matching the Allied free four that have shipped since
     2026-07-16. The MP floor question is now CLOSED.
 
+  * ONE PRIMARY, not two (2026-09-09). The armory kit is 2 primaries + sidearm + grenade; retail MP
+    is 1 primary, and shipping 2 would be a straight power increase over every stock server. MP uses
+    slot 1 + sidearm + grenade; slot 2 is hidden on the MP screen. Coop keeps both.
+  * MP HEALTH 100, not coop's 750 (2026-09-09). MUST be applied PER PLAYER at spawn in mp.scr, never
+    by writing the `coop_health` CVAR: server.scr:238 re-seeds level.coop_health from that cvar on
+    every map with a prevCoopHealth memo, so writing it would follow the player into the next COOP
+    map. Enforced by docs/tools/check_mp_isolation.py clause 4.
+  * ISOLATION IS A TESTED CONTRACT, not a promise (2026-09-09), at the user's explicit insistence.
+    docs/tools/check_mp_isolation.py enforces seven clauses and build.ps1 ABORTS on any failure.
+    Read its docstring before touching anything in this plan.
+
 Read section 1 first - it is the reason the floor question existed at all.
 
 ---
