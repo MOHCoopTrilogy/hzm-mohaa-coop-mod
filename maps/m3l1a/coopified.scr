@@ -13271,11 +13271,16 @@ coop_rampUnderwater:{
 	level.coop_qteOn = 1			//the whole feature; 0 restores exactly what shipped before it
 	level.coop_qteHud = 1			//0 = the mechanic with no bar
 	level.coop_qteLethal = 1		//0 = everything except the death. FIRST knob to flip if it reads badly
-	level.coop_qteWin = 18.0		//seconds of air once the lead-in ends
-	level.coop_qteLead = 1.5		//teaching window: no drain and no clock
-	level.coop_qteCap = 22.0		//the segment wall - the beat moves on regardless
-	level.coop_qteGain = 0.070		//meter per tap; break-even is 1.43 taps/s, 3/s clears in 9.1 s
-	level.coop_qteDrain = 0.10		//meter per second the current takes back
+	//[user 2026-09-08, bug-2535] "Make the fight current a bit longer please." The first live run
+	//cleared it in under five seconds of real time - the log said 9.55 but that number was a frame
+	//counter, see the marker fix in coop_qteRun. This roughly triples the fight without making it
+	//unwinnable: break-even moves 1.43 -> 2.0 taps/s, and a determined masher at 5/s now needs 11 s
+	//instead of 4. 3 taps/s -> 33 s, 4 -> 17 s, 5 -> 11 s, 6 -> 8 s.
+	level.coop_qteWin = 26.0		//seconds of air once the lead-in ends
+	level.coop_qteLead = 2.0		//teaching window: no drain and no clock
+	level.coop_qteCap = 32.0		//the segment wall - the beat moves on regardless
+	level.coop_qteGain = 0.030		//meter per tap; break-even is 2.0 taps/s
+	level.coop_qteDrain = 0.060		//meter per second the current takes back
 	level.coop_qteT0 = 0
 	level.coop_qteCleared = 0
 	level.coop_qteWatchBump = 0
@@ -15569,15 +15574,49 @@ coop_beachMedics:{
 		if(local.a != NULL && local.a != NIL){ local.made++ }
 		local.i++
 	}
-	//the map's own pair: the kit only, their healing is retail's and already running
-	local.kits = 0
-	if($left_medic != NULL && $left_medic != NIL){
-		if(isalive $left_medic){ thread coop_medicKit $left_medic 62; local.kits++ }
+	//[user 2026-09-08, bug-2534] the map's own medics are ADOPTED, not wired once here - see
+	//coop_medicAdopt. Wiring them at this instant was the bug: four of the five do not exist yet.
+	thread coop_medicAdopt
+	println("^~^~^ BEACHMEDIC spawned=" + local.made)
+}end
+
+
+//=========================================================================
+//[user 2026-09-08, bug-2534] "I found a stock medic without the medic icon floating over his head."
+//
+//THE MAP SPAWNS FIVE MEDIC-MODEL ACTORS, NOT TWO, AND FOUR OF THEM DO NOT EXIST YET when the beach
+//handoff runs. m3l1a.scr spawns left_medic and right_medic TWICE - once per branch of sequence 5
+//(:6880/:6895 for the left branch, :6992/:7078 for the right) - only one branch ever runs, and both
+//run well after the landing. A fifth at :5171 is `shingle_ranger6`: the medic MODEL used as an
+//ordinary rifleman up at the shingle, which is the one most likely to be seen bare, because it is
+//standing in the open where the player ends up.
+//
+//So the kit is ADOPTED on a poll rather than wired once. Cheap: three name lookups every 3 s for
+//six minutes, each of which does nothing once the actor is already carrying one.
+coop_medicAdopt:{
+	local.k = 0
+	while(local.k < 120){
+		//the retail pair heal on their own - retail's own sequence_5_medic does it - so they take the
+		//kit only. The shingle rifleman has the model and none of the healing, so an icon over him
+		//would promise something he cannot do unless we also give him ours.
+		waitthread coop_medicAdoptOne $left_medic 0
+		waitthread coop_medicAdoptOne $right_medic 0
+		waitthread coop_medicAdoptOne $shingle_ranger6 1
+		wait 3
+		local.k++
 	}
-	if($right_medic != NULL && $right_medic != NIL){
-		if(isalive $right_medic){ thread coop_medicKit $right_medic 62; local.kits++ }
-	}
-	println("^~^~^ BEACHMEDIC spawned=" + local.made + " kits=" + ( local.made + local.kits ))
+}end
+
+
+//=========================================================================
+coop_medicAdoptOne local.who local.heal:{
+	if(local.who == NULL || local.who == NIL){ end }
+	if(local.who.coop_kitOn == 1){ end }		//already carrying one; a respawned twin is a new entity
+	if(!(isalive local.who)){ end }
+	local.who.coop_kitOn = 1
+	thread coop_medicKit local.who 62
+	if(local.heal == 1){ thread coop_medicHeal local.who }
+	println("^~^~^ BEACHMEDIC adopted E" + local.who.entnum + " heal=" + local.heal)
 }end
 
 
@@ -16109,7 +16148,11 @@ coop_qteRun local.wx local.wy local.pace:{
 		}
 		local.i++
 	}
-	level.coop_qteWatchBump = 44		//+22 s watchdog, +11 s incoming safety; cleared at the handoff
+	//[bug-2535] 2 x coop_qteCap, BY CONSTRUCTION: the watchdog counts half-seconds (`120 + bump`)
+	//and the incoming safety counts seconds (`75 + bump/2`), so this value buys both exactly
+	//coop_qteCap of extra headroom and the 15 s watchdog-before-mortality gap is preserved.
+	//Raise the cap without raising this and the wall can outlast the watchdog.
+	level.coop_qteWatchBump = 64		//= 2 * coop_qteCap 32; cleared at the handoff
 	println("^~^~^ RAMPQTE arm n=" + local.n + " cap=" + level.coop_qteCap + " win=" + level.coop_qteWin)
 	if(local.n < 1){ println("^~^~^ RAMPQTE off why=nobody"); end }
 
@@ -16121,7 +16164,7 @@ coop_qteRun local.wx local.wy local.pace:{
 		//coop_rampHandoff from :16026). Without this the curtain would be redrawn on the next tick and
 		//the player would walk up Omaha behind a full-screen black plate with nothing left to clear it.
 		if(level.coop_rampDone == 1 || level.coop_rampCineDone == 1 || level.coop_rampUnderOn != 1){
-			println("^~^~^ RAMPQTE off why=abort t=" + local.t)
+			println("^~^~^ RAMPQTE off why=abort t=" + ( level.time - level.coop_qteT0 ))
 			waitthread coop_qteResolveAll
 			end
 		}
@@ -16129,7 +16172,7 @@ coop_qteRun local.wx local.wy local.pace:{
 		//unassigned level var throws, and a Script Error skips the statement without killing the thread,
 		//which is exactly how an anti-softlock wall ships inert.
 		if(( level.time - level.coop_qteT0 ) > level.coop_qteCap){
-			println("^~^~^ RAMPQTE wall fired t=" + local.t)
+			println("^~^~^ RAMPQTE wall fired t=" + ( level.time - level.coop_qteT0 ))
 			waitthread coop_qteResolveAll
 			end
 		}
@@ -16173,12 +16216,14 @@ coop_qteRun local.wx local.wy local.pace:{
 		local.rep++
 		if(local.rep >= 40){
 			local.rep = 0
-			println("^~^~^ RAMPQTE tick t=" + local.t + " done=" + local.done + " live=" + local.live)
+			//[bug-2535] REAL elapsed. local.t is a frame counter scaled 0.05/frame, i.e. it assumes 20
+			//script fps; at 60 it reads 3x high and the first playtest's "t=9.550" was really 4.8 s.
+			println("^~^~^ RAMPQTE tick t=" + ( level.time - level.coop_qteT0 ) + " done=" + local.done + " live=" + local.live)
 		}
 		waitframe
 		local.t = local.t + 0.05
 	}
-	println("^~^~^ RAMPQTE cleared t=" + local.t)
+	println("^~^~^ RAMPQTE cleared t=" + ( level.time - level.coop_qteT0 ))
 	waitthread coop_qteResolveAll
 }end
 
@@ -16229,7 +16274,7 @@ coop_qteTick local.p local.t:{
 	//--- won
 	if(local.m >= 1){
 		local.p.flags["coop_qteState"] = "passed"
-		println("^~^~^ RAMPQTE pass byE" + local.p.entnum + " t=" + local.t + " taps=" + local.p.flags["coop_qteTaps"])
+		println("^~^~^ RAMPQTE pass byE" + local.p.entnum + " t=" + ( level.time - level.coop_qteT0 ) + " taps=" + local.p.flags["coop_qteTaps"])
 		local.p iprint "You break free of the current." 1
 		if(level.coop_qteSwimSaid != 1){
 			level.coop_qteSwimSaid = 1
@@ -16241,7 +16286,7 @@ coop_qteTick local.p local.t:{
 	//--- out of air
 	if(local.el > ( level.coop_qteLead + level.coop_qteWin )){
 		local.p.flags["coop_qteState"] = "failed"
-		println("^~^~^ RAMPQTE expire byE" + local.p.entnum + " t=" + local.t + " taps=" + local.p.flags["coop_qteTaps"])
+		println("^~^~^ RAMPQTE expire byE" + local.p.entnum + " t=" + ( level.time - level.coop_qteT0 ) + " taps=" + local.p.flags["coop_qteTaps"])
 		local.p iprint "MISSION FAILED - YOU DROWNED" 1
 		local.p thread coop_qteBlackout
 	}
