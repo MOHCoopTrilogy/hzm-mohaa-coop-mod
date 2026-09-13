@@ -19,6 +19,24 @@
 >    NEW, separately named files (names must still start german/axis/it/sc for InitModel).
 > 6. The Axis cfg tree must live under `ui/coop_*` - the stufftext filter drops server `exec` of `ui/mploadout/`.
 > 7. FFA players are still allies/axis in this engine: choose the armory by dmteam in FFA too.
+>
+> **SUPERSEDED AGAIN ON UNLOCKS, later on 2026-09-13.** Decision 1's "coop unlocks ENFORCED" for Allies and "everything
+> unlocked" for Axis are both OUT. In their place:
+>
+> 8. **MP HAS ITS OWN PROGRESSION.** MP-oriented challenges unlock ALL gear in MP, for both the Allied and the Axis
+>    armory: weapons, weapon variants, weapon skins, character skins, headgear and glasses, gloves. User: "I think we
+>    need to create challenges that are mp oreintated to unlock gear".
+> 9. **START OVER IN MP.** Coop progress grants nothing in MP.
+> 10. **GUNS UNLOCK BY KILLS PER CLASS, and class kills count across both teams** (a rifle kill as Axis advances the
+>     Allied rifle ladder too). Variants and weapon skins unlock by kills with that weapon.
+> 11. **PLAYERS CARRY THEIR OWN PROGRESS** to any server: "I don't think it should be per server, players carry their
+>     own progress." The progress is client-held, so it needs a server-verified tamper check (to be designed).
+> 12. **BOT KILLS COUNT** toward MP progression.
+>
+> Still standing: separate Allied and Axis armories, no non-Allied weapons for Allies, the shotgun on both, Italian and
+> Japanese guns on Axis, glasses in the headgear slot, Axis gloves on their own cvar, the disguise tiks untouched, one
+> primary, health 100, and MP never calling coop armory / challenge / xp code. Open assumption to confirm in design: one
+> starter gun per class stays free, so a new player can always spawn armed.
 
 Authored 2026-09-09 from a 51-agent design pass with adversarial verification of every claim that
 decides the design. Every file:line was read that session. **Zero binaries required.**
