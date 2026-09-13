@@ -1,3 +1,14 @@
+> **USER DECISIONS (2026-09-13):**
+> - Markers vanish with the bar when the HUD fades (marker floor 0). The bar follows the HUD fade, superseding the July
+>   compass fade exemption for the bar.
+> - The bar replaces the round hud_compass ring while it is on. On by default.
+> - The DM box (kill feed/chat) shifts down under the bar.
+> - Hidden when scoped and when spectating.
+> - Current objective only (v1). Distance in metres.
+> - Not asked yet, taken at the recommendation: coop-only in v1 via a coop session flag (MP byte-identical).
+> - Still open (decisions page): teammate names near centre, v2 priority, arc/label density, locations for the 4
+>   no-location stages. Fix before building: markers overlapped labels in the mockup; give markers their own row.
+
 # Top compass bar: research map and recommended design (HZM MOHAA Coop)
 
 Evidence conventions:
