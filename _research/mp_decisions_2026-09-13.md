@@ -13,6 +13,14 @@ Decided earlier the same day, in chat:
 - Build-A-Base is the base-building mode; Base Assault is in.
 - The Field Settings redesign is approved with all 14 additions, plus the Host Rules sheet on Start Game.
 
+Decided later the same day, in chat (user: "Yes to 2 and 3"):
+- Security layer 2 goes ahead as recommended: the exe filters every server-origin line (not only vstr/exec
+  expansions); a refuse-list for the settings the mod vstr's, instead of persisting taint; a real cgame API
+  handshake (stamp cgi->apiversion, append new imports at the end, fall back to Cmd_Stuff on an old exe);
+  menu-widget laundering through globalwidgetcommand stays a residual for now.
+- Field Settings: the Compass row becomes "Modern Compass" (coop_compassBar): on = the top bar, off = the
+  classic round compass.
+
 ## Scope and isolation
 | id | decision |
 |---|---|

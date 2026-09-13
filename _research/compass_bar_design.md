@@ -10,6 +10,7 @@
 >   no-location stages - ANSWERED 2026-09-13 (mp_decisions_2026-09-13.md C1-C4): names shown near centre; downed
 >   markers first in v2; 150 degrees with labels every 15; give the 4 stages positions. Fix before building: markers
 >   overlapped labels in the mockup; give markers their own row.
+> - Menu (2026-09-13): the Field Settings "Compass" row becomes "Modern Compass" (coop_compassBar); off = classic ring.
 
 # Top compass bar: research map and recommended design (HZM MOHAA Coop)
 
