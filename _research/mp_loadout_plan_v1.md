@@ -37,6 +37,14 @@
 > Japanese guns on Axis, glasses in the headgear slot, Axis gloves on their own cvar, the disguise tiks untouched, one
 > primary, health 100, and MP never calling coop armory / challenge / xp code. Open assumption to confirm in design: one
 > starter gun per class stays free, so a new player can always spawn armed.
+>
+> 13. **MULTIPLAYER OPTIONS OPENS THE MP LOADOUT SCREENS** (user, 2026-09-13): "in the 'Multiplayer Options' button, I
+>     think we just need to make that go directly to the brand new loadout screens for both Allied and Axis (I guess you
+>     have a picker to select which you want to change loadout for) applying that should make it become your default
+>     for multiplayer (non coop modes)." So the entry point is a side picker (Allied / Axis) then that side's MP
+>     armory, and Apply saves that side's default MP kit, used in every non-coop mode.
+> 14. **THE STOCK WEAPON PICKER GOES** once the MP armories exist ("we dont need the stock picker do we?"): all five
+>     SelectPrimaryWeapon menus, including the in-match ESC "Select Weapon" re-entry, lead to the MP armory instead.
 
 Authored 2026-09-09 from a 51-agent design pass with adversarial verification of every claim that
 decides the design. Every file:line was read that session. **Zero binaries required.**
