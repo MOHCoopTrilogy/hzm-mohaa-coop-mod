@@ -45,6 +45,12 @@
 >     armory, and Apply saves that side's default MP kit, used in every non-coop mode.
 > 14. **THE STOCK WEAPON PICKER GOES** once the MP armories exist ("we dont need the stock picker do we?"): all five
 >     SelectPrimaryWeapon menus, including the in-match ESC "Select Weapon" re-entry, lead to the MP armory instead.
+>
+> 15. **80 MORE DECISIONS, 2026-09-13, on the Multiplayer Decision Sheet:** see `_research/mp_decisions_2026-09-13.md`
+>     (scope S1-S8, tamper T1-T7, progression P1-P14, armory A1-A8, flow and bots F1-F6, modes M1-M24, host H1-H9,
+>     compass C1-C4). Chosen against the recommendation: third-party MP maps in scope now via an engine hook (S2);
+>     scoped rifles count toward the base gun's class, not Sniper (P3); voice nationality must match the worn skin (A8).
+>     The open assumption above is CLOSED: one free starter per class per side, the stock class kit gun (P1).
 
 Authored 2026-09-09 from a 51-agent design pass with adversarial verification of every claim that
 decides the design. Every file:line was read that session. **Zero binaries required.**

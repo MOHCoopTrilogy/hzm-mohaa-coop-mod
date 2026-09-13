@@ -5,7 +5,7 @@
 >   in addition to the Freeze Tag, Rifles Only and base-building modes named in the original request.
 > - Base building: Build-A-Base (carry/place/rotate objects, any map) is the pick; Base Assault is IN (2026-09-13).
 > - King of the Hill: both community packs read (_research/koth_source_notes.md); we rebuild our own rules.
-> - Remaining questions are collected on the MP decisions page (published artifact) and recorded here once answered.
+> - ALL section 8(a) questions were answered 2026-09-13: see _research/mp_decisions_2026-09-13.md (M1-M24, H1-H9).
 > - Push is the MOHAA push mod from "King's LMAO server" (see _research/kings_push_hunt.md); the approved Ubermod V2 download is being read for the
 >   surviving implementations. Nothing here is decided about licensing: rebuild from rules unless the authors give permission.
 
