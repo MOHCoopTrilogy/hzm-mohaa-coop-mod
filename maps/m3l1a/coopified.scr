@@ -13679,6 +13679,23 @@ coop_rampUnderwater:{
 	level.coop_qteCleared = 0
 	level.coop_qteWatchBump = 0
 	level.coop_qteSwimSaid = 0
+	//[user 2026-09-13, bug-2561] THE METER IS THE SWIM. "every time you are tapping f should progress (swim)
+	//further with the swim noise we have by the time the bar is full we should be surfacing. Letting go of f
+	//slowly rolls you back to where you started, not doing anything should eventually drown you."
+	//Gain, drain, win and cap above are UNCHANGED - they are the user's own tune; they now move a body
+	//instead of a bar. See coop_qteSwimPose for the path and coop_qteSwimStep for what a tap does.
+	level.coop_qteSwim = 1			//0 = the old held pose, and the canned BEAT 6 strokes afterwards
+	level.coop_qteEase = 3.0		//how fast the camera catches the meter, per second
+	level.coop_qteStrokeGap = 0.28		//minimum seconds between two swim swooshes
+	level.coop_qteBurstGap = 0.9		//minimum seconds between two bubble bursts (each is an entity)
+	level.coop_qteSwam = 0
+	level.coop_qteShown = 0
+	level.coop_qtePulse = 0
+	level.coop_qteSide = 1
+	level.coop_qteTapNow = 0
+	level.coop_qteStrokeT = 0
+	level.coop_qteBurstT = 0
+	level.coop_qteAirT = 0
 	//[bug-2527] the input probe answered its question - a hold gives ONE edge, a mash gives one per
 	//press - and it must not run beside the QTE, because both enable the same bridge and both clear
 	//coop_lobbyInput, so the probe would eat the taps. Off by default, kept for re-measuring.
@@ -14174,6 +14191,15 @@ coop_rampUnderwater:{
 	local.n++; local.bx[local.n] = local.wx - 14; local.by[local.n] = local.wy - 24; local.bz[local.n] = ( 0 - 544 ); local.pp[local.n] = 7;         local.yy[local.n] = 90; local.rr[local.n] = ( 0 - 6 ); local.zz[local.n] = 4
 	local.n++; local.bx[local.n] = local.wx - 7;  local.by[local.n] = local.wy - 13; local.bz[local.n] = ( 0 - 543 ); local.pp[local.n] = 10;        local.yy[local.n] = 85; local.rr[local.n] = 5;         local.zz[local.n] = 2
 	local.n++; local.bx[local.n] = local.wx;      local.by[local.n] = local.wy;      local.bz[local.n] = ( 0 - 542 ); local.pp[local.n] = 13;        local.yy[local.n] = 90; local.rr[local.n] = ( 0 - 5 ); local.zz[local.n] = 2
+
+	//[user 2026-09-13, bug-2561] THE SWIM WAS THE QTE. When the fight drove the camera up this stroke path,
+	//running the loop below would replay the same six strokes as a canned reward he has already swum - so
+	//glide the last stretch to its endpoint (BEAT 7's start) and let the loop run zero times. Untouched when
+	//the QTE was off, refused or armed nobody: level.coop_qteSwam is only ever set by a real arm.
+	if(level.coop_qteSwam == 1){
+		waitthread coop_qteSwimFinish local.wx local.wy
+		local.n = 0
+	}
 
 	local.cz = 0 - 543			//exactly where 'up' ended - stroke 1 lerps DOWN to -548, so the
 							//push-off dip is a move rather than a five-unit pop
@@ -16508,6 +16534,7 @@ coop_uwRingLate local.pl:{
 //KILL SWITCHES: level.coop_qteOn 0 (whole feature, byte-identical to before), coop_qteHud 0 (mechanic
 //with no bar), coop_qteLethal 0 (no death). PROBES: ^~^~^ RAMPQTE.
 coop_qteRun local.wx local.wy local.pace:{
+	level.coop_qteSwam = 0			//[bug-2561] a refused run must leave BEAT 6 to the caller, as before
 	local.on = level.coop_qteOn		//snapshotted: clearing it mid-loop must not strand half a state
 	if(local.on != 1){ end }
 	if(level.gametype == 0){ end }
@@ -16565,6 +16592,18 @@ coop_qteRun local.wx local.wy local.pace:{
 	println("^~^~^ RAMPQTE arm n=" + local.n + " cap=" + level.coop_qteCap + " win=" + level.coop_qteWin)
 	if(local.n < 1){ println("^~^~^ RAMPQTE off why=nobody"); end }
 
+	//[user 2026-09-13, bug-2561] from here the meter drives the swim and the caller skips BEAT 6's strokes.
+	//Set only AFTER a real arm, so a refused or empty QTE leaves BEAT 6 running exactly as it did.
+	level.coop_qteSwam = level.coop_qteSwim
+	level.coop_qteShown = 0
+	level.coop_qtePulse = 0
+	level.coop_qteSide = 1
+	level.coop_qteTapNow = 0
+	level.coop_qteStrokeT = level.time
+	level.coop_qteBurstT = level.time
+	level.coop_qteAirT = 0
+	local.prevT = level.time
+
 	//--- the loop
 	local.t = 0
 	local.rep = 0
@@ -16588,6 +16627,9 @@ coop_qteRun local.wx local.wy local.pace:{
 
 		local.done = 0
 		local.live = 0
+		local.msum = 0			//[bug-2561] the shared camera's meter: the mean of everyone still in it
+		local.mcnt = 0
+		level.coop_qteTapNow = 0	//set by coop_qteTick on any player's tap THIS frame
 		local.i = 1
 		while(local.i <= $player.size){
 			local.p = $player[local.i]
@@ -16608,6 +16650,12 @@ coop_qteRun local.wx local.wy local.pace:{
 						}
 					}
 					if(local.p.flags["coop_qteState"] != "pending"){ local.done++ }
+					//[bug-2561] a passed man counts as 1 (his meter is left at 1), a drowned man is out, and a
+					//late joiner who was auto-passed never had a meter and is skipped
+					if(local.p.flags["coop_qteMeter"] != NIL && local.p.flags["coop_qteState"] != "failed"){
+						local.msum = local.msum + local.p.flags["coop_qteMeter"]
+						local.mcnt++
+					}
 				}
 			}
 			local.i++
@@ -16619,7 +16667,20 @@ coop_qteRun local.wx local.wy local.pace:{
 		//player per frame for the whole hold. coop_uwPose is the (pos, ang) form every other
 		//submerged leg uses, it clamps to the yaw rail, and it republishes coop_uwCamPos/Ang so the
 		//bubbles keep tracking the camera. It drives $boatCamera and ignores self: once is enough.
-		if(local.live > 0){ waitthread coop_uwPose local.hp local.ha }
+		if(level.coop_qteSwam == 1){
+			//[user 2026-09-13, bug-2561] THE SWIM. One shared $boatCamera, so it rides the mean meter.
+			local.tgt = 1
+			if(local.mcnt > 0){ local.tgt = local.msum / local.mcnt }
+			local.fdt = level.time - local.prevT
+			local.prevT = level.time
+			if(local.fdt < 0){ local.fdt = 0 }
+			if(local.fdt > 0.25){ local.fdt = 0.25 }
+			waitthread coop_qteSwimStep local.tgt local.fdt
+			if(local.live > 0){ waitthread coop_qteSwimPose local.wx local.wy level.coop_qteShown }
+			waitthread coop_qteAirTick
+		}else{
+			if(local.live > 0){ waitthread coop_uwPose local.hp local.ha }
+		}
 		if(local.live < 1){ level.coop_qteCleared = 1 }
 
 		local.rep++
@@ -16627,7 +16688,7 @@ coop_qteRun local.wx local.wy local.pace:{
 			local.rep = 0
 			//[bug-2535] REAL elapsed. local.t is a frame counter scaled 0.05/frame, i.e. it assumes 20
 			//script fps; at 60 it reads 3x high and the first playtest's "t=9.550" was really 4.8 s.
-			println("^~^~^ RAMPQTE tick t=" + ( level.time - level.coop_qteT0 ) + " done=" + local.done + " live=" + local.live)
+			println("^~^~^ RAMPQTE tick t=" + ( level.time - level.coop_qteT0 ) + " done=" + local.done + " live=" + local.live + " swim=" + level.coop_qteShown)
 		}
 		waitframe
 		local.t = local.t + 0.05
@@ -16656,6 +16717,7 @@ coop_qteTick local.p local.t:{
 		local.p.coop_lobbyInput = 0
 		local.m = local.m + level.coop_qteGain
 		local.p.flags["coop_qteTaps"] = local.p.flags["coop_qteTaps"] + 1
+		level.coop_qteTapNow = 1		//[bug-2561] coop_qteSwimStep turns this frame's taps into a stroke
 	}
 
 	//the current. The lead-in holds BOTH the drain and the clock, so the first exposure is teachable.
@@ -16684,8 +16746,10 @@ coop_qteTick local.p local.t:{
 	if(local.m >= 1){
 		local.p.flags["coop_qteState"] = "passed"
 		println("^~^~^ RAMPQTE pass byE" + local.p.entnum + " t=" + ( level.time - level.coop_qteT0 ) + " taps=" + local.p.flags["coop_qteTaps"])
-		local.p iprint "You break free of the current." 1
-		if(level.coop_qteSwimSaid != 1){
+		local.p iprint "You kick for the surface." 1
+		//[bug-2561] the one-off swoosh on a win belonged to the held pose; in the swim every stroke already
+		//made one, so only the legacy path keeps it
+		if(level.coop_qteSwam != 1 && level.coop_qteSwimSaid != 1){
 			level.coop_qteSwimSaid = 1
 			waitthread coop_uwSay "coop_uw_swim"
 		}
@@ -16699,6 +16763,131 @@ coop_qteTick local.p local.t:{
 		local.p iprint "MISSION FAILED - YOU DROWNED" 1
 		local.p thread coop_qteBlackout
 	}
+}end
+
+
+//=========================================================================
+//[user 2026-09-13, bug-2561] ONE FRAME OF THE SWIM'S MOTION: the camera catches the meter, and a tap becomes
+//a stroke. Level state only - the camera is shared, so there is exactly one of each.
+coop_qteSwimStep local.tgt local.dt:{
+	if(local.tgt < 0){ local.tgt = 0 }
+	if(local.tgt > 1){ local.tgt = 1 }
+	local.k = level.coop_qteEase * local.dt
+	if(local.k > 1){ local.k = 1 }
+	level.coop_qteShown = level.coop_qteShown + ( ( local.tgt - level.coop_qteShown ) * local.k )
+
+	//the stroke's body: a lift and a roll that decay over ~0.45 s, alternating arms tap by tap
+	level.coop_qtePulse = level.coop_qtePulse - ( local.dt * 2.2 )
+	if(level.coop_qtePulse < 0){ level.coop_qtePulse = 0 }
+
+	if(level.coop_qteTapNow == 1){
+		level.coop_qtePulse = 1
+		level.coop_qteSide = 0 - level.coop_qteSide
+		//the swoosh. Rate-limited, not per tap: coop_uwSay is ONE play for the whole server (see its header)
+		//and a four-man mash would otherwise be a wall of noise. At an ordinary two or three taps a second
+		//the gap never bites, so every stroke you make is a stroke you hear.
+		if(( level.time - level.coop_qteStrokeT ) >= level.coop_qteStrokeGap){
+			level.coop_qteStrokeT = level.time
+			waitthread coop_uwSay "coop_uw_swim"
+		}
+		//bubbles on the catch, rate-limited harder: each burst is a script_model that lives six seconds
+		if(( level.time - level.coop_qteBurstT ) >= level.coop_qteBurstGap){
+			level.coop_qteBurstT = level.time
+			thread coop_uwBurst
+		}
+	}
+}end
+
+
+//=========================================================================
+//[user 2026-09-13, bug-2561] WHERE THE SWIM IS AT PROGRESS s: 0 = on the seabed, 1 = where BEAT 7 begins.
+//The path is BEAT 6's own stroke table, unchanged, with the QTE's held pose as row 1 - so a full bar lands
+//exactly on BEAT 7's opening pose and BEAT 8's endpoint guarantee is untouched. KEEP THE TWO TABLES IN STEP
+//if either is ever re-cut.
+//Z SAFETY: the table's highest z is -542 and the stroke lift adds at most 2.5, so the swim never rises above
+//-539.5 - clear of the -534..-506 strobe band BEAT 6's header budgets against.
+coop_qteSwimPose local.wx local.wy local.s:{
+	if(local.s == NIL){ local.s = 0 }
+	if(local.s < 0){ local.s = 0 }
+	if(local.s > 1){ local.s = 1 }
+
+	local.k = 0
+	local.k++; local.tx[local.k] = 0 - 38; local.ty[local.k] = 0 - 66; local.tz[local.k] = 0 - 543; local.tp[local.k] = 11;        local.tw[local.k] = 84; local.tr[local.k] = 4
+	local.k++; local.tx[local.k] = 0 - 32; local.ty[local.k] = 0 - 55; local.tz[local.k] = 0 - 548; local.tp[local.k] = ( 0 - 2 ); local.tw[local.k] = 84; local.tr[local.k] = 9
+	local.k++; local.tx[local.k] = 0 - 26; local.ty[local.k] = 0 - 45; local.tz[local.k] = 0 - 546; local.tp[local.k] = 1;         local.tw[local.k] = 88; local.tr[local.k] = ( 0 - 8 )
+	local.k++; local.tx[local.k] = 0 - 20; local.ty[local.k] = 0 - 34; local.tz[local.k] = 0 - 545; local.tp[local.k] = 4;         local.tw[local.k] = 85; local.tr[local.k] = 7
+	local.k++; local.tx[local.k] = 0 - 14; local.ty[local.k] = 0 - 24; local.tz[local.k] = 0 - 544; local.tp[local.k] = 7;         local.tw[local.k] = 90; local.tr[local.k] = ( 0 - 6 )
+	local.k++; local.tx[local.k] = 0 - 7;  local.ty[local.k] = 0 - 13; local.tz[local.k] = 0 - 543; local.tp[local.k] = 10;        local.tw[local.k] = 85; local.tr[local.k] = 5
+	local.k++; local.tx[local.k] = 0;      local.ty[local.k] = 0;      local.tz[local.k] = 0 - 542; local.tp[local.k] = 13;        local.tw[local.k] = 90; local.tr[local.k] = ( 0 - 5 )
+
+	//six segments between seven rows. `* 6.0` keeps it a float; at s == 1 int() gives 6, clamped to the
+	//last segment with f == 1 so the pose is exactly row 7.
+	local.seg = local.s * 6.0
+	local.i = int( local.seg )
+	if(local.i > 5){ local.i = 5 }
+	local.f = local.seg - local.i
+	local.a = local.i + 1
+	local.b = local.i + 2
+
+	local.pos = (0 0 0)
+	local.pos[0] = local.wx + local.tx[local.a] + ( ( local.tx[local.b] - local.tx[local.a] ) * local.f )
+	local.pos[1] = local.wy + local.ty[local.a] + ( ( local.ty[local.b] - local.ty[local.a] ) * local.f )
+	local.pos[2] = local.tz[local.a] + ( ( local.tz[local.b] - local.tz[local.a] ) * local.f ) + ( 2.5 * level.coop_qtePulse )
+	local.ang = (0 0 0)
+	local.ang[0] = local.tp[local.a] + ( ( local.tp[local.b] - local.tp[local.a] ) * local.f )
+	local.ang[1] = local.tw[local.a] + ( ( local.tw[local.b] - local.tw[local.a] ) * local.f )
+	local.ang[2] = local.tr[local.a] + ( ( local.tr[local.b] - local.tr[local.a] ) * local.f ) + ( 5 * level.coop_qtePulse * level.coop_qteSide )
+	waitthread coop_uwPose local.pos local.ang
+}end
+
+
+//=========================================================================
+//[user 2026-09-13, bug-2561] THE LAST STRETCH, after the QTE resolves: glide from wherever the swim got to
+//up to where BEAT 7 begins, so the hand-off is a move and never a pop. The beat calls this INSTEAD of
+//BEAT 6's strokes. Also covers a drowned or walled solo run - the shared camera still has to reach BEAT 7,
+//and the drowned man is behind his own curtain (coop_qteBlackout) for it, as he always was.
+coop_qteSwimFinish local.wx local.wy:{
+	local.s0 = level.coop_qteShown
+	if(local.s0 == NIL){ local.s0 = 0 }
+	if(local.s0 < 0){ local.s0 = 0 }
+	if(local.s0 > 1){ local.s0 = 1 }
+	local.dur = 0.15 + ( 1.2 * ( 1 - local.s0 ) )
+	local.p0 = level.coop_qtePulse
+	if(local.p0 == NIL){ local.p0 = 0 }
+	println("^~^~^ RAMPQTE finish from=" + local.s0 + " dur=" + local.dur)
+	local.t0 = level.time
+	while(1){
+		local.f = ( level.time - local.t0 ) / local.dur
+		if(local.f > 1){ local.f = 1 }
+		local.u = local.f * local.f * ( 3 - ( 2 * local.f ) )
+		level.coop_qteShown = local.s0 + ( ( 1 - local.s0 ) * local.u )
+		level.coop_qtePulse = local.p0 * ( 1 - local.f )
+		waitthread coop_qteSwimPose local.wx local.wy level.coop_qteShown
+		if(local.f >= 1){ break }
+		waitframe
+	}
+	level.coop_qtePulse = 0
+	level.coop_qteSwam = 0
+}end
+
+
+//=========================================================================
+//[user 2026-09-13, bug-2561] "not doing anything should eventually drown you" - and you should feel it
+//coming. The air left, in the beat's own drowning language: coop_uwAirSet closes the gl2 tunnel and speeds
+//the heart. 0.20 (BEAT 6's opening value) at the end of the lead-in, down to 0.05 (BEAT 7's) as the clock
+//runs out. Quantised to hundredths and sent at most twice a second: every distinct value is one stufftext
+//per player, and an unquantised float would send one every frame.
+coop_qteAirTick:{
+	if(( level.time - level.coop_qteAirT ) < 0.5){ end }
+	level.coop_qteAirT = level.time
+	local.el = ( level.time - level.coop_qteT0 ) - level.coop_qteLead
+	if(local.el < 0){ local.el = 0 }
+	local.left = 1 - ( local.el / level.coop_qteWin )
+	if(local.left < 0){ local.left = 0 }
+	if(local.left > 1){ local.left = 1 }
+	local.av = 0.05 + ( 0.15 * local.left )
+	local.av = int( local.av * 100 ) * 0.01
+	waitthread coop_uwAirSet local.av
 }end
 
 
@@ -16762,7 +16951,8 @@ coop_qteBar local.p local.m local.force:{
 	ihuddraw_color local.p 126 0.92 0.92 0.88
 	ihuddraw_rect local.p 126 local.dx ( 0 - 78 ) 200 14
 	ihuddraw_alpha local.p 126 1
-	ihuddraw_string local.p 126 "TAP  F  - FIGHT THE CURRENT"
+	if(level.coop_qteSwam == 1){ ihuddraw_string local.p 126 "TAP  F  - SWIM FOR THE SURFACE" }
+	else{ ihuddraw_string local.p 126 "TAP  F  - FIGHT THE CURRENT" }
 }end
 
 
