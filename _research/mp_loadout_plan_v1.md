@@ -1,5 +1,25 @@
 # MP Loadout - build plan v1
 
+> **SUPERSEDED IN PART by the user's decisions of 2026-09-13. Where these conflict with anything below, these win.**
+>
+> 1. **THREE ARMORIES, not one.** Coop keeps its armory, unchanged. MP gets a separate **Allied armory** (Allied weapons
+>    plus the shotgun, coop unlocks ENFORCED on every server) and a separate **Axis armory** (German, Italian and
+>    Japanese weapons plus the shotgun, everything unlocked, full cosmetics: skins, headgear with glasses in the headgear
+>    slot like US, gloves, weapon variants and weapon skins). Each has its own saved picks. "I don't want allies having
+>    access to any non-allied weapons" - so the projection into coop's loSlot flags and the reuse of coop_loadout.urc
+>    for Allies below are both OUT.
+> 2. **The MP free floor is gone** (Kar98/MP40/P38/grenade in loadout_isUnlocked). It was team-blind, and the Axis
+>    armory is fully unlocked anyway.
+> 3. **MP never uses coop's armory code** (loadoutpick / challenges / xp / helmet / gloves / loadoutskins labels). That
+>    was the source of the three coop leaks the isolation vet found; enforced by check_mp_isolation.py clause 10.
+>    Read-only lookups (roster_get, skin tables, helmet/glove rosters, string helpers) may be allowlisted when the MP
+>    armories are built.
+> 4. **Axis first-person gloves get their OWN cvar** (a cgame change), not coop_gloveIdx.
+> 5. **Never modify the German character tiks coop's stealth disguise uses.** Axis gloves / hat-free preview models are
+>    NEW, separately named files (names must still start german/axis/it/sc for InitModel).
+> 6. The Axis cfg tree must live under `ui/coop_*` - the stufftext filter drops server `exec` of `ui/mploadout/`.
+> 7. FFA players are still allies/axis in this engine: choose the armory by dmteam in FFA too.
+
 Authored 2026-09-09 from a 51-agent design pass with adversarial verification of every claim that
 decides the design. Every file:line was read that session. **Zero binaries required.**
 

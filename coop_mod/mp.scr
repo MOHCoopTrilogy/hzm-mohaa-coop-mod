@@ -27,6 +27,11 @@
 // * It does NOT touch any ui/*.urc. The stock weapon picker is left exactly as it is and simply
 //   never gets a chance to matter, because this file sets the weapon class itself. That keeps the
 //   blast radius on coop at literally zero files.
+// * [user 2026-09-13, bug-2571] It does NOT use the COOP ARMORY, in any form - no loadoutpick.scr, challenges.scr,
+//   xp.scr, helmet.scr, gloves.scr or loadoutskins.scr call. Committing MP picks through loadout_set wrote coop client
+//   state on every join (finish chips, padlocks, Axis guns archived as unlocked), and the user has since decided MP
+//   gets its OWN Allied and Axis armories: "I don't want allies having access to any non-allied weapons". Until those
+//   exist, MP players spawn with the engine's stock class kit. check_mp_isolation.py clause 10 enforces this.
 //=========================================================================
 
 
@@ -51,12 +56,6 @@ main:{
 	//start two pollers.
 	if( level.coop_mpRun == 1 ){ end }
 	level.coop_mpRun = 1
-
-	//THE AXIS FLOOR goes live here and nowhere else. loadoutpick.scr::loadout_isUnlocked reads
-	//this to make the Kar98, MP40, P38 and Stielhandgranate free, because stock MP hands an Axis
-	//player an MP40 for nothing while the armory gates it behind fifty MP40 kills - enforcing SP
-	//unlocks unchanged would spawn a rank-0 Axis player with no primary, no smg and no sidearm.
-	level.coop_mpFreeKit = 1
 
 	//[user 2026-09-13, bug-2564] THE COOP FEEL IN MULTIPLAYER - "put all of it into pvp".
 	//
@@ -126,15 +125,11 @@ mp_manage:{
 mp_tickPlayer local.p:{
 	if( local.p == NULL ){ end }
 
-	// ---- [bug-2564] the armory picks --------------------------------------------------------
-	//the listen host's picks straight from his own archive, once per player
-	if( local.p.flags["coop_mpSeedStarted"] != 1 ){
-		local.p.flags["coop_mpSeedStarted"] = 1
-		thread mp_hostSeed local.p
-	}
-	//everyone else's arrive as name tokens (" ,w1<id>" etc.); read them, apply them, clean the name
+	// ---- [bug-2571] name tokens -------------------------------------------------------------
+	//A saved name can carry coop armory tokens (" ,w136" and friends) from the main-menu armory. They are STRIPPED so
+	//they never reach the scoreboard, and nothing is committed: MP does not use the coop armory (see the header).
 	if( waitthread coop_mod/main.scr::containsText local.p.netname " ," 0 ){
-		thread mp_readPicks local.p
+		thread mp_cleanName local.p
 	}
 
 	// ---- edge 1: the player picked a team -------------------------------------------------
@@ -148,13 +143,6 @@ mp_tickPlayer local.p:{
 		local.p.flags["coop_mpTeam"] = local.team
 
 		if( local.team != "" && local.team != "spectator" ){
-			//Ask the client to replay his archived armory picks. The volley makes him append ,w1..,w4
-			//tokens to his name one at a time; [bug-2564] mp_readPicks consumes them and cleans the name
-			//within half a second, which is also what the volley waits for before sending the next. Before
-			//that reader existed nothing consumed them, and they piled up on the scoreboard and were
-			//saved into the player's config with `seta name`.
-			thread coop_mod/loadoutpick.scr::loadout_resendVolley local.p 1
-
 			//And deploy him. The engine will not let a player leave spectator until dm_primary
 			//holds a legal CLASS, and the mod's own ui override leaves the stock picker empty -
 			//so set the class here rather than making him find a menu that has no content.
@@ -179,7 +167,6 @@ mp_tickPlayer local.p:{
 	//the next life is owed a kit again
 	if( local.alive == 0 && local.wasAlive == 1 ){
 		local.p.flags["coop_isActive"] = 0 - 2
-		local.p.flags["coop_mpKitGiven"] = 0
 	}
 
 	if( local.alive == 1 && local.wasAlive == 0 ){
@@ -265,122 +252,33 @@ mp_onSpawn local.p:{
 	local.p stufftext ( "s_volume " + local.bv )
 	local.p stufftext "s_sfxduck 1"
 
-	local.p.flags["coop_mpKitGiven"] = 0
-	waitthread mp_giveKit local.p
+	//[bug-2571] no armory kit here until the MP Allied and Axis armories exist - the engine's stock class kit stands
 }end
 
 
 //=========================================================================
-// [bug-2564] The kit itself: ONE primary [user 2026-09-09] plus sidearm and grenade. The armory kit is two
-// primaries; retail MP gives one, and shipping two would be a straight power increase over every stock server.
-// Slot 2 is deliberately never read. Coop keeps both.
+// [bug-2571] STRIP COOP ARMORY TOKENS FROM A MULTIPLAYER NAME.
 //
-// Nothing picked yet - a fresh client whose picks have not landed - leaves the stock class kit the engine
-// already gave him rather than stripping him to nothing; mp_kitIfDue gives it later in the same life when the
-// picks arrive.
-//=========================================================================
-mp_giveKit local.p:{
-	if( local.p == NULL ){ end }
-	local.g1 = local.p.flags["coop_loSlot1"]
-	local.g3 = local.p.flags["coop_loSlot3"]
-	local.g4 = local.p.flags["coop_loSlot4"]
-
-	if( ( local.g1 == NIL || local.g1 == "" ) && ( local.g3 == NIL || local.g3 == "" ) ){ end }
-
-	local.p takeall
-
-	if( local.g1 != NIL && local.g1 != "" ){ local.p give local.g1 }
-	if( local.g3 != NIL && local.g3 != "" ){ local.p give local.g3 }
-	if( local.g4 != NIL && local.g4 != "" ){ local.p give local.g4 }
-	local.p.flags["coop_mpKitGiven"] = 1
-
-	println( "^~^~^ MP kit e" + local.p.entnum + " team=" + local.p.dmteam + " p=" + local.g1 + " s=" + local.g3 + " g=" + local.g4 )
-}end
-
-
-//=========================================================================
-// [bug-2564] Picks that land AFTER the spawn - the host seed finishing late, or a remote client's tokens
-// arriving over the name bus - are given once, in the same life, instead of waiting for a death.
-//=========================================================================
-mp_kitIfDue local.p:{
-	if( local.p == NULL ){ end }
-	if( local.p.flags["coop_mpAlive"] != 1 ){ end }
-	if( local.p.flags["coop_mpKitGiven"] == 1 ){ end }
-	waitthread mp_giveKit local.p
-}end
-
-
-//=========================================================================
-// [bug-2564] THE LISTEN HOST'S PICKS, read straight from his own archived coop_lo1/3/4.
+// Replaces mp_giveKit / mp_kitIfDue / mp_hostSeed / mp_readPicks, which committed MP picks through the coop armory
+// (loadoutpick.scr::loadout_set) and so wrote coop client state on every join. A player's saved name can still carry
+// ,w / ,f tokens from the main-menu armory, so the name is cleaned - playerCleanName is a pure string helper that cuts
+// at the first " ," - and NOTHING is committed.
 //
-// On a listen server the host is client 0 and his client cvars are readable server-side, so his kit can be
-// committed before his first spawn instead of waiting on the name bus. Committed through loadout_set with
-// QUIET on: quiet ends before the re-give (loadoutpick.scr, `if(local.quiet == 1){ end }`), and that re-give is
-// the path into itemhandler.scr::giveInventory, whose changeGameType restores g_gametype to a HARDCODED 2 and
-// would turn an Objective, Round, TOW or Liberation server into Team Match. Validation, the slot flags and the
-// unlock gate all still run.
-//
-// Deliberately NOT loadout_hostSeed: it bails on flags["coop_isHost"], and setting that flag in MP unlocks
-// dev godmode, noclip and give_all. Slot 2 is skipped - ONE primary.
+// Coop's own dispatcher (player.scr::manageNamechange / playerNameCommand) never runs here and must not: it also
+// serves teleport-onto-player, a free DBNO heal and ammo crates to any client who types the token.
+// A busy flag and a one-second hold keep two polls from cleaning the same name twice before the client answers.
 //=========================================================================
-mp_hostSeed local.p:{
+mp_cleanName local.p:{
 	if( local.p == NULL ){ end }
-	if( local.p.entnum != 0 ){ end }
-	if( int( getcvar( "dedicated" ) ) ){ end }
-	if( !int( getcvar( "cl_running" ) ) ){ end }
+	if( local.p.flags["coop_mpCleaning"] == 1 ){ end }
+	local.p.flags["coop_mpCleaning"] = 1
 
-	local.got = 0
-	for( local.s = 1; local.s <= 4; local.s++ ){
-		if( local.s == 2 ){ continue }
-		if( local.p == NULL ){ end }
-		local.id = getcvar ( "coop_lo" + local.s )
-		if( local.id != "" ){
-			waitthread coop_mod/loadoutpick.scr::loadout_set local.p local.s local.id 1
-			local.got = 1
-		}
-	}
-	if( local.got == 1 ){ waitthread mp_kitIfDue local.p }
-}end
-
-
-//=========================================================================
-// [bug-2564] EVERYONE ELSE'S PICKS, off the name bus.
-//
-// A client appends ,w1<id> / ,w3<id> / ,w4<id> to his name - from the armory, or when the resend volley asks.
-// Coop reads those through player.scr::manageNamechange -> playerNameCommand, which never runs here and must
-// not: that dispatcher also serves teleport-onto-player, a free DBNO heal and ammo crates to any client who
-// types the token. This reader recognises ONLY the three loadout tokens, uses the two pure string helpers
-// (playerExtract, playerCleanName), and commits through loadout_set with QUIET on, which re-validates the id
-// against the roster, the slot and the unlock gate. Slot 2 is ignored (ONE primary) but still cleaned out.
-//
-// Then the name is put back without the tokens, which is also what the resend volley waits for before sending
-// the next one. A busy flag keeps two polls from reading the same tokens twice.
-//=========================================================================
-mp_readPicks local.p:{
+	local.clean = waitthread coop_mod/player.scr::playerCleanName local.p.netname
 	if( local.p == NULL ){ end }
-	if( local.p.flags["coop_mpReading"] == 1 ){ end }
-	local.p.flags["coop_mpReading"] = 1
-
-	local.name = local.p.netname
-	local.got = 0
-	for( local.s = 1; local.s <= 4; local.s++ ){
-		if( local.s == 2 ){ continue }
-		if( local.p == NULL ){ end }
-		local.id = waitthread coop_mod/player.scr::playerExtract local.name ( " ,w" + local.s )
-		if( local.id != NIL && local.id != "" ){
-			waitthread coop_mod/loadoutpick.scr::loadout_set local.p local.s local.id 1
-			local.got = 1
-		}
-	}
-	if( local.p == NULL ){ end }
-
-	local.clean = waitthread coop_mod/player.scr::playerCleanName local.name
 	if( local.clean != NIL && local.clean != "" ){
 		local.p stufftext ( "set name " + local.clean )
 	}
-	if( local.got == 1 ){ waitthread mp_kitIfDue local.p }
 
-	//let the clean name come back from the client before another poll can read the same tokens again
 	wait 1
-	if( local.p != NULL ){ local.p.flags["coop_mpReading"] = NIL }
+	if( local.p != NULL ){ local.p.flags["coop_mpCleaning"] = NIL }
 }end
