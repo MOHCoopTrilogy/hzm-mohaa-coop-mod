@@ -1,3 +1,13 @@
+> **USER DECISIONS (2026-09-13, after this note):**
+> 1. Fog strength: SUBTLE DEPTH - keep each map's native fog distance (no AI sight-range change); tune bias and
+>    colour only. Consequence: maps with no fog today (m1l1, m1l2a/b, co_lobby2-4, m6l3a-e) get no fog, and m3l1a
+>    (any profile turns off its scripted fog lift) is grade-only.
+> 2. Tone baseline: the HZM ACES grade - fix the CG_CoopDaylight first-frame reset (bug-2584) so the grade is live.
+> 3. Per-map colour grade ON by default, with a player toggle off; the player's own r_pp* sliders are never written.
+> 4. HD sky pack duplicates (bug-2583): KEEP the HD skies and RE-AUTHOR fog colour to match them on the affected maps.
+> 5. Taken at the recommendation unless the user says otherwise: a grade toggle plus a fog-strength slider with a
+>    floor above zero; colour-only profiles on scripted-fog maps (m3l1a, M3L3, e2l2, e2l3, e3l3, m4l3, m6l2a, m2l2c).
+
 # Per-map fog and per-map colour grade - research note
 
 Written 2026-09-13. READ-ONLY pass: nothing was built, deployed, launched or edited apart from this file.
