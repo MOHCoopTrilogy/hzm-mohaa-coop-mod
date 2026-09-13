@@ -21,6 +21,10 @@ Decided later the same day, in chat (user: "Yes to 2 and 3"):
 - Field Settings: the Compass row becomes "Modern Compass" (coop_compassBar): on = the top bar, off = the
   classic round compass.
 
+Scheduling (user, 2026-09-13, evening): MP starts NOW, in parallel with the visual upgrades; the first MP slice is
+the ARMORIES (Allied + Axis screens replacing the stock picker, with the Multiplayer Options side picker). Engine
+pieces from both queues take turns in the shared openmohaa-hzm/.cmake build folder.
+
 ## Scope and isolation
 | id | decision |
 |---|---|
