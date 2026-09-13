@@ -1,3 +1,17 @@
+> **USER DECISIONS (2026-09-13, after this design):**
+> - D1 tone baseline: the HZM ACES grade (decided with the fog/grade research; fix the daylight reset, bug-2584).
+> - D2 bloom: EXPOSURE-AWARE glow - r_ppBloomMode 1 (threshold in display domain for the active curve, half-float
+>   bright pass, exposure measured before bloom); mode 0 kept byte-identical for A/B.
+> - D3 render scale: default 1.0 for everyone, plus a restart-required Video menu option (0.5-2.0, FSR 1); the
+>   user tries 1.5 on their own machine first. Launch/restart only (bug-1181), never a live menu apply.
+> - D4 MSAA: build it - no-code retest, alpha-to-coverage, then 4x MSAA - and compare against 1.5x supersampling
+>   before either ships as a default.
+> - D8 soft particles: ON by default, r_softParticleDistance 24, player can turn off (restart applies).
+> - Taken at the recommendation unless the user says otherwise: D5 moderate RCAS above 1.0 that replaces
+>   r_ppSharpen only while RCAS runs; D6 GPU timer diagnostics developer-only; D7 gl2 ignores r_ext_multisample;
+>   D9 FXAA off while render scale > 1.0.
+> - Build order: bloom mode 1 -> MSAA retest -> render-scale split -> FSR 1 -> soft particles -> A2C -> MSAA.
+
 # gl2 render upgrades - design pass (bloom, AA, render scale + FSR 1, soft particles)
 
 Written 2026-09-13. READ-ONLY design: nothing in this note has been built, deployed or run. Every
