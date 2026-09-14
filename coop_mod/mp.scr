@@ -48,12 +48,18 @@ main:{
 		end
 	}
 
-	//Never single-player. ambient.scr sets level.gametype from g_gametype immediately above the
-	//hook, so this reads a value that is already correct and costs no getcvar.
-	if( level.gametype == NIL || level.gametype == 0 ){ end }
+	//[E4, MP armories slice 2] On a map that runs global/ambient.scr, ambient.scr:22 already set
+	//level.gametype from g_gametype just above its hook. On a SCRIPT-LESS or third-party MP map the
+	//game.dll mp_mapscript_hook (level.cpp Level::ServerSpawned) execs this DIRECTLY and ambient never
+	//ran, so level.gametype is NIL here - seed it from g_gametype exactly as ambient does. game.dll
+	//gates that hook so it can never fire on a coop map, and the refusal guard above is the backstop.
+	if( level.gametype == NIL ){ level.gametype = int( getcvar( g_gametype ) ) }
 
-	//Idempotent - ambient.scr has its own run-once flag, but a map that execs it twice must not
-	//start two pollers.
+	//Never single-player.
+	if( level.gametype == 0 ){ end }
+
+	//Idempotent - ambient.scr has its own run-once flag, but a map that execs it twice (or ambient AND
+	//the E4 hook on the same map) must not start two pollers.
 	if( level.coop_mpRun == 1 ){ end }
 	level.coop_mpRun = 1
 
@@ -87,7 +93,14 @@ main:{
 	//   exact value is cleared - a server's own dmflags are left alone. Coop sets it again on its next map.
 	if( int( getcvar( "dmflags" ) ) == 532676608 ){ setcvar "dmflags" "0" }
 
-	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script )
+	//[MP armories slice 2] Liveness probe (TRAPS T1). If coop_mod/mp_armory.scr parse-kills, ::alive is
+	//unreachable and returns NIL, so level.coop_mpArmoryLive stays 0 and every edge below keeps today's
+	//stock rifle deploy - a bad token in the armory strands nobody in spectate.
+	level.coop_mpArmoryLive = 0
+	local.armLive = waitthread coop_mod/mp_armory.scr::alive
+	if( local.armLive == 1 ){ level.coop_mpArmoryLive = 1 }
+
+	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script + " armory=" + level.coop_mpArmoryLive )
 	thread mp_manage
 }end
 
@@ -125,10 +138,16 @@ mp_manage:{
 mp_tickPlayer local.p:{
 	if( local.p == NULL ){ end }
 
-	// ---- [bug-2571] name tokens -------------------------------------------------------------
-	//A saved name can carry coop armory tokens (" ,w136" and friends) from the main-menu armory. They are STRIPPED so
-	//they never reach the scoreboard, and nothing is committed: MP does not use the coop armory (see the header).
-	if( waitthread coop_mod/main.scr::containsText local.p.netname " ," 0 ){
+	// ---- name bus ----------------------------------------------------------------------------
+	//[armory slice 2] When the armory is live the dispatcher owns the name bus: it reads the ,q pick
+	//markers (which mp_cleanName would otherwise strip before they were seen) and then cleans the name.
+	if( level.coop_mpArmoryLive == 1 ){
+		waitthread coop_mod/mp_armory.scr::tickPlayer local.p
+		if( local.p == NULL ){ end }
+	}
+	//[bug-2571] No armory: a saved name can carry coop armory tokens (" ,w136" and friends) from the
+	//main-menu armory. They are STRIPPED so they never reach the scoreboard, and nothing is committed.
+	else if( waitthread coop_mod/main.scr::containsText local.p.netname " ," 0 ){
 		thread mp_cleanName local.p
 	}
 
@@ -226,7 +245,17 @@ mp_onSpawn local.p:{
 
 	//[user 2026-09-09] MP health is 100, not coop's 750. PER PLAYER - see the header for why the
 	//cvar route would follow him into the next coop map.
-	local.p health 100
+	//[armory slice 2] When the armory is live the dispatcher hands out the committed kit (or the free
+	//starter / a bot's random free-tier gun) with `takeall` + `item`, tops up ammo, AND sets health 100
+	//in the same give. Never giveInventory / changeGameType (header) and never the coop_health cvar
+	//(clause 4). Without a live armory, health alone - the engine's stock class kit stands.
+	if( level.coop_mpArmoryLive == 1 ){
+		waitthread coop_mod/mp_armory.scr::giveKit local.p
+		if( local.p == NULL ){ end }
+	}
+	else{
+		local.p health 100
+	}
 
 	//[user 2026-09-13, bug-2564] THIS LIFE'S MONITORS - the ones coop starts from player.scr manageSetup /
 	//manageAliveSpawning: the ADS walk slowdown, wounded breathing, tinnitus and the injured muffle. Each loops
@@ -252,7 +281,7 @@ mp_onSpawn local.p:{
 	local.p stufftext ( "s_volume " + local.bv )
 	local.p stufftext "s_sfxduck 1"
 
-	//[bug-2571] no armory kit here until the MP Allied and Axis armories exist - the engine's stock class kit stands
+	//[armory slice 2] the kit itself is given above via mp_armory.scr::giveKit when the armory is live.
 }end
 
 
