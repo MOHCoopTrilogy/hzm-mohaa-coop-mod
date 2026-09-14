@@ -1,0 +1,123 @@
+//=========================================================================
+// MP_HARDCORE.SCR - the HARDCORE modifier (user 2026-09-14). A host toggle (coop_mpHardcore 0/1) that
+// composes on TOP of every MP game mode - it is a modifier row, like the weapon presets, not a mode of
+// its own. Four effects, all MP-only and all coop-safe:
+//   1. crosshair hidden        )
+//   2. health/stamina hidden   ) done in the cgame, gated on the serverinfo flag g_mpHardcore that
+//                                 ::manage publishes below (cgame CG_MpHardcoreActive - MP only, inert
+//                                 in coop because coop never sets the flag + a coop_isCoopSession guard).
+//   3. half health (50 not 100)   done here, per player, on the spawn edge (::onSpawn from mp.scr).
+//   4. slower movement            done here, sv_runspeed lowered while on, restored when off (::manage).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here can run on a coop map.
+// mp.scr::main threads ::manage and mp.scr::mp_onSpawn calls ::onSpawn.
+//
+// ISOLATION: sets ONLY g_mpHardcore (an MP-owned CVAR_SERVERINFO cvar, NOT a coop_* name - roadmap slice
+// 9) and sv_runspeed (an engine run-speed cvar, flags 0 / not archived, so it never fossils into a config
+// - fgame/gamecvars.cpp); reads the MP-owned host toggle coop_mpHardcore; names no coop cvar, coop_lo,
+// ui/loadout or coop_mod path; calls no coop code; never giveInventory/changeGameType or the coop_health
+// cvar (mp.scr header / isolation clause 4). Half health is set PER PLAYER, never a cvar, so it cannot
+// follow anyone into coop.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_armory.scr::alive). If this file parse-kills, ::alive is unreachable and
+//mp.scr's threads simply no-op - hardcore stays off, the crosshair/health/speed are stock, nobody is
+//stranded. Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Is the host toggle ON? coop_mpHardcore is MP-owned (coop_mp*, isolation clause 12c) and read-only here.
+// "" (never registered) or "0" -> off. int() is computed into a local BEFORE end - a function call in the
+// `}end <expr>` return position is NOT evaluated by this engine (bug-2603, TRAPS T1), so never put one
+// there. Returns 1/0.
+//=========================================================================
+isOn:{
+	local.s = getcvar( "coop_mpHardcore" )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+	if( local.v != 0 ){ local.v = 1 }
+}end local.v
+
+
+//=========================================================================
+// SPAWN EDGE - HALF HEALTH. Called from mp.scr::mp_onSpawn AFTER the kit give (mode / armory / stock),
+// which set health 100, so this OVERRIDES it to 50 when Hardcore is on. `health <n>` also writes
+// max_health (entity.cpp:1938 - the same behaviour mp.scr's header and dbno.scr:191 document), so both
+// the current and the max drop to 50. PER PLAYER, never a cvar - it cannot follow anyone into coop
+// (isolation clause 4). Composes with every mode because it lives on the shared spawn edge.
+//=========================================================================
+onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	local.hc = waitthread isOn
+	if( local.hc != 1 ){ end }
+	local.p health 50
+	println( "^~^~^ MPHC halfhealth e" + local.p.entnum + " hp=50" )
+}end
+
+
+//=========================================================================
+// THE MANAGER - one loop per MP map (threaded from mp.scr::main, guarded coop_mpRun and a run-once flag,
+// exactly like mp_bots.scr::manage). Two jobs, both re-evaluated each tick so a live host toggle is
+// honoured:
+//   1. Publish the serverinfo flag g_mpHardcore (1 when the host enabled Hardcore, else 0). It rides the
+//      ordinary serverinfo to every client's cgs (CG_ParseServerinfo -> cgs.mpHardcore) - NO new
+//      server->client shape. Written on change only, to avoid churn.
+//   2. Lower sv_runspeed to a walk-ish MP_HC_SPEED (140; stock run tops ~250 with sprint off, ~287 on)
+//      while Hardcore is on, memoing the prior value ONCE so it can be restored EXACTLY when Hardcore is
+//      turned off. sv_runspeed is read into ps.speed every frame (g_active.cpp), so the change is live.
+//      NEVER touched unless coop_mpRun AND Hardcore, and restored the instant Hardcore goes off.
+//=========================================================================
+manage:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpHcLoopOn == 1 ){ end }
+	level.coop_mpHcLoopOn = 1
+	level.coop_mpHcApplied = 0
+
+	//let the first clients finish connecting (mirrors mp_bots.scr::manage)
+	wait 2
+
+	while( level.coop_mpRun == 1 ){
+		local.hc = waitthread isOn
+
+		if( local.hc == 1 ){
+			//publish the serverinfo flag for the cgame (on change only)
+			if( getcvar( "g_mpHardcore" ) != "1" ){
+				setcvar "g_mpHardcore" "1"
+			}
+			//lower the run speed once, memoing the prior value so it restores exactly
+			if( level.coop_mpHcApplied != 1 ){
+				level.coop_mpHcSpeedPrev = getcvar( "sv_runspeed" )
+				if( level.coop_mpHcSpeedPrev == "" ){ level.coop_mpHcSpeedPrev = "250" }
+				setcvar "sv_runspeed" "140"
+				level.coop_mpHcApplied = 1
+				println( "^~^~^ MPHC on g_mpHardcore=1 sv_runspeed=140 (was " + level.coop_mpHcSpeedPrev + ")" )
+			}
+		}
+		else{
+			if( getcvar( "g_mpHardcore" ) != "0" ){
+				setcvar "g_mpHardcore" "0"
+			}
+			//restore the run speed once, back to the memoed prior value
+			if( level.coop_mpHcApplied == 1 ){
+				local.prev = level.coop_mpHcSpeedPrev
+				if( local.prev == NIL || local.prev == "" ){ local.prev = "250" }
+				setcvar "sv_runspeed" ( "" + local.prev )
+				level.coop_mpHcApplied = 0
+				println( "^~^~^ MPHC off g_mpHardcore=0 sv_runspeed restored=" + local.prev )
+			}
+		}
+
+		wait 2
+	}
+}end

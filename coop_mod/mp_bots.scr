@@ -1,0 +1,179 @@
+//=========================================================================
+// MP_BOTS.SCR - MP BOT AUTO-FILL (host-configurable bot backfill). Scales the number of engine bots
+// with the number of HUMAN players so a server stays populated, on ANY MP map and ANY MP mode.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here can
+// run on a coop map (the manager is a no-op there). mp.scr::main calls two labels:
+//     seedMaxbots  (once, up-front) - seed the LATCHED bot-slot ceiling so nav+slots exist next map
+//     manage       (threaded)       - the recount loop that drives the live bot count
+//
+// THE ENGINE'S NATIVE BOT SYSTEM (openmohaa-hzm, no third-party mod). g_bot.cpp / gamecmds.cpp:
+//   * sv_maxbots  (CVAR_LATCH, default 0): the SLOT CEILING. game.maxclients = maxclients + sv_maxbots
+//     (g_main.cpp:427, computed at map init) AND Recast navigation is SKIPPED entirely when it is 0
+//     ("No bots, skipping navigation", navigation_recast_load.cpp:729). Because it is LATCHED it only
+//     takes effect at a MAP LOAD - setting it live applies next map. So it MUST be > 0 at map load for
+//     any bot to ever spawn. We seed it up-front (seedMaxbots) to the ceiling the fill target needs.
+//   * sv_numbots  (default 0, NOT latched): the DESIRED live bot count. G_SpawnBots() runs every
+//     server frame (g_main.cpp:854) and reconciles the spawned bot count toward it - adding
+//     (G_AddBots) or removing (G_RemoveBots, which sheds the fuller team first) - so writing this cvar
+//     is the live add/remove knob. The console verbs addbot/removebot just adjust this same cvar.
+//   * sv_minPlayers (default 0): the engine's OWN backfill (min playing clients). We zero it while we
+//     manage so OUR sv_numbots is the single driver and the two cannot double up.
+//   * G_CountPlayingClients() (the count the engine backfill uses) excludes bots AND spectators - the
+//     same rule countHumans below applies in script via the isBot() builtin.
+//
+// WHAT APPLIES LIVE vs NEXT-MAP (be honest):
+//   * The live bot COUNT (sv_numbots) applies immediately: humans join -> bots shed; humans leave ->
+//     bots added back, every recount tick.
+//   * The CAP (sv_maxbots) is latched, so RAISING the fill target above the seeded ceiling can only
+//     add those extra slots at the next map load. Lowering it, and any count change within the cap,
+//     is live. For bots to appear on the FIRST map at all, sv_maxbots must have been > 0 when that map
+//     loaded (seed it in the server/launch cfg before `map`, exactly as the mode smokes do).
+//
+// ISOLATION: writes ONLY the engine sv_* bot cvars (none of them coop state, none archived) and reads
+// the MP-owned coop_mpBot* host cvars; names no coop cvar / coop_lo / ui/loadout / coop_mod path; calls
+// NO coop code; never giveInventory / changeGameType (both force gt2 - mp.scr header) and never touches
+// coop's AI / aihandler / bot difficulty system. check_mp_isolation.py admits it (coop_mp* is MP-owned).
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// SEED THE LATCHED SLOT CEILING. Called ONCE from mp.scr::main (up-front, before bots are needed).
+// sv_maxbots is CVAR_LATCH + the nav gate, so this can only grow the ceiling for the NEXT map load;
+// it is a convenience so a host who raised coop_mpBotFill gets the slots next map without editing a
+// cfg. A host who wants bots on the FIRST map still seeds sv_maxbots in the launch cfg before `map`.
+// No-op when the fill is off (coop_mpBotFill <= 0) so a host who never uses bots never latches slots.
+//=========================================================================
+seedMaxbots:{
+	if( level.coop_mpRun != 1 ){ end }
+
+	local.fill = waitthread bots_i "coop_mpBotFill"
+	if( local.fill <= 0 ){ end }
+
+	//the most bots we could ever want = min( fill, cap ). Cap defaults to 12 (see manage).
+	local.cap = waitthread bots_cap
+	local.want = local.fill
+	if( local.want > local.cap ){ local.want = local.cap }
+
+	//only ever GROW the latched ceiling here; never shrink it (a live shrink would fight a map already
+	//running with a larger cap, and shrinking cannot help this map anyway).
+	local.cur = waitthread bots_i "sv_maxbots"
+	if( local.want > local.cur ){
+		setcvar "sv_maxbots" ( "" + local.want )
+		println( "^~^~^ MPBOT seedMaxbots latched sv_maxbots=" + local.want + " (was " + local.cur + ") - applies at next map load" )
+	}
+	else{
+		println( "^~^~^ MPBOT seedMaxbots sv_maxbots=" + local.cur + " already >= wanted " + local.want )
+	}
+}end
+
+
+//=========================================================================
+// THE FILL MANAGER. One loop per map load, guarded on coop_mpRun (a level load / restart wipes it,
+// ending the loop cleanly) and a run-once flag. Threaded from mp.scr::main so its work never stalls
+// mp.scr's own per-player poll. Recounts on an interval (like the mode managers) - not per player.
+//=========================================================================
+manage:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpBotsLoopOn == 1 ){ end }
+	level.coop_mpBotsLoopOn = 1
+
+	//let the first clients finish connecting before the first recount (mp.scr::mp_manage waits 1 too).
+	wait 2
+
+	while( level.coop_mpRun == 1 ){
+		waitthread bots_tick
+		wait 3
+	}
+}end
+
+
+//=========================================================================
+// ONE RECOUNT. desiredBots = clamp( coop_mpBotFill - humanCount, 0, cap ). Writes sv_numbots ONLY on a
+// real delta (hysteresis - no thrash, no redundant writes). When the fill is off (<= 0) it does NOTHING
+// - it never clobbers a host's manual sv_numbots. The engine's per-frame reconciler then adds/removes
+// bots to match sv_numbots (shedding the fuller team first when humans join).
+//=========================================================================
+bots_tick:{
+	if( level.coop_mpRun != 1 ){ end }
+
+	local.fill = waitthread bots_i "coop_mpBotFill"
+	if( local.fill <= 0 ){ end }
+
+	//cap the fill target by the bot cap AND by the slots that actually exist this map (latched
+	//sv_maxbots): we can never spawn more bots than there are bot slots.
+	local.cap = waitthread bots_cap
+	local.slots = waitthread bots_i "sv_maxbots"
+	if( local.cap > local.slots ){ local.cap = local.slots }
+
+	local.humans = waitthread countHumans
+
+	//desiredBots = fill - humans, clamped to [0, cap]
+	local.want = ( local.fill - local.humans )
+	if( local.want < 0 ){ local.want = 0 }
+	if( local.want > local.cap ){ local.want = local.cap }
+
+	local.cur = waitthread bots_i "sv_numbots"
+
+	//own the count: keep the engine's own backfill out so it cannot double up with ours. Cheap and
+	//idempotent; 0 is the engine default so this is coop-safe even if it somehow persisted.
+	local.mp = waitthread bots_i "sv_minPlayers"
+	if( local.mp != 0 ){ setcvar "sv_minPlayers" "0" }
+
+	//HYSTERESIS: only act on a real delta.
+	if( local.want != local.cur ){
+		setcvar "sv_numbots" ( "" + local.want )
+		println( "^~^~^ MPBOT fill=" + local.fill + " humans=" + local.humans + " cap=" + local.cap + " desiredBots=" + local.want + " (was " + local.cur + ") -> sv_numbots=" + local.want )
+	}
+	else{
+		println( "^~^~^ MPBOT steady fill=" + local.fill + " humans=" + local.humans + " bots=" + local.cur + " cap=" + local.cap )
+	}
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//the host bot cap: coop_mpBotMax, default 12, floor 1. Read live so it can be retuned per server.
+bots_cap:{
+	local.s = getcvar( "coop_mpBotMax" )
+	if( local.s == "" ){ local.s = "12" }
+	local.c = int( local.s )
+	if( local.c < 1 ){ local.c = 12 }
+}end local.c
+
+
+//read an int cvar, "" -> 0. int() is computed into a local BEFORE `end` - a function call in the
+//`}end <expr>` return position is NOT evaluated by this engine (bug-2603 / mp_rounds.scr::rounds_i), so
+//never put one there.
+bots_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v
+
+
+//count HUMAN players who are in play: connected, NOT a bot (isBot builtin, as mp_armory.scr uses), NOT
+//a spectator, and on a team. Mirrors the engine's G_CountPlayingClients (bots and spectators excluded),
+//so the backfill scales with real players exactly as the native sv_minPlayers path would.
+countHumans:{
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		local.bot = isBot( local.p )
+		if( local.bot == 1 ){ continue }
+		if( local.p.isSpectator ){ continue }
+		local.team = local.p.dmteam
+		if( local.team != "allies" && local.team != "axis" ){ continue }
+		local.n++
+	}
+}end local.n

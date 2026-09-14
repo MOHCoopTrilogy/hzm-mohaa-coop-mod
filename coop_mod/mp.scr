@@ -130,6 +130,24 @@ main:{
 	if( local.armLive == 1 ){ level.coop_mpArmoryLive = 1 }
 
 	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script + " armory=" + level.coop_mpArmoryLive + " mode=" + level.coop_mpMode + " preset=" + level.coop_mpPreset )
+
+	//[MP bot auto-fill slice] Host-configurable bot BACKFILL (coop_mod/mp_bots.scr). Seeds the LATCHED
+	//bot-slot ceiling up-front - sv_maxbots is CVAR_LATCH and gates Recast nav, so it must be > 0 at MAP
+	//LOAD for bots to exist and a raise to the fill target only grows the cap next map - then starts the
+	//fill manager. No-op unless the host set coop_mpBotFill > 0. Works for EVERY mode (incl. "none") and
+	//every MP map because it lives here in the MP framework, guarded end-to-end on coop_mpRun. It writes
+	//ONLY the engine sv_* bot cvars (sv_maxbots/sv_numbots/sv_minPlayers - none of them coop state) and
+	//reads the MP-owned coop_mpBot* host cvars; it never touches coop's AI / aihandler.
+	waitthread coop_mod/mp_bots.scr::seedMaxbots
+	thread coop_mod/mp_bots.scr::manage
+
+	//[MP Hardcore modifier slice] The HARDCORE host toggle (coop_mpHardcore 0/1) - a modifier that composes
+	//with EVERY mode, like the weapon presets. Its manager publishes the serverinfo flag g_mpHardcore (the
+	//cgame hides the crosshair + health/stamina chrome when set) and lowers sv_runspeed while on, restoring
+	//it when off. Guarded end-to-end on coop_mpRun (only reachable from here, which set it) and a run-once
+	//flag; a no-op when the host never enables it. Half health is applied per player from mp_onSpawn below.
+	thread coop_mod/mp_hardcore.scr::manage
+
 	thread mp_manage
 }end
 
@@ -307,6 +325,12 @@ mp_onSpawn local.p:{
 	else{
 		local.p health 100
 	}
+
+	//[MP Hardcore modifier slice] HALF HEALTH. Runs AFTER the kit give above (which set health 100), so it
+	//overrides to 50 when the host enabled Hardcore. Per player, never a cvar - it cannot follow anyone into
+	//coop (header / isolation clause 4). Composes with every mode because it sits on the shared spawn edge.
+	waitthread coop_mod/mp_hardcore.scr::onSpawn local.p
+	if( local.p == NULL ){ end }
 
 	//[user 2026-09-13, bug-2564] THIS LIFE'S MONITORS - the ones coop starts from player.scr manageSetup /
 	//manageAliveSpawning: the ADS walk slowdown, wounded breathing, tinnitus and the injured muffle. Each loops

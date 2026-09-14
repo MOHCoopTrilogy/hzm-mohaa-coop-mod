@@ -40,3 +40,45 @@ giveInventory/changeGameType (forces gt2) or write coop_health/coop_lockLoadout/
 restart wipes coop_mpRun + delegates -> cross-round state lives in cvars. teamwin only gt>=4; map
 refuses dm/ under gt4; bots never press USE / play objectives. check_mp_isolation.py 0 FAILED,
 coop_loadout.urc sha unchanged, gen_loadout 615/615 on every slice.
+
+## Dependency note (user, 2026-09-14): MP progression <-> MP Service Record
+If we build weapon-unlock progression for the Allied/Axis inventories (roadmap slice 12: per-kill
+class+weapon attribution, unlock tables, save store - decisions P1-P14), it REQUIRES Multiplayer
+challenges in the Service Record to drive and display that progress. This mirrors the existing coop
+challenge/Service Record system (challenges.scr -> 445 challenges w/ writer+target+reward, coop_sr*
+view-state cvars, coop_sr_medals.tga, the coop_sr pin cfgs) but must be MP-OWNED and separate:
+- MP challenges live in their own file/rows (not challenges.scr's coop set), MP-side (Allied/Axis)
+  unlock counters as the "stat writers", with the armory unlock as the reward.
+- Its own Service Record page/tab + save store (P13 "offline Service Record and pins: later";
+  S8 a homepath-root progress file by new exe code is acceptable), never writing coop challenge
+  state or coop_sr* cvars (coop-isolation clause set F: MP gets its own files/verbs/cvars/HUD slots).
+- So slice 12 (MP progression) is really two coupled pieces: the unlock engine AND an MP Service
+  Record (MP challenges + page + medals/pins) - plan them together; the challenge rows ARE the
+  progression spec (kills-per-tier / headshot / picked-up-enemy-weapon per P4/P5/P8).
+
+### Wiring requirement (user, 2026-09-14): "ensure it's all wired up"
+The MP progression + MP Service Record must be END-TO-END WIRED and gate-validated, exactly like
+the coop challenge system already is at build time ("challenges: 445 | stat writers found: 188 |
+OK - every challenge has a writer, a reachable target and a real reward"). For the MP set that means
+a build-gate assertion (extend the coop challenge validator or add an MP twin) proving, for every MP
+challenge: (1) it has a STAT WRITER (some gameplay event actually increments its counter -
+kill/headshot/picked-up-enemy-weapon per P4/P5/P8), (2) a REACHABLE target, and (3) a real REWARD
+that maps to an actual armory unlock (the unlock id exists in mpa_roster/mpx_roster and the armory
+honours it). No orphan challenges, no unlocks with no driver, no rewards pointing at a missing gun.
+Plus: the Service Record page reads the live counters/unlock state, and the save store round-trips
+(write on unlock, read back on next session) - proven, not assumed. Bake this into slice 12 from the
+start; it is the same "every challenge has a writer/target/reward" discipline the coop packer enforces.
+
+## Hardcore modifier (user, 2026-09-14) - first engine slice
+A host toggle "Hardcore" enable-able on ALL modes (a modifier, like weapon presets), coop_mpHardcore 0/1:
+- Remove the crosshair.
+- Remove the health/stamina HUD indicators.
+- Half health (the MP spawn gives 50 instead of 100).
+- Everything a bit slower - reduced movement (walk-ish speed).
+Shape: an MP-owned SERVERINFO cvar the cgame reads via cgs.serverinfo; mp.scr sets it when the host
+enables Hardcore. cgame hides crosshair + health/stamina when the flag is set (gated to MP only, so
+coop HUD is untouched - coop never sets the flag). Script (mp_hardcore.scr / mp seam) sets half
+health at spawn and lowers movement (g_speed reduced on the MP server, restored off). Matched cgame
++ script deploy (T10). Composes with every mode. Coop-safe: flag only set on MP; coop HUD/health/
+speed unchanged. This establishes the serverinfo->cgame enforcement pattern the ADS/prone/cover/3P
+host toggles (slice 9) reuse.
