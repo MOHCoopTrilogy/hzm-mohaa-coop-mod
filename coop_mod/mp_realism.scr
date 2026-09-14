@@ -1,0 +1,84 @@
+//=========================================================================
+// MP_REALISM.SCR - the host "realism" toggles (user 2026-09-14). Four host toggles that let a host
+// disable each modern mechanic per-match (OFF = classic):
+//   coop_mpNoAds    -> bit 1  aim-down-sights off (scoped rifles still zoom)
+//   coop_mpNoProne  -> bit 2  prone off
+//   coop_mpNoCover  -> bit 4  take-cover off
+//   coop_mpNo3p     -> bit 8  third person off (forced first person)
+// These compose into ONE serverinfo bitmask, g_mpRealismOff, exactly like the Hardcore modifier composes
+// into g_mpHardcore. 0 = today's behaviour (nothing disabled), so a stock server and a coop session are
+// byte-identical and need no new code path. The engine gates every enforcement on the bit AND that it is
+// not a coop session (cgame CG_MpRealismOffActive; game.dll Player::CoopMpRealismOff) - so coop's prone,
+// cover, third-person and ADS are structurally untouched.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here can run on a coop map.
+// mp.scr::main threads ::manage.
+//
+// ISOLATION: sets ONLY g_mpRealismOff (an MP-owned CVAR_SERVERINFO|CVAR_ROM cvar, NOT a coop_* name);
+// reads the four MP-owned host toggles (coop_mp* names, isolation clause 12c); names no coop gameplay
+// cvar, coop_lo, ui/loadout or coop_mod path; calls no coop code. All state is per-serverinfo, never a
+// per-player or archived coop cvar, so nothing here can follow anyone into coop.
+//=========================================================================
+
+//Inert entry. mp.scr calls ::manage, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_hardcore.scr::alive). If this file parse-kills, ::alive is unreachable and
+//mp.scr's thread simply no-ops - the toggles stay off, every mechanic is stock, nobody is stranded.
+//Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// THE MANAGER - one loop per MP map (threaded from mp.scr::main, guarded coop_mpRun and a run-once flag,
+// exactly like mp_hardcore.scr::manage). It composes the four host toggles into the g_mpRealismOff bitmask
+// and publishes it on the ordinary serverinfo (NO new server->client shape). Re-evaluated each tick so a
+// live host toggle is honoured, written on change only to avoid serverinfo churn.
+//
+// int() is fed a "0"-defaulted local (an unset cvar reads ""), and the mask is composed into a local
+// BEFORE end - a function call in the `}end <expr>` return position is NOT evaluated by this engine
+// (bug-2603, TRAPS T1), so mask is built with plain assignments here, not returned from a call.
+//=========================================================================
+manage:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpRealismLoopOn == 1 ){ end }
+	level.coop_mpRealismLoopOn = 1
+
+	//let the first clients finish connecting (mirrors mp_hardcore.scr::manage)
+	wait 2
+
+	while( level.coop_mpRun == 1 ){
+		local.mask = 0
+
+		local.s = getcvar( "coop_mpNoAds" )
+		if( local.s == "" ){ local.s = "0" }
+		if( int( local.s ) != 0 ){ local.mask = local.mask + 1 }
+
+		local.s = getcvar( "coop_mpNoProne" )
+		if( local.s == "" ){ local.s = "0" }
+		if( int( local.s ) != 0 ){ local.mask = local.mask + 2 }
+
+		local.s = getcvar( "coop_mpNoCover" )
+		if( local.s == "" ){ local.s = "0" }
+		if( int( local.s ) != 0 ){ local.mask = local.mask + 4 }
+
+		local.s = getcvar( "coop_mpNo3p" )
+		if( local.s == "" ){ local.s = "0" }
+		if( int( local.s ) != 0 ){ local.mask = local.mask + 8 }
+
+		local.want = "" + local.mask
+		if( getcvar( "g_mpRealismOff" ) != local.want ){
+			setcvar "g_mpRealismOff" local.want
+			println( "^~^~^ MPREALISM g_mpRealismOff=" + local.mask )
+		}
+
+		wait 2
+	}
+}end
