@@ -1,3 +1,8 @@
+> **USER ANSWERS (2026-09-13):** see `mp_decisions_2026-09-13.md` "MP armories slice 1 answers". In short:
+> Sniper = scoped bolt-action rifles, scoped automatics (StG44) count toward their base class, scoped semi-autos pending;
+> Axis starters Kar98K Sniper + Trench Gun (Gewehrgranate locked Rocket tile); U4 accepted; U5 = the ARMORY button
+> always asks (Coop / MP Allied / MP Axis); hzmax_* bodies, MP glove cvar on both sides, game.dll picker redirect.
+
 # MP Armories - slice 1 build plan (reconciled)
 
 Written 2026-09-13 by a READ-ONLY planning pass. Nothing in the project was edited, built, deployed or

@@ -25,6 +25,20 @@ Scheduling (user, 2026-09-13, evening): MP starts NOW, in parallel with the visu
 the ARMORIES (Allied + Axis screens replacing the stock picker, with the Multiplayer Options side picker). Engine
 pieces from both queues take turns in the shared openmohaa-hzm/.cmake build folder.
 
+MP armories slice 1 answers (user, 2026-09-13, after mp_armories_slice1_plan.md):
+- P3 REVISED: the Sniper class is the scoped BOLT-ACTION rifles (scoped Springfield, Kar98 sniper and the like).
+  Automatic weapons with a scope are NOT Sniper - "definitely not a scoped stg44" - they count toward their base
+  class. Scoped SEMI-automatic rifles (scoped Garand, G43, SVT) were not named: pending a one-line confirmation.
+- U3 Axis free starters: Kar98K Sniper (Sniper) and Trench Gun (Shotgun); the Gewehrgranate becomes a locked
+  Rocket-class tile.
+- U4 accepted: Multiplayer Options moves to an MP-owned menu, so ESC > Multiplayer Options shows the Allied/Axis
+  side picker in coop too (coop gameplay and the coop armory unaffected).
+- U5: the Join Game ARMORY button ALWAYS asks which armory - Coop, MP Allied or MP Axis (plan recommendation was
+  MP session side else coop).
+- Taken at the plan recommendation: new Axis bodies named hzmax_* and dressed by script model only (A5); the MP glove
+  cvar covers Allies too, so an MP glove write never reaches coop_gloveIdx; the stock picker is replaced by a game.dll
+  redirect (no MP .urc can override SelectPrimaryWeapon, which also loads in coop).
+
 ## Scope and isolation
 | id | decision |
 |---|---|
