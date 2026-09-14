@@ -1,0 +1,420 @@
+//=========================================================================
+// MP_PUSH.SCR - PUSH ("Gain Ground"), an MP game MODE (slice 6). Decision M19: sequential
+// capture-point advance on the 7 converted single-player maps. ONE attacking team pushes a
+// frontline forward through an ORDERED chain of capture points; the defenders try to run the
+// round timer out before the chain is cleared.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, seed a capture point, deploy kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the push manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: PUSH has respawns, nothing to do)
+//
+// RECIPE (paraphrased, not copied - kings_push_hunt.md / ubermod_v2_source_notes.md; credit OwN-3m-All's
+// Push / "Push to Gain Ground" and ViPER's Gain Ground, neither of which ships a licence, so this is a
+// rebuild from the rules). The original: seven converted SP maps (m1l2b, m2l1, m3l3, m4l1, m4l2, m5l1a,
+// m5l1b) under Team Match; each map scripts ORDERED groups of team spawn points (targetnames alh, al2..al9
+// for Allies; axh, ax2..ax9 for Axis) and the active group advances as a team reaches the next checkpoint;
+// Allies head for the sparks, Axis for the smoke. We keep the CORE mechanic (an ordered frontline that
+// advances on capture) and the marker, and drop the per-map hand-placed spawn groups: those live in the
+// original's OWN standalone map scripts, which this project does not ship (its m1l2b.scr and the other six
+// are COOP scripts that load coop and so refuse MP by mp.scr's guard). Instead the chain is DERIVED from
+// real spawn origins on any gt2 map, exactly as mp_koth.scr derives its hill spots, with a per-map authored
+// override seam (push_seedAuthored) for hand-verified chains once they can be harvested.
+//
+// ATTACKER / DEFENDER. One fixed convention: ALLIES ATTACK (they "gain ground" toward the sparks), Axis
+// defend. The host may flip it with the cvar coop_mpPushAttackers ("allies" default, or "axis"). Attackers
+// capture the active point by team presence; defenders deny it by contesting.
+//
+// THE CAPTURE, reusing mp_koth's presence logic. Each second: count LIVING attackers within
+// coop_mpPushRadius of the active point and LIVING defenders in the same box. If EXACTLY the attackers are
+// present (>=1 attacker, 0 defenders) the point banks one second of capture; both present -> CONTESTED,
+// capture PAUSED; attackers absent -> paused. At coop_mpPushCap banked seconds the point is captured and the
+// frontline ADVANCES to the next point in the chain (the active point + its marker move forward). Attackers
+// win by capturing the FINAL point; defenders win if coop_mpPushTime elapses with the chain uncleared.
+//
+// THE MARKER, and why it needs NO new server->client shape and NO cgame ship - the SAME mechanism KOTH uses
+// (design risk resolved 2026-09-14, mp_koth.scr header). The active capture point's world position is set
+// with the stock script builtin set_objective_pos, which writes level.m_vObjectiveLocation; in gt2
+// Player::UpdateStats (player.cpp:8992-8994, gt2 < GT_TOW and no force-team) reads that var into
+// STAT_OBJECTIVECENTER (playerstat 19), delivered by the ORDINARY playerstate delta. So the stock round
+// compass objective ARROW points at the active point for every client with zero new grammar and no client
+// build. No stufftext, no new server->client shape.
+//
+// WIN MECHANISM (and why). Push's base gametype is 2 (Team Match). teamwin is legal ONLY on gametype >= 4
+// (scriptthread.cpp), so it CANNOT end a gt2 Push match. The match-win is therefore a script score plus a
+// forced map restart (stuffsrv "map <name>"), exactly as Gun Game, KOTH and the LMS/S&D round helper end a
+// match - the one proven, gametype-agnostic win path in this mod (no archive, no gametype flip).
+//
+// WHY NOT mp_rounds.scr. The shared round helper enforces NO-RESPAWN (a death marks you OUT for the round)
+// and decides wins by team WIPE or timeout. Push has RESPAWNS and its win is "chain cleared", not "enemy
+// wiped": driving it through rounds_begin/rounds_tick would end a Push match the instant one team was
+// momentarily wiped, which is wrong. So Push owns its own manager loop, modelled on mp_koth's koth_loop, and
+// only MIRRORS mp_rounds' lifecycle discipline (a round timer, engine frag/round/time limits zeroed so the
+// engine cannot end the match first, cross-restart state in NON-archived cvars, and the stuffsrv restart).
+//
+// ISOLATION: calls only the MP file coop_mod/mp_armory.scr (in MP_MANIFEST, so clause 10 admits it); names
+// no coop cvar / coop_lo token / ui/loadout tree / coop armory code; never giveInventory / changeGameType
+// (both force gt2 via setcvar g_gametype - mp.scr header) and never writes coop_health / coop_* state. All
+// cross-restart state (the series score) lives in the NON-archived coop_mpPush* cvars; per-map chain state
+// lives in level vars (a restart wipes them and re-derives the chain, which is correct - a new match).
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// One-time Push config + manager start. Idempotent (level flag). Reads the host cvars, zeroes the engine's
+// own frag/round/time limits so the engine cannot end the match before we do (the same discipline
+// mp_koth.scr / mp_rounds.scr use), resets the series-score cvars for a fresh match, and starts the manager.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpPushReady == 1 ){ end }
+	level.coop_mpPushReady = 1
+	level.coop_mpPushEnding = 0
+
+	//attacking side: host cvar coop_mpPushAttackers, default "allies" (they gain ground toward the sparks).
+	local.atk = getcvar( "coop_mpPushAttackers" )
+	if( local.atk != "axis" ){ local.atk = "allies" }
+	level.coop_mpPushAtk = local.atk
+	level.coop_mpPushDef = "axis"
+	if( local.atk == "axis" ){ level.coop_mpPushDef = "allies" }
+
+	//radius of a capture box (world units), host cvar coop_mpPushRadius, default 250. A living player within
+	//this 3D distance of the active point counts as inside (mp_koth's 200 hill, a touch wider for a frontline).
+	local.rad = getcvar( "coop_mpPushRadius" )
+	if( local.rad == "" ){ local.rad = "250" }
+	level.coop_mpPushRadius = int( local.rad )
+	if( level.coop_mpPushRadius < 32 ){ level.coop_mpPushRadius = 250 }
+
+	//seconds of uncontested hold to capture one point, host cvar coop_mpPushCap, default 8.
+	local.cap = getcvar( "coop_mpPushCap" )
+	if( local.cap == "" ){ local.cap = "8" }
+	level.coop_mpPushCapSecs = int( local.cap )
+	if( level.coop_mpPushCapSecs < 1 ){ level.coop_mpPushCapSecs = 8 }
+
+	//round time limit in seconds, host cvar coop_mpPushTime, default 420 (7 min). Defenders win on timeout.
+	local.tm = getcvar( "coop_mpPushTime" )
+	if( local.tm == "" ){ local.tm = "420" }
+	level.coop_mpPushTime = int( local.tm )
+	if( level.coop_mpPushTime < 30 ){ level.coop_mpPushTime = 420 }
+
+	//chain state (all wiped on a restart, which is correct: a restart is a fresh match)
+	level.coop_mpPushSpotN = 0
+	level.coop_mpPushChainN = 0
+	level.coop_mpPushChainReady = 0
+	level.coop_mpPushIdx = 0
+	level.coop_mpPushProg = 0
+	level.coop_mpPushFirstSpot = 0
+	level.coop_mpPushAnchorSet = 0
+	level.coop_mpPushStart = level.time
+
+	//series score lives in NON-archived cvars (setcvar), reset for this fresh match
+	setcvar "coop_mpPushWinsA" "0"
+	setcvar "coop_mpPushWinsX" "0"
+
+	//stop the engine ending the match first
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	//seed any authored chain for this map (override table). Derived spawn points are added as players spawn.
+	waitthread push_seedAuthored
+
+	println( "^~^~^ MPPUSH init gt=" + level.gametype + " atk=" + level.coop_mpPushAtk + " radius=" + level.coop_mpPushRadius + " cap=" + level.coop_mpPushCapSecs + " time=" + level.coop_mpPushTime )
+	thread push_loop
+}end
+
+
+//SPAWN EDGE. Config, record this real spawn origin as a candidate point (and, for an attacker, as the
+//frontline anchor), then deploy THROUGH THE ARMORY so the weapon preset (coop_mpPreset) is inherited
+//automatically (decision M5).
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+
+	//an attacker's spawn origin anchors the frontline: the chain is ordered outward from where the
+	//attackers start, so idx 1 is their first push and the last point is deepest into the map.
+	if( local.p.dmteam == level.coop_mpPushAtk && level.coop_mpPushAnchorSet != 1 ){
+		level.coop_mpPushAnchor = local.p.origin
+		level.coop_mpPushAnchorSet = 1
+		println( "^~^~^ MPPUSH anchor pos=" + local.p.origin )
+	}
+
+	waitthread push_addSpot local.p.origin
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. Nothing per-player here (the manager owns the chain and the scoring); just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread push_ensure
+}end
+
+
+//DEATH EDGE. Push has normal respawns - a death does not end anything.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	end
+}end
+
+
+//=========================================================================
+// Capture-point list. Every real player spawn origin becomes a candidate point, deduped by a minimum
+// separation and capped. The ORDERED chain is built once (push_buildChain) from these points.
+//=========================================================================
+
+//add one candidate point (a vector). Deduped within a minimum separation; capped. Records the time of the
+//first point so the chain can be frozen after a short settle even if few points arrive.
+push_addSpot local.pos:{
+	if( local.pos == NIL ){ end }
+	if( level.coop_mpPushChainReady == 1 ){ end }
+
+	local.maxN = 8
+	local.minSep = 300
+
+	if( level.coop_mpPushSpotN == NIL ){ level.coop_mpPushSpotN = 0 }
+	if( level.coop_mpPushSpotN >= local.maxN ){ end }
+
+	//reject a point too close to one we already hold
+	for( local.i = 1; local.i <= level.coop_mpPushSpotN; local.i++ ){
+		local.d = vector_length( local.pos - level.coop_mpPushSpots[local.i] )
+		if( local.d < local.minSep ){ end }
+	}
+
+	local.n = ( level.coop_mpPushSpotN + 1 )
+	level.coop_mpPushSpots[local.n] = local.pos
+	level.coop_mpPushSpotN = local.n
+	if( level.coop_mpPushFirstSpot == 0 ){ level.coop_mpPushFirstSpot = level.time }
+	println( "^~^~^ MPPUSH spot n=" + local.n + " pos=" + local.pos )
+}end
+
+
+//seed an authored chain for a named map (override table). THESE ARE THE M19 TARGET MAPS. The original push
+//mod hand-placed ordered spawn groups on the seven converted SP maps (m1l2b, m2l1, m3l3, m4l1, m4l2, m5l1a,
+//m5l1b); this project's copies of those maps are COOP scripts, so Push cannot run on them as shipped and no
+//real spawn origins have been harvested for them yet. Until an MP-standalone map script exists (or origins
+//are harvested from a live gt2 boot's "^~^~^ MPPUSH spot" prints, exactly as mp_koth's dm/mohdm1 chain was),
+//every map - the seven included - falls back to the DERIVED chain below. Add a case here with hand-verified
+//vectors (waitthread push_addSpot ( x y z ), in attack order) when they are measured; the derived path fills
+//in until then, and a map that yields no points never crashes (the chain simply stays unset).
+push_seedAuthored:{
+	local.m = getcvar( "mapname" )
+	if( local.m == "" ){ end }
+	//no authored chains yet - the seven M19 target maps derive from spawn origins (see the note above).
+}end
+
+
+//order the collected points into the capture chain, ONCE, then freeze it. Points are sorted by distance from
+//the attacker anchor ascending, so the attackers push outward from their start. If no attacker anchored yet,
+//the first collected point is used as the anchor (still a stable ordering). A single point is a one-link
+//chain - capturing it wins. Selection sort over the small (<=8) point set; vector_length only (no vector
+//maths beyond the subtraction it already does).
+push_buildChain:{
+	if( level.coop_mpPushChainReady == 1 ){ end }
+	if( level.coop_mpPushSpotN < 1 ){ end }
+
+	local.anchor = level.coop_mpPushAnchor
+	if( level.coop_mpPushAnchorSet != 1 ){ local.anchor = level.coop_mpPushSpots[1] }
+
+	//copy the point vectors into a working array and selection-sort by distance from the anchor
+	local.n = level.coop_mpPushSpotN
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.work[local.i] = level.coop_mpPushSpots[local.i]
+		local.used[local.i] = 0
+	}
+	for( local.out = 1; local.out <= local.n; local.out++ ){
+		local.best = 0
+		local.bestD = 0
+		for( local.i = 1; local.i <= local.n; local.i++ ){
+			if( local.used[local.i] == 1 ){ continue }
+			local.d = vector_length( local.work[local.i] - local.anchor )
+			if( local.best == 0 || local.d < local.bestD ){
+				local.best = local.i
+				local.bestD = local.d
+			}
+		}
+		local.used[local.best] = 1
+		level.coop_mpPushChain[local.out] = local.work[local.best]
+	}
+
+	level.coop_mpPushChainN = local.n
+	level.coop_mpPushChainReady = 1
+	level.coop_mpPushIdx = 1
+	level.coop_mpPushProg = 0
+	waitthread push_setActive 1
+	println( "^~^~^ MPPUSH chain built n=" + local.n )
+}end
+
+
+//activate chain index local.i as the frontline and publish its position to the stock objective compass arrow.
+push_setActive local.i:{
+	if( local.i < 1 || local.i > level.coop_mpPushChainN ){ end }
+	local.h = level.coop_mpPushChain[local.i]
+	level.coop_mpPushActive = local.h
+
+	//THE MARKER: stock script builtin, sets level.m_vObjectiveLocation -> STAT_OBJECTIVECENTER (playerstat
+	//19) -> the round compass objective arrow. No new server->client shape (header).
+	set_objective_pos local.h
+	println( "^~^~^ MPPUSH active idx=" + local.i + " of " + level.coop_mpPushChainN + " pos=" + local.h )
+}end
+
+
+//=========================================================================
+// THE PUSH MANAGER. One loop per map load, guarded on coop_mpRun (a level load / the restart wipes it,
+// ending the loop cleanly) and on a run-once flag. Runs once a second so a point is one second of capture.
+//=========================================================================
+push_loop:{
+	if( level.coop_mpPushLoopOn == 1 ){ end }
+	level.coop_mpPushLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread push_tick
+		wait 1
+	}
+}end
+
+
+//idempotent guarantee the loop is running (called from mode_think). ensureConfig already started it on the
+//first spawn; this only matters if think is somehow dispatched before a spawn.
+push_ensure:{
+	if( level.coop_mpPushReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+push_tick:{
+	if( level.coop_mpPushEnding == 1 ){ end }
+
+	//build the chain once enough points have been collected, or after a short settle with at least one.
+	if( level.coop_mpPushChainReady != 1 ){
+		local.ready = 0
+		if( level.coop_mpPushSpotN >= 4 ){ local.ready = 1 }
+		else if( level.coop_mpPushSpotN >= 2 && ( level.time - level.coop_mpPushFirstSpot ) >= 3 ){ local.ready = 1 }
+		else if( level.coop_mpPushSpotN >= 1 && ( level.time - level.coop_mpPushFirstSpot ) >= 8 ){ local.ready = 1 }
+		if( local.ready == 1 ){ waitthread push_buildChain }
+	}
+	if( level.coop_mpPushChainReady != 1 ){ end }
+
+	//round timer: defenders win if the chain is not cleared in time.
+	if( ( level.time - level.coop_mpPushStart ) >= level.coop_mpPushTime ){
+		waitthread push_win level.coop_mpPushDef "timeout"
+		end
+	}
+
+	//team presence at the active point
+	local.atkN = waitthread push_countInPoint level.coop_mpPushAtk
+	local.defN = waitthread push_countInPoint level.coop_mpPushDef
+
+	//DEV probe (coop_mpPushDev): 1 adds a synthetic attacker at the active point (deterministic advance for a
+	//bots-cannot-push-objectives smoke); 2 also adds a synthetic defender (to demonstrate a contested pause).
+	//Real presence is honoured on top, so a real defender still contests a dev-forced attacker.
+	local.dev = waitthread push_i "coop_mpPushDev"
+	if( local.dev >= 1 ){ local.atkN = ( local.atkN + 1 ) }
+	if( local.dev >= 2 ){ local.defN = ( local.defN + 1 ) }
+
+	//sole attacker presence banks a second; contested or empty banks nothing.
+	local.state = "empty"
+	if( local.atkN >= 1 && local.defN < 1 ){
+		local.state = "capturing"
+		level.coop_mpPushProg = ( level.coop_mpPushProg + 1 )
+	}
+	else if( local.atkN >= 1 && local.defN >= 1 ){
+		local.state = "contested"
+	}
+
+	local.left = ( level.coop_mpPushTime - ( level.time - level.coop_mpPushStart ) )
+	println( "^~^~^ MPPUSH tick idx=" + level.coop_mpPushIdx + "/" + level.coop_mpPushChainN + " atk=" + local.atkN + " def=" + local.defN + " state=" + local.state + " prog=" + level.coop_mpPushProg + "/" + level.coop_mpPushCapSecs + " left=" + local.left )
+
+	//captured?
+	if( level.coop_mpPushProg >= level.coop_mpPushCapSecs ){
+		waitthread push_advance
+	}
+}end
+
+
+//the active point is captured: advance the frontline, or win if it was the final point.
+push_advance:{
+	local.next = ( level.coop_mpPushIdx + 1 )
+	println( "^~^~^ MPPUSH capture idx=" + level.coop_mpPushIdx + " -> next=" + local.next )
+
+	if( local.next > level.coop_mpPushChainN ){
+		//the final point fell - the attackers cleared the chain.
+		waitthread push_win level.coop_mpPushAtk "cleared"
+		end
+	}
+
+	level.coop_mpPushIdx = local.next
+	level.coop_mpPushProg = 0
+	waitthread push_setActive local.next
+	iprintlnbold( "Push - the frontline ADVANCES!" )
+	println( "^~^~^ MPPUSH advance idx=" + local.next )
+}end
+
+
+//=========================================================================
+// The match win: announce, bump the winner's series score, hold the banner, then reload the SAME map (the
+// proven transition - mp_koth.scr::koth_win / mp_rounds.scr::rounds_win). One-shot via coop_mpPushEnding.
+//=========================================================================
+push_win local.side local.reason:{
+	if( level.coop_mpPushEnding == 1 ){ end }
+	level.coop_mpPushEnding = 1
+
+	local.a = waitthread push_i "coop_mpPushWinsA"
+	local.x = waitthread push_i "coop_mpPushWinsX"
+	if( local.side == "allies" ){ local.a = ( local.a + 1 ) }
+	if( local.side == "axis" ){ local.x = ( local.x + 1 ) }
+	setcvar "coop_mpPushWinsA" ( "" + local.a )
+	setcvar "coop_mpPushWinsX" ( "" + local.x )
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	local.what = "clear the chain"
+	if( local.reason == "timeout" ){ local.what = "hold the line" }
+	iprintlnbold( local.tag + " WIN Push - " + local.what + "!  (Allies " + local.a + " : " + local.x + " Axis)" )
+	println( "^~^~^ MPPUSH win side=" + local.side + " reason=" + local.reason + " winsA=" + local.a + " winsX=" + local.x + " map=" + getcvar( "mapname" ) )
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPPUSH restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//read an int cvar, "" -> 0. int() is computed into a local BEFORE end - a function call in the `}end <expr>`
+//return position is NOT evaluated by the engine (bug-2603 / mp_rounds.scr::rounds_i), so never put one there.
+push_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v
+
+
+//count LIVING, in-play players of a side ("allies"/"axis") inside the active capture box. Mirrors the filter
+//in mp_koth.scr::koth_countInHill / mp_rounds.scr::rounds_countAlive (not spectator, alive, on the team) plus
+//the 3D radius test around the active point.
+push_countInPoint local.team:{
+	local.n = 0
+	if( level.coop_mpPushChainReady != 1 ){ end local.n }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - level.coop_mpPushActive )
+		if( local.d > level.coop_mpPushRadius ){ continue }
+		local.n++
+	}
+}end local.n
