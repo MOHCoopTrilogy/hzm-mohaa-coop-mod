@@ -1,0 +1,309 @@
+//=========================================================================
+// MP_FREEZETAG.SCR - FREEZE TAG, an MP game MODE (slice 5). Decisions M12/M13/M14: played on Team
+// Match (gt2) with a SCRIPT round score (UBER recipe); a killed player is FROZEN in place, not truly
+// dead; thawed players STAY WHERE THEY WERE FROZEN (M13); bots thaw teammates by PROXIMITY plus an
+// AUTO-THAW TIMEOUT (M14).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, arm rounds, deploy OR apply freeze)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep rounds alive; drive freeze/thaw)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: begin the freeze, do NOT leave dead)
+//
+// FREEZE RECIPE (paraphrased, not copied - community_modes_deepdive.md / ubermod_v2_source_notes.md;
+// credit Mefy's Freeze Tag and OwN-3m-All's UBER `ft` replica). A killed player is represented as a
+// FROZEN BODY held at the spot they fell; a teammate melts (thaws) them by standing close for a short
+// time - "standing in the box is enough, no USE needed" - which is why a BOT can thaw too. Freeze the
+// whole enemy team AT ONCE to win the round. UBER ends the map with bsptransition + a gametype flip,
+// which CLAUDE.md forbids; we reuse the shared coop_mod/mp_rounds.scr round lifecycle + stuffsrv map
+// restart instead. The frozen BODY here is NOT a spawned script_model + func_beam rig (that risks the
+// entity budget and would want new client shapes); it is the killed PLAYER themselves, revived in place
+// and held frozen with stock player commands only (see THE FREEZE below).
+//
+// THE FREEZE, and why it is pure script with NO new server->client shape (design risk resolved). A poll
+// death edge fires AFTER the victim is already dead, so we cannot stop the death; instead we bring the
+// player straight back with the stock `respawn`, warp them to the recorded death origin, and HOLD them
+// there as a frozen statue with commands the mod already uses on downed/glued players (main.scr /
+// replace.scr): `notsolid` + `physics_off` pin them and make bullets pass through (so a frozen player
+// cannot be re-killed and re-frozen), `freezecontrols 1` blocks their input, `takeall` strips the kit,
+// `forcelegsstate STAND` sets a static pose, and the STOCK `injail 1` marks them OUT on the ordinary
+// scoreboard (dm_manager.cpp:2016 DM_Manager::IsAlivePlayer reads IsInJail - no new HUD, no new shape,
+// decision M22). On thaw we simply undo all of that (`solid` + `physics_on` + `freezecontrols 0` +
+// `injail 0`) and re-arm the kit through the armory: because the frozen player never LEFT the death
+// origin, "unfreeze in place" (M13) is automatic - no respawn-to-base, no warp.
+//
+// THAW BY PROXIMITY + TIMER copies the coop DBNO team-revive recipe (coop_mod/dbno.scr::
+// dbno_teamrevive_monitor): each tick, find the nearest LIVING, non-frozen teammate within a radius and
+// accumulate a channel timer while one is present, thaw when it fills - but WITHOUT DBNO's useheld gate
+// (Freeze Tag melts on presence alone, which is also what lets a bot thaw). An AUTO-THAW TIMEOUT (M14)
+// returns a frozen player even if no teammate ever reaches them, so a round can never stall on one
+// unreachable body. All three are host-tunable: coop_mpFtThawRadius, coop_mpFtThawTime, coop_mpFtAutoThaw.
+//
+// ROUND WIN: a team LOSES the round when ALL its players are frozen at once. mp_rounds.scr::
+// rounds_countAlive is the counter, and it treats a frozen player as NOT alive (it skips the flag
+// coop_mpRndFrozen, which THIS file sets on freeze and clears on thaw). When a side's count hits 0 the
+// shared helper banks the win into the non-archived coop_mpRnd* series cvars and restarts the map -
+// exactly as LMS and S&D do. A round timer (coop_mpFtTime, default 0 = off) is available so a stalemate
+// where thaws keep pace with freezes still resolves by majority survivors, like LMS.
+//
+// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, so
+// isolation clause 10 admits them); names no coop cvar, coop_lo token, ui/loadout tree or coop armory
+// code; never giveInventory / changeGameType (both force gt2 via setcvar g_gametype - mp.scr header) and
+// never writes coop_health / coop_* state. It does NOT reuse or mutate any coop DBNO state - the DBNO
+// recipe is COPIED into MP-owned names. Per-player freeze state lives in self.flags["coop_mpFt*"]
+// (entity keys, not cvars, and coop_mp* is MP-owned); coop_mpRndFrozen is the shared round-counter flag.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// One-time Freeze Tag config into the shared round helper's level.coop_mpRnd* vars. Idempotent (level
+// flag). The round manager itself (warmup -> live -> ending, the alive counts, the win + restart) lives
+// in mp_rounds.scr; this only sets the config it reads.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpFtReady == 1 ){ end }
+	level.coop_mpFtReady = 1
+
+	level.coop_mpRndName = "Freeze Tag"
+	level.coop_mpRndBombGuard = 0
+	//Freeze Tag has its own freeze/thaw callouts; leave the shared last-man callout off.
+	level.coop_mpRndCallout = 0
+
+	//optional round timer (host cvar coop_mpFtTime, default 0 = off; pure freeze-out). When set, a
+	//timed-out round is decided by majority survivors so a thaw-keeps-pace stalemate still resolves.
+	local.t = getcvar( "coop_mpFtTime" )
+	if( local.t == "" ){ local.t = "0" }
+	level.coop_mpRndTimeout = int( local.t )
+	level.coop_mpRndTimeoutSide = "majority"
+
+	//thaw radius (world units): a living teammate within this 3D distance melts a frozen teammate.
+	local.rad = getcvar( "coop_mpFtThawRadius" )
+	if( local.rad == "" ){ local.rad = "96" }
+	level.coop_mpFtThawRadius = int( local.rad )
+	if( level.coop_mpFtThawRadius < 16 ){ level.coop_mpFtThawRadius = 96 }
+
+	//thaw channel time (seconds of continuous presence to melt).
+	local.tt = getcvar( "coop_mpFtThawTime" )
+	if( local.tt == "" ){ local.tt = "3.0" }
+	level.coop_mpFtThawTime = float( local.tt )
+	if( level.coop_mpFtThawTime <= 0 ){ level.coop_mpFtThawTime = 3.0 }
+
+	//auto-thaw timeout (seconds a body waits before returning on its own; 0 = off).
+	local.at = getcvar( "coop_mpFtAutoThaw" )
+	if( local.at == "" ){ local.at = "30" }
+	level.coop_mpFtAutoThaw = int( local.at )
+
+	println( "^~^~^ MPFT init gt=" + level.gametype + " thawRadius=" + level.coop_mpFtThawRadius + " thawTime=" + level.coop_mpFtThawTime + " autoThaw=" + level.coop_mpFtAutoThaw + " roundTime=" + level.coop_mpRndTimeout )
+}end
+
+
+//=========================================================================
+// SPAWN EDGE. Two very different spawns arrive here:
+//   * a FREEZE respawn - mode_onDeath set coop_mpFtFreezing and called `respawn`; apply the freeze here
+//     (warp to the death origin, hold frozen, mark injail), and give NO kit.
+//   * any other spawn (round start / a warmup death respawn) - arm the round and deploy through the
+//     armory so the weapon preset (coop_mpPreset) is inherited automatically (decision M5).
+// A THAW does NOT come through here: a frozen player never died, so unfreezing is not a spawn edge - it
+// re-arms the kit itself (see ft_thaw).
+//=========================================================================
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread coop_mod/mp_rounds.scr::rounds_begin
+	if( local.p == NULL ){ end }
+
+	if( local.p.flags["coop_mpFtFreezing"] == 1 ){
+		waitthread ft_applyFreeze local.p
+		end
+	}
+
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//=========================================================================
+// PER-TICK. Keep the shared round manager running, then drive freeze/thaw for this player:
+//   * a FROZEN player: re-assert the hold, check the auto-thaw timeout and the proximity channel.
+//   * a LIVING, in-play player: remember the current origin so a future death can freeze the body where
+//     they stood (the poll is 0.5s, so this is at most half a second stale - close enough to "in place").
+//=========================================================================
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+	if( local.p == NULL ){ end }
+
+	if( local.p.flags["coop_mpFtFrozen"] == 1 ){
+		waitthread ft_frozenTick local.p
+		end
+	}
+
+	//in transition between death and the freeze-respawn: leave it alone
+	if( local.p.flags["coop_mpFtFreezing"] == 1 ){ end }
+
+	if( isAlive local.p && !local.p.isSpectator ){
+		local.p.flags["coop_mpFtLastOrigin"] = local.p.origin
+	}
+}end
+
+
+//=========================================================================
+// DEATH EDGE. Begin the freeze. Warmup deaths (round not yet LIVE) respawn normally, exactly as the
+// shared round framework wants; only a LIVE-round death freezes. We record the body origin, flag the
+// freeze, and bring the player straight back with the stock `respawn` so the next poll's spawn edge lands
+// in mode_onSpawn, which finishes the freeze (ft_applyFreeze).
+//=========================================================================
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpRndState != "live" ){ end }
+	if( local.p.flags["coop_mpFtFrozen"] == 1 ){ end }
+
+	local.o = local.p.flags["coop_mpFtLastOrigin"]
+	if( local.o == NIL && isAlive local.p ){ local.o = local.p.origin }
+	local.p.flags["coop_mpFtFreezeOrigin"] = local.o
+	local.p.flags["coop_mpFtFreezing"] = 1
+
+	println( "^~^~^ MPFT death e" + local.p.entnum + " side=" + local.p.dmteam )
+	local.p respawn
+}end
+
+
+//=========================================================================
+// Finish the freeze on the freeze-respawn's spawn edge. Warp the freshly-respawned player back to the
+// death origin and hold them there as a frozen statue with stock player commands (see the header). The
+// player stays ALIVE (so no death loop) but notsolid (so no re-kill) and injail (so the scoreboard reads
+// them OUT and mp_rounds counts them as not-alive via coop_mpRndFrozen).
+//=========================================================================
+ft_applyFreeze local.p:{
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_mpFtFreezing"] = NIL
+
+	//warp to where the body fell (M13). droptofloor snaps it to the ground, exactly as
+	//main.scr::playersWarpto does; a tiny lift first so droptofloor has room to work.
+	local.o = local.p.flags["coop_mpFtFreezeOrigin"]
+	if( local.o != NIL ){
+		local.p origin ( local.o + ( 0 0 1 ) )
+		local.p droptofloor 512
+	}
+
+	local.p takeall
+	local.p forcelegsstate "STAND"
+	local.p notsolid
+	local.p physics_off
+	local.p freezecontrols 1
+	local.p.injail = 1
+
+	local.p.flags["coop_mpFtFrozen"] = 1
+	local.p.flags["coop_mpRndFrozen"] = 1
+	local.p.flags["coop_mpFtFrozenAt"] = level.time
+	local.p.flags["coop_mpFtThawProg"] = 0
+
+	iprintln( local.p.netname + " is FROZEN!" )
+	println( "^~^~^ MPFT freeze e" + local.p.entnum + " side=" + local.p.dmteam )
+}end
+
+
+//=========================================================================
+// One frozen player, one tick. Re-assert the hold (belt and braces), then resolve a thaw:
+//   * AUTO-THAW: coop_mpFtAutoThaw seconds after freezing, the body returns on its own (M14).
+//   * PROXIMITY: a living, non-frozen teammate within coop_mpFtThawRadius accumulates a channel timer;
+//     when it reaches coop_mpFtThawTime the body thaws (copied from dbno.scr::dbno_teamrevive_monitor,
+//     minus the useheld gate - so a BOT standing near a frozen teammate thaws them too, M14).
+// If the frozen player somehow died anyway (a world trigger_hurt, a disconnect race), clear the freeze
+// so the normal death/respawn flow can take over.
+//=========================================================================
+ft_frozenTick local.p:{
+	if( local.p == NULL ){ end }
+
+	if( !( isAlive local.p ) ){
+		local.p.flags["coop_mpFtFrozen"] = NIL
+		local.p.flags["coop_mpRndFrozen"] = NIL
+		local.p.flags["coop_mpFtThawProg"] = 0
+		end
+	}
+
+	//re-assert the OUT marker each tick (cheap; covers any engine path that cleared it)
+	local.p.injail = 1
+
+	//auto-thaw timeout
+	if( level.coop_mpFtAutoThaw > 0 ){
+		local.age = ( level.time - local.p.flags["coop_mpFtFrozenAt"] )
+		if( local.age >= level.coop_mpFtAutoThaw ){
+			waitthread ft_thaw local.p "timeout"
+			end
+		}
+	}
+
+	//proximity channel: nearest living, non-frozen teammate within the thaw radius
+	local.near = waitthread ft_hasThawer local.p
+	if( local.p == NULL ){ end }
+	if( local.near == 1 ){
+		local.prog = local.p.flags["coop_mpFtThawProg"]
+		if( local.prog == NIL ){ local.prog = 0 }
+		//the poll interval is 0.5s (mp.scr::mp_manage), so one tick advances the channel by 0.5s
+		local.prog = ( local.prog + 0.5 )
+		local.p.flags["coop_mpFtThawProg"] = local.prog
+		if( local.prog >= level.coop_mpFtThawTime ){
+			waitthread ft_thaw local.p "revive"
+		}
+	}
+	else{
+		local.p.flags["coop_mpFtThawProg"] = 0
+	}
+}end
+
+
+//=========================================================================
+// THAW. Undo every part of the freeze and re-arm the kit. Because the frozen player never left the death
+// origin, this unfreezes them IN PLACE (M13) with no respawn and no warp. Idempotent on the frozen flag.
+//=========================================================================
+ft_thaw local.p local.cause:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpFtFrozen"] != 1 ){ end }
+
+	local.p.flags["coop_mpFtFrozen"] = NIL
+	local.p.flags["coop_mpRndFrozen"] = NIL
+	local.p.flags["coop_mpFtThawProg"] = 0
+
+	local.p.injail = 0
+	local.p freezecontrols 0
+	local.p solid
+	local.p physics_on
+
+	//a fresh kit through the armory (inherits the weapon preset, M5) - health 100, no coop state
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+
+	iprintln( local.p.netname + " was THAWED!" )
+	println( "^~^~^ MPFT thaw e" + local.p.entnum + " cause=" + local.cause )
+}end
+
+
+//=========================================================================
+// Helper: is there a LIVING, non-frozen teammate within the thaw radius of this frozen player? Mirrors
+// the filter in mp_rounds.scr::rounds_countAlive (same team, not spectator, alive) plus the not-frozen
+// test and the 3D radius. Returns 1/0 into a local before end (the }end <expr> trap, bug-2603).
+//=========================================================================
+ft_hasThawer local.p:{
+	local.found = 0
+	if( local.p == NULL ){ end local.found }
+	local.team = local.p.dmteam
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.entnum == local.p.entnum ){ continue }
+		if( local.q.dmteam != local.team ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.flags["coop_mpFtFrozen"] == 1 ){ continue }
+		if( !( isAlive local.q ) ){ continue }
+		local.d = vector_length( local.q.origin - local.p.origin )
+		if( local.d > level.coop_mpFtThawRadius ){ continue }
+		local.found = 1
+		local.i = ( $player.size + 1 )
+	}
+}end local.found
