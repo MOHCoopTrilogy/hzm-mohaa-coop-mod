@@ -1,0 +1,275 @@
+//=========================================================================
+// MP_GUNGAME.SCR - Gun Game, the first MP game MODE (slice 1). FFA (gt1) only for v1 (decision M9).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here
+// can run on a coop map. mp.scr owns the per-player poll and the team/alive/death edges; it
+// dispatches into this file through three seam labels (a switch on level.coop_mpMode in mp.scr):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (the spawn-edge kit; Gun Game OWNS the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick kill/tier poll + scoreboard mirror)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death hook; see M8 note there)
+// A later mode adds its own case in those three switches and its own coop_mod/mp_<mode>.scr.
+//
+// ISOLATION: names no coop cvar / coop_lo / ui/loadout token; calls NO coop code (only its own
+// labels and the generated ladder coop_mod/mp_gungame_tiers.scr, itself an MP file). It NEVER calls
+// giveInventory or changeGameType (both end in setcvar g_gametype and would force gt2, killing FFA -
+// mp.scr header) and NEVER writes coop_health / coop_lockLoadout / any coop_* state. Per-player
+// state lives in self.flags["coop_mpGG*"] (entity keys, not cvars, and coop_mp* is MP-owned).
+//
+// HOW A KILL IS OBSERVED (and why it is a POLL, not a delegate): the engine already scores every FFA
+// frag into the player's num_kills - +1 on an enemy kill, -1 on a suicide (player.cpp
+// KilledPlayerInDeathmatch / dm_manager.cpp DM_Team::AddKills, freeforall path). So mode_think reads
+// each player's `getkills` every tick and acts on the DELTA since it last normalised the value. This
+// needs no event_subscribe (unproven in this mod - mp.scr header) and no killhandler (which would
+// replace ALL default death handling). It works identically for bots (bots are Players; getkills /
+// addkills apply), so bot kills advance tiers and a bot can win (M11) with no stufftext to a bot.
+//
+// M10 WEIGHTED CREDIT: progression is REDUCED vs classic Gun Game (1 kill = 1 tier). Here it takes
+// coop_mpGGKillsPerTier frags to climb one tier (default 2). Concrete rule: an integer per-player
+// counter coop_mpGGprog rises by 1 per frag; each time it reaches KillsPerTier the player climbs a
+// tier and the counter drops by KillsPerTier.
+//
+// M7 FINAL TIER = pistol-whip / bash only: the ladder's last tier issues a pistol with NO reserve
+// top-up (mp_gungame_tiers.tsv bashonly=1, ammoN 0). A kill scored WHILE on the final tier WINS the
+// round - and because that tier's weapon is the pistol-whip, the win is inherently a bash kill, so
+// M7 needs no means-of-death lookup. (See mode_onDeath for the one Gun Game rule pure script cannot
+// serve without an engine getter, M8's mid-tier melee-demote-of-victim.)
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// One-time setup for the round: cache the generated ladder and stop the engine ending the match on
+// the host's raw frag count. Idempotent (level flag). fraglimit is NOT a coop cvar - coop's
+// server.scr re-zeroes it on the next coop map - so this write cannot follow anyone into coop.
+//=========================================================================
+ensureReady:{
+	if( level.coop_mpGGReady == 1 ){ end }
+	level.coop_mpGGReady = 1
+	level.coop_mpGGEnding = 0
+	level.coop_mpGGTiers = waitthread coop_mod/mp_gungame_tiers.scr::tiers
+	level.coop_mpGGTierCount = waitthread coop_mod/mp_gungame_tiers.scr::tier_count
+
+	//the mode owns the win condition; raw frags != tier under weighted progression, so the engine's
+	//own fraglimit end would fire early. Zero it and end the round ourselves on the final-tier kill.
+	setcvar "fraglimit" "0"
+	println( "^~^~^ MPGG ready tiers=" + level.coop_mpGGTierCount )
+}end
+
+
+//=========================================================================
+// SPAWN EDGE - the give. Called from mp.scr::mp_onSpawn (via mp_modeGiveKit) for a freshly-alive MP
+// player. Gun Game owns the kit: it does NOT open the armory. Tier persists across a player's deaths
+// within the round (the Player object survives an MP respawn), so it is initialised once per
+// connection; a map reload (the win restart) makes fresh Player objects and everyone starts at tier 0.
+//=========================================================================
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureReady
+
+	if( local.p.flags["coop_mpGGinit"] != 1 ){
+		local.p.flags["coop_mpGGinit"] = 1
+		local.p.flags["coop_mpGGtier"] = 0
+		local.p.flags["coop_mpGGprog"] = 0
+		waitthread setShown local.p 0
+	}
+	waitthread giveTierKit local.p
+}end
+
+
+//=========================================================================
+// PER-TICK (called every 0.5s poll from mp.scr::mp_tickPlayer via mp_modeTick, for every player).
+// Reads the frag delta since the last normalise, advances/demotes the tier, wins on a final-tier
+// kill, then mirrors the current tier into the stock Kills column (no new HUD shape, M22).
+//=========================================================================
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpGGEnding == 1 ){ end }
+	waitthread ensureReady
+	if( local.p.flags["coop_mpGGinit"] != 1 ){ end }
+
+	local.tier = local.p.flags["coop_mpGGtier"]
+	if( local.tier == NIL ){ local.tier = 0 }
+	local.base = local.p.flags["coop_mpGGbase"]
+	if( local.base == NIL ){ local.base = local.tier }
+
+	local.raw = local.p getkills
+	if( local.raw == NIL ){ local.raw = local.base }
+	local.delta = ( local.raw - local.base )
+	local.top = ( level.coop_mpGGTierCount - 1 )
+
+	if( local.delta > 0 ){
+		//a kill scored WHILE on the final (bash) tier wins the round (M7)
+		if( local.tier >= local.top ){
+			if( level.coop_mpGGEnding != 1 ){
+				level.coop_mpGGEnding = 1
+				thread doWin local.p
+			}
+			end
+		}
+		waitthread advance local.p local.delta
+		if( local.p == NULL ){ end }
+		local.tier = local.p.flags["coop_mpGGtier"]
+	}
+	else if( local.delta < 0 ){
+		//suicide(s): the engine did addkills -1 per self-kill (KilledPlayerInDeathmatch). Demote one
+		//tier per suicide (the self-kill-demotes-self rule).
+		local.n = ( 0 - local.delta )
+		waitthread demote local.p local.n
+		if( local.p == NULL ){ end }
+		local.tier = local.p.flags["coop_mpGGtier"]
+	}
+
+	waitthread setShown local.p local.tier
+}end
+
+
+//=========================================================================
+// VICTIM DEATH HOOK - called from mp.scr::mp_tickPlayer (via mp_modeOnDeath) on the alive->dead edge.
+//
+// M8 says a MELEE/bash kill demotes the VICTIM one tier. That needs the MEANS OF DEATH of this
+// specific death, and pure script cannot observe it for a player-vs-player kill: the only routes are
+// the unproven event_subscribe delegate (mp.scr header forbids introducing it) or Player killhandler
+// (which REPLACES all default death handling - obituary, death-drop, corpse - and so is unusable
+// here). So M8's mid-tier melee-demote is DEFERRED to a later slice that adds a minimal engine getter
+// (last attacker + meansofdeath on Player). What Gun Game DOES serve without means-of-death:
+//   * the FINAL-tier bash win (M7) - that tier's only weapon is the pistol-whip, handled in mode_think
+//   * suicide-demote - the negative getkills delta in mode_think
+// Kept as an explicit seam so the demote drops in here once the getter exists.
+//=========================================================================
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	end
+}end
+
+
+//=========================================================================
+// Advance the killer by local.kills frags of weighted progression (M10). Climbs a tier every
+// coop_mpGGKillsPerTier frags (default 2 = reduced vs classic 1/tier). Hands the new-tier weapon out
+// at once (classic Gun Game swaps on the kill) and announces the climb.
+//=========================================================================
+advance local.p local.kills:{
+	if( local.p == NULL ){ end }
+
+	local.kptS = getcvar( "coop_mpGGKillsPerTier" )
+	if( local.kptS == "" ){ local.kptS = "2" }
+	local.kpt = int( local.kptS )
+	if( local.kpt < 1 ){ local.kpt = 2 }
+
+	local.tier = local.p.flags["coop_mpGGtier"]
+	if( local.tier == NIL ){ local.tier = 0 }
+	local.prog = local.p.flags["coop_mpGGprog"]
+	if( local.prog == NIL ){ local.prog = 0 }
+	local.top = ( level.coop_mpGGTierCount - 1 )
+
+	local.prog = ( local.prog + local.kills )
+	local.changed = 0
+	while( local.prog >= local.kpt && local.tier < local.top ){
+		local.prog = ( local.prog - local.kpt )
+		local.tier++
+		local.changed = 1
+	}
+	if( local.tier >= local.top ){ local.prog = 0 }
+
+	local.p.flags["coop_mpGGtier"] = local.tier
+	local.p.flags["coop_mpGGprog"] = local.prog
+
+	if( local.changed == 1 ){
+		waitthread giveTierKit local.p
+		if( local.p == NULL ){ end }
+		local.nm = level.coop_mpGGTiers[local.tier]["name"]
+		iprintlnbold( local.p.netname + " reached tier " + ( local.tier + 1 ) + "/" + level.coop_mpGGTierCount + " - " + local.nm )
+		println( "^~^~^ MPGGUP e" + local.p.entnum + " tier=" + local.tier + " prog=" + local.prog )
+	}
+}end
+
+
+//=========================================================================
+// Demote the player local.n tiers (never below 0) and clear their progress. The demoted weapon is
+// handed out on the next spawn (a suicide leaves the player dead) - mode_onSpawn gives the current
+// tier's kit.
+//=========================================================================
+demote local.p local.n:{
+	if( local.p == NULL ){ end }
+	local.tier = local.p.flags["coop_mpGGtier"]
+	if( local.tier == NIL ){ local.tier = 0 }
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		if( local.tier > 0 ){ local.tier-- }
+	}
+	local.p.flags["coop_mpGGtier"] = local.tier
+	local.p.flags["coop_mpGGprog"] = 0
+	iprintlnbold( local.p.netname + " dropped to tier " + ( local.tier + 1 ) )
+	println( "^~^~^ MPGGDOWN e" + local.p.entnum + " tier=" + local.tier + " suicides=" + local.n )
+}end
+
+
+//=========================================================================
+// Give the player their current tier's kit: plain takeall + item (never giveInventory /
+// changeGameType), reserve ammo (skipped on the bash-only final tier, ammoN 0), and health 100 per
+// player (never the coop_health cvar - it would follow the player into coop, mp.scr header clause 4).
+//=========================================================================
+giveTierKit local.p:{
+	if( local.p == NULL ){ end }
+	local.tier = local.p.flags["coop_mpGGtier"]
+	if( local.tier == NIL ){ local.tier = 0 }
+	local.r = level.coop_mpGGTiers[local.tier]
+	if( local.r == NIL ){ end }
+
+	local.give = local.r["give"]
+	local.p takeall
+	if( local.give != "" ){ local.p item local.give }
+	if( local.r["ammo"] != "" && local.r["ammoN"] > 0 ){
+		local.p ammo local.r["ammo"] local.r["ammoN"]
+	}
+	local.p health 100
+
+	if( local.give != "" ){ thread useAfter local.p local.give }
+	println( "^~^~^ MPGGKIT e" + local.p.entnum + " tier=" + local.tier + " give=" + local.give + " bashonly=" + local.r["bashonly"] )
+}end
+
+
+//re-assert the held weapon after the engine's own +0.3s useitem has landed (mirrors mp_armory::useAfter)
+useAfter local.p local.give:{
+	wait 0.4
+	if( local.p == NULL ){ end }
+	local.p use local.give
+}end
+
+
+//=========================================================================
+// Force the player's stock Kills column to local.want (the current tier), by adding the signed
+// difference against what the engine currently holds. This is the "mirror tier into Kills" (M22): the
+// HUD shows the tier with no new shape. coop_mpGGbase remembers what we wrote so the next tick's
+// getkills delta reflects only NEW engine frags.
+//=========================================================================
+setShown local.p local.want:{
+	if( local.p == NULL ){ end }
+	local.raw = local.p getkills
+	if( local.raw == NIL ){ local.raw = 0 }
+	if( local.raw != local.want ){ local.p addkills ( local.want - local.raw ) }
+	local.p.flags["coop_mpGGbase"] = local.want
+}end
+
+
+//=========================================================================
+// The round win. Show the winner topped out, hold the banner, then cleanly reload the SAME map -
+// the proven transition (main.scr::restartMap / lobby.scr): stuffsrv "map <name>" -> SV_Map_f, no
+// archive and no gametype flip. The reload re-runs mp.scr::main, so tiers reset and everyone
+// re-deploys at tier 0. Threaded (not waitthread) so the 5s banner never stalls the poll.
+//=========================================================================
+doWin local.p:{
+	level.coop_mpGGEnding = 1
+	if( local.p != NULL ){
+		waitthread setShown local.p level.coop_mpGGTierCount
+		iprintlnbold( local.p.netname + " WON the Gun Game!" )
+		println( "^~^~^ MPGGWIN e" + local.p.entnum + " map=" + getcvar( "mapname" ) )
+	}
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){ stuffsrv ( "map " + local.m ) }
+}end

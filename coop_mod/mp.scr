@@ -63,6 +63,17 @@ main:{
 	if( level.coop_mpRun == 1 ){ end }
 	level.coop_mpRun = 1
 
+	//[MP modes slice 1] THE MODE SCAFFOLD. The host picks the MP game mode with the cvar coop_mpMode:
+	//   "" / "none"  -> today's behaviour EXACTLY (the armory deathmatch path below, byte-identical)
+	//   "gungame"    -> FFA Gun Game (coop_mod/mp_gungame.scr)
+	//This is a READ only. coop_mp* is MP-owned (isolation clause 12c) and a level load wipes level vars,
+	//so the mode can never follow anyone into coop. The dispatch SEAM is three switch labels below -
+	//mp_modeGiveKit (spawn-edge kit), mp_modeTick (per-tick), mp_modeOnDeath (death edge) - each a
+	//switch on level.coop_mpMode; a later mode adds a case and its own coop_mod/mp_<mode>.scr.
+	level.coop_mpMode = "none"
+	local.mode = getcvar( "coop_mpMode" )
+	if( local.mode != "" && local.mode != "none" ){ level.coop_mpMode = local.mode }
+
 	//[user 2026-09-13, bug-2564] THE COOP FEEL IN MULTIPLAYER - "put all of it into pvp".
 	//
 	//1. game.* constants. variables.scr seeds these on coop maps only, and weaponstate.scr reads both
@@ -100,7 +111,7 @@ main:{
 	local.armLive = waitthread coop_mod/mp_armory.scr::alive
 	if( local.armLive == 1 ){ level.coop_mpArmoryLive = 1 }
 
-	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script + " armory=" + level.coop_mpArmoryLive )
+	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script + " armory=" + level.coop_mpArmoryLive + " mode=" + level.coop_mpMode )
 	thread mp_manage
 }end
 
@@ -141,7 +152,10 @@ mp_tickPlayer local.p:{
 	// ---- name bus ----------------------------------------------------------------------------
 	//[armory slice 2] When the armory is live the dispatcher owns the name bus: it reads the ,q pick
 	//markers (which mp_cleanName would otherwise strip before they were seen) and then cleans the name.
-	if( level.coop_mpArmoryLive == 1 ){
+	//[MP modes slice 1] A game MODE bypasses the armory entirely (Gun Game owns its own kit), so the
+	//armory name bus is skipped when a mode is active and the name is simply cleaned instead. When
+	//coop_mpMode == "none" this is byte-identical to before (armoryLive gate unchanged).
+	if( level.coop_mpMode == "none" && level.coop_mpArmoryLive == 1 ){
 		waitthread coop_mod/mp_armory.scr::tickPlayer local.p
 		if( local.p == NULL ){ end }
 	}
@@ -186,10 +200,23 @@ mp_tickPlayer local.p:{
 	//the next life is owed a kit again
 	if( local.alive == 0 && local.wasAlive == 1 ){
 		local.p.flags["coop_isActive"] = 0 - 2
+		//[MP modes slice 1] the death edge - the per-"kill" mode seam (the victim just died).
+		if( level.coop_mpMode != "none" ){
+			waitthread mp_modeOnDeath local.p
+			if( local.p == NULL ){ end }
+		}
 	}
 
 	if( local.alive == 1 && local.wasAlive == 0 ){
 		waitthread mp_onSpawn local.p
+		if( local.p == NULL ){ end }
+	}
+
+	//[MP modes slice 1] the per-tick mode seam. Runs for every player every poll so a mode can watch
+	//kills/tiers even for players who did not die this tick (Gun Game reads the getkills delta here).
+	if( level.coop_mpMode != "none" ){
+		waitthread mp_modeTick local.p
+		if( local.p == NULL ){ end }
 	}
 }end
 
@@ -249,7 +276,13 @@ mp_onSpawn local.p:{
 	//starter / a bot's random free-tier gun) with `takeall` + `item`, tops up ammo, AND sets health 100
 	//in the same give. Never giveInventory / changeGameType (header) and never the coop_health cvar
 	//(clause 4). Without a live armory, health alone - the engine's stock class kit stands.
-	if( level.coop_mpArmoryLive == 1 ){
+	//[MP modes slice 1] a game MODE owns the spawn kit and bypasses the armory entirely (Gun Game
+	//hands out the current-tier weapon with its own takeall + item + ammo + health 100).
+	if( level.coop_mpMode != "none" ){
+		waitthread mp_modeGiveKit local.p
+		if( local.p == NULL ){ end }
+	}
+	else if( level.coop_mpArmoryLive == 1 ){
 		waitthread coop_mod/mp_armory.scr::giveKit local.p
 		if( local.p == NULL ){ end }
 	}
@@ -310,4 +343,43 @@ mp_cleanName local.p:{
 
 	wait 1
 	if( local.p != NULL ){ local.p.flags["coop_mpCleaning"] = NIL }
+}end
+
+
+//=========================================================================
+// [MP modes slice 1] THE MODE DISPATCH SEAM. Three labels, each a switch on level.coop_mpMode, are
+// the only places mp.scr knows a specific mode. A later mode (Rifles preset, KOTH, S&D, LMS, ...)
+// adds a `case "<mode>":` in each and ships its own coop_mod/mp_<mode>.scr with mode_onSpawn /
+// mode_think / mode_onDeath. Keeping the seam here (rather than a dynamic file name, which the engine
+// cannot thread) means mp.scr stays the single owner of the poll and the edges.
+//=========================================================================
+
+//spawn-edge kit: the mode owns the give (called from mp_onSpawn)
+mp_modeGiveKit local.p:{
+	if( local.p == NULL ){ end }
+	switch( level.coop_mpMode ){
+		case "gungame":
+			waitthread coop_mod/mp_gungame.scr::mode_onSpawn local.p
+			break
+	}
+}end
+
+//per-tick hook: the mode watches kills/tiers (called from mp_tickPlayer every poll)
+mp_modeTick local.p:{
+	if( local.p == NULL ){ end }
+	switch( level.coop_mpMode ){
+		case "gungame":
+			waitthread coop_mod/mp_gungame.scr::mode_think local.p
+			break
+	}
+}end
+
+//death-edge hook: the victim just died (called from mp_tickPlayer on the alive->dead edge)
+mp_modeOnDeath local.p:{
+	if( local.p == NULL ){ end }
+	switch( level.coop_mpMode ){
+		case "gungame":
+			waitthread coop_mod/mp_gungame.scr::mode_onDeath local.p
+			break
+	}
 }end
