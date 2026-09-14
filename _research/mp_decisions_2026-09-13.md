@@ -28,7 +28,8 @@ pieces from both queues take turns in the shared openmohaa-hzm/.cmake build fold
 MP armories slice 1 answers (user, 2026-09-13, after mp_armories_slice1_plan.md):
 - P3 REVISED: the Sniper class is the scoped BOLT-ACTION rifles (scoped Springfield, Kar98 sniper and the like).
   Automatic weapons with a scope are NOT Sniper - "definitely not a scoped stg44" - they count toward their base
-  class. Scoped SEMI-automatic rifles (scoped Garand, G43, SVT) were not named: pending a one-line confirmation.
+  class. Scoped SEMI-automatic rifles (scoped Garand, G43, SVT) are SNIPER too (user, confirmed): only fully
+  automatic weapons with a scope (e.g. scoped StG44) count toward their base class.
 - U3 Axis free starters: Kar98K Sniper (Sniper) and Trench Gun (Shotgun); the Gewehrgranate becomes a locked
   Rocket-class tile.
 - U4 accepted: Multiplayer Options moves to an MP-owned menu, so ESC > Multiplayer Options shows the Allied/Axis
