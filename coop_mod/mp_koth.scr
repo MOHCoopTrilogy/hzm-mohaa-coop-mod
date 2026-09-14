@@ -1,0 +1,371 @@
+//=========================================================================
+// MP_KOTH.SCR - KING OF THE HILL, an MP game MODE (slice 4). Decision M15: a MOVING hill, TEAM
+// PRESENCE scoring, CONTESTED pauses, a POINT PER SECOND, FIRST TO LIMIT wins; an "Imperative" host
+// option offered on top.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, seed a hill spot, deploy the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the hill manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: KOTH has respawns, nothing to do)
+//
+// RECIPE (paraphrased, not copied - koth_source_notes.md; credit Klownterfit's KOTH and ViPER's
+// Strategic Hold). Klownterfit seeds the idea of a random spot list; ViPER contributes TEAM PRESENCE
+// scoring (any member of a team inside the box feeds that team, both teams inside cancels out) and the
+// "Imperative" one-unbroken-hold-wins variant. We rebuild from the rules (neither pack has a licence):
+//   * team-presence: each second, if EXACTLY ONE team has a living player inside the hill radius, that
+//     team scores 1 point; both present -> contested, scoring PAUSED; neither -> no score.
+//   * the hill MOVES: it relocates to the next authored/derived spot every coop_mpKothMove seconds.
+//   * FIRST TO coop_mpKothLimit points wins the match, then the map restarts fresh.
+//   * "Imperative" (coop_mpKothImperative 1, default off): the hill must be held UNBROKEN - any second
+//     that is contested, empty, changes hands, or follows a relocation RESETS both scores to 0, so the
+//     winner is the first team to run the limit as one clean hold (ViPER "hold 3", paraphrased).
+//
+// THE HILL MARKER, and why it needs NO new server->client shape and NO cgame ship (design risk resolved
+// 2026-09-14). The coop top compass BAR is coop-only and is hidden in MP, so MP shows the STOCK round
+// compass (ui/hud_compass.urc, already shipped). That menu draws an objective-direction ARROW from
+// playerstat 19 = STAT_OBJECTIVECENTER (bg_public.h). We set the hill's world position with the stock
+// script builtin set_objective_pos, which writes level.m_vObjectiveLocation; in gt2 Player::UpdateStats
+// (player.cpp:8992-8994, gt2 < GT_TOW and no force-team) reads that var and computes STAT_OBJECTIVECENTER,
+// delivered by the ORDINARY playerstate delta - not a new command shape. So the round compass arrow points
+// at the hill for every client with zero new grammar and no client build. (The stock objective-extent
+// balls, playerstat 17/18, were dropped from the mod HUD, but the direction arrow at 19 is kept.)
+//
+// WIN MECHANISM (and why). KOTH's base gametype is 2 (Team Match). teamwin is legal ONLY on gametype >= 4
+// (scriptthread.cpp), so it CANNOT end a gt2 KOTH match. The match-win is therefore a script score plus a
+// forced map restart (stuffsrv "map <name>"), exactly as Gun Game and the LMS/S&D round helper end their
+// rounds - the one proven, gametype-agnostic win path in this mod (no archive, no gametype flip).
+//
+// HILL SPOTS ARE DERIVED FROM REAL MAP ENTITIES, NOT GUESSED. getentarray "classname" returns nothing at
+// runtime in this engine (maptest_phase2.scr:95), so spawn entities cannot be enumerated directly. Instead
+// every player spawn origin (the engine's own info_player_* placement) is recorded as a candidate spot,
+// deduped by a minimum separation and capped, giving a spread of real map positions on ANY gt2 map with no
+// per-map data. A named-map override table (koth_authoredSpots) supplies hand-verified spots where we have
+// them; unknown maps fall back to the derived spots, and a map that somehow yields none never crashes (the
+// hill simply stays unset until the first spawn seeds it).
+//
+// ISOLATION: calls only the MP file coop_mod/mp_armory.scr (in MP_MANIFEST, so clause 10 admits it); names
+// no coop cvar / coop_lo token / ui/loadout tree / coop armory code; never giveInventory / changeGameType
+// (both force gt2 via setcvar g_gametype - mp.scr header) and never writes coop_health / coop_* state. All
+// cross-restart state (the running score) lives in the NON-archived coop_mpKoth* cvars; per-map hill state
+// lives in level vars (a restart wipes them and re-derives the hill, which is correct - a new match).
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// One-time KOTH config + hill-manager start. Idempotent (level flag). Reads the host cvars, zeroes the
+// engine's own frag/round/time limits so the engine cannot end the match before we do (same discipline
+// mp_rounds.scr / mp_gungame.scr use), resets the score cvars for a fresh match, and starts the manager.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpKothReady == 1 ){ end }
+	level.coop_mpKothReady = 1
+	level.coop_mpKothEnding = 0
+
+	//score to win: host cvar coop_mpKothLimit, default 150 points (= 150 uncontested seconds of hold).
+	local.lim = getcvar( "coop_mpKothLimit" )
+	if( local.lim == "" ){ local.lim = "150" }
+	level.coop_mpKothLimit = int( local.lim )
+	if( level.coop_mpKothLimit < 1 ){ level.coop_mpKothLimit = 150 }
+
+	//radius of the hill box (world units), host cvar coop_mpKothRadius, default 200 (Klownterfit's 200-unit
+	//box). A living player within this 3D distance of the active hill centre counts as inside.
+	local.rad = getcvar( "coop_mpKothRadius" )
+	if( local.rad == "" ){ local.rad = "200" }
+	level.coop_mpKothRadius = int( local.rad )
+	if( level.coop_mpKothRadius < 32 ){ level.coop_mpKothRadius = 200 }
+
+	//seconds between hill relocations, host cvar coop_mpKothMove, default 45.
+	local.mv = getcvar( "coop_mpKothMove" )
+	if( local.mv == "" ){ local.mv = "45" }
+	level.coop_mpKothMoveSecs = int( local.mv )
+	if( level.coop_mpKothMoveSecs < 5 ){ level.coop_mpKothMoveSecs = 45 }
+
+	//Imperative host option (coop_mpKothImperative), default 0 = off.
+	local.imp = getcvar( "coop_mpKothImperative" )
+	if( local.imp == "" ){ local.imp = "0" }
+	level.coop_mpKothImperative = int( local.imp )
+
+	//hill state (all wiped on a restart, which is correct: a restart is a fresh match)
+	level.coop_mpKothSpotN = 0
+	level.coop_mpKothIdx = 0
+	level.coop_mpKothHasHill = 0
+	level.coop_mpKothNextMove = 0
+	level.coop_mpKothHolder = ""
+
+	//running score lives in NON-archived cvars (setcvar), reset for this fresh match
+	setcvar "coop_mpKothScoreA" "0"
+	setcvar "coop_mpKothScoreX" "0"
+
+	//stop the engine ending the match first
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	//seed any authored spots for this map (override table). Derived spawn spots are added as players spawn.
+	waitthread koth_seedAuthored
+
+	println( "^~^~^ MPKOTH init gt=" + level.gametype + " limit=" + level.coop_mpKothLimit + " radius=" + level.coop_mpKothRadius + " move=" + level.coop_mpKothMoveSecs + " imperative=" + level.coop_mpKothImperative )
+	thread koth_loop
+}end
+
+
+//SPAWN EDGE. Config, seed a hill spot from this real spawn origin, then deploy THROUGH THE ARMORY so the
+//weapon preset (coop_mpPreset) is inherited automatically (decision M5).
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread koth_addSpot local.p.origin
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. Nothing per-player here (the manager owns the hill and the scoring); just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread koth_ensure
+}end
+
+
+//DEATH EDGE. KOTH has normal respawns - a death does not end anything.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	end
+}end
+
+
+//=========================================================================
+// Hill-spot list. Every real player spawn origin becomes a candidate spot, deduped by a minimum
+// separation and capped, so the moving hill visits a spread of genuine map positions on any map.
+//=========================================================================
+
+//add one candidate spot (a vector). Deduped within coop_mpKothMinSep; capped at coop_mpKothMaxSpots. The
+//FIRST spot activates the hill at once so a marker exists from the first spawn.
+koth_addSpot local.pos:{
+	if( local.pos == NIL ){ end }
+
+	local.maxN = 6
+	local.minSep = 250
+
+	if( level.coop_mpKothSpotN == NIL ){ level.coop_mpKothSpotN = 0 }
+	if( level.coop_mpKothSpotN >= local.maxN ){ end }
+
+	//reject a spot too close to one we already hold
+	for( local.i = 1; local.i <= level.coop_mpKothSpotN; local.i++ ){
+		local.d = vector_length( local.pos - level.coop_mpKothSpots[local.i] )
+		if( local.d < local.minSep ){ end }
+	}
+
+	local.n = ( level.coop_mpKothSpotN + 1 )
+	level.coop_mpKothSpots[local.n] = local.pos
+	level.coop_mpKothSpotN = local.n
+	println( "^~^~^ MPKOTH spot n=" + local.n + " pos=" + local.pos )
+
+	//first spot: light the hill immediately
+	if( level.coop_mpKothHasHill != 1 ){
+		level.coop_mpKothIdx = 1
+		waitthread koth_setHill 1
+	}
+}end
+
+
+//seed authored spots for a named map (override table). Uses the same spot list, so authored and derived
+//spots compose. Coordinates are hand-verified per map; unknown maps ship no authored entry and rely on the
+//derived spawn spots. Vectors are added through koth_addSpot so the dedup/cap/first-hill logic is shared.
+koth_seedAuthored:{
+	local.m = getcvar( "mapname" )
+	if( local.m == "" ){ end }
+
+	//dm/mohdm1 (Southern France) - four hand-picked spots, each a REAL player-spawn origin harvested from a
+	//live gt2 boot (the derived path prints every spawn as "^~^~^ MPKOTH spot"), chosen for spread across the
+	//map (west courtyard, centre, east, north platform). Authored spots are added first, so they take the low
+	//indices and the first hill; runtime spawn origins still top up any remaining slots (deduped, capped).
+	//This is the seam for further per-map lists; every OTHER gt2 map derives its hill from spawn origins live.
+	if( local.m == "dm/mohdm1" ){
+		waitthread koth_addSpot ( -1134 0 128 )
+		waitthread koth_addSpot ( -211 -340 0 )
+		waitthread koth_addSpot ( 897 -134 0 )
+		waitthread koth_addSpot ( 1220 2731 385 )
+		end
+	}
+}end
+
+
+//activate spot index local.i as the hill and publish its position to the stock objective compass arrow.
+koth_setHill local.i:{
+	if( local.i < 1 || local.i > level.coop_mpKothSpotN ){ end }
+	local.h = level.coop_mpKothSpots[local.i]
+	level.coop_mpKothHill = local.h
+	level.coop_mpKothHasHill = 1
+	level.coop_mpKothNextMove = ( level.time + level.coop_mpKothMoveSecs )
+
+	//THE MARKER: stock script builtin, sets level.m_vObjectiveLocation -> STAT_OBJECTIVECENTER (playerstat
+	//19) -> the round compass objective arrow. No new server->client shape (header).
+	set_objective_pos local.h
+	println( "^~^~^ MPKOTH hill idx=" + local.i + " pos=" + local.h )
+}end
+
+
+//=========================================================================
+// THE HILL MANAGER. One loop per map load, guarded on coop_mpRun (a level load / the restart wipes it,
+// ending the loop cleanly) and on a run-once flag. Runs once a second so a point is one second of hold.
+//=========================================================================
+koth_loop:{
+	if( level.coop_mpKothLoopOn == 1 ){ end }
+	level.coop_mpKothLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread koth_tick
+		wait 1
+	}
+}end
+
+
+//idempotent guarantee the loop is running (called from mode_think). ensureConfig already started it on the
+//first spawn; this only matters if think is somehow dispatched before a spawn.
+koth_ensure:{
+	if( level.coop_mpKothReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+koth_tick:{
+	if( level.coop_mpKothEnding == 1 ){ end }
+	if( level.coop_mpKothHasHill != 1 ){ end }
+
+	//relocate the hill if its timer elapsed and there is somewhere else to go
+	local.moved = 0
+	if( level.coop_mpKothSpotN >= 2 && level.time >= level.coop_mpKothNextMove ){
+		local.next = ( level.coop_mpKothIdx + 1 )
+		if( local.next > level.coop_mpKothSpotN ){ local.next = 1 }
+		level.coop_mpKothIdx = local.next
+		waitthread koth_setHill local.next
+		iprintlnbold( "King of the Hill - the hill has MOVED!" )
+		println( "^~^~^ MPKOTH move idx=" + local.next )
+		local.moved = 1
+	}
+
+	//team presence inside the hill
+	local.a = waitthread koth_countInHill "allies"
+	local.x = waitthread koth_countInHill "axis"
+
+	//sole occupant this second: "allies" / "axis" / "" (contested or empty)
+	local.sole = ""
+	if( local.a >= 1 && local.x < 1 ){ local.sole = "allies" }
+	else if( local.x >= 1 && local.a < 1 ){ local.sole = "axis" }
+
+	if( level.coop_mpKothImperative == 1 ){
+		//UNBROKEN-HOLD rule: a relocation, a contest, an empty hill, or a change of holder resets the run.
+		if( local.moved == 1 || local.sole == "" ){
+			if( level.coop_mpKothHolder != "" ){ waitthread koth_resetScores }
+			level.coop_mpKothHolder = ""
+		}
+		else{
+			if( level.coop_mpKothHolder != local.sole ){
+				waitthread koth_resetScores
+				level.coop_mpKothHolder = local.sole
+			}
+			waitthread koth_award local.sole
+		}
+	}
+	else{
+		//cumulative rule: the sole team banks a point; contested/empty banks nothing.
+		if( local.sole != "" ){ waitthread koth_award local.sole }
+	}
+
+	local.sa = waitthread koth_i "coop_mpKothScoreA"
+	local.sx = waitthread koth_i "coop_mpKothScoreX"
+	local.state = local.sole
+	if( local.state == "" ){
+		if( local.a >= 1 && local.x >= 1 ){ local.state = "contested" } else { local.state = "empty" }
+	}
+	println( "^~^~^ MPKOTH tick a=" + local.a + " x=" + local.x + " state=" + local.state + " scoreA=" + local.sa + " scoreX=" + local.sx )
+
+	//win check
+	if( local.sa >= level.coop_mpKothLimit ){ waitthread koth_win "allies" local.sa local.sx }
+	else if( local.sx >= level.coop_mpKothLimit ){ waitthread koth_win "axis" local.sa local.sx }
+}end
+
+
+//award one point to a side ("allies"/"axis") in its score cvar.
+koth_award local.side:{
+	if( local.side == "allies" ){
+		local.v = ( waitthread koth_i "coop_mpKothScoreA" + 1 )
+		setcvar "coop_mpKothScoreA" ( "" + local.v )
+	}
+	else if( local.side == "axis" ){
+		local.v = ( waitthread koth_i "coop_mpKothScoreX" + 1 )
+		setcvar "coop_mpKothScoreX" ( "" + local.v )
+	}
+}end
+
+
+//zero both score cvars (Imperative break).
+koth_resetScores:{
+	setcvar "coop_mpKothScoreA" "0"
+	setcvar "coop_mpKothScoreX" "0"
+	println( "^~^~^ MPKOTH reset (imperative break)" )
+}end
+
+
+//=========================================================================
+// The match win: announce, hold the banner, then reload the SAME map (the proven transition -
+// mp_gungame.scr::doWin / mp_rounds.scr::rounds_win). One-shot via coop_mpKothEnding.
+//=========================================================================
+koth_win local.side local.sa local.sx:{
+	if( level.coop_mpKothEnding == 1 ){ end }
+	level.coop_mpKothEnding = 1
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " WIN King of the Hill!  Allies " + local.sa + " : " + local.sx + " Axis" )
+	println( "^~^~^ MPKOTH win side=" + local.side + " scoreA=" + local.sa + " scoreX=" + local.sx + " map=" + getcvar( "mapname" ) )
+
+	//fresh match next map load
+	setcvar "coop_mpKothScoreA" "0"
+	setcvar "coop_mpKothScoreX" "0"
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPKOTH restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//read an int cvar, "" -> 0. int() is computed into a local BEFORE end - a function call in the `}end <expr>`
+//return position is NOT evaluated by the engine (bug-2603 / mp_rounds.scr::rounds_i), so never put one there.
+koth_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v
+
+
+//count LIVING, in-play players of a side ("allies"/"axis") inside the hill radius. Mirrors the filter in
+//mp_rounds.scr::rounds_countAlive (not spectator, alive, on the team) plus the 3D radius test.
+koth_countInHill local.team:{
+	local.n = 0
+	if( level.coop_mpKothHasHill != 1 ){ end local.n }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - level.coop_mpKothHill )
+		if( local.d > level.coop_mpKothRadius ){ continue }
+		local.n++
+	}
+}end local.n
