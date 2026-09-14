@@ -188,6 +188,18 @@ applyMarker local.p local.side local.field local.data:{
 	if( local.field == "3" ){ local.wantSlot = "g" }
 	if( local.r["slot"] != local.wantSlot ){ end }
 
+	//[preset slice 2, M3/M5] a PRIMARY whose weapon class the active preset masks out is refused at pick
+	//time too. The deploy path (resolvePrimary -> classBanned) would degrade it to an allowed starter
+	//anyway, but denying here keeps the committed chip honest and never shows a banned gun as selected.
+	//Sidearms (field 2) and grenades (field 3) are NEVER preset-masked (M4), so only field "1" is checked.
+	if( local.field == "1" ){
+		local.pmb = waitthread presetBansClass local.r["dmclass"]
+		if( local.pmb == 1 ){
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + local.field + local.data + " deny preset" )
+			end
+		}
+	}
+
 	//UNLOCK (interim): only the P1 free starters are unlocked in slice 1/2. Everything else is locked.
 	if( local.r["starter"] != 1 ){
 		println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + local.field + local.data + " deny locked" )
@@ -383,8 +395,39 @@ starterFor local.side local.class:{
 	}
 }end local.id
 
+//[preset slice 2, M3/M4/M5] does the ACTIVE weapon preset mask this primary dmclass out? Reads the
+//MP-owned level.coop_mpPreset (seeded once in mp.scr::main from the coop_mpPreset host cvar). Pistols and
+//grenades ALWAYS pass (M4). "" / "none" / NIL / an unknown value -> nothing masked (fail-open to today's
+//behaviour). P3: the Sniper class is the roster's dmclass "sniper" tag, which already covers scoped
+//bolt-action and scoped semi-auto rifles while a scoped fully-auto is tagged to its base class - so this
+//reuses the shipped tags and reclassifies nothing.
+presetBansClass local.cls:{
+	local.pre = level.coop_mpPreset
+	if( local.pre == NIL || local.pre == "" || local.pre == "none" ){ end 0 }
+	//pistols and grenades stay under every preset (M4)
+	if( local.cls == "pistol" || local.cls == "grenade" ){ end 0 }
+	if( local.pre == "rifles" ){
+		if( local.cls == "rifle" ){ end 0 }
+		end 1
+	}
+	if( local.pre == "snipers" ){
+		if( local.cls == "sniper" ){ end 0 }
+		end 1
+	}
+	if( local.pre == "riflesnipers" ){
+		if( local.cls == "rifle" || local.cls == "sniper" ){ end 0 }
+		end 1
+	}
+}end 0
+
 //is a dmclass banned by the server's dmflags? (DF_WEAPON_NO_* bits, bg_public.h)
 classBanned local.cls:{
+	//[preset slice 2, M5] the active weapon preset masks primary classes FIRST, composed HERE so every
+	//path that asks "is this class legal" - resolvePrimary's degrade, firstAllowedClass and botRollClass -
+	//honours the preset through the one gate, never a fork. Pistols/grenades are never masked (M4, handled
+	//inside presetBansClass).
+	local.pb = waitthread presetBansClass local.cls
+	if( local.pb == 1 ){ end 1 }
 	local.f = int( getcvar( "dmflags" ) )
 	local.bit = 0
 	switch( local.cls ){
