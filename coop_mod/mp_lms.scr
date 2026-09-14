@@ -1,0 +1,81 @@
+//=========================================================================
+// MP_LMS.SCR - LAST MAN STANDING, an MP game MODE (slice 3). Decision M17: team elimination rounds
+// with a last-man callout.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn-edge: set config, arm rounds, deploy the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the round manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: mark OUT for the round, no respawn)
+//
+// RECIPE (paraphrased, not copied - community_modes_deepdive.md; credit OwN-3m-All's Last Man Standing
+// and UBER's Survivor). One life per round: when you die you are OUT until the round ends, held in
+// spectator; when a whole team is eliminated the other team wins the round; the last living player of a
+// side gets a callout. The shared coop_mod/mp_rounds.scr helper does the no-respawn hold, the alive
+// counts, the callout and the round transition; this file is only the LMS config and the three edges.
+//
+// WIN MECHANISM (and why). LMS's base gametype is 3 (Round-Based Match). teamwin is legal ONLY on
+// gametype >= 4 (scriptthread.cpp), so it CANNOT end an LMS round. The round-win is therefore a script
+// series score in cvars plus a forced map restart (stuffsrv "map <name>"), exactly as Gun Game ends its
+// round - the one win path the shared helper uses for every mode. UBER's Survivor ended the map with
+// bsptransition + a gametype flip, which CLAUDE.md forbids; the restart replaces it. A timed-out round
+// is resolved by MAJORITY survivors so a stalemate still advances the series.
+//
+// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, so
+// isolation clause 10 admits them); names no coop cvar / coop_lo token / ui/loadout tree / coop armory
+// code; never giveInventory / changeGameType; never writes coop_health / coop_* state. It does NOT reuse
+// the coop LMS cvar coop_lmsLives or coop_mod/main.scr::lmsForceSpectatorHandle (both coop-only); LMS's
+// own series lives in the coop_mpRnd* cvars.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//One-time LMS config into the shared round helper's level.coop_mpRnd* vars. Idempotent (level flag).
+ensureConfig:{
+	if( level.coop_mpLmsReady == 1 ){ end }
+	level.coop_mpLmsReady = 1
+
+	level.coop_mpRndName = "Last Man Standing"
+	level.coop_mpRndBombGuard = 0
+	level.coop_mpRndCallout = 1
+
+	//optional round timer (host cvar coop_mpLmsTime, default 0 = off; pure elimination). When set, a
+	//timed-out round is decided by majority survivors so a camping stalemate still resolves.
+	local.t = getcvar( "coop_mpLmsTime" )
+	if( local.t == "" ){ local.t = "0" }
+	level.coop_mpRndTimeout = int( local.t )
+	level.coop_mpRndTimeoutSide = "majority"
+
+	println( "^~^~^ MPLMS init gt=" + level.gametype + " time=" + level.coop_mpRndTimeout )
+}end
+
+
+//SPAWN EDGE. Set config, arm the round manager, and deploy THROUGH THE ARMORY so the weapon preset
+//(coop_mpPreset) is inherited automatically (decision M5).
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread coop_mod/mp_rounds.scr::rounds_begin
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. Nothing per-player here (the shared manager owns the round); just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+}end
+
+
+//DEATH EDGE. Hand the victim to the shared helper: OUT for the rest of the round (no respawn).
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_onDeath local.p
+}end

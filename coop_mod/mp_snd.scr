@@ -1,0 +1,89 @@
+//=========================================================================
+// MP_SND.SCR - SEARCH & DESTROY, an MP game MODE (slice 3). Decision M16: the STOCK gametype-4
+// objective bomb game, played as rounds with NO respawn, on objective maps.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn-edge: set config, arm rounds, deploy the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the round manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: mark OUT for the round, no respawn)
+//
+// THE BOMB IS NOT REINVENTED (CLAUDE.md fix methodology). Plant / defuse / detonate is the STOCK gt4
+// recipe in global/obj_dm.scr, wired by each objective map's own bomb_thinker: allies (or axis) hold
+// USE on the charge trigger for level.bomb_set_time, the fuse ticks for level.bomb_tick_time, a defuse
+// by level.defusing_team stops it, and a detonation destroys the target and ENDS the match in engine
+// code - that engine match-end IS the attackers' win. This file only layers the ROUND / NO-RESPAWN
+// structure on top, via the shared coop_mod/mp_rounds.scr helper. It reads the stock map's own
+// level.planting_team (attackers), level.defusing_team (defenders) and level.bombs_planted; it never
+// touches the bomb entities. Bots never press USE / never play the objective (they just fight), so the
+// bomb is human-driven - the round can still resolve by elimination or the round timer with no plant.
+//
+// WIN MECHANISM (and why). gt4 (objective) is the one family where teamwin is legal, but this mode
+// deliberately does NOT use teamwin: teamwin fires the engine's own round transition, which would race
+// the deterministic map-restart the shared helper uses (and which LMS on gt3 has no choice but to use).
+// So S&D wins a round exactly as LMS does - a script series score in cvars plus a stuffsrv "map <name>"
+// restart - keeping ONE proven, gametype-agnostic win path. See mp_rounds.scr header.
+//
+// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, so
+// isolation clause 10 admits them); names no coop cvar, coop_lo token, ui/loadout tree or coop armory
+// code; never giveInventory / changeGameType; never writes coop_health / coop_* state. level.planting_team
+// / defusing_team / bombs_planted are plain stock level vars, not cvars.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//One-time S&D config into the shared round helper's level.coop_mpRnd* vars (read by mp_rounds.scr).
+//Idempotent (level flag). Attackers/defenders come from the stock map's own bomb wiring.
+ensureConfig:{
+	if( level.coop_mpSndReady == 1 ){ end }
+	level.coop_mpSndReady = 1
+
+	level.coop_mpRndName = "Search & Destroy"
+	level.coop_mpRndBombGuard = 1
+	level.coop_mpRndCallout = 1
+
+	//round timer (host cvar coop_mpSndTime, default 120s). On timeout the DEFENDERS win - the attackers
+	//failed to detonate - so the timeout side is the stock defusing_team.
+	local.t = getcvar( "coop_mpSndTime" )
+	if( local.t == "" ){ local.t = "120" }
+	level.coop_mpRndTimeout = int( local.t )
+
+	local.def = level.defusing_team
+	if( local.def == NIL ){ local.def = "" }
+	level.coop_mpRndTimeoutSide = local.def
+
+	local.att = level.planting_team
+	if( local.att == NIL ){ local.att = "" }
+	println( "^~^~^ MPSND init planting=" + local.att + " defusing=" + local.def + " gt=" + level.gametype + " time=" + level.coop_mpRndTimeout )
+}end
+
+
+//SPAWN EDGE. Set config, arm the round manager, and deploy THROUGH THE ARMORY so the weapon preset
+//(coop_mpPreset) is inherited automatically (decision M5) - unlike Gun Game, which owns a fixed ladder.
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread coop_mod/mp_rounds.scr::rounds_begin
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. Nothing per-player here (the shared manager owns the round); just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+}end
+
+
+//DEATH EDGE. Hand the victim to the shared helper: OUT for the rest of the round (no respawn).
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_onDeath local.p
+}end

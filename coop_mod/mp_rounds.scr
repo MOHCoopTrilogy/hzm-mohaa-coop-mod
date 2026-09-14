@@ -1,0 +1,321 @@
+//=========================================================================
+// MP_ROUNDS.SCR - the shared MP round-state helper (slice 3). Consumed by
+// coop_mod/mp_snd.scr (Search & Destroy) and coop_mod/mp_lms.scr (Last Man Standing).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here
+// can run on a coop map. mp.scr owns the per-player poll and the team/alive/death edges; a mode
+// (mp_snd / mp_lms) is dispatched through mp.scr's three seam labels (a switch on
+// level.coop_mpMode) and in turn drives THIS helper:
+//     mode_onSpawn  -> rounds_begin    (per map-load setup; starts the round manager loop ONCE)
+//     mode_onDeath  -> rounds_onDeath  (mark the victim OUT for the rest of the round: NO respawn)
+//     mode_think    -> rounds_ensure   (idempotent: guarantees the manager loop is running)
+//
+// ISOLATION: names no coop cvar / coop_lo / ui/loadout token; calls NO coop code (only its own
+// labels; the modes call it and the shipped MP armory, both MP files). It NEVER calls giveInventory
+// or changeGameType (both end in setcvar g_gametype and would force gt2 - mp.scr header) and NEVER
+// writes coop_health / coop_lockLoadout / any coop_* state. Per-player state lives in
+// self.flags["coop_mpRnd*"] (entity keys, not cvars, and coop_mp* is MP-owned).
+//
+// CROSS-ROUND STATE LIVES IN CVARS, NOT LEVEL VARS. A round ends by RESTARTING the same map with
+// the proven transition (stuffsrv "map <mapname>" -> SV_Map_f, no archive, no gametype flip - exactly
+// as coop_mod/mp_gungame.scr::doWin ends its round). That reload wipes every level var, so the round
+// helper is re-initialised from scratch each round; only the SERIES score survives, and it survives
+// because it is kept in the coop_mpRnd* cvars below (mirrors how the engine's g_temp* scores persist a
+// map change). setcvar creates NON-archived cvars, so nothing here is written to disk or can follow a
+// player into coop. The cvars: coop_mpRndScoreA / coop_mpRndScoreX (series wins per side),
+// coop_mpRndNum (rounds played), coop_mpRndToWin (series target).
+//
+// NO-RESPAWN ENFORCEMENT (decisions M16/M17). Once a round is LIVE, a player who dies is OUT until the
+// round ends: marked with self.flags["coop_mpRndOut"] on the death edge and, every manager tick, any
+// out player who is somehow alive-on-a-team again is forced back with the `spectator` entity command
+// (the same command coop_mod/main.scr::lmsForceSpectatorHandle uses to hold a player out; NOT a
+// stufftext `spectator`, which the client filter drops - community_modes_deepdive.md). Because the
+// round ends with a full map restart, out players are simply re-spawned fresh next round; no re-team is
+// needed. Deaths during the warmup (before the round arms) respawn normally, as UBER's round framework
+// does. WIN mechanism: teamwin is legal only on gametype >= 4, so it CANNOT serve LMS (gt3); rather than
+// fork the win path by gametype, BOTH modes use the same script-score + map-restart here, which is
+// gametype-agnostic and does not depend on the engine round-transition / intermission event hooks that
+// registerev leaves silently dead (community_modes_deepdive.md).
+//=========================================================================
+
+//Inert entry. The modes call the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// PER MAP-LOAD SETUP. Called from a mode's mode_onSpawn (the first alive edge of the round). The mode
+// has already set its config into the level.coop_mpRnd* vars below (name / timeout / callout / bomb
+// guard) BEFORE calling this. Idempotent within one map load (level flag). Zeroes the engine's own
+// frag/round/time limits so the engine cannot end the match before the round manager does (the same
+// discipline mp_gungame.scr uses on fraglimit). Then starts the single manager loop.
+//=========================================================================
+rounds_begin:{
+	if( level.coop_mpRndReady == 1 ){ end }
+	level.coop_mpRndReady = 1
+	level.coop_mpRndEnding = 0
+	level.coop_mpRndState = "warmup"
+	level.coop_mpRndStart = level.time
+	level.coop_mpRndCallAllies = 0
+	level.coop_mpRndCallAxis = 0
+	level.coop_mpRndBombWas = 0
+
+	//config defaults (a mode may have overridden these before calling)
+	if( level.coop_mpRndName == NIL ){ level.coop_mpRndName = "Rounds" }
+	if( level.coop_mpRndTimeout == NIL ){ level.coop_mpRndTimeout = 0 }
+	if( level.coop_mpRndTimeoutSide == NIL ){ level.coop_mpRndTimeoutSide = "" }
+	if( level.coop_mpRndCallout == NIL ){ level.coop_mpRndCallout = 0 }
+	if( level.coop_mpRndBombGuard == NIL ){ level.coop_mpRndBombGuard = 0 }
+
+	//series target: a host cvar (coop_mpRndToWin), default 5. Read here so it can be retuned per server.
+	local.tw = getcvar( "coop_mpRndToWin" )
+	if( local.tw == "" ){ local.tw = "5" }
+	level.coop_mpRndToWin = int( local.tw )
+	if( level.coop_mpRndToWin < 1 ){ level.coop_mpRndToWin = 5 }
+
+	//stop the engine ending the match first: raw frags/rounds/time are not our win condition here.
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	println( "^~^~^ MPRND begin mode=" + level.coop_mpRndName + " gt=" + level.gametype + " toWin=" + level.coop_mpRndToWin + " timeout=" + level.coop_mpRndTimeout + " bombGuard=" + level.coop_mpRndBombGuard )
+	thread rounds_loop
+}end
+
+
+//Idempotent guarantee the loop is running (called from mode_think every poll). rounds_begin already
+//started it on the first spawn; this only matters if a mode dispatches think before spawn.
+rounds_ensure:{
+	if( level.coop_mpRndReady != 1 ){ waitthread rounds_begin }
+}end
+
+
+//=========================================================================
+// THE ROUND MANAGER. One loop per map load, guarded on coop_mpRun (a level load / the round restart
+// wipes it, ending the loop cleanly). Not per-player: it counts both sides once per tick and owns the
+// round decision. Threaded so its banner waits never stall mp.scr's own poll.
+//=========================================================================
+rounds_loop:{
+	if( level.coop_mpRndLoopOn == 1 ){ end }
+	level.coop_mpRndLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread rounds_tick
+		wait 0.5
+	}
+}end
+
+
+rounds_tick:{
+	if( level.coop_mpRndEnding == 1 ){ end }
+
+	//no-respawn: re-assert OUT players every tick, whatever state we are in (belt and braces for any
+	//death path that outran the death edge, or an engine respawn between ticks).
+	waitthread rounds_enforceAll
+
+	//WARMUP: arm the round once both sides field a living player (deaths respawn normally until then).
+	if( level.coop_mpRndState == "warmup" ){
+		local.a = waitthread rounds_countAlive "allies"
+		local.x = waitthread rounds_countAlive "axis"
+		if( local.a >= 1 && local.x >= 1 ){
+			level.coop_mpRndState = "live"
+			level.coop_mpRndStart = level.time
+			iprintlnbold( level.coop_mpRndName + " - round " + ( waitthread rounds_i "coop_mpRndNum" + 1 ) + " - FIGHT!" )
+			println( "^~^~^ MPRND armed allies=" + local.a + " axis=" + local.x )
+		}
+		end
+	}
+
+	if( level.coop_mpRndState != "live" ){ end }
+
+	local.a = waitthread rounds_countAlive "allies"
+	local.x = waitthread rounds_countAlive "axis"
+
+	//last-man callout (decision M17): announce a side's final survivor, once per round per side.
+	waitthread rounds_calloutCheck "allies" local.a
+	waitthread rounds_calloutCheck "axis" local.x
+
+	//round timer
+	local.timedout = 0
+	if( level.coop_mpRndTimeout > 0 && ( level.time - level.coop_mpRndStart ) >= level.coop_mpRndTimeout ){ local.timedout = 1 }
+
+	//decide
+	local.win = ""
+	local.reason = ""
+	if( local.a <= 0 && local.x <= 0 ){
+		local.win = "draw"
+		local.reason = "doublewipe"
+	}
+	else if( local.x <= 0 ){
+		local.win = "allies"
+		local.reason = "wipe"
+	}
+	else if( local.a <= 0 ){
+		local.win = "axis"
+		local.reason = "wipe"
+	}
+	else if( local.timedout == 1 ){
+		local.reason = "timeout"
+		local.win = waitthread rounds_timeoutWinner local.a local.x
+	}
+
+	if( local.win == "" ){ end }
+
+	//S&D bomb guard: while a planted bomb is still ticking, do NOT hand the defenders a wipe/timeout win
+	//- the stock gt4 bomb (global/obj_dm.scr) may yet detonate it for the attackers. Detonation ends the
+	//match in engine code (the objective completes), which IS the attackers' win, covered by stock. A
+	//defuse drops level.bombs_planted back to 0 and the next tick resolves normally.
+	if( level.coop_mpRndBombGuard == 1 ){
+		local.planted = 0
+		if( level.bombs_planted != NIL && level.bombs_planted > 0 ){ local.planted = 1 }
+		if( local.planted == 1 ){
+			if( local.win == level.defusing_team && ( local.reason == "wipe" || local.reason == "timeout" ) ){ end }
+		}
+	}
+
+	waitthread rounds_win local.win local.reason
+}end
+
+
+//=========================================================================
+// The round win: bump the winner's SERIES score cvar, announce, check the series target, then reload
+// the SAME map (the proven transition - mp_gungame.scr::doWin). One-shot via coop_mpRndEnding.
+//=========================================================================
+rounds_win local.win local.reason:{
+	if( level.coop_mpRndEnding == 1 ){ end }
+	level.coop_mpRndEnding = 1
+	level.coop_mpRndState = "ending"
+
+	local.a = waitthread rounds_i "coop_mpRndScoreA"
+	local.x = waitthread rounds_i "coop_mpRndScoreX"
+	local.num = waitthread rounds_i "coop_mpRndNum"
+	local.num = ( local.num + 1 )
+
+	if( local.win == "allies" ){ local.a = ( local.a + 1 ) }
+	if( local.win == "axis" ){ local.x = ( local.x + 1 ) }
+
+	setcvar "coop_mpRndScoreA" ( "" + local.a )
+	setcvar "coop_mpRndScoreX" ( "" + local.x )
+	setcvar "coop_mpRndNum" ( "" + local.num )
+
+	local.tag = "DRAW"
+	if( local.win == "allies" ){ local.tag = "ALLIES win the round" }
+	if( local.win == "axis" ){ local.tag = "AXIS win the round" }
+	iprintlnbold( level.coop_mpRndName + ": " + local.tag + " (" + local.reason + ")  -  Allies " + local.a + " : " + local.x + " Axis" )
+	println( "^~^~^ MPRND win side=" + local.win + " reason=" + local.reason + " scoreA=" + local.a + " scoreX=" + local.x + " round=" + local.num )
+
+	//series decided?
+	if( local.a >= level.coop_mpRndToWin || local.x >= level.coop_mpRndToWin ){
+		local.mw = "Allies"
+		if( local.x > local.a ){ local.mw = "Axis" }
+		iprintlnbold( level.coop_mpRndName + " - " + local.mw + " WIN THE MATCH!  Starting a new series." )
+		println( "^~^~^ MPRND series winner=" + local.mw + " scoreA=" + local.a + " scoreX=" + local.x )
+		//fresh series next map load
+		setcvar "coop_mpRndScoreA" "0"
+		setcvar "coop_mpRndScoreX" "0"
+		setcvar "coop_mpRndNum" "0"
+	}
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPRND restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//=========================================================================
+// Mode edges (called through mp.scr's seam via the mode files).
+//=========================================================================
+
+//Death edge: mark the victim OUT for the rest of the round, but only once the round is LIVE. A warmup
+//death respawns normally. The enforce loop does the actual force-to-spectator so a death that outran
+//this still gets caught.
+rounds_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpRndState != "live" ){ end }
+	local.p.flags["coop_mpRndOut"] = 1
+	println( "^~^~^ MPRND out e" + local.p.entnum + " side=" + local.p.dmteam )
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//read an int cvar, "" -> 0. NOTE: int() is computed into a local BEFORE `end` - a function call in the
+//`}end <expr>` return position is NOT evaluated by the engine (it returned the bare token "int"), which
+//poisoned the score cvars into strings and made the series `>=` a type mismatch.
+rounds_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v
+
+//count LIVING, in-play players on a side ("allies" / "axis"): not OUT, not spectator, alive.
+rounds_countAlive local.team:{
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.flags["coop_mpRndOut"] == 1 ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.n++
+	}
+}end local.n
+
+//force every OUT player who is somehow alive-on-a-team back to spectator (the no-respawn hold).
+rounds_enforceAll:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.flags["coop_mpRndOut"] != 1 ){ continue }
+		if( local.p.dmteam == "spectator" || local.p.isSpectator ){ continue }
+		if( local.p.health > 0 ){ local.p hide }
+		local.p spectator
+		println( "^~^~^ MPRND hold e" + local.p.entnum )
+	}
+}end
+
+//last-man callout: when a side is down to exactly one living player, name that survivor once.
+rounds_calloutCheck local.team local.aliveN:{
+	if( level.coop_mpRndCallout != 1 ){ end }
+	if( local.aliveN != 1 ){ end }
+	if( local.team == "allies" ){
+		if( level.coop_mpRndCallAllies == 1 ){ end }
+		level.coop_mpRndCallAllies = 1
+	} else {
+		if( level.coop_mpRndCallAxis == 1 ){ end }
+		level.coop_mpRndCallAxis = 1
+	}
+	local.who = ""
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.flags["coop_mpRndOut"] == 1 ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.who = local.p.netname
+		local.i = ( $player.size + 1 )
+	}
+	if( local.who == "" ){ end }
+	iprintlnbold( local.who + " is the LAST MAN STANDING for " + local.team + "!" )
+	println( "^~^~^ MPRND lastman side=" + local.team + " name=" + local.who )
+}end
+
+//resolve a timed-out round. "allies"/"axis" -> that side wins (S&D defenders); "majority" -> the side
+//with more survivors (LMS, so a stalemate still advances the series); anything else -> draw.
+rounds_timeoutWinner local.a local.x:{
+	local.s = level.coop_mpRndTimeoutSide
+	if( local.s == "allies" || local.s == "axis" ){ end local.s }
+	if( local.s == "majority" ){
+		if( local.a > local.x ){ end "allies" }
+		if( local.x > local.a ){ end "axis" }
+	}
+}end "draw"
