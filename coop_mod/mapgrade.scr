@@ -1,0 +1,60 @@
+//=========================================================================
+// HZM coop - PER-MAP COLOUR GRADE (server side).
+//
+// Reads the generated lookup cfg (coop_mod/cfg/mapgrade.cfg, from docs/tools/grade_profiles.tsv
+// via docs/tools/gen_mapgrade.py) and publishes THIS map's grade to every client as the packed
+// cvar coop_mapGrade "expo cont sat temp". The client relay (cgame CG_CoopMapGradeThink) splits it
+// into the renderer r_ppMap* layer, which RB_ToneMap multiplies on top of the player's own grade and
+// the night layer. Grade is ON by default; the player opt-out is the client-only archived cvar
+// r_ppMapGradeOn, which a server cannot flip.
+//
+// Threaded UNCONDITIONALLY from coop_mod/main.scr::main, exactly like the fog boot - so it only ever
+// runs on coop-integrated maps (never on a stock MP map), and no per-map script needs editing. A map
+// with no row in the table publishes nothing, so its grade stays identity (unchanged look).
+//=========================================================================
+
+//=========================================================================
+coop_mapgrade_boot:{
+//=========================================================================
+	waitthread coop_mod/main.scr::waitForMainScript
+
+	// Load the lookup table ONCE per server process. coop_mgLoaded is a script-owned flag with no
+	// engine default, so the empty value getcvar returns on the very first read (T7) simply means
+	// "not loaded yet". stuffsrv queues the exec on the server console; the coop_mg_* cvars it defines
+	// persist for the whole session, so later maps skip the exec and read them directly.
+	if( getcvar( "coop_mgLoaded" ) != "1" ){
+		setcvar "coop_mgLoaded" "1"
+		stuffsrv "exec coop_mod/cfg/mapgrade.cfg"
+		wait 0.5
+	}
+
+	level.coop_mapGradeRow = getcvar( "coop_mg_" + level.coop_mapname )
+	if( level.coop_mapGradeRow == "" || level.coop_mapGradeRow == NIL ){
+		println( "^~^~^ COOP_MAPGRADE none for " + level.coop_mapname )
+		end
+	}
+	println( "^~^~^ COOP_MAPGRADE " + level.coop_mapname + " = " + level.coop_mapGradeRow )
+	thread coop_mapgrade_publish
+}end
+
+//=========================================================================
+// Push coop_mapGrade to every connected player once (and to late joiners). Values are sent UNQUOTED,
+// one statement per stufftext (T8): Cvar_Set2 re-joins the trailing tokens, so "1.00 1.05 0.80 -0.12"
+// arrives intact. self.flags["coop_mgSent"] makes it one-shot per player; the loop keeps running for
+// clients who connect after the map has started.
+//=========================================================================
+coop_mapgrade_publish:{
+//=========================================================================
+	while( 1 ){
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			if( local.p != NULL && local.p.flags["coop_mgSent"] != 1 ){
+				local.p.flags["coop_mgSent"] = 1
+				local.p stufftext ( "set coop_mapGrade " + level.coop_mapGradeRow )
+			}
+			local.i++
+		}
+		wait 3
+	}
+}end
