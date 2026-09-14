@@ -5,6 +5,9 @@
 > 2. Tone baseline: the HZM ACES grade - fix the CG_CoopDaylight first-frame reset (bug-2584) so the grade is live.
 > 3. Per-map colour grade ON by default, with a player toggle off; the player's own r_pp* sliders are never written.
 > 4. HD sky pack duplicates (bug-2583): KEEP the HD skies and RE-AUTHOR fog colour to match them on the affected maps.
+> - HD-sky fog (bug-2583), user 2026-09-13 after the m2l1 pilot: KEEP the HD skies but give the washed-out
+>   HD-sky maps a MOODIER, non-sky-matched fog (visible cool/warm atmosphere) at native distance - the sky-matched
+>   0.81 grey was invisible on bright snow. Applies to the 13 EYES HD-sky maps.
 > 5. Taken at the recommendation unless the user says otherwise: a grade toggle plus a fog-strength slider with a
 >    floor above zero; colour-only profiles on scripted-fog maps (m3l1a, M3L3, e2l2, e2l3, e3l3, m4l3, m6l2a, m2l2c).
 
