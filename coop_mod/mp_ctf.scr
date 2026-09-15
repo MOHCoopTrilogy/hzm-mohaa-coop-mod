@@ -1,0 +1,487 @@
+//=========================================================================
+// MP_CTF.SCR - CAPTURE THE FLAG, an MP game MODE (slice 6). Decision M18: "CTF and Demolition built
+// on Mefy's MIT libraries, credited". Two flags, grab the enemy flag, run it to your own base to
+// score, first to the capture limit (or the clock) wins; played on Team Match (gt2).
+//
+// CREDIT. Mefy's Capture the Flag (ctf.scr) from the MOHAA community server libraries, MIT-licensed.
+// The actual source is unobtainable (mefy.moh-central.net returns 403 - _research/mp_gamemodes_
+// understanding.md "Unfetchable sources", and its CTF rules "rest on search text only"), so this is a
+// REBUILD FROM THE PUBLISHED RULES, not a copy: a flag entity per base, grab / drop / return / capture,
+// per-team bases, first to the cap limit.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, seed a team base, deploy the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the flag manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: drop the flag they carried, if any)
+//
+// NO NEW SERVER->CLIENT SHAPE, AND NO CGAME SHIP (the risk the task flagged, resolved 2026-09-14).
+// Everything CTF shows a client is delivered by shapes that already ship:
+//   * THE SCORE is a SCRIPT score, exactly as King of the Hill (coop_mod/mp_koth.scr) does on gt2. The
+//     capture counts live in the non-archived cvars coop_mpCtfScoreA / coop_mpCtfScoreX and every event
+//     is announced with the STOCK iprintlnbold / iprintln (a server-print shape that has always shipped).
+//     The engine's own gt2 team score (a kill tally) still shows on the stock scoreboard; the AUTHORITATIVE
+//     CTF capture score is the script one, announced on every grab / capture / return, decision M22
+//     ("stock columns plus announcements for v1"). Adding a real capture-counter HUD column WOULD need a
+//     new server->client stat + a cgame draw - deliberately NOT done here (a log-plus-iprint CTF that
+//     works beats a blocked one), and called out in the report as the only thing a future HUD slice needs.
+//   * THE FLAG is a stock script_model (models/static/quake3_flag.tik - a real CTF flag shipped in the
+//     paks, catalogued in _research/buildmode_objects_customaps.md), spawned and moved with the ordinary
+//     spawn / model / .origin commands the mod already uses (coop_mod/ammobox.scr, coop_mod/ambience.scr).
+//     A spawned entity and its origin ride the ORDINARY entity delta - no new grammar. It is notsolid, so
+//     grab / return are proximity checks (a 3D radius), NOT a trigger_use rig (which mp_freezetag.scr avoided
+//     for the same "would want new client shapes" reason).
+//   * THE DIRECTION MARKER reuses the KOTH mechanism verbatim: set_objective_pos writes level.
+//     m_vObjectiveLocation -> STAT_OBJECTIVECENTER (playerstat 19), which the stock round compass arrow
+//     already reads (player.cpp UpdateStats on gt2). It is ONE shared arrow for all clients, so it points
+//     at the flag currently IN PLAY (carried or dropped), not a per-player objective - the single-arrow
+//     limit is inherent to the stock stat and is accepted rather than adding a per-player shape.
+//
+// WHAT IS HUMAN-DRIVEN. OpenMOHAA bots only navigate and fight; they do not seek objectives or flags
+// (_research/mp_gamemodes_understanding.md: "bots ignore flags", docs.openmohaa.org). So grabbing, carrying
+// and capturing are HUMAN actions - a bots-only server proves init, base seeding, flag spawn, the marker and
+// the score/win path, but a bot will not walk a flag home. This is the same limit S&D / Demolition accept for
+// planting. A human carrier is handled fully (carry-follow, drop-on-death, return, capture).
+//
+// WIN MECHANISM (and why). CTF's base gametype is 2 (Team Match). teamwin is legal ONLY on gametype >= 4
+// (scriptthread.cpp), so it CANNOT end a gt2 match. The match-win is therefore a script score plus a forced
+// map restart (stuffsrv "map <name>"), exactly as KOTH, Gun Game and the LMS/S&D round helper end - the one
+// proven, gametype-agnostic win path in this mod (no archive, no gametype flip).
+//
+// BASES ARE DERIVED FROM REAL TEAM SPAWN ORIGINS, NOT GUESSED. getentarray "classname" returns nothing at
+// runtime in this engine (maptest_phase2.scr:95 / mp_koth.scr header), so spawn entities cannot be enumerated.
+// Instead the FIRST spawn origin seen for each team becomes that team's base (its flag home), harvested from
+// the engine's own team-spawn placement as players spawn - the same "derive from spawn edges" recipe KOTH uses.
+// Base separation therefore follows the map's team-spawn layout; a map with tightly grouped team spawns just
+// makes for a small field, never a crash. A team that has not spawned yet simply has no flag until it does.
+//
+// ISOLATION: calls only the MP file coop_mod/mp_armory.scr (in MP_MANIFEST, so clause 10 admits it); names no
+// coop cvar / coop_lo token / ui/loadout tree / coop armory code; never giveInventory / changeGameType (both
+// force gt2 via setcvar g_gametype - mp.scr header) and never writes coop_health / coop_* state. Cross-restart
+// state (the running score) lives in the NON-archived coop_mpCtf* cvars; per-map flag/base state lives in level
+// vars (a restart wipes them and re-seeds bases from the fresh spawns, which is correct - a new match).
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// One-time CTF config + flag-manager start. Idempotent (level flag). Reads the host cvars, zeroes the
+// engine's own frag/round/time limits so the engine cannot end the match before we do (same discipline
+// KOTH / mp_rounds use), resets the score cvars for a fresh match, and starts the manager loop.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpCtfReady == 1 ){ end }
+	level.coop_mpCtfReady = 1
+	level.coop_mpCtfEnding = 0
+
+	//captures to win: host cvar coop_mpCtfCaps, default 3.
+	local.cap = getcvar( "coop_mpCtfCaps" )
+	if( local.cap == "" ){ local.cap = "3" }
+	level.coop_mpCtfCaps = int( local.cap )
+	if( level.coop_mpCtfCaps < 1 ){ level.coop_mpCtfCaps = 3 }
+
+	//grab / return radius (world units): a living player within this 3D distance of a flag can grab it
+	//(enemy) or return it (owner). Host cvar coop_mpCtfGrabRadius, default 64.
+	local.gr = getcvar( "coop_mpCtfGrabRadius" )
+	if( local.gr == "" ){ local.gr = "64" }
+	level.coop_mpCtfGrabRadius = int( local.gr )
+	if( level.coop_mpCtfGrabRadius < 16 ){ level.coop_mpCtfGrabRadius = 64 }
+
+	//capture radius (world units): a carrier this close to their own base scores (if their own flag is
+	//home). Host cvar coop_mpCtfBaseRadius, default 150.
+	local.br = getcvar( "coop_mpCtfBaseRadius" )
+	if( local.br == "" ){ local.br = "150" }
+	level.coop_mpCtfBaseRadius = int( local.br )
+	if( level.coop_mpCtfBaseRadius < 32 ){ level.coop_mpCtfBaseRadius = 150 }
+
+	//dropped-flag auto-return time (seconds; 0 = off). Host cvar coop_mpCtfReturnTime, default 30.
+	local.rt = getcvar( "coop_mpCtfReturnTime" )
+	if( local.rt == "" ){ local.rt = "30" }
+	level.coop_mpCtfReturnTime = int( local.rt )
+
+	//optional match time limit (seconds; 0 = off, no board row). On timeout the side with more captures
+	//wins. Host cvar coop_mpCtfTime, default 0.
+	local.tm = getcvar( "coop_mpCtfTime" )
+	if( local.tm == "" ){ local.tm = "0" }
+	level.coop_mpCtfTimeout = int( local.tm )
+	level.coop_mpCtfStart = level.time
+
+	//per-map flag/base state (all wiped on a restart, which is correct: a restart is a fresh match)
+	level.coop_mpCtfHasBase["a"] = 0
+	level.coop_mpCtfHasBase["x"] = 0
+	level.coop_mpCtfState["a"] = "home"
+	level.coop_mpCtfState["x"] = "home"
+	level.coop_mpCtfCarrier["a"] = NULL
+	level.coop_mpCtfCarrier["x"] = NULL
+	level.coop_mpCtfDropAt["a"] = 0
+	level.coop_mpCtfDropAt["x"] = 0
+
+	//running score lives in NON-archived cvars (setcvar), reset for this fresh match
+	setcvar "coop_mpCtfScoreA" "0"
+	setcvar "coop_mpCtfScoreX" "0"
+
+	//stop the engine ending the match first
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	println( "^~^~^ MPCTF init gt=" + level.gametype + " caps=" + level.coop_mpCtfCaps + " grab=" + level.coop_mpCtfGrabRadius + " baseRad=" + level.coop_mpCtfBaseRadius + " returnTime=" + level.coop_mpCtfReturnTime + " time=" + level.coop_mpCtfTimeout )
+	thread ctf_loop
+}end
+
+
+//SPAWN EDGE. Config, seed this team's base from the real spawn origin (once per team), then deploy THROUGH
+//THE ARMORY so the weapon preset (coop_mpPreset) is inherited automatically (decision M5).
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread ctf_seedBase local.p
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. Nothing per-player here (the manager owns the flags and scoring); just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ctf_ensure
+}end
+
+
+//DEATH EDGE. CTF has normal respawns - a death does not end anything, but if the victim was carrying a
+//flag it drops where they fell.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ctf_dropIfCarrier local.p
+}end
+
+
+//=========================================================================
+// Base seeding. The FIRST spawn origin seen for a team becomes that team's flag home; the flag entity is
+// spawned there at once so a marker exists from the first spawn. "allies" -> side "a", anything else -> "x".
+//=========================================================================
+ctf_seedBase local.p:{
+	if( local.p == NULL ){ end }
+	local.side = "x"
+	if( local.p.dmteam == "allies" ){ local.side = "a" }
+	if( local.p.dmteam == "spectator" || local.p.dmteam == "" || local.p.dmteam == NIL ){ end }
+	if( local.p.isSpectator ){ end }
+
+	if( level.coop_mpCtfHasBase[local.side] == 1 ){ end }
+	level.coop_mpCtfBase[local.side] = local.p.origin
+	level.coop_mpCtfHasBase[local.side] = 1
+	println( "^~^~^ MPCTF base side=" + local.side + " pos=" + local.p.origin )
+
+	waitthread ctf_spawnFlag local.side
+}end
+
+
+//spawn (or re-home) the flag script_model for a side at its base. notsolid so grab/return are proximity
+//checks, not a collision trigger.
+ctf_spawnFlag local.side:{
+	if( level.coop_mpCtfHasBase[local.side] != 1 ){ end }
+	if( level.coop_mpCtfFlag[local.side] == NIL ){
+		local.f = spawn script_model
+		local.f model "models/static/quake3_flag.tik"
+		local.f.origin = level.coop_mpCtfBase[local.side]
+		local.f droptofloor 512
+		local.f notsolid
+		level.coop_mpCtfFlag[local.side] = local.f
+		//re-home the base to where the flag settled, so a capture test uses the real flag position
+		level.coop_mpCtfBase[local.side] = local.f.origin
+		println( "^~^~^ MPCTF flag spawn side=" + local.side + " pos=" + local.f.origin )
+	}
+	level.coop_mpCtfState[local.side] = "home"
+	level.coop_mpCtfCarrier[local.side] = NULL
+}end
+
+
+//=========================================================================
+// THE FLAG MANAGER. One loop per map load, guarded on coop_mpRun (a level load / the restart wipes it,
+// ending the loop cleanly) and on a run-once flag. Once a second is plenty for a proximity game.
+//=========================================================================
+ctf_loop:{
+	if( level.coop_mpCtfLoopOn == 1 ){ end }
+	level.coop_mpCtfLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread ctf_tick
+		wait 1
+	}
+}end
+
+
+//idempotent guarantee the loop is running (called from mode_think). ensureConfig already started it on the
+//first spawn; this only matters if think is somehow dispatched before a spawn.
+ctf_ensure:{
+	if( level.coop_mpCtfReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+ctf_tick:{
+	if( level.coop_mpCtfEnding == 1 ){ end }
+
+	waitthread ctf_driveFlag "a"
+	waitthread ctf_driveFlag "x"
+
+	//shared objective arrow: point it at whichever flag is IN PLAY (dropped/carried); the axis flag first
+	//(the allies' target), then the allies flag. One arrow for all clients (header).
+	waitthread ctf_updateMarker
+
+	//win check
+	local.sa = waitthread ctf_i "coop_mpCtfScoreA"
+	local.sx = waitthread ctf_i "coop_mpCtfScoreX"
+	println( "^~^~^ MPCTF tick scoreA=" + local.sa + " scoreX=" + local.sx + " stateA=" + level.coop_mpCtfState["a"] + " stateX=" + level.coop_mpCtfState["x"] )
+
+	if( local.sa >= level.coop_mpCtfCaps ){
+		waitthread ctf_win "allies" local.sa local.sx
+		end
+	}
+	if( local.sx >= level.coop_mpCtfCaps ){
+		waitthread ctf_win "axis" local.sa local.sx
+		end
+	}
+
+	//optional time limit: the side with more captures wins (draw stays for another cycle)
+	if( level.coop_mpCtfTimeout > 0 && ( level.time - level.coop_mpCtfStart ) >= level.coop_mpCtfTimeout ){
+		if( local.sa > local.sx ){ waitthread ctf_win "allies" local.sa local.sx }
+		else if( local.sx > local.sa ){ waitthread ctf_win "axis" local.sa local.sx }
+	}
+}end
+
+
+//=========================================================================
+// Drive one flag (side "a" = allies' flag defended by allies / grabbed by axis; "x" = the mirror). Resolves
+// grab, carry-follow, capture, drop-safety and return in the flag's current state.
+//=========================================================================
+ctf_driveFlag local.side:{
+	if( level.coop_mpCtfHasBase[local.side] != 1 ){ end }
+	if( level.coop_mpCtfFlag[local.side] == NIL ){
+		waitthread ctf_spawnFlag local.side
+		end
+	}
+
+	local.flag = level.coop_mpCtfFlag[local.side]
+	local.enemySide = waitthread ctf_enemySide local.side
+	local.ownTeam = waitthread ctf_teamOf local.side
+	local.enemyTeam = waitthread ctf_teamOf local.enemySide
+	local.st = level.coop_mpCtfState[local.side]
+
+	if( local.st == "home" ){
+		local.flag.origin = level.coop_mpCtfBase[local.side]
+		//an enemy standing on the home flag grabs it
+		local.g = waitthread ctf_nearestOf local.enemyTeam local.flag.origin
+		if( local.g != NULL ){ waitthread ctf_grab local.side local.g }
+		end
+	}
+
+	if( local.st == "carried" ){
+		local.c = level.coop_mpCtfCarrier[local.side]
+		//carrier lost (dead / spectator / switched team / gone): drop where they were, or home if unknown
+		if( local.c == NULL || !( isAlive local.c ) || local.c.isSpectator || local.c.dmteam != local.enemyTeam ){
+			waitthread ctf_dropSide local.side
+			end
+		}
+		//carry-follow: float the flag above the carrier (origin-step; the entity delta carries it)
+		local.flag.origin = ( local.c.origin + ( 0 0 48 ) )
+
+		//capture: carrier at their OWN base AND the enemy team's own flag is home (classic CTF rule)
+		if( level.coop_mpCtfHasBase[local.enemySide] == 1 && level.coop_mpCtfState[local.enemySide] == "home" ){
+			local.d = vector_length( local.c.origin - level.coop_mpCtfBase[local.enemySide] )
+			if( local.d <= level.coop_mpCtfBaseRadius ){
+				waitthread ctf_capture local.side local.c
+			}
+		}
+		end
+	}
+
+	if( local.st == "dropped" ){
+		//an owner returns their own dropped flag by touching it
+		local.r = waitthread ctf_nearestOf local.ownTeam local.flag.origin
+		if( local.r != NULL ){
+			waitthread ctf_returnHome local.side "returned"
+			end
+		}
+		//an enemy re-grabs a dropped flag
+		local.g = waitthread ctf_nearestOf local.enemyTeam local.flag.origin
+		if( local.g != NULL ){
+			waitthread ctf_grab local.side local.g
+			end
+		}
+		//auto-return after the timeout
+		if( level.coop_mpCtfReturnTime > 0 && ( level.time - level.coop_mpCtfDropAt[local.side] ) >= level.coop_mpCtfReturnTime ){
+			waitthread ctf_returnHome local.side "timeout"
+		}
+	}
+}end
+
+
+//=========================================================================
+// Flag state transitions.
+//=========================================================================
+
+//an enemy player picks up the flag.
+ctf_grab local.side local.p:{
+	if( local.p == NULL ){ end }
+	level.coop_mpCtfState[local.side] = "carried"
+	level.coop_mpCtfCarrier[local.side] = local.p
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintlnbold( local.p.netname + " has taken the " + local.tag + " flag!" )
+	println( "^~^~^ MPCTF grab side=" + local.side + " by=e" + local.p.entnum + " team=" + local.p.dmteam )
+}end
+
+
+//the carrier died / left: the flag drops where the entity currently sits.
+ctf_dropSide local.side:{
+	if( level.coop_mpCtfFlag[local.side] == NIL ){ end }
+	local.flag = level.coop_mpCtfFlag[local.side]
+	local.flag droptofloor 512
+	level.coop_mpCtfState[local.side] = "dropped"
+	level.coop_mpCtfCarrier[local.side] = NULL
+	level.coop_mpCtfDropAt[local.side] = level.time
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintln( "The " + local.tag + " flag was dropped." )
+	println( "^~^~^ MPCTF drop side=" + local.side + " pos=" + local.flag.origin )
+}end
+
+
+//return the flag to its base (owner touch or auto-timeout).
+ctf_returnHome local.side local.cause:{
+	waitthread ctf_spawnFlag local.side
+	if( level.coop_mpCtfFlag[local.side] != NIL ){
+		level.coop_mpCtfFlag[local.side].origin = level.coop_mpCtfBase[local.side]
+	}
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintln( "The " + local.tag + " flag was returned (" + local.cause + ")." )
+	println( "^~^~^ MPCTF return side=" + local.side + " cause=" + local.cause )
+}end
+
+
+//a capture scored: the CARRIER's team (the enemy of `side`) banks a point; the captured flag goes home.
+ctf_capture local.side local.p:{
+	if( local.p == NULL ){ end }
+	local.team = local.p.dmteam
+	waitthread ctf_award local.team
+
+	local.sa = waitthread ctf_i "coop_mpCtfScoreA"
+	local.sx = waitthread ctf_i "coop_mpCtfScoreX"
+	local.tag = "ALLIES"
+	if( local.team == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " CAPTURE!  Allies " + local.sa + " : " + local.sx + " Axis" )
+	println( "^~^~^ MPCTF capture team=" + local.team + " by=e" + local.p.entnum + " scoreA=" + local.sa + " scoreX=" + local.sx )
+
+	waitthread ctf_returnHome local.side "captured"
+}end
+
+
+//drop the flag a dying/leaving player was carrying (called on the death edge and as a safety in the tick).
+ctf_dropIfCarrier local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpCtfCarrier["a"] == local.p ){ waitthread ctf_dropSide "a" }
+	if( level.coop_mpCtfCarrier["x"] == local.p ){ waitthread ctf_dropSide "x" }
+}end
+
+
+//=========================================================================
+// The match win: announce, hold the banner, then reload the SAME map (the proven transition -
+// mp_koth.scr::koth_win / mp_rounds.scr::rounds_win). One-shot via coop_mpCtfEnding.
+//=========================================================================
+ctf_win local.side local.sa local.sx:{
+	if( level.coop_mpCtfEnding == 1 ){ end }
+	level.coop_mpCtfEnding = 1
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " WIN Capture the Flag!  Allies " + local.sa + " : " + local.sx + " Axis" )
+	println( "^~^~^ MPCTF win side=" + local.side + " scoreA=" + local.sa + " scoreX=" + local.sx + " map=" + getcvar( "mapname" ) )
+
+	//fresh match next map load
+	setcvar "coop_mpCtfScoreA" "0"
+	setcvar "coop_mpCtfScoreX" "0"
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPCTF restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//"allies"/"axis" for a side letter.
+ctf_teamOf local.side:{
+	local.t = "axis"
+	if( local.side == "a" ){ local.t = "allies" }
+}end local.t
+
+//the opposite side letter.
+ctf_enemySide local.side:{
+	local.e = "a"
+	if( local.side == "a" ){ local.e = "x" }
+}end local.e
+
+//update the shared objective-compass arrow: point at the axis flag if it is in play, else the allies flag
+//if IT is in play, else leave it at the axis base. One global arrow for all clients (header).
+ctf_updateMarker:{
+	if( level.coop_mpCtfHasBase["x"] == 1 && level.coop_mpCtfState["x"] != "home" && level.coop_mpCtfFlag["x"] != NIL ){
+		set_objective_pos level.coop_mpCtfFlag["x"].origin
+		end
+	}
+	if( level.coop_mpCtfHasBase["a"] == 1 && level.coop_mpCtfState["a"] != "home" && level.coop_mpCtfFlag["a"] != NIL ){
+		set_objective_pos level.coop_mpCtfFlag["a"].origin
+		end
+	}
+	if( level.coop_mpCtfHasBase["x"] == 1 ){ set_objective_pos level.coop_mpCtfBase["x"] }
+}end
+
+//read an int cvar, "" -> 0. int() is computed into a local BEFORE end - a function call in the `}end <expr>`
+//return position is NOT evaluated by the engine (bug-2603 / mp_koth.scr::koth_i), so never put one there.
+ctf_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v
+
+//award one capture to a side ("allies"/"axis") in its score cvar.
+ctf_award local.team:{
+	if( local.team == "allies" ){
+		local.v = ( waitthread ctf_i "coop_mpCtfScoreA" + 1 )
+		setcvar "coop_mpCtfScoreA" ( "" + local.v )
+	}
+	else if( local.team == "axis" ){
+		local.v = ( waitthread ctf_i "coop_mpCtfScoreX" + 1 )
+		setcvar "coop_mpCtfScoreX" ( "" + local.v )
+	}
+}end
+
+//the nearest LIVING, in-play player of a team within the grab radius of a world position. Mirrors the
+//filter in mp_koth.scr::koth_countInHill (not spectator, alive, on the team) plus the 3D radius. Returns
+//the player or NULL into a local before end (the }end <expr> trap, bug-2603).
+ctf_nearestOf local.team local.pos:{
+	local.best = NULL
+	if( local.pos == NIL ){ end local.best }
+	local.bestd = level.coop_mpCtfGrabRadius
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - local.pos )
+		if( local.d > local.bestd ){ continue }
+		local.best = local.p
+		local.bestd = local.d
+	}
+}end local.best
