@@ -1,0 +1,239 @@
+//=========================================================================
+// MP_MEDKITS.SCR - MEDKITS / HEALING, an MP host toggle (coop_mpMedkits 0/1). A PORT of the coop
+// medkit self-heal (coop_mod/medkit.scr::medkit_use) into MP-owned code - it never calls, reads or
+// mutates coop medkit/heal state (coop_medkits, coop_medkit_*, level.coop_health are never touched).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here
+// can run on a coop map. mp.scr::mp_onSpawn calls ::onSpawn on every MP (re)spawn.
+//
+// WHAT IT DOES. When the host enables it, each life is issued coop_mpMedkitCount bandages. A player
+// who is HURT holds [USE] while STATIONARY to channel a self-heal (mirrors the coop medkit_use
+// channel: forcetorsostate COOP_SELFHEAL, the coop_medkitView first-person stow, a progress bar, and
+// a cancel on movement or on taking damage). On completion the player is healed to the HEAL CEILING
+// and one bandage is spent.
+//
+// THE HEAL CEILING is the mode's health, never level.coop_health (isolation clause 4): max_health,
+// which mp.scr set to 100 (or 50 under Hardcore) on the spawn edge. When DBNO is ALSO on the player
+// carries a large absorption pool instead of a 0-100 bar, so the ceiling there is that full pool
+// (restoring absorption - which also un-does the post-revive fragility of a DBNO getup). The ceiling
+// is resolved live at heal time so a host toggling Hardcore or DBNO mid-match is honoured.
+//
+// THE [USE] KEY IS SHARED WITH DBNO REVIVE, and the two must not race. A living player holding [USE]
+// next to a DOWNED teammate is a REVIVER (mp_dbno.scr owns that), so this file REFUSES to start a
+// self-heal while any downed teammate sits within the DBNO revive range - the revive wins the key.
+// It also never heals a player who is themselves down (coop_mpDbnoActive == 1). There is no coop
+// name-command bus in MP (mp.scr deliberately never runs coop's manageNamechange dispatcher), so a
+// dedicated MP medkit KEYBIND is deferred; the [USE]-hold channel is the MP-owned trigger.
+//
+// ISOLATION: calls no coop code (only its own labels; mp.scr's seam is the caller); names no coop
+// cvar, coop_lo token, ui/loadout tree, coop_mod armory path or coop medkit flag. Per-player state
+// lives in self.flags["coop_mpMedkits*"] (entity keys, not cvars); host tuning is the MP-owned
+// coop_mpMedkit* / coop_mpDbno* cvars, read-only here. NEVER giveInventory/changeGameType, never a
+// saved coop cvar, never xp/challenge/armory. coop_medkitView is a coop_-prefixed CLIENT view cvar
+// (not a saved coop cvar, coop_lo* or coop_mp* token, so outside every isolation clause) used
+// verbatim as a literal, exactly as coop stuffs it; it drives the first-person weapon stow only.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_hardcore.scr::alive). If this file parse-kills, ::alive is
+//unreachable, mp.scr's onSpawn call no-ops, and Medkits simply stays off. Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Is the host toggle ON? coop_mpMedkits is MP-owned (coop_mp*, isolation clause 12c) and read-only.
+// "" (never registered) or "0" -> off. int() into a local BEFORE end (bug-2603, TRAPS T1). Returns 1/0.
+//=========================================================================
+isOn:{
+	local.s = getcvar( "coop_mpMedkits" )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+	if( local.v != 0 ){ local.v = 1 }
+}end local.v
+
+
+//=========================================================================
+// SPAWN EDGE. Called from mp.scr::mp_onSpawn. Issue this life's bandages and start the self-heal
+// poll. A no-op unless the host enabled Medkits. Per-life token guards against a stale monitor.
+//=========================================================================
+onSpawn local.p:{
+	if( local.p == NULL ){ end }
+
+	local.p.flags["coop_mpMedkitsInUse"] = NIL
+
+	local.on = waitthread isOn
+	if( local.on != 1 ){
+		local.p.flags["coop_mpMedkitsHave"] = 0
+		end
+	}
+
+	local.n = int( getcvar( "coop_mpMedkitCount" ) )
+	if( local.n <= 0 ){ local.n = 1 }
+	local.p.flags["coop_mpMedkitsHave"] = local.n
+
+	local.p.flags["coop_mpMedkitsLife"] = level.time
+	thread mp_medkit_monitor local.p local.p.flags["coop_mpMedkitsLife"]
+}end
+
+
+//=========================================================================
+// Resolve THIS player's live heal ceiling. Under DBNO the player carries a large absorption pool, so
+// the ceiling is that full pool; otherwise it is the mode's max_health (100, or 50 Hardcore). Read
+// live so a mid-match host toggle is honoured. Returns the value in a local before end (bug-2603).
+//=========================================================================
+mp_medkit_ceiling local.p:{
+	local.c = 100
+	if( local.p != NULL ){
+		local.mh = local.p.max_health
+		if( local.mh != NIL && local.mh > 0 ){ local.c = local.mh }
+	}
+	local.d = getcvar( "coop_mpDbno" )
+	if( local.d == "1" ){ local.c = 9999 }
+}end local.c
+
+
+//=========================================================================
+// Is there a DOWNED teammate within DBNO revive range of this player? If so, the player is a reviver
+// and this file must stand aside from the [USE] key. Returns 1/0 in a local before end (bug-2603).
+//=========================================================================
+mp_medkit_reviverNearby local.p:{
+	local.found = 0
+	if( local.p == NULL ){ end local.found }
+	local.range = int( getcvar( "coop_mpDbnoReviveRange" ) )
+	if( local.range <= 0 ){ local.range = 80 }
+	local.team = local.p.dmteam
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.entnum == local.p.entnum ){ continue }
+		if( local.q.flags["coop_mpDbnoActive"] != 1 ){ continue }
+		if( local.q.dmteam != local.team ){ continue }
+		local.d = vector_length( local.q.origin - local.p.origin )
+		if( local.d > local.range ){ continue }
+		local.found = 1
+		local.i = ( $player.size + 1 )
+	}
+}end local.found
+
+
+//=========================================================================
+// THE POLL. While this life runs, watch for the self-heal condition: alive, not down, hurt, holding
+// [USE], stationary, has a bandage, and NOT acting as a DBNO reviver. When it holds, run the channel.
+//=========================================================================
+mp_medkit_monitor local.p local.life:{
+	if( local.p == NULL ){ end }
+
+	while( local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_mpMedkitsLife"] == local.life ){
+		local.have = local.p.flags["coop_mpMedkitsHave"]
+		if( local.have == NIL ){ local.have = 0 }
+
+		if( local.p.flags["coop_mpDbnoActive"] != 1 && local.p.flags["coop_mpMedkitsInUse"] != 1 && local.have >= 1 && local.p.useheld == 1 ){
+			local.ceil = waitthread mp_medkit_ceiling local.p
+			if( local.p != NULL && local.p.health < local.ceil ){
+				local.rev = waitthread mp_medkit_reviverNearby local.p
+				if( local.p != NULL && local.rev != 1 ){
+					waitthread mp_medkit_use local.p
+				}
+			}
+		}
+		waitframe
+	}
+}end
+
+
+//=========================================================================
+// THE CHANNEL. Copied from coop medkit.scr::medkit_use, MP-owned: torso self-heal pose + the
+// coop_medkitView first-person stow, a progress bar (slots 33/34/35, free in MP), cancel on movement
+// or on taking damage, then heal to the live ceiling and spend one bandage.
+//=========================================================================
+mp_medkit_use local.p:{
+	if( local.p == NULL ){ end }
+
+	local.p.flags["coop_mpMedkitsInUse"] = 1
+	local.p forcetorsostate COOP_SELFHEAL
+	local.p stufftext "set coop_medkitView 1"
+	local.startOrigin = local.p.origin
+
+	ihuddraw_virtualsize local.p 33 1
+	ihuddraw_align       local.p 33 center bottom
+	ihuddraw_font        local.p 33 "verdana-12"
+	ihuddraw_color       local.p 33 1 1 1
+	ihuddraw_rect        local.p 33 0 -80 0 0
+	ihuddraw_string      local.p 33 "Applying medkit..."
+	ihuddraw_alpha       local.p 33 1
+	ihuddraw_virtualsize local.p 34 1
+	ihuddraw_align       local.p 34 left bottom
+	ihuddraw_shader      local.p 34 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 34 0.12 0.12 0.12
+	ihuddraw_rect        local.p 34 270 -55 100 6
+	ihuddraw_alpha       local.p 34 0.8
+	ihuddraw_virtualsize local.p 35 1
+	ihuddraw_align       local.p 35 left bottom
+	ihuddraw_shader      local.p 35 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.p 35 0.1 0.9 0.1
+	ihuddraw_rect        local.p 35 270 -55 0 6
+	ihuddraw_alpha       local.p 35 0.9
+
+	local.frames = 0
+	local.prev = local.p.health
+	local.cancelled = 0
+	while( local.frames < 100 ){
+		if( local.p == NULL ){ end }
+		if( !isAlive local.p || local.p.flags["coop_isActive"] != 1 ){ local.cancelled = 1 }
+		else if( vector_length( local.p.origin - local.startOrigin ) > 15 ){ local.cancelled = 1 }
+		else if( local.p.health < local.prev - 5 ){
+			local.p iprint "Heal interrupted!" 1
+			local.cancelled = 1
+		}
+		if( local.cancelled == 1 ){
+			waitthread mp_medkit_clear local.p
+			end
+		}
+		if( local.frames == 1 || local.frames == 50 ){ local.p playsound coop_medkit_cloth }
+		ihuddraw_rect local.p 35 270 -55 local.frames 6
+		local.frames++
+		local.prev = local.p.health
+		waitframe
+	}
+
+	if( local.p == NULL ){ end }
+	if( !isAlive local.p ){
+		waitthread mp_medkit_clear local.p
+		end
+	}
+
+	local.ceil = waitthread mp_medkit_ceiling local.p
+	local.p healthonly local.ceil
+	local.have = local.p.flags["coop_mpMedkitsHave"]
+	if( local.have == NIL ){ local.have = 1 }
+	local.p.flags["coop_mpMedkitsHave"] = ( local.have - 1 )
+
+	waitthread mp_medkit_clear local.p
+	if( local.p != NULL ){
+		local.p playsound med_kit
+		local.p iprint "You have bandaged yourself up." 1
+		println ( "^~^~^ MPMED heal e" + local.p.entnum + " left=" + ( local.have - 1 ) )
+	}
+}end
+
+
+//Tear down the channel HUD + view stow. Idempotent-safe (a Script Error skips a line, not the thread).
+mp_medkit_clear local.p:{
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_mpMedkitsInUse"] = NIL
+	if( isAlive local.p ){ local.p forcetorsostate STAND }
+	local.p stufftext "set coop_medkitView 0"
+	ihuddraw_alpha  local.p 33 0
+	ihuddraw_string local.p 33 ""
+	ihuddraw_alpha  local.p 34 0
+	ihuddraw_alpha  local.p 35 0
+}end

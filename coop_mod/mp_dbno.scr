@@ -1,0 +1,591 @@
+//=========================================================================
+// MP_DBNO.SCR - DOWN BUT NOT OUT, an MP host toggle (coop_mpDbno 0/1). A PORT of the coop DBNO
+// recipe (coop_mod/dbno.scr) into MP-owned code - it never calls, reads or mutates coop DBNO state.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here
+// can run on a coop map. mp.scr::mp_onSpawn calls ::onSpawn on every MP (re)spawn.
+//
+// WHAT IT DOES. When the host enables it, a lethal amount of incoming fire puts an MP player DOWN
+// (crawling, immobilised, bleeding out) instead of dead. A downed player is REVIVABLE: a living
+// teammate holds [USE] within range to bring them back with partial absorption, or the downed
+// player holds [USE] to give up. Bleed-out or give-up is a TRUE death (a $world kill), which is the
+// ONLY path that reaches the engine's death and therefore mp.scr's dead-edge / a mode's onDeath.
+//
+// HOW THE INTERCEPTION WORKS (copied from coop dbno_start/dbno_monitor, MP-owned). On spawn the
+// player's CURRENT health is raised to a large ABSORPTION POOL (healthonly 9999) - max_health is
+// untouched, so 100/50 stays the mode ceiling. A per-frame monitor watches CUMULATIVE incoming
+// damage; at coop_mpDbnoThreshold it forces the DOWN state instead of letting the engine kill.
+// The pool is what makes the down reliable: a single frame's damage can never reach 0 first, so
+// there is no one-shot-past-the-down race (dbno.scr documents the same reason for its 9999).
+//
+// THE ELIMINATION-MODE BRIDGE (the crux). In the no-respawn modes (LMS, S&D) a downed player is
+// STILL ALIVE - health 100, not spectator, no coop_mpRndOut/coop_mpRndFrozen flag - so
+// mp_rounds.scr::rounds_countAlive keeps counting them as IN, and the round does NOT end while they
+// are merely down. Only bleed-out/give-up runs the $world kill, which trips mp.scr's dead-edge ->
+// mp_modeOnDeath -> rounds_onDeath, marking them OUT. In respawn modes (FFA/Team/KOTH/Gun Game/Push)
+// the same $world death is just a normal death and the engine respawns them. See the report / TRAPS.
+//
+// FREEZE TAG IS EXEMPT (STOP-flag). Freeze Tag is itself a death-replacement mechanic (a killed
+// player is respawned and held as a frozen statue). Layering DBNO on it is incoherent (down ->
+// bleed-out -> freeze), and worse, the freeze-respawn is an alive-edge that would re-arm DBNO on a
+// frozen statue. So ::onSpawn refuses to run under coop_mpMode "freezetag". Reported, not shipped
+// broken.
+//
+// THE DOWNED VIEW reuses the client cvar coop_dbnoView, exactly as coop does. It is a per-CLIENT
+// cvar (never archived - cg_main.c clears it on connect/map change; bug-1202) that cgame + the
+// renderer read to force the bleed-out vignette, the aim SWAY, the downed camera and a HUD that will
+// not fade. Nothing in the engine gates it on a coop session, so stuffing it to the downed MP
+// client drives the same presentation with NO engine change, and it can never follow anyone into a
+// separate coop session. It is stuffed to the downed client only and cleared (set 0) on every exit.
+//
+// ISOLATION: calls no coop code (only its own labels and mp.scr's seam is the caller); names no coop
+// cvar, coop_lo token, ui/loadout tree, coop_mod armory path or coop DBNO flag (coop_dbno_* /
+// level.coop_health are never touched). Per-player state lives in self.flags["coop_mpDbno*"] (entity
+// keys, not cvars); host tuning is the MP-owned coop_mpDbno* cvars, all read-only here. NEVER
+// giveInventory/changeGameType, never a saved coop cvar, never xp/challenge/armory. coop_dbnoView is
+// a coop_-prefixed CLIENT cvar that is not a saved coop cvar, coop_lo* or a coop_mp* token, so it is
+// outside every isolation clause; it is used verbatim as a literal, never assembled.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_hardcore.scr::alive / mp_armory.scr::alive). If this file parse-kills,
+//::alive is unreachable, mp.scr's onSpawn call no-ops, and DBNO simply stays off - nobody is stranded.
+//Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Is the host toggle ON? coop_mpDbno is MP-owned (coop_mp*, isolation clause 12c) and read-only here.
+// "" (never registered) or "0" -> off. int() is computed into a local BEFORE end - a function call in
+// the `}end <expr>` return position is NOT evaluated by this engine (bug-2603, TRAPS T1). Returns 1/0.
+//=========================================================================
+isOn:{
+	local.s = getcvar( "coop_mpDbno" )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+	if( local.v != 0 ){ local.v = 1 }
+}end local.v
+
+
+//=========================================================================
+// SPAWN EDGE. Called from mp.scr::mp_onSpawn AFTER the kit give and the Hardcore half-health, so
+// max_health is final. Clears any stale downed-view flag, resets per-life DBNO state, and - when the
+// host has DBNO on and this is not an exempt mode - raises the absorption pool and starts the monitor.
+//=========================================================================
+onSpawn local.p:{
+	if( local.p == NULL ){ end }
+
+	//safety-net: a player who died while downed must never respawn with the bleed-out view latched.
+	local.p stufftext "set coop_dbnoView 0"
+
+	//reset this life's DBNO state (NIL, not 0, so the != 1 tests read cleanly)
+	local.p.flags["coop_mpDbnoActive"]  = NIL
+	local.p.flags["coop_mpDbnoDead"]    = NIL
+	local.p.flags["coop_mpDbnoHealing"] = NIL
+	local.p.flags["coop_mpDbnoElapsed"] = 0
+	local.p.flags["coop_mpDbnoTimer"]   = 0
+
+	local.on = waitthread isOn
+	if( local.on != 1 ){ end }
+
+	//FREEZE TAG EXEMPTION (STOP-flag, see header). DBNO is disabled under Freeze Tag - that mode
+	//already replaces death with a revivable frozen state, and its freeze-respawn would re-arm DBNO
+	//on a statue.
+	if( level.coop_mpMode == "freezetag" ){ end }
+
+	//belt-and-braces: never arm DBNO on a player mid-freeze (inert unless a future mode sets these).
+	if( local.p.flags["coop_mpFtFreezing"] == 1 ){ end }
+	if( local.p.flags["coop_mpFtFrozen"] == 1 ){ end }
+
+	//raise the absorption pool so a lethal burst is intercepted into a DOWN instead of a death.
+	//healthonly leaves max_health (the mode ceiling) alone - the same call and reason as dbno.scr.
+	local.p healthonly 9999
+
+	//per-life token so a stale monitor from a previous life can never double up with this one.
+	local.p.flags["coop_mpDbnoLife"] = level.time
+	thread mp_dbno_monitor local.p local.p.flags["coop_mpDbnoLife"]
+}end
+
+
+//=========================================================================
+// THE PER-FRAME MONITOR. Runs for the whole life (across down+revive cycles), watching cumulative
+// incoming damage. At the threshold it forces the DOWN state. Guarded on the per-life token so a
+// respawn's fresh monitor never races an old one. Mirrors coop dbno_monitor, MP-owned.
+//=========================================================================
+mp_dbno_monitor local.p local.life:{
+	if( local.p == NULL ){ end }
+	local.prev = local.p.health
+	local.cumulative = 0
+	local.lastDmg = level.time
+
+	while( local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_mpDbnoLife"] == local.life ){
+		//do not accumulate or trigger while already down - the down threads own that state
+		if( local.p.flags["coop_mpDbnoActive"] == 1 ){
+			local.prev = local.p.health
+			waitframe
+			continue
+		}
+
+		local.threshold = int( getcvar( "coop_mpDbnoThreshold" ) )
+		if( local.threshold <= 0 ){ local.threshold = 100 }
+
+		local.curr = local.p.health
+		local.frame = local.prev - local.curr
+		if( local.frame > 0 ){
+			local.cumulative = local.cumulative + local.frame
+			local.lastDmg = level.time
+		}
+		else if( level.time - local.lastDmg >= 2 ){
+			local.cumulative = 0
+		}
+
+		if( local.cumulative >= local.threshold && isAlive local.p && local.p.flags["coop_mpDbnoDead"] != 1 ){
+			local.cumulative = 0
+			waitthread mp_dbno_enter local.p
+		}
+		//fallback: a hit huge enough to reach 0 despite the pool (rare) - down them if we still can
+		else if( local.p.health <= 0 && isAlive local.p && local.p.flags["coop_mpDbnoDead"] != 1 ){
+			local.cumulative = 0
+			waitthread mp_dbno_enter local.p
+		}
+
+		local.prev = local.p.health
+		waitframe
+	}
+}end
+
+
+//=========================================================================
+// ENTER THE DOWN STATE. Pin the player at the 100 down-pool, arm the bleed-out timer, flag the
+// downed view, and start the down threads. Broadcasts a teammate banner.
+//=========================================================================
+mp_dbno_enter local.p:{
+	//guard: the killing hit outran us and the player is already a corpse - let the normal death run.
+	if( !isAlive local.p ){
+		local.p.flags["coop_mpDbnoDead"] = 1
+		println "^~^~^ MPDBNO death_outran"
+		end
+	}
+
+	local.timer = int( getcvar( "coop_mpDbnoBleed" ) )
+	if( local.timer <= 0 ){ local.timer = 30 }
+
+	local.p.flags["coop_mpDbnoActive"]  = 1
+	local.p.flags["coop_mpDbnoDead"]    = NIL
+	local.p.flags["coop_mpDbnoHealing"] = NIL
+	local.p.flags["coop_mpDbnoElapsed"] = 0
+	local.p.flags["coop_mpDbnoTimer"]   = local.timer
+	local.p.flags["coop_mpDbnoOrigin"]  = local.p.origin
+
+	local.p healthonly 100
+	local.p stufftext "set coop_dbnoView 1"
+
+	local.msg = "You are DOWN! Bleeding out in " + local.timer + "s"
+	local.p iprint local.msg 1
+	println ( "^~^~^ MPDBNO down e" + local.p.entnum + " t=" + local.timer )
+
+	waitthread mp_dbno_banner local.p
+
+	thread mp_dbno_bleedout local.p
+	thread mp_dbno_present  local.p
+	thread mp_dbno_mitigate local.p
+	thread mp_dbno_teamrevive local.p
+	thread mp_dbno_letgo local.p
+}end
+
+
+//=========================================================================
+// The bleed-out clock. One second per tick, paused while a revive is channelling. On expiry the
+// player is truly killed (::mp_dbno_die).
+//=========================================================================
+mp_dbno_bleedout local.p:{
+	if( local.p == NULL ){ end }
+	local.timer = local.p.flags["coop_mpDbnoTimer"]
+
+	while( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 && local.p.flags["coop_mpDbnoElapsed"] < local.timer ){
+		wait 1
+		if( local.p == NULL ){ end }
+		//KILLED WHILE DOWN. A burst can outrun the mitigation and drive the down-pool to 0, so the
+		//ENGINE kills the player itself. That engine death has already tripped mp.scr's dead-edge ->
+		//a mode's onDeath (in LMS this is exactly the correct "eliminated"), so we must NOT fire a
+		//second $world kill on the corpse (it prints a spurious bleedout and damages a dead entity).
+		//Just clear the downed state + view so the presentation/mitigation loops stop. Mirrors coop
+		//dbno_corpse_monitor, MP-owned.
+		if( !isAlive local.p ){
+			local.p.flags["coop_mpDbnoActive"] = NIL
+			local.p.flags["coop_mpDbnoDead"]   = 1
+			local.p stufftext "set coop_dbnoView 0"
+			ihuddraw_alpha  local.p 20 0
+			ihuddraw_alpha  local.p 27 0
+			ihuddraw_string local.p 27 ""
+			ihuddraw_alpha  local.p 216 0
+			ihuddraw_string local.p 216 ""
+			println ( "^~^~^ MPDBNO death_killedWhileDown e" + local.p.entnum )
+			end
+		}
+		if( local.p.flags["coop_mpDbnoHealing"] == 1 ){ continue }
+		local.p.flags["coop_mpDbnoElapsed"] = local.p.flags["coop_mpDbnoElapsed"] + 1
+	}
+
+	if( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 ){
+		waitthread mp_dbno_die local.p "bledout"
+	}
+}end
+
+
+//=========================================================================
+// TRUE DEATH. The only path to the engine's death (and therefore mp.scr's dead-edge / a mode's
+// onDeath). Clears the downed state and view FIRST so nothing survives the kill, then $world-kills.
+//=========================================================================
+mp_dbno_die local.p local.cause:{
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_mpDbnoDead"]   = 1
+	local.p.flags["coop_mpDbnoActive"] = NIL
+	local.p stufftext "set coop_dbnoView 0"
+	local.p modheight "stand"
+
+	//clear the downed HUD
+	ihuddraw_alpha  local.p 20 0
+	ihuddraw_alpha  local.p 27 0
+	ihuddraw_string local.p 27 ""
+	ihuddraw_alpha  local.p 216 0
+	ihuddraw_string local.p 216 ""
+
+	println ( "^~^~^ MPDBNO death_" + local.cause + " e" + local.p.entnum )
+	local.p damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
+}end
+
+
+//=========================================================================
+// The downed presentation: prone crawl (immobilised, moving speeds the bleed), a black bleed-out
+// fade (slot 20) and a countdown (slot 27). One waitframe loop; the countdown text is redrawn on
+// change only. Slots 20/27 are coop DBNO slots and are free in an MP-only session (no MP file draws
+// HUD, verified). Mirrors coop dbno_crawl_manager + dbno_fade_manager + dbno_countdown_hud.
+//=========================================================================
+mp_dbno_present local.p:{
+	if( local.p == NULL ){ end }
+	local.timer = local.p.flags["coop_mpDbnoTimer"]
+
+	//black bleed-out overlay
+	ihuddraw_shader      local.p 20 "textures/mohmenu/black.tga"
+	ihuddraw_virtualsize local.p 20 1
+	ihuddraw_rect        local.p 20 0 0 640 480
+	ihuddraw_color       local.p 20 0 0 0
+	ihuddraw_alpha       local.p 20 0.3
+
+	//countdown text
+	ihuddraw_virtualsize local.p 27 1
+	ihuddraw_align       local.p 27 center center
+	ihuddraw_font        local.p 27 "verdana-12"
+	ihuddraw_color       local.p 27 1 0.35 0.35
+	ihuddraw_rect        local.p 27 0 -44 0 0
+	ihuddraw_alpha       local.p 27 1
+	ihuddraw_string      local.p 27 ""
+
+	local.p forcelegsstate DBNO_COLLAPSE
+
+	local.penalty = 0
+	local.lastShown = 0 - 1
+	while( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 ){
+		//killed while down (see mp_dbno_bleedout): stop touching the body until the bleedout tick
+		//clears the state. modheight/forcelegsstate on a corpse would warn.
+		if( !isAlive local.p ){ waitframe; continue }
+		local.p modheight "prone"
+
+		//moving accelerates the bleed-out (same shape as coop dbno_crawl_manager)
+		if( vector_length( local.p.origin - local.p.flags["coop_mpDbnoOrigin"] ) > 100 ){
+			local.penalty++
+			if( local.penalty >= 10 ){
+				local.penalty = 0
+				local.p.flags["coop_mpDbnoElapsed"] = local.p.flags["coop_mpDbnoElapsed"] + 1
+			}
+		}
+		else{
+			local.penalty = 0
+		}
+
+		local.elapsed = local.p.flags["coop_mpDbnoElapsed"]
+		local.frac = local.elapsed * 1.0 / local.timer
+		if( local.frac > 1 ){ local.frac = 1 }
+		ihuddraw_alpha local.p 20 ( 0.3 + local.frac * 0.6 )
+
+		local.remaining = local.timer - local.elapsed
+		if( local.remaining < 0 ){ local.remaining = 0 }
+		if( local.remaining != local.lastShown ){
+			local.lastShown = local.remaining
+			ihuddraw_string local.p 27 ( "BLEEDING OUT: " + local.remaining + "s" )
+		}
+		waitframe
+	}
+
+	if( local.p != NULL ){
+		local.p modheight "stand"
+		ihuddraw_alpha  local.p 20 0
+		ihuddraw_alpha  local.p 27 0
+		ihuddraw_string local.p 27 ""
+	}
+}end
+
+
+//=========================================================================
+// Damage mitigation while down. AI/players keep shooting a downed player pinned at 100; give most of
+// any drop back before it can reach 0, so a downed player is not instantly finished by chip fire but
+// sustained fire still kills. Mirrors coop dbno_damage_mitigation, MP-owned.
+//=========================================================================
+mp_dbno_mitigate local.p:{
+	if( local.p == NULL ){ end }
+	local.m = getcvar( "coop_mpDbnoMitigation" )
+	if( local.m == "" ){ local.m = "0.65" }
+	local.mitigate = float( local.m )
+	if( local.mitigate < 0 ){ local.mitigate = 0.65 }
+
+	local.prev = local.p.health
+	while( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 ){
+		if( isAlive local.p ){
+			local.cur = local.p.health
+			local.dmg = local.prev - local.cur
+			if( local.dmg > 0 ){
+				local.newh = local.cur + ( local.dmg * local.mitigate )
+				if( local.newh > 100 ){ local.newh = 100 }
+				if( local.newh > 0 ){ local.p healthonly local.newh }
+			}
+			local.prev = local.p.health
+		}
+		waitframe
+	}
+}end
+
+
+//=========================================================================
+// TEAM REVIVE. A LIVING, same-team, non-downed teammate holds [USE] within coop_mpDbnoReviveRange
+// for coop_mpDbnoReviveTime seconds to bring the downed player back up. NO medkit cost (MP decouples
+// DBNO revive from the Medkits toggle - otherwise DBNO would be dead without Medkits on). Revive is
+// impossible in FFA/Gun Game (no real team), so a downed player there simply bleeds out - reported.
+// Mirrors coop dbno_teamrevive_monitor, MP-owned; slots 135-140 are coop DBNO revive slots, free in
+// an MP-only session.
+//=========================================================================
+mp_dbno_teamrevive local.downed:{
+	if( local.downed == NULL ){ end }
+
+	//real team only: in FFA/Gun Game dmteam is not allies/axis, so no teammate can revive.
+	local.team = local.downed.dmteam
+	if( local.team != "allies" && local.team != "axis" ){ end }
+
+	local.range = int( getcvar( "coop_mpDbnoReviveRange" ) )
+	if( local.range <= 0 ){ local.range = 80 }
+	local.rt = getcvar( "coop_mpDbnoReviveTime" )
+	if( local.rt == "" ){ local.rt = "4.0" }
+	local.reviveSec = float( local.rt )
+	if( local.reviveSec <= 0 ){ local.reviveSec = 4.0 }
+
+	local.dt = 0.1
+	local.progress = 0
+	local.shown = 0
+
+	//downed player's own prompt/bar (slots 138 text, 139 track, 140 fill) - fade-exempt band
+	ihuddraw_virtualsize local.downed 138 1
+	ihuddraw_align       local.downed 138 center center
+	ihuddraw_font        local.downed 138 "verdana-12"
+	ihuddraw_color       local.downed 138 1 1 1
+	ihuddraw_rect        local.downed 138 0 -58 0 0
+	ihuddraw_string      local.downed 138 ""
+	ihuddraw_alpha       local.downed 138 0
+	ihuddraw_virtualsize local.downed 139 1
+	ihuddraw_align       local.downed 139 left bottom
+	ihuddraw_shader      local.downed 139 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.downed 139 0.12 0.12 0.12
+	ihuddraw_rect        local.downed 139 270 -55 100 6
+	ihuddraw_alpha       local.downed 139 0
+	ihuddraw_virtualsize local.downed 140 1
+	ihuddraw_align       local.downed 140 left bottom
+	ihuddraw_shader      local.downed 140 "textures/hud/coop_bar_white"
+	ihuddraw_color       local.downed 140 0.1 0.9 0.1
+	ihuddraw_rect        local.downed 140 270 -55 0 6
+	ihuddraw_alpha       local.downed 140 0
+
+	while( local.downed != NULL && local.downed.flags["coop_mpDbnoActive"] == 1 ){
+		//nearest LIVING, same-team, non-downed teammate within range holding [USE]
+		local.best = NULL
+		local.bestD = local.range
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.q = $player[local.i]
+			if( local.q != NULL && local.q.entnum != local.downed.entnum && isAlive local.q && local.q.dmteam == local.team && local.q.flags["coop_mpDbnoActive"] != 1 && local.q.useheld == 1 ){
+				local.dist = vector_length( local.q.origin - local.downed.origin )
+				if( local.dist <= local.bestD ){
+					local.bestD = local.dist
+					local.best  = local.q
+				}
+			}
+			local.i++
+		}
+
+		if( local.best != NULL ){
+			if( local.shown != 1 ){
+				local.shown = 1
+				ihuddraw_string local.downed 138 "You are being revived"
+				ihuddraw_alpha  local.downed 138 1
+				ihuddraw_alpha  local.downed 139 0.8
+				ihuddraw_alpha  local.downed 140 0.9
+			}
+			//pause the bleed-out clock while the channel runs
+			local.downed.flags["coop_mpDbnoHealing"] = 1
+			local.progress = local.progress + local.dt
+
+			local.f = local.progress / local.reviveSec
+			if( local.f > 1 ){ local.f = 1 }
+			local.fill = int( local.f * 100 )
+			ihuddraw_rect local.downed 140 270 -55 local.fill 6
+
+			if( local.progress >= local.reviveSec ){
+				ihuddraw_alpha  local.downed 138 0
+				ihuddraw_string local.downed 138 ""
+				ihuddraw_alpha  local.downed 139 0
+				ihuddraw_alpha  local.downed 140 0
+				waitthread mp_dbno_revive local.downed
+				end
+			}
+		}
+		else{
+			//nobody channelling: resume the clock, reset the bar
+			if( local.shown != 0 ){
+				local.shown = 0
+				ihuddraw_alpha  local.downed 138 0
+				ihuddraw_string local.downed 138 ""
+				ihuddraw_alpha  local.downed 139 0
+				ihuddraw_alpha  local.downed 140 0
+			}
+			if( local.downed != NULL ){ local.downed.flags["coop_mpDbnoHealing"] = NIL }
+			local.progress = 0
+		}
+		wait local.dt
+	}
+
+	//patient resolved mid-channel: clear the downed HUD
+	if( local.downed != NULL ){
+		ihuddraw_alpha  local.downed 138 0
+		ihuddraw_string local.downed 138 ""
+		ihuddraw_alpha  local.downed 139 0
+		ihuddraw_alpha  local.downed 140 0
+		local.downed.flags["coop_mpDbnoHealing"] = NIL
+	}
+}end
+
+
+//=========================================================================
+// SELF GIVE-UP. The downed player holds their OWN [USE] for ~3 continuous seconds to bleed out at
+// once. Distinct key-owner from the teammate revive (that reads the REVIVER's useheld), so the two
+// never race. Mirrors the give-up half of coop dbno_letgo_monitor, MP-owned.
+//=========================================================================
+mp_dbno_letgo local.p:{
+	if( local.p == NULL ){ end }
+	while( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 ){
+		if( local.p.useheld == 1 ){
+			local.held = 0
+			while( local.p != NULL && local.p.flags["coop_mpDbnoActive"] == 1 && local.p.useheld == 1 ){
+				local.held++
+				if( local.held == 20 ){ ihuddraw_string local.p 27 "Giving up..." }
+				if( local.held >= 60 ){
+					waitthread mp_dbno_die local.p "letgo"
+					end
+				}
+				waitframe
+			}
+		}
+		waitframe
+	}
+}end
+
+
+//=========================================================================
+// REVIVE. Bring a downed player back up with PARTIAL absorption (coop_mpDbnoRevivePool, default 300)
+// - enough headroom that ordinary fire downs them again rather than one-shotting, but a heavy single
+// hit CAN now truly kill a revived player (the intended post-revive fragility; the full 9999 spawn
+// pool guaranteed the first down was never a one-shot). The monitor is still running for this life,
+// so a revived player can be downed again. Mirrors the good end-state of coop dbno_ai_revive without
+// the coop weapon-re-give / armory (MP keeps whatever kit the player had).
+//=========================================================================
+mp_dbno_revive local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpDbnoActive"] != 1 ){ end }
+
+	local.p.flags["coop_mpDbnoActive"]  = NIL
+	local.p.flags["coop_mpDbnoDead"]    = NIL
+	local.p.flags["coop_mpDbnoHealing"] = NIL
+	local.p stufftext "set coop_dbnoView 0"
+	local.p modheight "stand"
+	local.p forcelegsstate DBNO_GETUP_STAND
+
+	local.pool = int( getcvar( "coop_mpDbnoRevivePool" ) )
+	if( local.pool <= 0 ){ local.pool = 300 }
+	local.p healthonly local.pool
+
+	//clear the downed HUD
+	ihuddraw_alpha  local.p 20 0
+	ihuddraw_alpha  local.p 27 0
+	ihuddraw_string local.p 27 ""
+	ihuddraw_alpha  local.p 138 0
+	ihuddraw_string local.p 138 ""
+	ihuddraw_alpha  local.p 139 0
+	ihuddraw_alpha  local.p 140 0
+
+	local.p iprint "You are back on your feet!" 1
+	println ( "^~^~^ MPDBNO getup_revive e" + local.p.entnum + " pool=" + local.pool )
+}end
+
+
+//=========================================================================
+// The "<name> is down" teammate banner (slot 216, fade-exempt). Same-team living players only. Stood
+// back down after a few seconds by ::mp_dbno_bannerClear on a level deadline (a second down extends
+// it). Mirrors coop dbno_enter's banner + dbno_downBannerClear, MP-owned.
+//=========================================================================
+mp_dbno_banner local.p:{
+	if( local.p == NULL ){ end }
+	local.team = local.p.dmteam
+	local.msg = local.p.netname + " is down!"
+	level.coop_mpDbnoBannerUntil = level.time + 6
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.o = $player[local.i]
+		if( local.o != NULL && local.o.entnum != local.p.entnum && isAlive local.o && local.o.dmteam == local.team ){
+			ihuddraw_virtualsize local.o 216 1
+			ihuddraw_align       local.o 216 center top
+			ihuddraw_font        local.o 216 "verdana-12"
+			ihuddraw_color       local.o 216 1 0.25 0.2
+			ihuddraw_rect        local.o 216 0 58 0 0
+			ihuddraw_string      local.o 216 local.msg
+			ihuddraw_alpha       local.o 216 1
+		}
+		local.i++
+	}
+	thread mp_dbno_bannerClear
+}end
+
+
+mp_dbno_bannerClear:{
+	if( level.coop_mpDbnoBannerOn == 1 ){ end }
+	level.coop_mpDbnoBannerOn = 1
+	while( level.coop_mpDbnoBannerUntil != NIL && level.time < level.coop_mpDbnoBannerUntil ){
+		wait 0.5
+	}
+	level.coop_mpDbnoBannerUntil = NIL
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.o = $player[local.i]
+		if( local.o != NULL ){
+			ihuddraw_alpha  local.o 216 0
+			ihuddraw_string local.o 216 ""
+		}
+		local.i++
+	}
+	level.coop_mpDbnoBannerOn = NIL
+}end
