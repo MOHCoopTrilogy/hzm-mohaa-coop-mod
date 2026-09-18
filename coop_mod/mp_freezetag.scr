@@ -100,7 +100,21 @@ ensureConfig:{
 	if( local.at == "" ){ local.at = "30" }
 	level.coop_mpFtAutoThaw = int( local.at )
 
-	println( "^~^~^ MPFT init gt=" + level.gametype + " thawRadius=" + level.coop_mpFtThawRadius + " thawTime=" + level.coop_mpFtThawTime + " autoThaw=" + level.coop_mpFtAutoThaw + " roundTime=" + level.coop_mpRndTimeout )
+	//MELTGUN (UberMod fidelity, M14+): a living teammate who AIMS at a frozen body and holds FIRE welds
+	//them free FASTER than the passive proximity melt - the "meltgun". Range coop_mpFtMeltRadius (default
+	//350), weld time coop_mpFtMeltTime (default 1.5s of continuous fire on target). The passive proximity
+	//channel + auto-thaw stay so a BOT can still thaw a teammate (bots do not aim-weld).
+	local.mr = getcvar( "coop_mpFtMeltRadius" )
+	if( local.mr == "" ){ local.mr = "350" }
+	level.coop_mpFtMeltRadius = int( local.mr )
+	if( level.coop_mpFtMeltRadius < 32 ){ level.coop_mpFtMeltRadius = 350 }
+
+	local.mt = getcvar( "coop_mpFtMeltTime" )
+	if( local.mt == "" ){ local.mt = "1.5" }
+	level.coop_mpFtMeltTime = float( local.mt )
+	if( level.coop_mpFtMeltTime <= 0 ){ level.coop_mpFtMeltTime = 1.5 }
+
+	println( "^~^~^ MPFT init gt=" + level.gametype + " thawRadius=" + level.coop_mpFtThawRadius + " thawTime=" + level.coop_mpFtThawTime + " autoThaw=" + level.coop_mpFtAutoThaw + " meltRadius=" + level.coop_mpFtMeltRadius + " meltTime=" + level.coop_mpFtMeltTime + " roundTime=" + level.coop_mpRndTimeout )
 }end
 
 
@@ -203,6 +217,7 @@ ft_applyFreeze local.p:{
 	local.p.flags["coop_mpRndFrozen"] = 1
 	local.p.flags["coop_mpFtFrozenAt"] = level.time
 	local.p.flags["coop_mpFtThawProg"] = 0
+	local.p.flags["coop_mpFtMeltProg"] = 0
 
 	iprintln( local.p.netname + " is FROZEN!" )
 	println( "^~^~^ MPFT freeze e" + local.p.entnum + " side=" + local.p.dmteam )
@@ -225,6 +240,7 @@ ft_frozenTick local.p:{
 		local.p.flags["coop_mpFtFrozen"] = NIL
 		local.p.flags["coop_mpRndFrozen"] = NIL
 		local.p.flags["coop_mpFtThawProg"] = 0
+	local.p.flags["coop_mpFtMeltProg"] = 0
 		end
 	}
 
@@ -238,6 +254,24 @@ ft_frozenTick local.p:{
 			waitthread ft_thaw local.p "timeout"
 			end
 		}
+	}
+
+	//MELTGUN channel (UberMod fidelity): a teammate AIMING at this body and holding FIRE welds it free
+	//faster than passive proximity. Accumulates while a melter is on target; thaws at coop_mpFtMeltTime.
+	local.melt = waitthread ft_hasMelter local.p
+	if( local.p == NULL ){ end }
+	if( local.melt == 1 ){
+		local.mp = local.p.flags["coop_mpFtMeltProg"]
+		if( local.mp == NIL ){ local.mp = 0 }
+		local.mp = ( local.mp + 0.5 )
+		local.p.flags["coop_mpFtMeltProg"] = local.mp
+		if( local.mp >= level.coop_mpFtMeltTime ){
+			waitthread ft_thaw local.p "meltgun"
+			end
+		}
+	}
+	else{
+		local.p.flags["coop_mpFtMeltProg"] = 0
 	}
 
 	//proximity channel: nearest living, non-frozen teammate within the thaw radius
@@ -254,6 +288,9 @@ ft_frozenTick local.p:{
 		}
 	}
 	else{
+		//only the PROXIMITY channel resets here. The MELTGUN channel is a separate, longer-range welder and
+		//owns its own reset (line ~274, when no melter is on target); zeroing it here defeated ranged melting
+		//- a melter beyond the passive radius had its progress wiped every tick and could never complete.
 		local.p.flags["coop_mpFtThawProg"] = 0
 	}
 }end
@@ -270,6 +307,7 @@ ft_thaw local.p local.cause:{
 	local.p.flags["coop_mpFtFrozen"] = NIL
 	local.p.flags["coop_mpRndFrozen"] = NIL
 	local.p.flags["coop_mpFtThawProg"] = 0
+	local.p.flags["coop_mpFtMeltProg"] = 0
 
 	local.p.injail = 0
 	local.p freezecontrols 0
@@ -289,6 +327,37 @@ ft_thaw local.p local.cause:{
 // the filter in mp_rounds.scr::rounds_countAlive (same team, not spectator, alive) plus the not-frozen
 // test and the 3D radius. Returns 1/0 into a local before end (the }end <expr> trap, bug-2603).
 //=========================================================================
+//Is a living, non-frozen teammate AIMING at this frozen body (within coop_mpFtMeltRadius, view forward
+//pointed at it within a ~25deg cone) AND holding FIRE? That is the meltgun weld. Returns 1/0 in a local
+//before end (bug-2603). Mirrors the flak's gunner view maths - vector_dot of the aim forward and the
+//normalized direction to the body.
+ft_hasMelter local.p:{
+	local.found = 0
+	if( local.p == NULL ){ end local.found }
+	local.team = local.p.dmteam
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.entnum == local.p.entnum ){ continue }
+		if( local.q.dmteam != local.team ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.flags["coop_mpFtFrozen"] == 1 ){ continue }
+		if( !( isAlive local.q ) ){ continue }
+		if( local.q.fireheld != 1 ){ continue }
+		local.vec = ( local.p.origin - local.q.origin )
+		local.d = vector_length( local.vec )
+		if( local.d > level.coop_mpFtMeltRadius ){ continue }
+		if( local.d >= 1 ){
+			local.dir = vector_normalize( local.vec )
+			local.fwd = angles_toforward local.q.viewangles
+			local.dot = vector_dot local.dir local.fwd
+			if( local.dot < 0.9 ){ continue }
+		}
+		local.found = 1
+		local.i = ( $player.size + 1 )
+	}
+}end local.found
+
 ft_hasThawer local.p:{
 	local.found = 0
 	if( local.p == NULL ){ end local.found }

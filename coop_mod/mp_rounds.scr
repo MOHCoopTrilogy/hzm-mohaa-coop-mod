@@ -122,6 +122,18 @@ rounds_tick:{
 		if( local.a >= 1 && local.x >= 1 ){
 			level.coop_mpRndState = "live"
 			level.coop_mpRndStart = level.time
+			//[MP CHALLENGES] snapshot every player present at arm as a round PARTICIPANT (their team now) into
+			//self.flags["coop_mpRndTeam"]. The no-respawn hold (rounds_enforceAll) later forces dead players to
+			//spectator, wiping their live dmteam, so the win award reads this record instead - otherwise only
+			//the surviving last man is credited rounds/win_<mode> (mp_progression.scr::mp_awardRoundWin). Wiped
+			//with all entity flags on the round's map restart.
+			for( local.si = 1; local.si <= $player.size; local.si++ ){
+				local.sp = $player[local.si]
+				if( local.sp == NULL ){ continue }
+				if( local.sp.isSpectator ){ continue }
+				if( local.sp.dmteam != "allies" && local.sp.dmteam != "axis" ){ continue }
+				local.sp.flags["coop_mpRndTeam"] = local.sp.dmteam
+			}
 			iprintlnbold( level.coop_mpRndName + " - round " + ( waitthread rounds_i "coop_mpRndNum" + 1 ) + " - FIGHT!" )
 			println( "^~^~^ MPRND armed allies=" + local.a + " axis=" + local.x )
 		}
@@ -187,6 +199,25 @@ rounds_win local.win local.reason:{
 	if( level.coop_mpRndEnding == 1 ){ end }
 	level.coop_mpRndEnding = 1
 	level.coop_mpRndState = "ending"
+
+	//[MP CHALLENGES] credit the round win to the challenge stats (win_<mode> for the winners + rounds for
+	//every participant). level.coop_mpMode names this round family's mode (lms/snd/freezetag/demolition/
+	//prophunt). mp_awardRoundWin (NOT mp_awardTeamWin) reads each player's snapshotted coop_mpRndTeam, so a
+	//player the no-respawn hold has already forced to spectator this round still gets credited.
+	waitthread coop_mod/mp_progression.scr::mp_awardRoundWin local.win level.coop_mpMode
+
+	//[MP CHALLENGES] Prop Hunt: every prop (axis) still alive + in play at round end SURVIVED this round.
+	if( level.coop_mpMode == "prophunt" ){
+		for( local.pi = 1; local.pi <= $player.size; local.pi++ ){
+			local.pp = $player[local.pi]
+			if( local.pp == NULL ){ continue }
+			if( local.pp.dmteam != "axis" ){ continue }
+			if( local.pp.isSpectator ){ continue }
+			if( local.pp.flags["coop_mpRndOut"] == 1 ){ continue }
+			if( !( isAlive local.pp ) ){ continue }
+			waitthread coop_mod/mp_progression.scr::mp_awardObj local.pp "propsurv" 1
+		}
+	}
 
 	local.a = waitthread rounds_i "coop_mpRndScoreA"
 	local.x = waitthread rounds_i "coop_mpRndScoreX"

@@ -1,51 +1,42 @@
 //=========================================================================
-// MP_DEMOLITION.SCR - DEMOLITION, an MP game MODE (slice 6). Decision M18: "CTF and Demolition
-// built on Mefy's MIT libraries, credited". A bomb / destroy-objective ROUND mode on objective maps.
+// MP_DEMOLITION.SCR - DEMOLITION, an MP game MODE. SYMMETRIC two-way bomb rounds (UberMod / Mefy
+// fidelity): EACH team has one bomb SITE, and EITHER team plants a charge on the ENEMY'S site to
+// destroy it. No respawns within a round; destroy the enemy site (or wipe them, or hold the clock) to
+// win. A series of round wins decides the match. This replaces the earlier one-way build (which just
+// layered rounds on the stock gt4 objective bomb with a fixed attacker/defender and so played almost
+// exactly like our own S&D) - the defining Demolition trait is that BOTH sides attack.
 //
-// CREDIT. Mefy's Demolition (dem.scr) from the MOHAA Extended-Gametypes libraries, MIT-licensed. Its
-// actual source is unobtainable (mefy.moh-central.net returns 403 - _research/mp_gamemodes_understanding.md
-// "Unfetchable sources"), so this is a REBUILD FROM THE PUBLISHED RULES, not a copy: attackers plant a
-// charge to DESTROY the objective, defenders defend / defuse, the round is decided by the bomb, an
-// elimination, or the round clock, and a series of round wins decides the match. The bomb itself is NOT
-// reinvented (CLAUDE.md fix methodology) - it is the STOCK gt4 objective bomb.
+// CREDIT. Mefy's Demolition (dem.scr, MIT) is symmetric - `attacker "both"` on its own secretbases plant
+// sites. Its source is unobtainable, so this is a rebuild from the published rules, not a copy.
 //
-// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
-// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
-// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
-//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn-edge: set config, arm rounds, deploy the kit)
-//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep the round manager alive)
-//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: mark OUT for the round, no respawn)
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun, which
+// ONLY coop_mod/mp.scr sets and a level load wipes - so nothing here runs on a coop map. mp.scr dispatches
+// through its seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, arm rounds, seed this side's site, kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: keep rounds alive; drive plant/defuse; site mgr)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: cancel their plant/defuse, mark OUT)
 //
-// RELATION TO SEARCH & DESTROY (why this is a sibling, not a duplicate). S&D (coop_mod/mp_snd.scr) and
-// Demolition are the two members of the STOCK-gt4-bomb ROUND family, exactly as LMS and Freeze Tag are
-// two members of the elimination-round family - all four drive the ONE proven shared lifecycle in
-// coop_mod/mp_rounds.scr (warmup -> live -> win -> stuffsrv-map restart, with the series score kept in the
-// non-archived coop_mpRnd* cvars). Demolition is its own mode id, its own board routing (the objective
-// board), and its own round-time host cvar (coop_mpDemTime); it layers the SAME no-respawn round structure
-// on the SAME stock bomb. A respawn-on variant was considered and rejected: it would need the shared helper
-// to stop resolving rounds by elimination (or momentary all-dead frames between respawns would end a round
-// falsely), which is churn on the one file S&D / LMS / Freeze Tag all depend on - not worth the risk for
-// a mode whose faithful behaviour is one-life bomb rounds anyway. See mp_snd.scr for the bomb-wiring notes.
+// THE SITES are derived from real team spawn origins (same clean pattern as Base Assault / CTF): the FIRST
+// spawn origin seen for a side becomes that side's bomb site, a sandbag-and-charge marker offset from the
+// spawn. No bsp entity, no per-map table.
 //
-// THE BOMB IS THE STOCK gt4 RECIPE (global/obj_dm.scr), wired by each objective map's own bomb_thinker:
-// attackers hold USE on the charge trigger for level.bomb_set_time, the fuse ticks, a defuse by the
-// defending team stops it, and a detonation destroys the target and ENDS the match in engine code - that
-// engine match-end IS the attackers' win. This file only layers the ROUND / NO-RESPAWN structure via the
-// shared coop_mod/mp_rounds.scr helper; it reads the stock map's own level.planting_team (attackers),
-// level.defusing_team (defenders) and level.bombs_planted, and never touches the bomb entities. Bots never
-// press USE / never play the objective (they just fight), so planting is human-driven - the round still
-// resolves by elimination or the round clock with no plant, same as S&D.
+// PLANT / DEFUSE (compact copy of the Base Assault plant machinery, MP-owned). An ENEMY player holds [USE]
+// within coop_mpDemRadius of a site for coop_mpDemPlant seconds to arm a charge; a fuse of coop_mpDemFuse
+// then ticks; a SITE-OWNER holding [USE] for coop_mpDemDefuse defuses it before it blows. On detonation
+// the site is destroyed and the PLANTING team WINS the round (via the shared helper's rounds_win). Bots
+// never press [USE], so planting is human-driven; a round still resolves by elimination or the clock.
 //
-// WIN MECHANISM (and why). gt4 (objective) is the one family where teamwin is legal, but this mode - like
-// S&D - deliberately does NOT use teamwin: teamwin fires the engine's own round transition, which would
-// race the deterministic map-restart the shared helper uses. So Demolition wins a round exactly as S&D and
-// LMS do - a script series score in cvars plus a stuffsrv "map <name>" restart - keeping ONE proven,
-// gametype-agnostic win path. See mp_rounds.scr header.
+// ROUND LIFECYCLE + SERIES is the shared coop_mod/mp_rounds.scr (as LMS / S&D / Freeze Tag use it): no
+// respawns once live, a script series score in the non-archived coop_mpRnd* cvars, and a stuffsrv map
+// restart between rounds (never bsptransition / changeGameType). A destroyed site short-circuits to a
+// round win; otherwise the shared elimination / timeout logic decides. Timeout is a DRAW (neither side
+// blew the other's site), so coop_mpRndTimeoutSide is left empty.
 //
-// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, so
-// isolation clause 10 admits them); names no coop cvar, coop_lo token, ui/loadout tree or coop armory
-// code; never giveInventory / changeGameType; never writes coop_health / coop_* state. level.planting_team
-// / defusing_team / bombs_planted are plain stock level vars, not cvars.
+// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, clause 10);
+// names no coop cvar, coop_lo token, ui/loadout tree or coop armory code; never giveInventory /
+// changeGameType; never writes coop_health / coop_* state. Per-player plant state lives in
+// self.flags["coop_mpDem*"]; site state in level.coop_mpDem* (coop_mp* is MP-owned). Uses stock builtins
+// spawn / model / droptofloor / solid / remove and the native field useheld.
 //=========================================================================
 
 //Inert entry. mp.scr calls the specific labels below, not main.
@@ -55,52 +46,354 @@ main:{
 }end
 
 
-//One-time Demolition config into the shared round helper's level.coop_mpRnd* vars (read by mp_rounds.scr).
-//Idempotent (level flag). Attackers/defenders come from the stock map's own bomb wiring.
+//The liveness probe. Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// One-time config. Round config into the shared helper + the plant/fuse/defuse tuning. Idempotent.
+//=========================================================================
 ensureConfig:{
 	if( level.coop_mpDemReady == 1 ){ end }
 	level.coop_mpDemReady = 1
 
 	level.coop_mpRndName = "Demolition"
-	level.coop_mpRndBombGuard = 1
+	level.coop_mpRndBombGuard = 0
 	level.coop_mpRndCallout = 1
 
-	//round timer (host cvar coop_mpDemTime, default 120s). On timeout the DEFENDERS win - the attackers
-	//failed to detonate - so the timeout side is the stock defusing_team.
+	//round timer (host cvar coop_mpDemTime, default 180s). Timeout = DRAW (neither side detonated), so the
+	//shared helper's timeout side is left empty.
 	local.t = getcvar( "coop_mpDemTime" )
-	if( local.t == "" ){ local.t = "120" }
+	if( local.t == "" ){ local.t = "180" }
 	level.coop_mpRndTimeout = int( local.t )
+	level.coop_mpRndTimeoutSide = ""
 
-	local.def = level.defusing_team
-	if( local.def == NIL ){ local.def = "" }
-	level.coop_mpRndTimeoutSide = local.def
+	//plant time (seconds of [USE] to arm the charge): host cvar coop_mpDemPlant, default 5.
+	level.coop_mpDemPlant = waitthread dem_cvarInt "coop_mpDemPlant" 5 1
+	//defuse time: host cvar coop_mpDemDefuse, default 5.
+	level.coop_mpDemDefuse = waitthread dem_cvarInt "coop_mpDemDefuse" 5 1
+	//fuse time (armed -> detonation): host cvar coop_mpDemFuse, default 30.
+	level.coop_mpDemFuse = waitthread dem_cvarInt "coop_mpDemFuse" 30 5
+	//interaction radius: host cvar coop_mpDemRadius, default 100.
+	level.coop_mpDemRadius = waitthread dem_cvarInt "coop_mpDemRadius" 100 32
 
-	local.att = level.planting_team
-	if( local.att == NIL ){ local.att = "" }
-	println( "^~^~^ MPDEM init planting=" + local.att + " defusing=" + local.def + " gt=" + level.gametype + " time=" + level.coop_mpRndTimeout )
+	//per-side site state: "none" (not yet seeded), "alive", "planted", "destroyed".
+	level.coop_mpDemState["a"] = "none"
+	level.coop_mpDemState["x"] = "none"
+	level.coop_mpDemPos["a"] = NIL
+	level.coop_mpDemPos["x"] = NIL
+	level.coop_mpDemEnt["a"] = NULL
+	level.coop_mpDemEnt["x"] = NULL
+	level.coop_mpDemFuseAt["a"] = 0
+	level.coop_mpDemFuseAt["x"] = 0
+	level.coop_mpDemPlanter["a"] = NULL
+	level.coop_mpDemPlanter["x"] = NULL
+	level.coop_mpDemPlantStart["a"] = 0
+	level.coop_mpDemPlantStart["x"] = 0
+	level.coop_mpDemDefuser["a"] = NULL
+	level.coop_mpDemDefuser["x"] = NULL
+	level.coop_mpDemDefuseStart["a"] = 0
+	level.coop_mpDemDefuseStart["x"] = 0
+
+	println( "^~^~^ MPDEM init plant=" + level.coop_mpDemPlant + " defuse=" + level.coop_mpDemDefuse + " fuse=" + level.coop_mpDemFuse + " radius=" + level.coop_mpDemRadius + " time=" + level.coop_mpRndTimeout )
 }end
 
 
-//SPAWN EDGE. Set config, arm the round manager, and deploy THROUGH THE ARMORY so the weapon preset
-//(coop_mpPreset) is inherited automatically (decision M5) - unlike Gun Game, which owns a fixed ladder.
+//read an int cvar with a default + a floor. int() into a local BEFORE end (bug-2603).
+dem_cvarInt local.name local.def local.floor:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = ( "" + local.def ) }
+	local.v = int( local.s )
+	if( local.v < local.floor ){ local.v = local.def }
+}end local.v
+
+
+//=========================================================================
+// SPAWN EDGE. Config, arm the round, seed THIS side's bomb site from the spawn origin if not yet set, kit.
+//=========================================================================
 mode_onSpawn local.p:{
 	if( local.p == NULL ){ end }
 	waitthread ensureConfig
 	waitthread coop_mod/mp_rounds.scr::rounds_begin
 	if( local.p == NULL ){ end }
+	waitthread dem_seedSite local.p
+	if( local.p == NULL ){ end }
 	waitthread coop_mod/mp_armory.scr::giveKit local.p
 }end
 
 
-//PER-TICK. Nothing per-player here (the shared manager owns the round); just keep it running.
-mode_think local.p:{
+//The first spawn origin seen for a side becomes that side's bomb site (offset a little so the marker is
+//not on the spawn). Idempotent per side.
+dem_seedSite local.p:{
 	if( local.p == NULL ){ end }
-	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+	local.side = "x"
+	if( local.p.dmteam == "allies" ){ local.side = "a" }
+	if( local.p.dmteam == "spectator" || local.p.dmteam == "" || local.p.dmteam == NIL ){ end }
+	if( local.p.isSpectator ){ end }
+	if( level.coop_mpDemState[local.side] != "none" ){ end }
+
+	local.ang = local.p.angles
+	local.yaw = local.ang[1]
+	//engine cos/sin take DEGREES (DEG2RAD internally); the old radian pre-conversion collapsed the site
+	//offset to a fixed ~(+80,0,0) regardless of facing, so plant sites landed in one direction (bug-2660).
+	local.ox = ( cos local.yaw * 80 )
+	local.oy = ( sin local.yaw * 80 )
+	local.pos = ( local.p.origin + ( local.ox local.oy 0 ) )
+
+	local.ent = spawn script_model model "models/static/sandbag_wall.tik"
+	local.ent.origin = local.pos
+	local.ent droptofloor 512
+	local.ent solid
+	level.coop_mpDemEnt[local.side] = local.ent
+	level.coop_mpDemPos[local.side] = local.ent.origin
+	level.coop_mpDemState[local.side] = "alive"
+
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintln( local.tag + " demolition target established!" )
+	println( "^~^~^ MPDEM site side=" + local.side + " pos=" + local.ent.origin )
 }end
 
 
-//DEATH EDGE. Hand the victim to the shared helper: OUT for the rest of the round (no respawn).
+//=========================================================================
+// PER-TICK. Keep the round manager alive, run the site fuse manager once, then this player's plant/defuse.
+//=========================================================================
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+	if( local.p == NULL ){ end }
+	waitthread dem_manage
+	if( local.p == NULL ){ end }
+	waitthread dem_tickPlayer local.p
+}end
+
+
+//DEATH EDGE. Cancel this victim's plant/defuse, then hand to the shared helper (OUT, no respawn).
 mode_onDeath local.p:{
 	if( local.p == NULL ){ end }
+	waitthread dem_cancelPlayer local.p
 	waitthread coop_mod/mp_rounds.scr::rounds_onDeath local.p
+}end
+
+
+//=========================================================================
+// SITE FUSE MANAGER. Once per tick (level flag stops N players re-running it): for each PLANTED site, if
+// its fuse has expired, detonate it - destroy the site and WIN the round for the team that planted.
+//=========================================================================
+dem_manage:{
+	if( level.coop_mpDemManageAt == level.time ){ end }
+	level.coop_mpDemManageAt = level.time
+	if( level.coop_mpRndState != "live" ){ end }
+
+	waitthread dem_driveFuse "a"
+	waitthread dem_driveFuse "x"
+	waitthread dem_updateMarker
+
+	//BOTS: each squad attacks the ENEMY bomb site (Phase 6 director). allies -> axis site ("x"), axis -> allies
+	//site ("a"). No-op per side until that site is seeded (coop_mpDemPos NIL). Idempotent (moves the node).
+	local.botTgtAllies = level.coop_mpDemPos["x"]
+	local.botTgtAxis = level.coop_mpDemPos["a"]
+	waitthread coop_mod/mp_botdirector.scr::dir_attackEnemy 12 13 local.botTgtAllies local.botTgtAxis
+}end
+
+
+dem_driveFuse local.side:{
+	if( level.coop_mpDemState[local.side] != "planted" ){ end }
+	local.fuseAt = level.coop_mpDemFuseAt[local.side]
+	if( local.fuseAt <= 0 ){ end }
+	if( level.time >= local.fuseAt ){
+		//detonate: the PLANTERS (the enemy of this site's owner) win the round
+		local.attackers = "axis"
+		if( local.side == "x" ){ local.attackers = "allies" }
+		level.coop_mpDemState[local.side] = "destroyed"
+		//[MP CHALLENGES] credit the "destroy" objective to the player who planted this charge (remembered at
+		//arm time, since the active-planter slot was cleared then).
+		local.by = level.coop_mpDemPlantedBy[local.side]
+		if( local.by != NIL && local.by != NULL ){ waitthread coop_mod/mp_progression.scr::mp_awardObj local.by "destroy" 1 }
+		local.ent = level.coop_mpDemEnt[local.side]
+		if( local.ent != NIL && local.ent != NULL ){ local.ent remove }
+		waitthread dem_sound "explode_tank"
+		local.tag = "ALLIES"
+		if( local.attackers == "axis" ){ local.tag = "AXIS" }
+		iprintlnbold( local.tag + " destroyed the enemy demolition target!" )
+		println( "^~^~^ MPDEM detonate site=" + local.side + " winner=" + local.attackers )
+		waitthread coop_mod/mp_rounds.scr::rounds_win local.attackers "detonation"
+		end
+	}
+	//fuse countdown callouts + an audible beep at each mark (the on-screen timer for a from-scratch bomb).
+	local.remain = int( local.fuseAt - level.time )
+	if( local.remain == 20 || local.remain == 10 || local.remain == 5 || local.remain == 3 || local.remain == 1 ){
+		iprintlnbold( "Demolition charge: " + local.remain + "s to detonation!" )
+		waitthread dem_sound "alarm_switch"
+	}
+}end
+
+
+//=========================================================================
+// PER-PLAYER PLANT / DEFUSE. If the player holds [USE] near the ENEMY site (plant) or their OWN planted
+// site (defuse), channel it.
+//=========================================================================
+dem_tickPlayer local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.isSpectator ){ end }
+	if( !( isAlive local.p ) ){ end }
+	if( level.coop_mpRndState != "live" ){ end }
+
+	local.mySide = "x"
+	if( local.p.dmteam == "allies" ){ local.mySide = "a" }
+	if( local.p.dmteam == "spectator" || local.p.dmteam == "" || local.p.dmteam == NIL ){ end }
+	local.enemySide = "a"
+	if( local.mySide == "a" ){ local.enemySide = "x" }
+
+	local.use = local.p.useheld
+	if( local.use == NIL ){ local.use = 0 }
+	if( local.use != 1 ){
+		waitthread dem_cancelPlayer local.p
+		end
+	}
+
+	//PLANT: near the enemy's ALIVE site
+	if( level.coop_mpDemState[local.enemySide] == "alive" ){
+		local.pos = level.coop_mpDemPos[local.enemySide]
+		if( local.pos != NIL ){
+			local.d = vector_length( local.p.origin - local.pos )
+			if( local.d <= level.coop_mpDemRadius ){
+				waitthread dem_tickPlant local.p local.enemySide
+				end
+			}
+		}
+	}
+	//DEFUSE: near our OWN planted site
+	if( level.coop_mpDemState[local.mySide] == "planted" ){
+		local.pos = level.coop_mpDemPos[local.mySide]
+		if( local.pos != NIL ){
+			local.d = vector_length( local.p.origin - local.pos )
+			if( local.d <= level.coop_mpDemRadius ){
+				waitthread dem_tickDefuse local.p local.mySide
+				end
+			}
+		}
+	}
+	//out of range of anything actionable - cancel
+	waitthread dem_cancelPlayer local.p
+}end
+
+
+//accumulate a plant on the enemy site. self-consistent single-planter model.
+dem_tickPlant local.p local.side:{
+	local.cur = level.coop_mpDemPlanter[local.side]
+	if( local.cur == local.p ){
+		local.elapsed = ( level.time - level.coop_mpDemPlantStart[local.side] )
+		if( local.elapsed >= level.coop_mpDemPlant ){
+			//armed
+			level.coop_mpDemState[local.side] = "planted"
+			level.coop_mpDemFuseAt[local.side] = ( level.time + level.coop_mpDemFuse )
+			//remember the planter for the "destroy" credit at detonation - the active-planter slot is
+			//cleared right below, so without this the detonation would have no one to credit.
+			level.coop_mpDemPlantedBy[local.side] = local.p
+			level.coop_mpDemPlanter[local.side] = NULL
+			level.coop_mpDemPlantStart[local.side] = 0
+			iprintlnbold( local.p.netname + " planted a charge! " + level.coop_mpDemFuse + "s fuse!" )
+			println( "^~^~^ MPDEM plant side=" + local.side + " by=e" + local.p.entnum )
+			waitthread coop_mod/mp_progression.scr::mp_awardObj local.p "plant" 1
+			waitthread dem_sound "plantbomb"
+		}
+		else{
+			local.ri = int( level.coop_mpDemPlant - local.elapsed )
+			if( ( int( local.elapsed ) % 2 ) == 0 && local.ri > 0 ){ local.p iprint ( "Planting... " + local.ri + "s" ) }
+		}
+		end
+	}
+	//another teammate already holds the plant slot: do NOT steal it. Stealing would overwrite the planter
+	//and reset coop_mpDemPlantStart every poll (two attackers alternate within one manage pass), so the
+	//charge would never arm. The slot is released the instant the current planter releases [USE], moves off,
+	//or dies (dem_cancelPlayer), and the next teammate takes over cleanly then.
+	if( local.cur != NIL && local.cur != NULL ){
+		local.p iprint "A teammate is planting the charge..."
+		end
+	}
+	//no current planter: start this player's plant
+	level.coop_mpDemPlanter[local.side] = local.p
+	level.coop_mpDemPlantStart[local.side] = level.time
+	local.p iprint "Planting a charge on the enemy target..."
+	println( "^~^~^ MPDEM plantStart side=" + local.side + " by=e" + local.p.entnum )
+}end
+
+
+//accumulate a defuse on our own planted site.
+dem_tickDefuse local.p local.side:{
+	local.cur = level.coop_mpDemDefuser[local.side]
+	if( local.cur == local.p ){
+		local.elapsed = ( level.time - level.coop_mpDemDefuseStart[local.side] )
+		if( local.elapsed >= level.coop_mpDemDefuse ){
+			//defused: back to alive
+			level.coop_mpDemState[local.side] = "alive"
+			level.coop_mpDemFuseAt[local.side] = 0
+			level.coop_mpDemDefuser[local.side] = NULL
+			level.coop_mpDemDefuseStart[local.side] = 0
+			iprintlnbold( local.p.netname + " DEFUSED the charge!" )
+			println( "^~^~^ MPDEM defuse side=" + local.side + " by=e" + local.p.entnum )
+			waitthread coop_mod/mp_progression.scr::mp_awardObj local.p "defuse" 1
+		}
+		else{
+			local.ri = int( level.coop_mpDemDefuse - local.elapsed )
+			if( ( int( local.elapsed ) % 2 ) == 0 && local.ri > 0 ){ local.p iprint ( "Defusing... " + local.ri + "s" ) }
+		}
+		end
+	}
+	level.coop_mpDemDefuser[local.side] = local.p
+	level.coop_mpDemDefuseStart[local.side] = level.time
+	local.p iprint "Defusing the charge..."
+	println( "^~^~^ MPDEM defuseStart side=" + local.side + " by=e" + local.p.entnum )
+}end
+
+
+//cancel a player's active plant/defuse (they moved off, released [USE], died).
+dem_cancelPlayer local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpDemPlanter["a"] == local.p ){
+		level.coop_mpDemPlanter["a"] = NULL
+		level.coop_mpDemPlantStart["a"] = 0
+	}
+	if( level.coop_mpDemPlanter["x"] == local.p ){
+		level.coop_mpDemPlanter["x"] = NULL
+		level.coop_mpDemPlantStart["x"] = 0
+	}
+	if( level.coop_mpDemDefuser["a"] == local.p ){
+		level.coop_mpDemDefuser["a"] = NULL
+		level.coop_mpDemDefuseStart["a"] = 0
+	}
+	if( level.coop_mpDemDefuser["x"] == local.p ){
+		level.coop_mpDemDefuser["x"] = NULL
+		level.coop_mpDemDefuseStart["x"] = 0
+	}
+}end
+
+
+//broadcast a non-positional audio cue to every player (played on each player so all hear it), the same
+//way mp_medkits.scr plays its cues. local.alias is a known-good soundalias (plantbomb/explode_tank/
+//alarm_switch are all used elsewhere in the mod, so no missing-alias console spam).
+dem_sound local.alias:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		local.q playsound local.alias
+	}
+}end
+
+
+//point the shared objective-compass arrow at whichever site currently holds a live planted charge (the
+//same set_objective_pos mechanism CTF/KOTH/Push/Base Assault use). Attackers see it as "defend", defenders
+//as "defuse". No planted charge -> leave the last marker (harmless; refreshed next plant).
+dem_updateMarker:{
+	if( level.coop_mpDemState["a"] == "planted" ){
+		if( level.coop_mpDemPos["a"] != NIL ){ set_objective_pos level.coop_mpDemPos["a"] }
+		end
+	}
+	if( level.coop_mpDemState["x"] == "planted" ){
+		if( level.coop_mpDemPos["x"] != NIL ){ set_objective_pos level.coop_mpDemPos["x"] }
+		end
+	}
 }end

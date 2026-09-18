@@ -92,6 +92,14 @@ main:{
 	local.preset = getcvar( "coop_mpPreset" )
 	if( local.preset != "" && local.preset != "none" ){ level.coop_mpPreset = local.preset }
 
+	//[MP Spawn Protection] Register an MP DEFAULT of ON (a few seconds of post-spawn invulnerability that
+	//drops the moment the player fires) the FIRST time an MP map runs and the host never chose. Only seeds
+	//when the cvar is unset ("") - a host who set coop_mpSpawnProtect 0/1 by console keeps their value. This
+	//is a setcvar on an MP-owned cvar (coop_mp*, clause 12c) inside mp.scr, which only ever runs on an MP
+	//map, so it cannot change a coop server. The mechanic + duration live in coop_mod/mp_spawnprotect.scr
+	//(coop_mpSpawnProtTime seconds, default 3); mp_onSpawn calls it on the shared spawn edge.
+	if( getcvar( "coop_mpSpawnProtect" ) == "" ){ setcvar "coop_mpSpawnProtect" "1" }
+
 	//[user 2026-09-13, bug-2564] THE COOP FEEL IN MULTIPLAYER - "put all of it into pvp".
 	//
 	//1. game.* constants. variables.scr seeds these on coop maps only, and weaponstate.scr reads both
@@ -129,7 +137,12 @@ main:{
 	local.armLive = waitthread coop_mod/mp_armory.scr::alive
 	if( local.armLive == 1 ){ level.coop_mpArmoryLive = 1 }
 
-	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + level.script + " armory=" + level.coop_mpArmoryLive + " mode=" + level.coop_mpMode + " preset=" + level.coop_mpPreset )
+	//level.script is set by the engine when it runs the map script; on a force-arena map (Push on an SP
+	//map, mp_force_arena) that script is skipped, so it is NIL here - use the mapname so the debug line
+	//never throws a concat error. A NIL in a `+` chain is a Script Error that aborts the whole statement.
+	local.mapDbg = level.script
+	if( local.mapDbg == NIL ){ local.mapDbg = getcvar( "mapname" ) }
+	println( "^~^~^ MP init gametype=" + level.gametype + " map=" + local.mapDbg + " armory=" + level.coop_mpArmoryLive + " mode=" + level.coop_mpMode + " preset=" + level.coop_mpPreset )
 
 	//[MP bot auto-fill slice] Host-configurable bot BACKFILL (coop_mod/mp_bots.scr). Seeds the LATCHED
 	//bot-slot ceiling up-front - sv_maxbots is CVAR_LATCH and gates Recast nav, so it must be > 0 at MAP
@@ -141,12 +154,49 @@ main:{
 	waitthread coop_mod/mp_bots.scr::seedMaxbots
 	thread coop_mod/mp_bots.scr::manage
 
+	//[MP WALK SPEED = COOP PACE, user 2026-09-15] Every MP mode now walks at the SAME speed as coop by
+	//default - the tactical pace sv_dmspeedmult 0.6 (matching autoexec.cfg / start_server.cfg), NOT the
+	//old full-DM 1.1 (which was 287*1.1 = ~316 vs coop's 287*0.6 = ~172). A host "FAST RUN" toggle
+	//(coop_mpFastRun 1) bumps the multiplier to coop_mpFastRunMult (default 0.8 = ~230) - noticeably
+	//quicker than the coop crawl but well short of full DM, so the coop SPRINT burst still earns its
+	//keep. sv_runspeed stays at the engine default 287 (Hardcore lowers it to 200 and restores it; since
+	//BOTH the base and Hardcore scale by dmspeedmult, Hardcore stays ~70% of whatever base is set here,
+	//so its relative feel is preserved automatically). Set here in main, so it covers EVERY mode. These
+	//cvars persist across maps, so setting them explicitly each MP boot stops a prior coop/Hardcore value
+	//following the session; start_server.cfg mirrors the coop values back on return to coop.
+	setcvar "sv_runspeed" "287"
+	local.mpSpeed = "0.6"
+	if( getcvar( "coop_mpFastRun" ) == "1" ){
+		local.mpSpeed = getcvar( "coop_mpFastRunMult" )
+		if( local.mpSpeed == "" ){ local.mpSpeed = "0.8" }
+	}
+	setcvar "sv_dmspeedmult" local.mpSpeed
+	println( "^~^~^ MP walkspeed dmspeedmult=" + local.mpSpeed + " fastrun=" + getcvar( "coop_mpFastRun" ) )
+
+	//[bug-2712] COOP INSTANT-REGEN LEAK -> everyone invulnerable in MP. coop sets g_healrate 100000
+	//(server.cfg / start_server.cfg, and itemhandler.scr re-applies it) so health packs apply instantly and
+	//players never chase pickups. The engine treats BOTH 0 and very large values as INSTANT heal
+	//(player.cpp/health.cpp), so in PvP every player AND bot heals bullet damage faster than it lands - the
+	//whole server is invulnerable to sustained fire, and only a single burst that exceeds one frame's heal (a
+	//grenade) can kill. This is the real cause of the "nothing dies" reports (the DBNO 9999 pool was a second
+	//layer, now default off). Reset to the MP-normal GRADUAL rate each MP boot; like sv_runspeed above it
+	//persists across maps and start_server.cfg mirrors the coop value back on return to coop. NEVER 0 (0 is
+	//also instant).
+	local.hrWas = getcvar( "g_healrate" )
+	setcvar "g_healrate" "10"
+	println( "^~^~^ MP g_healrate reset to 10 (was " + local.hrWas + " - coop instant-regen leak, bug-2712)" )
+
 	//[MP Hardcore modifier slice] The HARDCORE host toggle (coop_mpHardcore 0/1) - a modifier that composes
 	//with EVERY mode, like the weapon presets. Its manager publishes the serverinfo flag g_mpHardcore (the
 	//cgame hides the crosshair + health/stamina chrome when set) and lowers sv_runspeed while on, restoring
 	//it when off. Guarded end-to-end on coop_mpRun (only reachable from here, which set it) and a run-once
 	//flag; a no-op when the host never enables it. Half health is applied per player from mp_onSpawn below.
 	thread coop_mod/mp_hardcore.scr::manage
+
+	//[MP Single-Round Ammo modifier] Subscribe player_killed once so a kill refills the killer to one round
+	//(the spawn-edge cap is applied per player in mp_onSpawn). One-Shot needs no manager (pure spawn edge).
+	//Both are host toggles that compose on top of every compatible mode; guarded end-to-end on coop_mpRun.
+	thread coop_mod/mp_oneammo.scr::init
 
 	//[MP realism toggles slice] The four host "realism" toggles (coop_mpNoAds / coop_mpNoProne /
 	//coop_mpNoCover / coop_mpNo3p). Its manager composes them into the serverinfo bitmask g_mpRealismOff
@@ -155,11 +205,56 @@ main:{
 	//host enables none of them. Composes with every mode, like Hardcore and the weapon presets.
 	thread coop_mod/mp_realism.scr::manage
 
-	//[DBNO + Medkits default ON] Both are host toggles (linkcvar checkboxes on Host Rules) that default
-	//to "" (never registered) = off. The user wants them ON by design, so seed to "1" if never set. A
-	//host's explicit "0" from the toggle persists and is never overwritten (only "" is touched).
-	if( getcvar( "coop_mpDbno" ) == "" ){ setcvar "coop_mpDbno" "1" }
+	//[DBNO default OFF - 2026-09-18] DBNO raises every player/bot to a 9999 absorption pool (mp_dbno.scr) so a
+	//lethal hit becomes a DOWN. But the down/death trigger does not fire reliably in MP, so the pool just makes
+	//EVERYONE effectively invulnerable ("nothing takes damage"). Until the down is fixed, DBNO must NOT default
+	//on - it breaks combat in every MP mode. It stays a host toggle (Host Rules checkbox); a host who sets it
+	//explicitly still gets it. Medkits are unaffected and keep their default-on.
+	if( getcvar( "coop_mpDbno" ) == "" ){ setcvar "coop_mpDbno" "0" }
 	if( getcvar( "coop_mpMedkits" ) == "" ){ setcvar "coop_mpMedkits" "1" }
+
+	//[Dynamic Weather in MP - 2026-09-18] Host toggle coop_mpWeather (Host Rules checkbox). MP maps load
+	//script-less so the coop weather starter + per-map theme never run; mp_weather.scr supplies both and reaches
+	//the shared coop renderer. Reaches an MP file (MP->MP); it in turn calls the allowlisted
+	//weather.scr::coop_weather_init.
+	//DEFAULT OFF (bug-2710): user confirmed weather crashes the listen-server client loading m2l1 Push -
+	//MP arena maps skip the map's *_precache.scr, so the snow renderer uses FX the client never registered ->
+	//crash. Coop is unaffected (its map script precaches normally). Was briefly default ON per the user's
+	//request; a crashing default is not shippable, so weather is opt-in until the MP precache gap is fixed and
+	//CLIENT-verified, then this flips back to "1". mp_weather_on also treats unset as OFF (belt-and-suspenders).
+	if( getcvar( "coop_mpWeather" ) == "" ){ setcvar "coop_mpWeather" "0" }
+	thread coop_mod/mp_weather.scr::mp_weather_init
+
+	//[MP Progression slice 1] Kill-attribution session counters. THREADED (not waitthread) and in its
+	//own file: it subscribes to the player_killed delegate, which the mp.scr header flags as unproven
+	//here - so a throw there is a Script Error that skips only its own statement and never touches this
+	//poll. A no-op today beyond crediting in-memory counters; slice 3 signs+carries them (arch A),
+	//slice 4/5 turn them into challenges and armory unlocks. Guarded end-to-end on coop_mpRun.
+	thread coop_mod/mp_progression.scr::init
+
+	//[user 2026-09-16] CLEAR CAMPAIGN AI. Modes on the SP campaign maps launch them as script-less arenas
+	//(sv_mpForceArena), so the map SCRIPT that would set up/patrol the AI never runs - but the bsp's own
+	//`Actor` entities still spawn and, with no script, attack the player on sight. MP has no AI by design, so
+	//sweep them here before the first player spawns. Guarded by coop_mpRun (this whole thread), so coop AI is
+	//never touched; MP bots are class "Player", not "Actor", so they are untouched too. No-op on the dm/mp_*
+	//and mohdm* maps (no Actors). Re-swept briefly to catch any that finish spawning a frame or two late.
+	waitthread mp_clearArenaAI
+
+	//[MP mode ONE-TIME init, pre-spawn] Some modes must set up the level BEFORE the first player spawns
+	//(e.g. Push on the converted SP maps has to script-spawn its team spawn points - those bsps carry
+	//none, so without this the first spawn has nowhere to go). Runs here in main (prespawn), guarded on
+	//coop_mpRun; a no-op for modes with no init. Separate from the per-player mp_modeGiveKit seam.
+	waitthread mp_modeInit
+
+	//[DMG PROBE] global health tracer for the "nothing dies" investigation. Threaded once here; gated per
+	//iteration on coop_mpDmgProbe so it is silent until enabled AND then immediately watches every ALREADY-alive
+	//player/bot (a per-spawn probe cannot, because the stuck-invulnerable entities never respawn to attach it).
+	thread mp_dmgProbeLoop
+
+	//[MP Vehicles] cross-mode emplacements/pickups (host toggle coop_mpVehicles). AFTER mp_modeInit so any
+	//script-spawned team spawns exist; a no-op unless enabled and the map has an authored layout. Guarded
+	//on coop_mpRun inside the file, so it can never touch a coop map.
+	waitthread coop_mod/mp_vehicles.scr::onMapInit
 
 	thread mp_manage
 }end
@@ -168,12 +263,12 @@ main:{
 //=========================================================================
 // The per-player poll.
 //
-// DELIBERATELY A POLL, not the engine's player_spawned delegate. The delegate exists
-// (scriptthread.cpp registers registerev / event_subscribe) and would give a cleaner post-equip
-// hook, but the label-argument form is unverified in this codebase - nothing in the mod's whole
-// .scr tree uses it - and an unverified builtin in the one file that must never misbehave is a bad
-// trade. Polling is the shape player.scr::manage has used since [200]. Revisit once the delegate
-// has been proven on a throwaway label.
+// DELIBERATELY A POLL, not the engine's player_spawned delegate. The poll watches PER-PLAYER STATE
+// every tick (team/alive edges, mode ticks), not just discrete events, so it is the right shape here
+// regardless - and polling is what player.scr::manage has used since [200]. NOTE: the delegate form is
+// no longer unproven - coop_mod/mp_progression.scr subscribes to `player_killed` and it was verified
+// firing (self=victim, 11 args) on a 2026-09-14 bot match. So a future event-driven hook is now a
+// viable option for discrete edges; this poll stays for the per-tick state it owns.
 //=========================================================================
 mp_manage:{
 	//let the first clients finish connecting
@@ -204,7 +299,11 @@ mp_tickPlayer local.p:{
 	//[MP modes slice 1] A game MODE bypasses the armory entirely (Gun Game owns its own kit), so the
 	//armory name bus is skipped when a mode is active and the name is simply cleaned instead. When
 	//coop_mpMode == "none" this is byte-identical to before (armoryLive gate unchanged).
-	if( level.coop_mpMode == "none" && level.coop_mpArmoryLive == 1 ){
+	//[user 2026-09-16] the armory drives EVERY mode that deploys the committed loadout (not just "none"):
+	//in a game mode the player used to be force-deployed and the loadout screen slammed shut before they
+	//could pick (mp_deploy's popmenu). Now the same hold/commit path runs for any armory-using mode.
+	local.usesArmory = waitthread mp_modeUsesArmory
+	if( level.coop_mpArmoryLive == 1 && local.usesArmory == 1 ){
 		waitthread coop_mod/mp_armory.scr::tickPlayer local.p
 		if( local.p == NULL ){ end }
 	}
@@ -225,11 +324,22 @@ mp_tickPlayer local.p:{
 		local.p.flags["coop_mpTeam"] = local.team
 
 		if( local.team != "" && local.team != "spectator" ){
-			//And deploy him. The engine will not let a player leave spectator until dm_primary
-			//holds a legal CLASS, and the mod's own ui override leaves the stock picker empty -
-			//so set the class here rather than making him find a menu that has no content.
-			//EventPrimaryDMWeapon self-deploys (EndSpectator + Respawn) in the same command.
-			waitthread mp_deploy local.p
+			//[user 2026-09-15] HOLD IN THE ARMORY instead of force-spawning. Old behaviour deployed a
+			//rifle here the instant you joined, which spawned you out from under the armory the E5 engine
+			//redirect had just opened - so the loadout screen "disappeared quickly" with no time to pick.
+			//Now a HUMAN on the armory DM path (mode none, armory live) is instead handed to the armory's
+			//own hold: it keeps you in spectate with the screen open, and mp_armory.scr::tickPlayer deploys
+			//you when you press DONE/DEPLOY (the ,qad marker) or after the 25s idle timeout. A BOT (no UI),
+			//an actual game MODE (the mode owns the kit), or a parse-killed armory (coop_mpArmoryLive 0)
+			//all keep the immediate stock deploy - so nobody is ever stranded in spectate (TRAPS T1).
+			local.usesArmory = waitthread mp_modeUsesArmory
+			if( level.coop_mpArmoryLive == 1 && local.usesArmory == 1 && isBot( local.p ) != 1 ){
+				waitthread coop_mod/mp_armory.scr::onTeamFlip local.p
+			} else {
+				//The engine will not let a player leave spectator until dm_primary holds a legal CLASS, and
+				//the mod's ui override leaves the stock picker empty; EventPrimaryDMWeapon self-deploys.
+				waitthread mp_deploy local.p
+			}
 		}
 	}
 
@@ -310,6 +420,23 @@ mp_deploy local.p:{
 
 
 //=========================================================================
+// [user 2026-09-16] Does the current MP mode let the player choose an armory LOADOUT? "none" (DM/TDM) and
+// every objective/round mode that deploys the committed kit through mp_armory.scr::giveKit DO -> the
+// armory hold + name-bus run for them, so a player can pick before spawning. Gun Game owns a fixed tier
+// ladder and Prop Hunt assigns role kits (props are weaponless), so those keep the immediate stock deploy.
+// Returns 1/0 (int into a local before end - bug-2603).
+//=========================================================================
+mp_modeUsesArmory:{
+	local.v = 1
+	if( level.coop_mpMode == "gungame" ){ local.v = 0 }
+	if( level.coop_mpMode == "prophunt" ){ local.v = 0 }
+	if( level.coop_mpMode == "buildabase" ){ local.v = 0 }
+	if( level.coop_mpMode == "snd" ){ local.v = 0 }
+	if( level.coop_mpMode == "cyberattack" ){ local.v = 0 }
+}end local.v
+
+
+//=========================================================================
 // Every respawn, after the engine has already handed out the stock class kit.
 //
 // Health FIRST, because `health <n>` also writes max_health (entity.cpp:1938 - the same behaviour
@@ -345,6 +472,16 @@ mp_onSpawn local.p:{
 	waitthread coop_mod/mp_hardcore.scr::onSpawn local.p
 	if( local.p == NULL ){ end }
 
+	//[MP One-Shot modifier] INSTAGIB. Runs AFTER Hardcore's half-health, so at 1 hp it wins when both are on -
+	//any hit from any weapon is then lethal. Per player, never a cvar; composes with every mode on this edge.
+	waitthread coop_mod/mp_oneshot.scr::onSpawn local.p
+	if( local.p == NULL ){ end }
+
+	//[MP Single-Round Ammo modifier] Cap the primary to one round (refill on kill). AFTER the kit give, and a
+	//no-op on the modes that own their weapons (Gun Game / Prop Hunt / Build-A-Base / S&D / Cyber Attack).
+	waitthread coop_mod/mp_oneammo.scr::onSpawn local.p
+	if( local.p == NULL ){ end }
+
 	//[user 2026-09-13, bug-2564] THIS LIFE'S MONITORS - the ones coop starts from player.scr manageSetup /
 	//manageAliveSpawning: the ADS walk slowdown, wounded breathing, tinnitus and the injured muffle. Each loops
 	//only while coop_isActive == 1 and exits once a death sets it to -2, so one assignment per life starts them
@@ -352,13 +489,20 @@ mp_onSpawn local.p:{
 	//connection, so it is started exactly once per player.
 	//NOT coop_isHost, ever: that flag unlocks dev godmode, noclip and give_all (developer.scr).
 	local.p.flags["coop_isActive"] = 1
-	thread coop_mod/ads.scr::coop_ads_monitor local.p
-	thread coop_mod/painbreath.scr::wounded_monitor local.p
-	thread coop_mod/tinnitus.scr::coop_tinnitus_monitor local.p
-	thread coop_mod/tinnitus.scr::coop_injured_muffle_monitor local.p
-	if( local.p.flags["coop_mpLimpWarn"] != 1 ){
-		local.p.flags["coop_mpLimpWarn"] = 1
-		thread coop_mod/player.scr::coop_limpWarn local.p
+	//[user 2026-09-17] These are FIRST-PERSON immersion effects (ADS walk-slow, wounded breathing, tinnitus,
+	//injured muffle, limp) - they only make sense for a HUMAN behind the screen. On BOTS they are pointless
+	//and actively harmful: the wounded-breath "cough" was audible to nearby humans (the reported "injured
+	//cough at full health" was actually OTHER injured bots), and the limp slowed bots so they struggled to
+	//move. So start them for humans only; a bot gets none of them. Coop is untouched (this is the MP path).
+	if( isBot( local.p ) != 1 ){
+		thread coop_mod/ads.scr::coop_ads_monitor local.p
+		thread coop_mod/painbreath.scr::wounded_monitor local.p
+		thread coop_mod/tinnitus.scr::coop_tinnitus_monitor local.p
+		thread coop_mod/tinnitus.scr::coop_injured_muffle_monitor local.p
+		if( local.p.flags["coop_mpLimpWarn"] != 1 ){
+			local.p.flags["coop_mpLimpWarn"] = 1
+			thread coop_mod/player.scr::coop_limpWarn local.p
+		}
 	}
 
 	//the same audio safety net coop runs on every (re)spawn (player.scr:1357/1366): a muffle or a duck cut short
@@ -368,6 +512,14 @@ mp_onSpawn local.p:{
 	if( local.bv == "" ){ local.bv = "0.9" }
 	local.p stufftext ( "s_volume " + local.bv )
 	local.p stufftext "s_sfxduck 1"
+
+	//[user 2026-09-17] MODERN COMPASS in MP: switch on the top compass bar for this client - the SAME bar coop
+	//uses. cgame's CG_DrawCompassBar honours coop_mpCompass as the MP analog of coop_isCoopSession (engine hook
+	//mp_compass_session), so MP gets the modern bar + objective/teammate markers in place of the stock round
+	//ring. Client cvar; cgame zeroes it on a map change and this re-sets it each spawn (respawns are frequent,
+	//and it stays set once it lands). Plain set, never seta - it must never reach the player's config. coop_mp*
+	//token = MP-owned, legal in an MP file. Respects the player's coop_compassBar pref (off = they keep the ring).
+	local.p stufftext "set coop_mpCompass 1"
 
 	//[MP DBNO / Medkits host toggles] Both are PORTS of the coop systems into MP-owned files
 	//(coop_mod/mp_dbno.scr, coop_mod/mp_medkits.scr) - they call no coop code and touch no coop state.
@@ -381,7 +533,40 @@ mp_onSpawn local.p:{
 	waitthread coop_mod/mp_medkits.scr::onSpawn local.p
 	if( local.p == NULL ){ end }
 
+	//[MP Spawn Protection host toggle] Brief post-spawn invulnerability (coop_mpSpawnProtect seconds, 0 =
+	//off), dropped the moment the player fires. MP-owned port (coop_mod/mp_spawnprotect.scr); a no-op
+	//unless the host enabled it; self-guarded on coop_mpRun + the coop_isActive life flag so it never
+	//leaks past a life or into coop. Runs last so it wraps the fully-kitted player.
+	waitthread coop_mod/mp_spawnprotect.scr::onSpawn local.p
+	if( local.p == NULL ){ end }
+
 	//[armory slice 2] the kit itself is given above via mp_armory.scr::giveKit when the armory is live.
+}end
+
+
+//[DMG PROBE] global singleton. Scans every connected player/bot at 10 Hz and prints each health CHANGE, so a
+//playtest log shows exactly what happens when a shot connects: health that never drops = damage not landing;
+//health that dips then climbs back = a heal. Gated per iteration on coop_mpDmgProbe so it is silent (near-zero
+//cost) until the host sets coop_mpDmgProbe 1, and it then watches entities that are ALREADY alive. Per-player
+//last-seen health lives in a flag; cleared when the probe is off so re-enabling starts fresh.
+mp_dmgProbeLoop:{
+	if( level.coop_mpDmgProbeLoopOn == 1 ){ end }
+	level.coop_mpDmgProbeLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		if( getcvar( "coop_mpDmgProbe" ) == "1" ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.p = $player[local.i]
+				if( local.p == NULL ){ continue }
+				local.h = local.p.health
+				local.prev = local.p.flags["coop_mpDmgProbeLast"]
+				if( local.prev != NIL && local.h != local.prev ){
+					println( "^~^~^ DMGPROBE e" + local.p.entnum + " team=" + local.p.dmteam + " alive=" + ( isAlive local.p ) + " hp " + local.prev + " -> " + local.h )
+				}
+				local.p.flags["coop_mpDmgProbeLast"] = local.h
+			}
+		}
+		wait 0.1
+	}
 }end
 
 
@@ -421,6 +606,81 @@ mp_cleanName local.p:{
 // cannot thread) means mp.scr stays the single owner of the poll and the edges.
 //=========================================================================
 
+//=========================================================================
+// CLEAR CAMPAIGN AI on an MP arena. See the call site in main: force-arena launches SP campaign maps
+// script-less, so the map's AI setup never runs but the bsp's `Actor` entities still spawn and attack.
+// One synchronous sweep now (single frame - safe in main), then a short threaded re-sweep for stragglers.
+//=========================================================================
+mp_clearArenaAI:{
+	if( level.coop_mpRun != 1 ){ end }
+	waitthread mp_sweepAI
+	thread mp_clearArenaAILate
+}end
+
+
+//one full pass: delete every live "Actor" (AI) entity. getentarray "classname" returns nothing at runtime
+//(maptest_phase2/wounded notes), so walk entnums with getentbyentnum. `delete` routes to Actor::Remove.
+mp_sweepAI:{
+	local.n = 0
+	local.max = int( getcvar( "maxentities" ) )
+	if( local.max <= 0 ){ local.max = 1024 }
+	local.i = 0
+	while( local.i < local.max ){
+		local.e = getentbyentnum local.i
+		if( local.e != NULL && local.e != NIL ){
+			if( local.e.classname == "Actor" ){
+				local.e delete
+				local.n = ( local.n + 1 )
+			}
+		}
+		local.i = ( local.i + 1 )
+	}
+	if( local.n > 0 ){ println( "^~^~^ MP cleared " + local.n + " campaign AI" ) }
+}end
+
+
+//re-sweep for a few frames: a handful of bsp actors can finish spawning a frame or two after ServerSpawned.
+mp_clearArenaAILate:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.k = 0
+	while( local.k < 6 ){
+		waitframe
+		if( level.coop_mpRun != 1 ){ end }
+		waitthread mp_sweepAI
+		local.k = ( local.k + 1 )
+	}
+}end
+
+
+//one-time pre-spawn init: the mode sets up the level before any player spawns (called once from main).
+//Only modes that need it declare a mode_init; the rest are absent from this switch and it is a no-op.
+mp_modeInit:{
+	switch( level.coop_mpMode ){
+		case "push":
+			waitthread coop_mod/mp_push.scr::mode_init
+			break
+		case "baseassault":
+			waitthread coop_mod/mp_baseassault.scr::mode_init
+			break
+		case "prophunt":
+			waitthread coop_mod/mp_prophunt.scr::mode_init
+			break
+		case "buildabase":
+			waitthread coop_mod/mp_buildabase.scr::mode_init
+			break
+		case "snd":
+			waitthread coop_mod/mp_snd.scr::mode_init
+			break
+		case "cyberattack":
+			waitthread coop_mod/mp_cyberattack.scr::mode_init
+			break
+		case "countdown":
+			waitthread coop_mod/mp_countdown.scr::mode_init
+			break
+	}
+}end
+
+
 //spawn-edge kit: the mode owns the give (called from mp_onSpawn)
 mp_modeGiveKit local.p:{
 	if( local.p == NULL ){ end }
@@ -431,11 +691,23 @@ mp_modeGiveKit local.p:{
 		case "snd":
 			waitthread coop_mod/mp_snd.scr::mode_onSpawn local.p
 			break
+		case "cyberattack":
+			waitthread coop_mod/mp_cyberattack.scr::mode_onSpawn local.p
+			break
 		case "lms":
 			waitthread coop_mod/mp_lms.scr::mode_onSpawn local.p
 			break
 		case "koth":
 			waitthread coop_mod/mp_koth.scr::mode_onSpawn local.p
+			break
+		case "domination":
+			waitthread coop_mod/mp_domination.scr::mode_onSpawn local.p
+			break
+		case "countdown":
+			waitthread coop_mod/mp_countdown.scr::mode_onSpawn local.p
+			break
+		case "assassination":
+			waitthread coop_mod/mp_assassination.scr::mode_onSpawn local.p
 			break
 		case "push":
 			waitthread coop_mod/mp_push.scr::mode_onSpawn local.p
@@ -448,6 +720,15 @@ mp_modeGiveKit local.p:{
 			break
 		case "ctf":
 			waitthread coop_mod/mp_ctf.scr::mode_onSpawn local.p
+			break
+		case "buildabase":
+			waitthread coop_mod/mp_buildabase.scr::mode_onSpawn local.p
+			break
+		case "baseassault":
+			waitthread coop_mod/mp_baseassault.scr::mode_onSpawn local.p
+			break
+		case "prophunt":
+			waitthread coop_mod/mp_prophunt.scr::mode_onSpawn local.p
 			break
 	}
 }end
@@ -462,11 +743,23 @@ mp_modeTick local.p:{
 		case "snd":
 			waitthread coop_mod/mp_snd.scr::mode_think local.p
 			break
+		case "cyberattack":
+			waitthread coop_mod/mp_cyberattack.scr::mode_think local.p
+			break
 		case "lms":
 			waitthread coop_mod/mp_lms.scr::mode_think local.p
 			break
 		case "koth":
 			waitthread coop_mod/mp_koth.scr::mode_think local.p
+			break
+		case "domination":
+			waitthread coop_mod/mp_domination.scr::mode_think local.p
+			break
+		case "countdown":
+			waitthread coop_mod/mp_countdown.scr::mode_think local.p
+			break
+		case "assassination":
+			waitthread coop_mod/mp_assassination.scr::mode_think local.p
 			break
 		case "push":
 			waitthread coop_mod/mp_push.scr::mode_think local.p
@@ -479,6 +772,15 @@ mp_modeTick local.p:{
 			break
 		case "ctf":
 			waitthread coop_mod/mp_ctf.scr::mode_think local.p
+			break
+		case "buildabase":
+			waitthread coop_mod/mp_buildabase.scr::mode_think local.p
+			break
+		case "prophunt":
+			waitthread coop_mod/mp_prophunt.scr::mode_think local.p
+			break
+		case "baseassault":
+			waitthread coop_mod/mp_baseassault.scr::mode_think local.p
 			break
 	}
 }end
@@ -493,11 +795,23 @@ mp_modeOnDeath local.p:{
 		case "snd":
 			waitthread coop_mod/mp_snd.scr::mode_onDeath local.p
 			break
+		case "cyberattack":
+			waitthread coop_mod/mp_cyberattack.scr::mode_onDeath local.p
+			break
 		case "lms":
 			waitthread coop_mod/mp_lms.scr::mode_onDeath local.p
 			break
 		case "koth":
 			waitthread coop_mod/mp_koth.scr::mode_onDeath local.p
+			break
+		case "domination":
+			waitthread coop_mod/mp_domination.scr::mode_onDeath local.p
+			break
+		case "countdown":
+			waitthread coop_mod/mp_countdown.scr::mode_onDeath local.p
+			break
+		case "assassination":
+			waitthread coop_mod/mp_assassination.scr::mode_onDeath local.p
 			break
 		case "push":
 			waitthread coop_mod/mp_push.scr::mode_onDeath local.p
@@ -510,6 +824,15 @@ mp_modeOnDeath local.p:{
 			break
 		case "ctf":
 			waitthread coop_mod/mp_ctf.scr::mode_onDeath local.p
+			break
+		case "buildabase":
+			waitthread coop_mod/mp_buildabase.scr::mode_onDeath local.p
+			break
+		case "prophunt":
+			waitthread coop_mod/mp_prophunt.scr::mode_onDeath local.p
+			break
+		case "baseassault":
+			waitthread coop_mod/mp_baseassault.scr::mode_onDeath local.p
 			break
 	}
 }end

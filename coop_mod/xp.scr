@@ -248,6 +248,11 @@ xp_init:{
 	level.coop_xp_rankXP[19] = 330000
 	level.coop_xp_rankXP[20] = 410000
 	level.coop_xp_rankXP[21] = 500000
+	//[user 2026-09-17] PRESTIGE: the 22-rank Army ladder tops out at rank 21 (GA, 500k XP). Once shared
+	//coop+MP earning is in play that ceiling is reachable, so above it players earn UNCAPPED prestige
+	//stars - one per coop_xp_prestigeStep XP beyond the rank-21 threshold. This only ADDS above the top
+	//(rankXP[0..21] are untouched), so no existing save is ever re-ranked (thresholds stay LOCKED).
+	level.coop_xp_prestigeStep = 100000
 
 	level.coop_xp_rankName[0]  = "Private"
 	level.coop_xp_rankName[1]  = "Private First Class"
@@ -380,6 +385,10 @@ xp_identify local.player:{
 	local.rank = waitthread xp_rankForTotal local.total
 	local.player.flags["coop_xp_rank"]  = local.rank
 	local.player.flags["coop_xp_rankmapstart"] = local.rank
+	//[user 2026-09-17] prestige stars above the top rank (re-derived from total, like rank).
+	local.prestige = waitthread xp_prestigeForTotal local.total
+	local.player.flags["coop_xp_prestige"] = local.prestige
+	waitthread xp_push_own_cvars local.player
 	//[user 07-16] rank is re-derived from total on connect (never stored) - re-apply all rank unlocks
 	//so they survive reconnects. Idempotent (chal_add_unlock dedups).
 	thread xp_rank_unlock local.player 0 local.rank
@@ -387,7 +396,9 @@ xp_identify local.player:{
 	setcvar ( "coop_xp_" + local.id ) ( "" + local.total )
 	local.player.flags["coop_xp_identifying"] = NIL
 
-	local.player iprint ( "Service record: " + level.coop_xp_rankAbbr[local.rank] + " - " + local.total + " XP" ) 1
+	local.srline = ( "Service record: " + level.coop_xp_rankAbbr[local.rank] + " - " + local.total + " XP" )
+	if( local.prestige > 0 ){ local.srline = ( local.srline + " (Prestige " + local.prestige + ")" ) }
+	local.player iprint local.srline 1
 }end
 
 
@@ -403,6 +414,64 @@ xp_rankForTotal local.total:{
 		local.i++
 	}
 }end(local.r)
+
+
+//=========================================================================
+// Prestige stars earned above the top rank. 0 until the rank-21 threshold is reached, then one star
+// per coop_xp_prestigeStep XP beyond it. Uncapped, so maxed players always have a next target.
+//=========================================================================
+xp_prestigeForTotal local.total:{
+	if( level.coop_xp_rankMax == NIL ){ level.coop_xp_rankMax = 21 }
+	if( level.coop_xp_prestigeStep == NIL || level.coop_xp_prestigeStep <= 0 ){ level.coop_xp_prestigeStep = 100000 }
+	local.p = 0
+	local.top = level.coop_xp_rankXP[level.coop_xp_rankMax]
+	if( local.total >= local.top ){
+		local.p = int( ( local.total - local.top ) / level.coop_xp_prestigeStep )
+	}
+}end(local.p)
+
+
+//=========================================================================
+// [user 2026-09-17] Push the OWNING player's SHARED rank identity to display cvars, so MP menus/HUD show the
+// same coop rank the player earns everywhere (coop and MP now feed one ladder). Display-only coop_xp_* cvars
+// (not saved gameplay cvars); rankAbbr has no spaces, safe for a bare seta. Called on identify + every award.
+//=========================================================================
+xp_push_own_cvars local.player:{
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( local.player.flags["coop_xp_total"] == NIL ){ end }
+	local.total = local.player.flags["coop_xp_total"]
+	local.rank = local.player.flags["coop_xp_rank"]
+	if( local.rank == NIL ){ local.rank = 0 }
+	local.pres = local.player.flags["coop_xp_prestige"]
+	if( local.pres == NIL ){ local.pres = 0 }
+	//XP remaining to the next milestone: next rank while on the ladder, else next prestige star.
+	local.next = 0
+	if( local.rank < level.coop_xp_rankMax ){
+		local.next = ( level.coop_xp_rankXP[local.rank + 1] - local.total )
+	} else {
+		local.next = ( level.coop_xp_prestigeStep - ( ( local.total - level.coop_xp_rankXP[level.coop_xp_rankMax] ) % level.coop_xp_prestigeStep ) )
+	}
+	//emblem index is the rank, zero-padded to 2 digits (coop_rank_00..21) - same map as the XP HUD bar.
+	local.rn = local.rank
+	if( local.rn < 10 ){ local.rn = ( "0" + local.rn ) }
+	local.player stufftext ( "seta coop_xp_rankIdx " + local.rank )
+	local.player stufftext ( "seta coop_xp_rankName " + level.coop_xp_rankAbbr[local.rank] )
+	local.player stufftext ( "seta coop_xp_rankShader textures/hud/coop_rank_" + local.rn )
+	local.player stufftext ( "seta coop_xp_totalOwn " + local.total )
+	local.player stufftext ( "seta coop_xp_next " + local.next )
+	local.player stufftext ( "seta coop_xp_prestige " + local.pres )
+
+	//[user 2026-09-17] SCOREBOARD FEED: publish this player's rank into a per-slot SERVER cvar so the engine
+	//scoreboard (dm_manager.cpp reads coop_sbRank<clientnum>, exactly like tow_allied_obj*) can show the
+	//shared rank in the Rank column. For a PLAYER entity, entnum IS the client number (clients occupy
+	//entities 0..maxclients-1; engine: entity.cpp "entnum IS the client number", player.cpp clientNum =
+	//edict->s.number). The old "entnum - 1" wrote the wrong slot, so every cell read empty -> "-" (bug-2699).
+	//One token, no spaces; prestige as "ABBR+N".
+	local.cn = local.player.entnum
+	local.rlabel = level.coop_xp_rankAbbr[local.rank]
+	if( local.pres > 0 ){ local.rlabel = ( local.rlabel + "+" + local.pres ) }
+	setcvar ( "coop_sbRank" + local.cn ) local.rlabel
+}end
 
 
 //=========================================================================
@@ -510,6 +579,70 @@ xp_award local.player local.amount local.reason local.label:{
 		//[user 07-16] unlock the weapons for every rank crossed (covers multi-rank lump jumps)
 		thread xp_rank_unlock local.player ( local.prevrank + 1 ) local.newrank
 		waitthread xp_flush
+	}
+
+	//[user 2026-09-17] prestige-crossing: at the top rank the block above never fires again, so award the
+	//prestige star here. Announce only on a real increase; push the client cvar + flush like a rank-up.
+	local.newprestige = waitthread xp_prestigeForTotal local.player.flags["coop_xp_total"]
+	if( local.player.flags["coop_xp_prestige"] == NIL ){ local.player.flags["coop_xp_prestige"] = local.newprestige }
+	if( local.newprestige > local.player.flags["coop_xp_prestige"] ){
+		local.player.flags["coop_xp_prestige"] = local.newprestige
+		local.player stufftext ( "seta coop_xp_prestige " + local.newprestige )
+		local.player iprint ( "PRESTIGE STAR " + local.newprestige + "!" ) 1
+		waitthread xp_flush
+	}
+
+	//refresh the shared rank display cvars (rank/emblem/total/next/prestige) so the MP + coop menus/HUD
+	//always read the current identity - one ladder, shown everywhere.
+	waitthread xp_push_own_cvars local.player
+}end
+
+
+//=========================================================================
+// [user 2026-09-17] MULTIPLAYER XP BRIDGE - the ONE coop label MP code (coop_mod/mp_progression.scr) may
+// call to earn coop XP. Progression is now SHARED across coop and MP: an MP kill/objective adds to the
+// same per-GUID coop XP total and rank as coop does. Sanctioned in check_mp_isolation.py (MP_COOP_ALLOW
+// "xp::xp_award_mp"); clause 8's coop-only LOOP guard is unchanged - the autosave/cover loops still never
+// run in MP, so this bridge flushes to disk itself (throttled). This only moves an XP number: it touches
+// no coop gameplay, weapon, disguise or AI state, and is a hard no-op outside MP (coop_mpRun != 1).
+//
+// A per-player PER-MATCH cap (coop_xp_mpMatchCap, default 2000) keeps MP grinding from trivializing the
+// coop rank ladder. The cap resets every map load (a level epoch; level vars wipe on load).
+//=========================================================================
+xp_award_mp local.player local.amount local.reason local.label:{
+	//MP-only, by construction. Written as the masked `== 1` guard idiom (isolation clause 7a exempts a
+	//coop file's `level.coop_mpRun == 1` read); outside MP the whole body is skipped and this no-ops.
+	if( level.coop_mpRun == 1 ){
+		if( local.player == NULL || local.player == NIL ){ end }
+		if( local.amount == NIL || local.amount <= 0 ){ end }
+
+		if( level.coop_xp_mpMatchCap == NIL ){
+			level.coop_xp_mpMatchCap = 2000
+			local.cv = getcvar( "coop_xp_mpMatchCap" )
+			if( local.cv != "" ){ level.coop_xp_mpMatchCap = int( local.cv ) }
+		}
+		//per-MATCH cap resets each map load: stamp a level epoch, zero the running total on first earn under it.
+		if( level.coop_xp_mpEpoch == NIL ){ level.coop_xp_mpEpoch = ( level.time + 1 ) }
+		if( local.player.flags["coop_xp_mpEpoch"] != level.coop_xp_mpEpoch ){
+			local.player.flags["coop_xp_mpEpoch"] = level.coop_xp_mpEpoch
+			local.player.flags["coop_xp_mpMatch"] = 0
+		}
+		if( local.player.flags["coop_xp_mpMatch"] == NIL ){ local.player.flags["coop_xp_mpMatch"] = 0 }
+		local.room = ( level.coop_xp_mpMatchCap - local.player.flags["coop_xp_mpMatch"] )
+		if( local.room <= 0 ){ end }
+		if( local.amount > local.room ){ local.amount = local.room }
+		local.player.flags["coop_xp_mpMatch"] = ( local.player.flags["coop_xp_mpMatch"] + local.amount )
+
+		waitthread xp_award local.player local.amount local.reason local.label
+
+		//persist: the 60s autosave loop is coop-only (clause 8), so MP relies on the write-through cvar
+		//(done inside xp_award, survives map transitions) plus this THROTTLED file flush (server-restart
+		//durability). Throttled so a busy PvP server does not write a file per kill.
+		if( level.coop_xp_mpLastFlush == NIL ){ level.coop_xp_mpLastFlush = 0 }
+		if( ( level.time - level.coop_xp_mpLastFlush ) >= 30 ){
+			level.coop_xp_mpLastFlush = level.time
+			waitthread xp_flush
+		}
 	}
 }end
 

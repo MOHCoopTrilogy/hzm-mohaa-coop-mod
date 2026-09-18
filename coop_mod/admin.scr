@@ -1,87 +1,231 @@
-//[204] chrissstrahl - All Admin Menu Commands would go in here, see developer.scr for examples
-//Contains Admin related commands that are needed for proper map testing
+//=========================================================================
+// ADMIN.SCR - the coop/MP ADMIN PANEL. [204] chrissstrahl seeded the secure name-append command framework
+// (player.scr::manageNamechange extracts a " ,6<data>" token from the admin's name and routes it here); this
+// fills in the real command set. Works in BOTH coop and multiplayer - these are host/admin actions, not
+// MP-mode state, so they are safe on either. Auth is enforced: the host is auto-trusted, everyone else must
+// have logged in via developer.scr (coopDeveloperVerified), checked below BEFORE any command runs.
+//
+// COMMAND TOKENS (the menu appends " ,6<data>"; <data> reaches here). "ua" opens the menu. Every other token
+// is a 2-digit number = ACTION*10 + player SLOT (1..8), plus a couple of server actions:
+//   1N kick  2N ban  3N slay  4N god-toggle  5N tp-player-to-me  6N bring-me-to-player   90 restart map
+// The slot indexes $player[slot]; adm_refreshNames publishes the current names into admin_p1..8 for the menu.
+//
+// ISOLATION: this is a COOP-classified file, so it names NO coop_mp* token (clause 7) - it uses admin_* /
+// stuffsrv / plain player-entity ops only, never coop_mp*, coop_lo or the loadout tree. Kicks/bans go through
+// the stock server console (stuffsrv "clientkick"/"banClient"); slay/tp are per-entity.
+//=========================================================================
 
-//commands that are extracted from netname, see player.scr::manageNamechange
+//=========================================================================
+// COMMAND ROUTER. self = the admin player. local.data = the token after " ,6".
 //=========================================================================
 admincommand local.data:{
-//=========================================================================
-	//printout info if empty data was given
-	if(!local.data){ iprintlnbold_noloc("GO SLEEP! YOU ARE SLIPPING.");end }
-	
-	//show Admin menu
-	if(waitthread game.main::containsText local.data "ua" game.false){
-		self stufftext ("pushmenu coopadmin\n")
+	if( !local.data ){ iprintlnbold_noloc( "GO SLEEP! YOU ARE SLIPPING." ); end }
+
+	//open the menu (refresh the player-name readouts first so the roster is current).
+	if( waitthread game.main::containsText local.data "ua" game.false ){
+		waitthread adm_refreshNames
+		self stufftext ( "pushmenu coopadmin\n" )
 		end
 	}
-	
-	//DEBUG
-	//println("COOPDEBUG: admincommand")
-	
-	//KEEP LEFT COMMAND SHORT they are added to player name
-	//by the menu when clicking a button, so the shorter the better
-	//=========================================================================
-	//STRUCTURE for menu command is: ,6***
-	//You can choose the chars after ,6 freely, however they need to be uniqe and in this list to work
-	//Example: (append name ,6a99)
-	//=========================================================================
-	local.adminCommand["t1"]	= "test1"	//test1
-	local.adminCommand["t2"]	= "test2"	//test2
-	local.adminCommand["a99"]	= "anothertest99"	//anothertest99
-	local.adminCommand["bt4"]	= "Button4"	//anothertest99
-	
-	
-	//if the command was found in the above list execute it
-	//=========================================================================
-	//checks also if the player has loged in and validated properly
-	//=========================================================================
-	//DO NOT TOUCH THIS PART - YOU COULD BREAK SECURITY CHECKS
-	if(local.adminCommand[local.data] != NIL){
-		if(self.flags["coop_isHost"] == 1){ self.flags["coopDeveloperVerified"] = 1 }
 
-		if(self.flags["coopDeveloperVerified"] == 1){
-			//logged-in/authenificated - just execute the function requested
-			self stufftext ("popmenu 0;cg_3rd_Person 0")
-			self thread (local.adminCommand[local.data])
-			end
-		}else{
-			self thread coop_mod/developer.scr::login
+	//AUTH GATE - the host is auto-trusted; anyone else must have logged in. DO NOT weaken this.
+	if( self.flags["coop_isHost"] == 1 ){ self.flags["coopDeveloperVerified"] = 1 }
+	if( self.flags["coopDeveloperVerified"] != 1 ){
+		self thread coop_mod/developer.scr::login
+		end
+	}
+	self stufftext ( "popmenu 0;cg_3rd_Person 0" )
+
+	//server actions (no target).
+	if( local.data == "90" ){ waitthread adm_restart; end }
+
+	//targeted actions: NN = action*10 + slot.
+	local.n = int( local.data )
+	if( local.n < 10 ){ self iprint ( "adminCommand unsupported command: " + local.data ) 1; end }
+	local.act = ( local.n / 10 )
+	local.slot = ( local.n % 10 )
+
+	local.target = waitthread adm_target local.slot
+	if( local.target == NULL ){ self iprint ( "Admin: no player in slot " + local.slot ) 1; end }
+
+	switch( local.act ){
+	case 1:
+		waitthread adm_kick local.target
+		break
+	case 2:
+		waitthread adm_ban local.target
+		break
+	case 3:
+		waitthread adm_slay local.target
+		break
+	case 4:
+		waitthread adm_god local.target
+		break
+	case 5:
+		waitthread adm_tp local.target self
+		break
+	case 6:
+		waitthread adm_tp self local.target
+		break
+	default:
+		self iprint ( "adminCommand unsupported action: " + local.act ) 1
+		break
+	}
+}end
+
+
+//=========================================================================
+// TARGETING. Return the in-play player in a 1..8 slot ($player is 1-indexed), or NULL.
+//=========================================================================
+adm_target local.slot:{
+	local.r = NULL
+	if( local.slot >= 1 && local.slot <= $player.size ){
+		local.r = $player[local.slot]
+	}
+}end local.r
+
+
+//publish the current roster into admin_p1..8 (names) + admin_pcount so the menu can show who is who. Cleared
+//slots are blanked. MP-safe / coop-safe: admin_* are neutral cvars (not coop_mp*).
+adm_refreshNames:{
+	local.i = 1
+	while( local.i <= 8 ){
+		local.nm = ""
+		if( local.i <= $player.size && $player[local.i] != NULL ){
+			local.nm = $player[local.i].flags["coop_netname"]
+			if( local.nm == NIL || local.nm == "" ){ local.nm = $player[local.i].netname }
 		}
+		setcvar ( "admin_p" + local.i ) ( "" + local.nm )
+		local.i++
 	}
-	//oh noooo, the requested command is not on teh list above
+	setcvar "admin_pcount" ( "" + $player.size )
+}end
+
+
+//=========================================================================
+// COMMANDS. self of admincommand is the acting admin; targets are passed in.
+//=========================================================================
+
+//KICK - drop the player through the stock server console. clientnum = entnum - 1 (world is entity 0).
+adm_kick local.p:{
+	if( local.p == NULL ){ end }
+	local.cn = ( local.p.entnum - 1 )
+	iprintlnbold_noloc( "Admin kicked " + local.p.netname )
+	stuffsrv ( "clientkick " + local.cn )
+	println( "^~^~^ ADMIN kick ent=" + local.p.entnum + " cn=" + local.cn )
+}end
+
+
+//BAN - ban the player two ways: (1) the stock IP ban (banClient), and (2) the GUID ban below, which survives
+//an IP change / VPN / reconnect. Both, so a single click keeps them out however they come back.
+adm_ban local.p:{
+	if( local.p == NULL ){ end }
+	local.cn = ( local.p.entnum - 1 )
+	iprintlnbold_noloc( "Admin banned " + local.p.netname )
+	stuffsrv ( "banClient " + local.cn )
+	waitthread adm_addGuidBan local.p
+	println( "^~^~^ ADMIN ban ent=" + local.p.entnum + " cn=" + local.cn )
+}end
+
+
+//=========================================================================
+// GUID BANS. self.coop_guid is the engine's cl_guid (MD5 of the client's qkey - g_client.cpp), so it is the
+// same across IPs and survives a reconnect from a new address. Banned guids live in the ARCHIVED cvar
+// coop_banGuids (";"-delimited, seeded in autoexec, so it persists across restarts). adm_enforceGuidBan is
+// threaded per player from player.scr::manageSetup: it waits for the guid to arrive, then kicks a match.
+// (Only a client who deletes their qkey to regenerate a guid AND changes IP can still return - the fully
+// evasion-proof gate is account login; this GUID+IP pair is the strongest option short of that.)
+//=========================================================================
+
+//is a guid on the ban list? (list is ";g1;g2;..." so a ";guid;" test is an exact, non-partial match.)
+adm_guidBanned local.guid:{
+	local.v = 0
+	if( local.guid == NIL || local.guid == "" ){ end 0 }
+	local.list = getcvar( "coop_banGuids" )
+	if( local.list == "" ){ end 0 }
+	if( waitthread game.main::containsText local.list ( ";" + local.guid + ";" ) game.true ){ local.v = 1 }
+}end local.v
+
+
+//add a player's guid to the persistent ban list (deduped). Archived cvar, so it survives a restart.
+adm_addGuidBan local.p:{
+	if( local.p == NULL ){ end }
+	local.guid = local.p.coop_guid
+	if( local.guid == NIL || local.guid == "" ){
+		self iprint ( "Admin: " + local.p.netname + " has no GUID yet - IP ban only" ) 1
+		end
+	}
+	if( waitthread adm_guidBanned local.guid ){ end }
+	local.list = getcvar( "coop_banGuids" )
+	if( local.list == "" ){ local.list = ";" }
+	local.newlist = ( local.list + local.guid + ";" )
+	setcvar "coop_banGuids" local.newlist
+	//persist as an ARCHIVED cvar so the ban outlives this session (autoexec seeds it archived; seta keeps it).
+	stuffsrv ( "seta coop_banGuids \"" + local.newlist + "\"" )
+	println( "^~^~^ ADMIN guidban add guid=" + local.guid )
+}end
+
+
+//per-player enforcer (threaded from player.scr::manageSetup, so it runs in BOTH coop and MP on every join).
+//Wait for the engine to push coop_guid, then kick if it is on the ban list.
+adm_enforceGuidBan local.p:{
+	if( local.p == NULL ){ end }
+	local.tries = 0
+	while( ( local.p.coop_guid == NIL || local.p.coop_guid == "" ) && local.tries < 20 ){
+		wait 0.5
+		if( local.p == NULL ){ end }
+		local.tries++
+	}
+	if( local.p == NULL ){ end }
+	if( waitthread adm_guidBanned local.p.coop_guid ){
+		iprintlnbold_noloc( "Banned player rejected: " + local.p.netname )
+		local.cn = ( local.p.entnum - 1 )
+		stuffsrv ( "clientkick " + local.cn )
+		println( "^~^~^ ADMIN guidban kick guid=" + local.p.coop_guid + " cn=" + local.cn )
+	}
+}end
+
+
+//SLAY - kill the player where they stand.
+adm_slay local.p:{
+	if( local.p == NULL ){ end }
+	if( isAlive local.p ){ local.p.health = 0 }
+	iprintlnbold_noloc( "Admin slayed " + local.p.netname )
+	println( "^~^~^ ADMIN slay ent=" + local.p.entnum )
+}end
+
+
+//GOD - toggle invulnerability on a player (per-player flag; nothing persists to a cvar).
+adm_god local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_adminGod"] == 1 ){
+		local.p.flags["coop_adminGod"] = 0
+		local.p immortal 0
+		local.p iprint ( "Admin: godmode OFF" ) 1
+	}
 	else{
-		self iprint ("adminCommand unsupported command: "+local.data) 1
+		local.p.flags["coop_adminGod"] = 1
+		local.p immortal 1
+		local.p iprint ( "Admin: godmode ON" ) 1
 	}
+	println( "^~^~^ ADMIN god ent=" + local.p.entnum + " -> " + local.p.flags["coop_adminGod"] )
 }end
 
-//[205] chrissstrahl - admin test function
-//self is the player
-//=========================================================================
-test1:{
-//=========================================================================
-	self iprint ("adminCommand EXECUTED func: test1") 1
-}
-end
 
-//[205] chrissstrahl - admin test function
-//self is the player
-//=========================================================================
-test2:{
-//=========================================================================
-	self iprint ("adminCommand EXECUTED func: test3") 1
+//TELEPORT - move local.mover to local.dest's position (used both ways: pull a player to the admin, or send
+//the admin to a player). A simple origin warp, the same primitive developer.scr's teleport uses.
+adm_tp local.mover local.dest:{
+	if( local.mover == NULL || local.dest == NULL ){ end }
+	local.mover.origin = local.dest.origin
+	println( "^~^~^ ADMIN tp ent=" + local.mover.entnum + " -> ent=" + local.dest.entnum )
 }end
 
-//[205] chrissstrahl - admin test function
-//self is the player
-//=========================================================================
-anothertest99:{
-//=========================================================================
-	self iprint ("adminCommand EXECUTED func: anothertest99") 1
-}end
 
-//[205] chrissstrahl - admin test function
-//self is the player
-//=========================================================================
-Button4:{
-//=========================================================================
-	self iprint ("adminCommand EXECUTED func: Button4") 1
+//RESTART - reload the current map (a clean restart on both coop and MP; no archive, no gametype flip).
+adm_restart:{
+	local.m = getcvar( "mapname" )
+	if( local.m == "" ){ end }
+	iprintlnbold_noloc( "Admin restarting the map..." )
+	println( "^~^~^ ADMIN restart map=" + local.m )
+	stuffsrv ( "map " + local.m )
 }end

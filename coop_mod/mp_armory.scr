@@ -46,6 +46,18 @@ mp_bus_families:{
 	local.f[5] = ",qx2"
 	local.f[6] = ",qx3"
 	local.f[7] = ",qxd"
+	//[MP cosmetics] k = skin, h = helmet, v = glove (per side). data = the roster id (glove 0-6).
+	local.f[8] = ",qak"
+	local.f[9] = ",qah"
+	local.f[10] = ",qav"
+	local.f[11] = ",qxk"
+	local.f[12] = ",qxh"
+	local.f[13] = ",qxv"
+	//[MP challenges] f = weapon finish (per side). data = the finish index 0-7 (0 clears; 1-7 map to
+	//gold/chrome/blued/bloody/camo_woodland/camo_winter/camo_desert), validated against the fin:<finish>
+	//challenge unlock and applied at spawn by mp_finish_map.scr.
+	local.f[14] = ",qaf"
+	local.f[15] = ",qxf"
 }end local.f
 
 
@@ -56,6 +68,12 @@ mp_bus_families:{
 // Bots never see a screen or a timer - their kit is rolled fresh on the spawn edge (::giveKit).
 //=========================================================================
 onTeamFlip local.p:{
+	if( local.p == NULL ){ end }
+
+	//[slice 5] load this player's persisted progression so their armory unlocks (coop_mpUnlockC_*) are
+	//current BEFORE they pick - ensureLoaded is idempotent (once per session), so this is a no-op after
+	//the first join. A returning player thus sees earned weapons unlocked on their very first armory open.
+	waitthread coop_mod/mp_progression.scr::ensureLoaded local.p
 	if( local.p == NULL ){ end }
 
 	local.p.flags["coop_mp_K1"] = NIL
@@ -176,6 +194,75 @@ applyMarker local.p local.side local.field local.data:{
 	}
 
 	if( local.data == "" ){ end }
+
+	//[MP cosmetics] k=skin, h=helmet, v=glove. Validated against the side roster; stored as the tik/stem
+	//in coop_mp_SKIN/HELM/GLOVE, applied at spawn by mp_cosmetics.scr::apply. Cosmetics are free in this
+	//slice (challenge-gating is the later step); the chip name is refreshed so the player sees the pick.
+	//cosmetics are EARNED: the server refuses a pick the player has not unlocked (cosUnlocked reads the
+	//carried progression total). A locked pick simply does not commit; the appearance panel still lets
+	//them preview it. Free (need 0) options always pass.
+	if( local.field == "k" || local.field == "h" || local.field == "v" ){
+		local.cu = waitthread coop_mod/mp_cosmetics.scr::cosUnlocked local.p local.field local.data
+		if( local.cu != 1 ){
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + local.field + local.data + " deny locked cosmetic" )
+			end
+		}
+	}
+	if( local.field == "k" ){
+		local.rs = waitthread coop_mod/mp_cosmetics.scr::skinGet local.side local.data
+		if( local.rs != NIL && local.rs["stem"] != "" ){
+			local.p.flags["coop_mp_SKIN"] = local.rs["stem"]
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "k" + local.data + " skin=" + local.rs["stem"] )
+		}
+		end
+	}
+	if( local.field == "h" ){
+		local.rh = waitthread coop_mod/mp_cosmetics.scr::helmGet local.data
+		if( local.rh != NIL ){
+			local.p.flags["coop_mp_HELM"] = local.rh["tik"]
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "h" + local.data + " helm=" + local.rh["tik"] )
+		}
+		end
+	}
+	if( local.field == "v" ){
+		local.gi = int( local.data )
+		if( local.gi >= 0 && local.gi <= 6 ){
+			local.p.flags["coop_mp_GLOVE"] = local.gi
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "v" + local.data + " glove=" + local.gi )
+		}
+		end
+	}
+	//[MP CHALLENGES] WEAPON FINISH pick (field "f", data = finish name, "none" clears). Server-authoritative:
+	//a finish is accepted only if its fin:<finish> challenge is complete. Stored in coop_mpFinSel; applied at
+	//spawn by mp_finish_map.scr::resolve (base -> variant model).
+	if( local.field == "f" ){
+		local.fi = int( local.data )
+		if( local.fi == 0 ){
+			local.p.flags["coop_mpFinSel"] = ""
+			println( "^~^~^ MPTOK e" + local.p.entnum + " finish=none" )
+			end
+		}
+		local.fn = ""
+		switch( local.fi ){
+			case 1: local.fn = "gold"; break
+			case 2: local.fn = "chrome"; break
+			case 3: local.fn = "blued"; break
+			case 4: local.fn = "bloody"; break
+			case 5: local.fn = "camo_woodland"; break
+			case 6: local.fn = "camo_winter"; break
+			case 7: local.fn = "camo_desert"; break
+		}
+		if( local.fn == "" ){ end }
+		local.fu = waitthread coop_mod/mp_challenges.scr::isUnlocked local.p ( "fin:" + local.fn )
+		if( local.fu != 1 ){
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "f" + local.data + " deny locked finish" )
+			end
+		}
+		local.p.flags["coop_mpFinSel"] = local.fn
+		println( "^~^~^ MPTOK e" + local.p.entnum + " finish=" + local.fn )
+		end
+	}
+
 	if( local.field != "1" && local.field != "2" && local.field != "3" ){ end }
 
 	local.r = waitthread rosterGet local.side local.data
@@ -200,10 +287,22 @@ applyMarker local.p local.side local.field local.data:{
 		}
 	}
 
-	//UNLOCK (interim): only the P1 free starters are unlocked in slice 1/2. Everything else is locked.
+	//UNLOCK (slice 5): a free STARTER is always allowed; a non-starter needs its weapon CLASS unlocked by
+	//progression. mp_progression.scr::applyUnlocks sets coop_mpUnlockC_<class> on the player from their
+	//persisted counters; the server is authoritative, so a client that faked the UI cvar still lands here
+	//and is denied. ensureLoaded ran on the team-flip edge, so the flags are current.
 	if( local.r["starter"] != 1 ){
-		println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + local.field + local.data + " deny locked" )
-		end
+		//[MP CHALLENGES] a non-starter weapon is unlocked by its own per-class-tier CHALLENGE
+		//(wt:<class>:<tier>), not the whole class at once. mp_challenges.scr::isUnlocked reads the
+		//player's derived challenge unlock store (self.flags["coop_mpUnlocks"], set by mp_progression's
+		//applyUnlocks->derive). Server is authoritative - a faked UI cvar still lands here and is denied.
+		local.cls = local.r["class"]
+		local.tok = ( "wt:" + local.cls + ":" + local.r["tier"] )
+		local.unlocked = waitthread coop_mod/mp_challenges.scr::isUnlocked local.p local.tok
+		if( local.unlocked != 1 ){
+			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + local.field + local.data + " deny locked " + local.tok )
+			end
+		}
 	}
 
 	if( local.field == "1" ){ local.p.flags["coop_mp_K1"] = local.data }
@@ -285,6 +384,14 @@ giveKit local.p:{
 	local.ggive = ""
 	if( local.rg != NIL && local.rg["give"] != NIL ){ local.ggive = local.rg["give"] }
 
+	//[MP CHALLENGES] apply an earned + picked weapon FINISH: swap the primary/sidearm base tik for its
+	//variant model when the player has completed the fin:<finish> challenge and picked it (userinfo
+	//coop_mpFinPick). resolve() returns the base unchanged otherwise, so this is a no-op without a finish.
+	if( local.pgive != "" ){ local.pgive = waitthread coop_mod/mp_finish_map.scr::resolve local.p local.pgive }
+	if( local.p == NULL ){ end }
+	if( local.sgive != "" ){ local.sgive = waitthread coop_mod/mp_finish_map.scr::resolve local.p local.sgive }
+	if( local.p == NULL ){ end }
+
 	//the give: plain takeall + item (never giveInventory / changeGameType - see mp.scr header)
 	local.p takeall
 	if( local.pgive != "" ){ local.p item local.pgive }
@@ -313,6 +420,11 @@ giveKit local.p:{
 
 	//switch to the primary past the engine's +0.3s useitem (mirrors EquipWeapons' PostEvent "use")
 	if( local.pgive != "" ){ thread useAfter local.p local.pgive }
+
+	//[MP cosmetics step 1] apply the player's chosen body skin + gloves (helmet in step 2). MP-owned,
+	//no coop call; a bad token there is a Script Error that skips only its statement, so the kit above
+	//is never at risk. Threaded so a waitframe inside it never stalls the spawn edge.
+	thread coop_mod/mp_cosmetics.scr::apply local.p
 
 	println( "^~^~^ MPKIT e" + local.p.entnum + " side=" + local.side + " p=" + local.pgive + " s=" + local.sgive + " g=" + local.ggive + " hp=100 cause=" + local.cause )
 }end

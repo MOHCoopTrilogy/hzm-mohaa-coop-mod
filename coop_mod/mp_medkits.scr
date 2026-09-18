@@ -73,6 +73,8 @@ onSpawn local.p:{
 	local.on = waitthread isOn
 	if( local.on != 1 ){
 		local.p.flags["coop_mpMedkitsHave"] = 0
+		//host turned Medkits off mid-match: clear any lingering icon/count HUD from a prior life.
+		waitthread mp_medkit_hudClear local.p
 		end
 	}
 
@@ -80,15 +82,81 @@ onSpawn local.p:{
 	if( local.n <= 0 ){ local.n = 1 }
 	local.p.flags["coop_mpMedkitsHave"] = local.n
 
+	//[user 2026-09-18] DISCOVERABILITY. Medkits had no item, no count HUD and no prompt - the only trigger is
+	//"hold [USE] while hurt and standing still", so a host who turned Medkits ON saw nothing happen and thought
+	//the toggle was dead. Tell the player, once when they first spawn with it on, that it exists and how to use
+	//it; and re-arm the per-life "you are hurt, bandage now" nudge (fired once per life from the monitor).
+	local.p.flags["coop_mpMedkitHurtHinted"] = NIL
+	if( local.p.flags["coop_mpMedkitHinted"] != 1 ){
+		local.p.flags["coop_mpMedkitHinted"] = 1
+		local.p iprint ( "Medkits ON - " + local.n + " per life. When hurt, hold [USE] while standing still to bandage up." ) 1
+	}
+
 	local.p.flags["coop_mpMedkitsLife"] = level.time
 	thread mp_medkit_monitor local.p local.p.flags["coop_mpMedkitsLife"]
+	//[user 2026-09-18] COOP-STYLE HUD: the same spinning medkit icon + bandage count coop draws (slots 36/37,
+	//textures/hud/coop_medkit_icon), so MP Medkits reads identically to the coop feature.
+	thread mp_medkit_hud local.p local.p.flags["coop_mpMedkitsLife"]
 }end
 
 
 //=========================================================================
-// Resolve THIS player's live heal ceiling. Under DBNO the player carries a large absorption pool, so
-// the ceiling is that full pool; otherwise it is the mode's max_health (100, or 50 Hardcore). Read
-// live so a mid-match host toggle is honoured. Returns the value in a local before end (bug-2603).
+// PERSISTENT ICON + COUNT HUD - a straight port of coop_mod/medkit.scr::medkit_hud_monitor (slots 36/37, both
+// free in MP). Same coop_medkit_icon shader, same verdana-14 count, same screen corner, so the MP feature looks
+// exactly like coop. Bound to the life token so a death/respawn/host-off tears it down. Coop_-prefixed CLIENT
+// HUD texture, used verbatim exactly as the channel already uses coop_bar_white - outside every isolation clause.
+//=========================================================================
+mp_medkit_hud local.p local.life:{
+	if( local.p == NULL ){ end }
+
+	ihuddraw_virtualsize local.p 36 1
+	ihuddraw_align       local.p 36 left bottom
+	ihuddraw_shader      local.p 36 "textures/hud/coop_medkit_icon"
+	ihuddraw_rect        local.p 36 5 -62 16 16
+	ihuddraw_alpha       local.p 36 1
+
+	ihuddraw_virtualsize local.p 37 1
+	ihuddraw_align       local.p 37 left bottom
+	ihuddraw_font        local.p 37 "verdana-14"
+	ihuddraw_color       local.p 37 1 1 1
+	ihuddraw_rect        local.p 37 23 -60 0 0
+	ihuddraw_alpha       local.p 37 1
+
+	local.last = -1
+	while( local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_mpMedkitsLife"] == local.life ){
+		local.c = local.p.flags["coop_mpMedkitsHave"]
+		if( local.c == NIL ){ local.c = 0 }
+		if( local.c != local.last ){
+			ihuddraw_string local.p 37 ( "" + local.c )
+			local.last = local.c
+		}
+		wait 0.2
+	}
+
+	waitthread mp_medkit_hudClear local.p
+}end
+
+
+//Tear down the icon/count HUD. Idempotent-safe.
+mp_medkit_hudClear local.p:{
+	if( local.p == NULL ){ end }
+	ihuddraw_alpha  local.p 36 0
+	ihuddraw_alpha  local.p 37 0
+	ihuddraw_string local.p 37 ""
+}end
+
+
+//=========================================================================
+// Resolve THIS player's live heal ceiling: the mode's max_health (100, or 50 Hardcore). Read live so a
+// mid-match Hardcore toggle is honoured. Returns the value in a local before end (bug-2603).
+//
+// [bug-2642] This is DELIBERATELY the mode max_health even under DBNO. DBNO raises the player's CURRENT
+// health to a 9999 ABSORPTION POOL (mp_dbno.scr::healthonly 9999) while leaving max_health at 100. The
+// old code returned 9999 here under DBNO "to restore the pool", which broke the self-heal two ways: the
+// start-gate (health < ceiling) then passed at ANY health - so a player could channel a heal at FULL
+// health - and a completion `healthonly 9999` refilled the whole absorption pool for one bandage (a
+// near-invincibility exploit). A full-pool DBNO player now has health 9999 >= ceiling 100, so the gate
+// correctly blocks; the medkit only tops a genuinely hurt player back toward 100/50.
 //=========================================================================
 mp_medkit_ceiling local.p:{
 	local.c = 100
@@ -96,8 +164,6 @@ mp_medkit_ceiling local.p:{
 		local.mh = local.p.max_health
 		if( local.mh != NIL && local.mh > 0 ){ local.c = local.mh }
 	}
-	local.d = getcvar( "coop_mpDbno" )
-	if( local.d == "1" ){ local.c = 9999 }
 }end local.c
 
 
@@ -135,6 +201,16 @@ mp_medkit_monitor local.p local.life:{
 	while( local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && local.p.flags["coop_mpMedkitsLife"] == local.life ){
 		local.have = local.p.flags["coop_mpMedkitsHave"]
 		if( local.have == NIL ){ local.have = 0 }
+
+		//[user 2026-09-18] once-per-life nudge: the first moment the player is actually hurt with a bandage in
+		//hand and not busy, remind them how to heal. Keeps the feature from feeling "off" when they take damage.
+		if( local.have >= 1 && local.p.flags["coop_mpMedkitHurtHinted"] != 1 && local.p.flags["coop_mpDbnoActive"] != 1 && local.p.flags["coop_mpMedkitsInUse"] != 1 ){
+			local.ceilH = waitthread mp_medkit_ceiling local.p
+			if( local.p != NULL && local.p.health < ( local.ceilH - 5 ) ){
+				local.p.flags["coop_mpMedkitHurtHinted"] = 1
+				local.p iprint "Hold [USE] while standing still to bandage." 1
+			}
+		}
 
 		if( local.p.flags["coop_mpDbnoActive"] != 1 && local.p.flags["coop_mpMedkitsInUse"] != 1 && local.have >= 1 && local.p.useheld == 1 ){
 			local.ceil = waitthread mp_medkit_ceiling local.p
@@ -211,8 +287,10 @@ mp_medkit_use local.p:{
 		end
 	}
 
+	//heal UP to the ceiling only - never reduce (a DBNO absorption pool boosted mid-channel must not be
+	//dropped to 100 by the completion; bug-2642).
 	local.ceil = waitthread mp_medkit_ceiling local.p
-	local.p healthonly local.ceil
+	if( local.p != NULL && local.p.health < local.ceil ){ local.p healthonly local.ceil }
 	local.have = local.p.flags["coop_mpMedkitsHave"]
 	if( local.have == NIL ){ local.have = 1 }
 	local.p.flags["coop_mpMedkitsHave"] = ( local.have - 1 )

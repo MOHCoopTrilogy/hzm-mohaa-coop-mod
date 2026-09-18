@@ -210,6 +210,8 @@ koth_setHill local.i:{
 	//THE MARKER: stock script builtin, sets level.m_vObjectiveLocation -> STAT_OBJECTIVECENTER (playerstat
 	//19) -> the round compass objective arrow. No new server->client shape (header).
 	set_objective_pos local.h
+	//[user 2026-09-16] point the MP bots at the hill (both teams). Coop-safe: coop_mpRun-gated, MP-only.
+	waitthread coop_mod/mp_botobj.scr::botobj_set 1 local.h 6 ""
 	println( "^~^~^ MPKOTH hill idx=" + local.i + " pos=" + local.h )
 }end
 
@@ -259,6 +261,15 @@ koth_tick:{
 	local.sole = ""
 	if( local.a >= 1 && local.x < 1 ){ local.sole = "allies" }
 	else if( local.x >= 1 && local.a < 1 ){ local.sole = "axis" }
+
+	//[MP CHALLENGES] credit the per-player "capture" stat on a HILL TAKEOVER edge (a side becomes sole
+	//occupant when it wasn't the last crediting holder). Discrete, like a CTF capture - NOT per banked tick,
+	//which would inflate it. A contested/empty hill clears the edge so a later re-take counts again.
+	if( local.sole == "" ){ level.coop_mpKothCapLast = "" }
+	else if( local.sole != level.coop_mpKothCapLast ){
+		level.coop_mpKothCapLast = local.sole
+		waitthread koth_creditCapture local.sole
+	}
 
 	if( level.coop_mpKothImperative == 1 ){
 		//UNBROKEN-HOLD rule: a relocation, a contest, an empty hill, or a change of holder resets the run.
@@ -322,6 +333,9 @@ koth_win local.side local.sa local.sx:{
 	if( level.coop_mpKothEnding == 1 ){ end }
 	level.coop_mpKothEnding = 1
 
+	//[MP CHALLENGES] credit the win (win_koth for the winners + rounds for all).
+	waitthread coop_mod/mp_progression.scr::mp_awardTeamWin local.side "koth"
+
 	local.tag = "ALLIES"
 	if( local.side == "axis" ){ local.tag = "AXIS" }
 	iprintlnbold( local.tag + " WIN King of the Hill!  Allies " + local.sa + " : " + local.sx + " Axis" )
@@ -369,3 +383,20 @@ koth_countInHill local.team:{
 		local.n++
 	}
 }end local.n
+
+
+//[MP CHALLENGES] award the per-player "capture" objective stat to every living, in-play player of a side
+//currently inside the hill (a hill takeover). Same filter as koth_countInHill; called on the takeover edge.
+koth_creditCapture local.team:{
+	if( level.coop_mpKothHasHill != 1 ){ end }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - level.coop_mpKothHill )
+		if( local.d > level.coop_mpKothRadius ){ continue }
+		waitthread coop_mod/mp_progression.scr::mp_awardObj local.p "capture" 1
+	}
+}end
