@@ -1,0 +1,340 @@
+//=========================================================================
+// MP_PROPHUNT.SCR - PROP HUNT, an MP game MODE. Hiders (PROPS) disguise as static map objects and try
+// to survive; SEEKERS (HUNTERS) get weapons and hunt them down before the round timer runs out.
+//   TEAM CONVENTION:  AXIS = PROPS (hiders)   ALLIES = HUNTERS (seekers)
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its four seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeInit     -> mode_init      (pre-spawn: round + prop config)
+//     mp.scr::mp_modeGiveKit  -> mode_onSpawn   (spawn edge: props morph, hunters get a kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: hide-phase freeze; prop re-morph; keep no-weapons)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: clear the morph, mark OUT via mp_rounds)
+//
+// PROP DISGUISE (paraphrased from UberMod V5 global/morph_player.scr, orig. Unreal_Demon; not copied).
+// A prop is a normal ALIVE player who is `hide`den (visual only - a hidden solid player still takes
+// bullets, exactly as mp_freezetag.scr relies on to re-kill a solid frozen body) with a stock static
+// script_model GLUEd to them as the thing everyone sees. `takeall` strips their weapons so they cannot
+// fight back; the glued model rides the player's origin/angles for free. The player's own hitbox is what
+// a hunter shoots, so aiming at the visible prop kills the hidden player behind it. Pressing [USE]
+// cycles to the next prop shape (re-glue a new model). On death the model is removed and the player is
+// shown again; mp_rounds marks them OUT (no respawn) for the rest of the round.
+//
+// ROUND LIFECYCLE is the SHARED helper coop_mod/mp_rounds.scr (as LMS / S&D / Freeze Tag use it): no
+// respawns once live, a script series score, and a map restart between rounds (never bsptransition /
+// changeGameType). PROPS LOSE when every prop is dead (mp_rounds counts them out -> a "wipe" for the
+// hunters/allies). PROPS WIN by SURVIVING the round timer: coop_mpRndTimeoutSide is set to "axis", so a
+// timed-out round is banked to the props. A short HIDE PHASE at round start (coop_mpPhHideTime seconds)
+// freezes the hunters' input (freezecontrols, our own coop_mpPhFrozen flag - NOT the round's
+// coop_mpRndFrozen, so frozen hunters still COUNT as alive and the round does not mis-resolve) while the
+// props scatter and pick their spots.
+//
+// ISOLATION: calls only the two MP files mp_rounds.scr and mp_armory.scr (both in MP_MANIFEST, so
+// isolation clause 10 admits them); names no coop cvar, coop_lo token, ui/loadout tree or coop armory
+// code; never giveInventory / changeGameType and never writes coop_health / coop_* state. Per-player
+// state lives in self.flags["coop_mpPh*"] (entity keys, not cvars); the glued model handle is kept in
+// level.coop_mpPhModel[entnum]. Host tuning is the MP-owned coop_mpPh* cvars, read-only here. The prop
+// models are stock Pak0 static tiks. Uses only stock builtins hide/show/glue/unglue/takeall/health/
+// freezecontrols/spawn/remove and native fields useheld / dmteam / origin.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_freezetag.scr). Returns literal 1; if this file parse-kills, ::alive is
+//unreachable and mp.scr's mode dispatch simply finds nothing to run.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// PRE-SPAWN CONFIG (from mp.scr::mp_modeInit). Sets the shared round config (name, the survive-timer and
+// its props-win timeout side) and the prop-list + tuning. Idempotent (level flag).
+//=========================================================================
+mode_init:{
+	waitthread ensureConfig
+}end
+
+ensureConfig:{
+	if( level.coop_mpPhReady == 1 ){ end }
+	level.coop_mpPhReady = 1
+
+	level.coop_mpRndName = "Prop Hunt"
+	level.coop_mpRndBombGuard = 0
+	level.coop_mpRndCallout = 0
+
+	//round survive-timer (seconds): host cvar coop_mpPhTime, default 240. Props WIN a timed-out round, so
+	//the shared round helper is told the timeout side is AXIS (the props).
+	local.t = getcvar( "coop_mpPhTime" )
+	if( local.t == "" ){ local.t = "240" }
+	level.coop_mpRndTimeout = int( local.t )
+	if( level.coop_mpRndTimeout < 30 ){ level.coop_mpRndTimeout = 240 }
+	level.coop_mpRndTimeoutSide = "axis"
+
+	//hide phase (seconds hunters are frozen at round start): host cvar coop_mpPhHideTime, default 15.
+	local.h = getcvar( "coop_mpPhHideTime" )
+	if( local.h == "" ){ local.h = "15" }
+	level.coop_mpPhHideTime = int( local.h )
+	if( level.coop_mpPhHideTime < 0 ){ level.coop_mpPhHideTime = 15 }
+
+	//prop health: host cvar coop_mpPhHealth, default 100.
+	local.hp = getcvar( "coop_mpPhHealth" )
+	if( local.hp == "" ){ local.hp = "100" }
+	level.coop_mpPhHealth = int( local.hp )
+	if( level.coop_mpPhHealth < 1 ){ level.coop_mpPhHealth = 100 }
+
+	//the prop shapes (stock Pak0 statics). Index 1..N; a prop cycles through them with [USE].
+	level.coop_mpPhProp[1] = "models/static/tree_commontree.tik"
+	level.coop_mpPhProp[2] = "models/static/haystack.tik"
+	level.coop_mpPhProp[3] = "models/static/grandfathers_clock.tik"
+	level.coop_mpPhProp[4] = "models/static/piano.tik"
+	level.coop_mpPhProp[5] = "models/static/bathtubwithshowerhead.tik"
+	level.coop_mpPhProp[6] = "models/static/toilet.tik"
+	level.coop_mpPhProp[7] = "models/static/lightpost_globe.tik"
+	level.coop_mpPhPropN = 7
+
+	println( "^~^~^ MPPH init gt=" + level.gametype + " roundTime=" + level.coop_mpRndTimeout + " hide=" + level.coop_mpPhHideTime + " propHealth=" + level.coop_mpPhHealth + " props=" + level.coop_mpPhPropN )
+}end
+
+
+//=========================================================================
+// SPAWN EDGE. Arm the round, then split by team: AXIS become a prop (morph, no weapons); ALLIES get a
+// hunter kit through the armory (inherits the host weapon preset). The hide-phase freeze is applied in
+// mode_think, not here, so it can lift itself when the timer elapses.
+//=========================================================================
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread coop_mod/mp_rounds.scr::rounds_begin
+	if( local.p == NULL ){ end }
+	if( local.p.isSpectator ){ end }
+
+	if( local.p.dmteam == "axis" ){
+		waitthread ph_becomeProp local.p
+		end
+	}
+
+	//hunter: a normal armory kit
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//=========================================================================
+// PER-TICK. Keep the round manager alive, then drive the role:
+//   PROP (axis):   keep weapons stripped (a prop must never be able to shoot), re-morph on a [USE] press.
+//   HUNTER (allies): freeze input during the hide phase, release it after coop_mpPhHideTime.
+//=========================================================================
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_rounds.scr::rounds_ensure
+	waitthread ph_manage
+	if( local.p == NULL ){ end }
+	if( local.p.isSpectator ){ end }
+	if( !( isAlive local.p ) ){ end }
+
+	if( local.p.dmteam == "axis" ){
+		waitthread ph_propTick local.p
+		end
+	}
+	if( local.p.dmteam == "allies" ){
+		waitthread ph_hunterTick local.p
+	}
+}end
+
+
+//=========================================================================
+// DEATH EDGE. Clear the morph (remove the glued model, show the player) and hand off to the shared round
+// helper, which marks the victim OUT for the rest of the round (no respawn).
+//=========================================================================
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ph_clearMorph local.p
+	waitthread coop_mod/mp_rounds.scr::rounds_onDeath local.p
+}end
+
+
+//=========================================================================
+// Become a prop: strip weapons, set prop health, morph into the first shape, tell the player how to play.
+//=========================================================================
+ph_becomeProp local.p:{
+	if( local.p == NULL ){ end }
+	local.p takeall
+	local.p.health = level.coop_mpPhHealth
+	local.p.flags["coop_mpPhPropIdx"] = 1
+	local.p.flags["coop_mpPhUseWas"] = 0
+	waitthread ph_morph local.p 1
+
+	local.p iprint "You are a PROP - hide! Press [USE] to change shape. You cannot fight back."
+	println( "^~^~^ MPPH prop e" + local.p.entnum )
+}end
+
+
+//=========================================================================
+// Morph the player into prop shape index local.idx: clear any previous glued model, spawn the new one at
+// the player's origin, glue it on, and hide the player so only the prop shows.
+//=========================================================================
+ph_morph local.p local.idx:{
+	if( local.p == NULL ){ end }
+	if( local.idx < 1 ){ local.idx = 1 }
+	if( local.idx > level.coop_mpPhPropN ){ local.idx = 1 }
+
+	waitthread ph_removeModel local.p
+
+	local.mdl = level.coop_mpPhProp[local.idx]
+	local.obj = spawn script_model
+	local.obj model local.mdl
+	local.obj.origin = local.p.origin
+	local.obj notsolid
+	local.obj glue local.p
+	level.coop_mpPhModel[local.p.entnum] = local.obj
+	local.p.flags["coop_mpPhPropIdx"] = local.idx
+
+	local.p hide
+	local.p.flags["coop_mpPhMorphed"] = 1
+	println( "^~^~^ MPPH morph e" + local.p.entnum + " idx=" + local.idx )
+}end
+
+
+//remove this player's glued prop model, if any.
+ph_removeModel local.p:{
+	if( local.p == NULL ){ end }
+	local.old = level.coop_mpPhModel[local.p.entnum]
+	if( local.old != NIL && local.old != NULL ){
+		local.old unglue
+		local.old remove
+	}
+	level.coop_mpPhModel[local.p.entnum] = NULL
+}end
+
+
+//fully un-morph: remove the model AND show the player (used on death / round end).
+ph_clearMorph local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpPhMorphed"] != 1 ){ end }
+	waitthread ph_removeModel local.p
+	local.p show
+	local.p.flags["coop_mpPhMorphed"] = NIL
+	println( "^~^~^ MPPH unmorph e" + local.p.entnum )
+}end
+
+
+//=========================================================================
+// One prop, one tick. Keep the kit stripped (belt and braces - a prop must never fire) and cycle the
+// prop shape on a rising [USE] edge.
+//=========================================================================
+ph_propTick local.p:{
+	if( local.p == NULL ){ end }
+
+	//never let a prop hold a weapon
+	local.p takeall
+
+	//re-morph on a [USE] rising edge
+	local.use = local.p.useheld
+	if( local.use == NIL ){ local.use = 0 }
+	local.was = local.p.flags["coop_mpPhUseWas"]
+	if( local.was == NIL ){ local.was = 0 }
+	if( local.use == 1 && local.was == 0 ){
+		local.idx = local.p.flags["coop_mpPhPropIdx"]
+		if( local.idx == NIL ){ local.idx = 1 }
+		local.idx = ( local.idx + 1 )
+		if( local.idx > level.coop_mpPhPropN ){ local.idx = 1 }
+		waitthread ph_morph local.p local.idx
+		if( local.p != NULL ){ local.p iprint "Shape changed" }
+	}
+	if( local.p != NULL ){ local.p.flags["coop_mpPhUseWas"] = local.use }
+}end
+
+
+//=========================================================================
+// One hunter, one tick. During the hide phase (coop_mpPhHideTime seconds after the round goes LIVE) hold
+// the hunter's input frozen so the props can scatter; release it afterwards. Uses our OWN coop_mpPhFrozen
+// flag, never the round's coop_mpRndFrozen - a hide-phase hunter must still COUNT as alive.
+//=========================================================================
+ph_hunterTick local.p:{
+	if( local.p == NULL ){ end }
+
+	local.inHide = 0
+	if( level.coop_mpRndState == "live" && level.coop_mpPhHideTime > 0 ){
+		if( ( level.time - level.coop_mpRndStart ) < level.coop_mpPhHideTime ){ local.inHide = 1 }
+	}
+
+	local.frozen = local.p.flags["coop_mpPhFrozen"]
+	if( local.frozen == NIL ){ local.frozen = 0 }
+
+	if( local.inHide == 1 && local.frozen == 0 ){
+		local.p freezecontrols 1
+		local.p.flags["coop_mpPhFrozen"] = 1
+		local.p iprint "Hunters HOLD - props are hiding..."
+	}
+	else if( local.inHide == 0 && local.frozen == 1 ){
+		local.p freezecontrols 0
+		local.p.flags["coop_mpPhFrozen"] = NIL
+		local.p iprint "HUNT!"
+	}
+
+	//WRONG-SHOT PENALTY: firing during the HUNT costs the hunter a little health, so they cannot spray every
+	//prop spot risk-free (that is the disguise mini-game). Per trigger-pull (rising fire edge), floored at 1
+	//so it never self-kills. Host cvar coop_mpPhShotCost (default 3, 0 = off). Never during the hide phase.
+	local.fire = local.p.fireheld
+	if( local.fire == NIL ){ local.fire = 0 }
+	local.fw = local.p.flags["coop_mpPhFireWas"]
+	if( local.fw == NIL ){ local.fw = 0 }
+	if( local.inHide == 0 && local.fire == 1 && local.fw == 0 ){
+		local.cost = getcvar( "coop_mpPhShotCost" )
+		if( local.cost == "" ){ local.cost = "3" }
+		local.cost = int( local.cost )
+		if( local.cost > 0 ){
+			local.h = ( local.p.health - local.cost )
+			if( local.h < 1 ){ local.h = 1 }
+			local.p.health = local.h
+		}
+	}
+	local.p.flags["coop_mpPhFireWas"] = local.fire
+}end
+
+
+//=========================================================================
+// PROP SEED (once per map load). Prop Hunt needs at least one PROP (axis) or the shared round warmup never
+// arms (rounds_tick needs >=1 living on each side) and the mode silently never starts. If, in warmup, there
+// are hunters but zero props and 2+ hunters to spare, DRAFT the last allies player onto axis (native
+// join_team - not coop code) so the hunt can begin. Guarded once per map load; the round's map restart
+// wipes coop_mpPhSeeded for a fresh evaluation next round.
+//=========================================================================
+ph_manage:{
+	if( level.coop_mpPhManageAt == level.time ){ end }
+	level.coop_mpPhManageAt = level.time
+	if( level.coop_mpRndState != "warmup" ){ end }
+	if( level.coop_mpPhSeeded == 1 ){ end }
+
+	local.na = 0
+	local.nx = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.dmteam == "allies" ){ local.na++ }
+		else if( local.q.dmteam == "axis" ){ local.nx++ }
+	}
+	if( local.nx >= 1 ){ end }
+	if( local.na < 2 ){ end }
+
+	//no props but 2+ hunters: draft the LAST allies player to props.
+	local.pick = NULL
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.dmteam == "allies" ){ local.pick = local.q }
+	}
+	if( local.pick == NULL ){ end }
+
+	level.coop_mpPhSeeded = 1
+	local.pick join_team "axis"
+	iprintlnbold( local.pick.netname + " is drafted as a PROP so the hunt can begin!" )
+	println( "^~^~^ MPPH seedprop e" + local.pick.entnum )
+}end

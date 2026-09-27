@@ -1,0 +1,77 @@
+//=========================================================================
+// HARDCORE.SCR - the coop HARDCORE host rule (user 2026-09-25: Host Rules > Hardcore, host cvar coop_hardcore).
+//
+// Latched ONCE per map by ::init, which main.scr::main calls inside its single-frame boot - so NOTHING in this
+// file may wait or waitframe. OFF (0, the default) leaves every coop system exactly as it was: each hook below
+// tests level.coop_hardcore == 1 and otherwise runs the classic line untouched. A host changing the option
+// mid-map changes nothing until the next map.
+//
+// The rules, and who reads them:
+//  - health = the lower of Player Health and 250   main.scr::playerHealth + server.scr::checkScoreboard (::effHealth)
+//  - the knock-down threshold scales with it       dbno.scr monitor (x health / 750) - at 250 HP a flat 250 burst
+//                                                  kills in the same engine call, so nobody would ever go down
+//  - half the bleed-out (headshot 22 s)            dbno.scr::dbno_enter
+//  - no self-revive while a teammate is up; the    medkit.scr::dbno_selfrevive + dbno.scr give-up (::selfReviveBlocked)
+//    USE hold then gives up instead
+//  - 1 banked medkit, half the health drops        medkit.scr caps (level.coop_medkitCap), itemhandler (drop freq)
+//  - the difficulty director never below 0.4 and   director.scr
+//    never saved to the campaign skill
+//  - +100 XP at the debrief, never on a vote skip  xp.scr (team award: late joiners excluded)
+//  - no crosshair / stamina / health bar / hit     serverinfo g_coopHardcore (game.dll, cgame, client exe);
+//    markers, magazines only around a reload,      set here on EVERY coop map, zeroed by the server on every map
+//    no aim assist
+//  - respawns come in shared 20 s waves (never     game.dll Player::Dead hold on g_coopHardcore; a corpse revive
+//    under 5 s away)                               and a first deploy are never held
+//=========================================================================
+
+main:{
+	end
+}end
+
+
+//=========================================================================
+// Called once from main.scr::main, BEFORE server.scr::main (the scoreboard) and before any spawn.
+// NO wait / waitframe (single-frame boot).
+//=========================================================================
+init:{
+	level.coop_hardcore = 0
+	local.hc = int( getcvar "coop_hardcore" )
+	if( local.hc > 0 ){ level.coop_hardcore = 1 }
+
+	level.coop_medkitCap = 2
+	if( level.coop_hardcore == 1 ){
+		level.coop_medkitCap = 1
+		level.coop_healthDropFreq = ( level.coop_healthDropFreq * 2 )
+	}
+	setcvar "g_coopHardcore" level.coop_hardcore
+
+	if( level.coop_hardcore == 1 ){
+		println ( "^~^~^ COOPHC on kitCap=" + level.coop_medkitCap + " drop=" + level.coop_healthDropFreq )
+	}else{
+		println "^~^~^ COOPHC off"
+	}
+}end
+
+
+//=========================================================================
+// The player health this map runs at: Player Health (coop_health, 0 = 750), capped at 250 under Hardcore -
+// never raised, so a host who plays at 100 does not get an easier game by ticking Hardcore.
+//=========================================================================
+effHealth:{
+	local.h = int( getcvar "coop_health" )
+	if( local.h <= 0 ){ local.h = 750 }
+	if( level.coop_hardcore == 1 && local.h > 250 ){ local.h = 250 }
+}end local.h
+
+
+//=========================================================================
+// Hardcore: a downed player may not self-revive while any teammate is up (fighting: on the roster, alive and
+// not downed - the director's upN). The caller is downed, so it never counts itself. Re-evaluated on every
+// call, so the lock lifts the moment the last one goes down or leaves. Returns 1 = blocked.
+//=========================================================================
+selfReviveBlocked local.player:{
+	local.blocked = 0
+	if( level.coop_hardcore != 1 ){ end local.blocked }
+	local.up = waitthread coop_mod/main.scr::coop_fightingPlayerCount
+	if( local.up >= 1 ){ local.blocked = 1 }
+}end local.blocked

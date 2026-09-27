@@ -633,6 +633,12 @@ xp_award_mp local.player local.amount local.reason local.label:{
 		if( local.amount > local.room ){ local.amount = local.room }
 		local.player.flags["coop_xp_mpMatch"] = ( local.player.flags["coop_xp_mpMatch"] + local.amount )
 
+		//[bug-2751] PER-ROUND accumulator for the MP end-of-round card. xp_mp_roundcard reads this to show
+		//"+N XP this round" and to animate the bar from the round-start total, then zeroes it. Tracks the
+		//ACTUAL (post-cap) amount earned, so a capped-out player's card honestly shows the smaller gain.
+		if( local.player.flags["coop_xp_mpRnd"] == NIL ){ local.player.flags["coop_xp_mpRnd"] = 0 }
+		local.player.flags["coop_xp_mpRnd"] = ( local.player.flags["coop_xp_mpRnd"] + local.amount )
+
 		waitthread xp_award local.player local.amount local.reason local.label
 
 		//persist: the 60s autosave loop is coop-only (clause 8), so MP relies on the write-through cvar
@@ -644,6 +650,174 @@ xp_award_mp local.player local.amount local.reason local.label:{
 			waitthread xp_flush
 		}
 	}
+}end
+
+
+//=========================================================================
+// [user 2026-09-20, bug-2751] MULTIPLAYER END-OF-ROUND CARD - the SECOND sanctioned MP->coop bridge label
+// (allowlisted in check_mp_isolation.py as xp::xp_mp_roundcard, exactly like xp_award_mp). MP round/match
+// code (mp_push.scr::push_win, mp_rounds.scr::rounds_win) calls this in the pause before the next round/map
+// to show every player a compact debrief: the round result headline, their SHARED coop rank emblem + name,
+// the XP they earned this round, a progress bar toward the next rank, and a PROMOTED banner if they ranked
+// up. It mirrors the coop debrief (xp_summary_card) but is LEANER (static bar, no squad freeze) and MP-owned.
+//
+// ISOLATION: this is a coop-file label, so it may freely read the coop rank tables (level.coop_xp_rankName/
+// rankXP) and the per-player coop_xp_* flags - none of that is coop_mp* state. It is a hard no-op outside MP
+// (level.coop_mpRun != 1, the clause-7a idiom). It draws on an MP-OWNED HUD slot block (160-167), clear of
+// the top gain bar (62-69), the promo ceremony (70-73) and the MP challenge toast (76-78), so nothing it
+// draws can collide. It ALWAYS holds the window (even if it drew no card) so round pacing is unchanged when
+// XP is disabled. local.headline is the round-result line the caller passes (already MP-side text).
+//=========================================================================
+xp_mp_roundcard local.headline:{
+	//MP-only guard in the sanctioned clause-7a form (a coop file may read `level.coop_mpRun == 1`).
+	if( level.coop_mpRun == 1 ){ local.isMp = 1 }else{ end }
+	if( level.coop_xp_init != 1 ){ waitthread xp_init }		//ensure the rank tables exist even if no XP was earned this round
+	if( level.coop_xp_rankMax == NIL ){ level.coop_xp_rankMax = 21 }
+	if( local.headline == NIL ){ local.headline = "ROUND OVER" }
+
+	local.hold = getcvar( "coop_xp_mpRoundCardTime" )
+	if( local.hold == "" ){ local.hold = "5" }
+	local.hold = float( local.hold )
+	if( local.hold <= 0 ){ local.hold = 5 }
+
+	//DRAW for every connected player (walked live, bug-1679 lesson). alive-or-dead both get it - the round
+	//is over, so a corpse-state player still deserves the debrief. Slots 160-167, virtualres 1, >=100 so the
+	//idle HUD fade cannot dim it while players stand between rounds (TRAPS T18).
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			if( local.p.classname == "Player" && local.p.flags["coop_xp_rank"] != NIL ){
+				local.rank = local.p.flags["coop_xp_rank"]
+				local.total = local.p.flags["coop_xp_total"]
+				if( local.total == NIL ){ local.total = 0 }
+				local.gained = local.p.flags["coop_xp_mpRnd"]
+				if( local.gained == NIL ){ local.gained = 0 }
+				local.from = ( local.total - local.gained )
+
+				//rank at round START (from the pre-round total) -> did they get promoted THIS round?
+				local.rank0 = waitthread xp_rankForTotal local.from
+
+				//within-rank fill fraction toward the NEXT rank (prestige past the top uses the step).
+				local.floor = level.coop_xp_rankXP[local.rank]
+				if( local.floor == NIL ){ local.floor = 0 }
+				local.ceil = ( local.floor + 1 )
+				if( local.rank < level.coop_xp_rankMax ){
+					local.ceil = level.coop_xp_rankXP[local.rank + 1]
+				}else{
+					local.step = level.coop_xp_prestigeStep
+					if( local.step == NIL || local.step <= 0 ){ local.step = 100000 }
+					local.ceil = ( local.floor + local.step )
+				}
+				if( local.ceil <= local.floor ){ local.ceil = ( local.floor + 1 ) }
+				local.w = int( 194 * ( local.total - local.floor ) / ( local.ceil - local.floor ) )
+				if( local.w < 0 ){ local.w = 0 }
+				if( local.w > 194 ){ local.w = 194 }
+
+				local.rn = local.rank
+				if( local.rn < 10 ){ local.rn = "0" + local.rn }
+				local.rname = level.coop_xp_rankName[local.rank]
+				if( local.rname == NIL ){ local.rname = "" }
+
+				//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
+				waitthread coop_mod/hudresend.scr::claim local.p 160 167
+				//headline
+				ihuddraw_virtualsize local.p 160 1
+				ihuddraw_align       local.p 160 center top
+				ihuddraw_font        local.p 160 "facfont-20"
+				ihuddraw_color       local.p 160 0.95 0.9 0.7
+				ihuddraw_rect        local.p 160 0 56 0 0
+				ihuddraw_string      local.p 160 local.headline
+				ihuddraw_alpha       local.p 160 1
+
+				//"+N XP this round"
+				ihuddraw_virtualsize local.p 161 1
+				ihuddraw_align       local.p 161 center top
+				ihuddraw_font        local.p 161 "verdana-12"
+				ihuddraw_color       local.p 161 0.86 0.74 0.44
+				ihuddraw_rect        local.p 161 0 82 0 0
+				ihuddraw_string      local.p 161 ( "+" + local.gained + " XP this round" )
+				ihuddraw_alpha       local.p 161 1
+
+				//glow + emblem (centered above the bar)
+				ihuddraw_virtualsize local.p 162 1
+				ihuddraw_align       local.p 162 left top
+				ihuddraw_shader      local.p 162 "textures/hud/xpbar/xpbar_glow"
+				ihuddraw_rect        local.p 162 272 128 96 96
+				ihuddraw_alpha       local.p 162 0.45
+
+				ihuddraw_virtualsize local.p 163 1
+				ihuddraw_align       local.p 163 left top
+				ihuddraw_shader      local.p 163 ( "textures/hud/coop_rank_" + local.rn )
+				ihuddraw_rect        local.p 163 292 148 56 56
+				ihuddraw_alpha       local.p 163 1
+
+				//rank name
+				ihuddraw_virtualsize local.p 164 1
+				ihuddraw_align       local.p 164 center top
+				ihuddraw_font        local.p 164 "facfont-20"
+				ihuddraw_color       local.p 164 0.92 0.86 0.62
+				ihuddraw_rect        local.p 164 0 210 0 0
+				ihuddraw_string      local.p 164 local.rname
+				ihuddraw_alpha       local.p 164 1
+
+				//progress bar base + fill (brass-on-steel, same art as the coop bar; fill inset baked in art)
+				ihuddraw_virtualsize local.p 165 1
+				ihuddraw_align       local.p 165 left top
+				ihuddraw_shader      local.p 165 "textures/hud/xpbar/xpbar_base"
+				ihuddraw_rect        local.p 165 212 234 216 14
+				ihuddraw_alpha       local.p 165 0.92
+
+				ihuddraw_virtualsize local.p 166 1
+				ihuddraw_align       local.p 166 left top
+				ihuddraw_shader      local.p 166 "textures/hud/xpbar/xpbar_fill"
+				ihuddraw_rect        local.p 166 228 238 local.w 6
+				ihuddraw_alpha       local.p 166 1
+
+				//PROMOTED banner (only if the round crossed a rank boundary)
+				if( local.rank > local.rank0 ){
+					ihuddraw_virtualsize local.p 167 1
+					ihuddraw_align       local.p 167 center top
+					ihuddraw_font        local.p 167 "facfont-20"
+					ihuddraw_color       local.p 167 1 0.85 0.3
+					ihuddraw_rect        local.p 167 0 316 0 0
+					ihuddraw_string      local.p 167 ( "PROMOTED TO " + local.rname )
+					ihuddraw_alpha       local.p 167 1
+					local.p playsound coop_rankup_cine volume 3
+				}
+				//round accumulator consumed - zero it so the NEXT round's card counts only the next round
+				local.p.flags["coop_xp_mpRnd"] = 0
+			}
+		}
+		local.i++
+	}
+
+	wait local.hold
+
+	//tear the card down off every HUD (re-walk $player, bug-1679).
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p != NIL ){
+			ihuddraw_alpha local.p 160 0
+			ihuddraw_alpha local.p 161 0
+			ihuddraw_alpha local.p 162 0
+			ihuddraw_alpha local.p 163 0
+			ihuddraw_alpha local.p 164 0
+			ihuddraw_alpha local.p 165 0
+			ihuddraw_alpha local.p 166 0
+			ihuddraw_alpha local.p 167 0
+			ihuddraw_string local.p 160 ""
+			ihuddraw_string local.p 161 ""
+			ihuddraw_string local.p 164 ""
+			ihuddraw_string local.p 167 ""
+			//only the push side-swap path has no map reload after this card to wipe a lost teardown;
+			//alpha alone is enough to hide every layer, so one thread covers the whole card
+			thread coop_mod/hudresend.scr::resend local.p 160 167 0
+		}
+		local.i++
+	}
+	println( "^~^~^ MPROUNDCARD shown headline='" + local.headline + "'" )
 }end
 
 
@@ -686,6 +860,8 @@ xp_micro_popup local.player local.amount local.reason local.label:{
 	//[user 2026-08-10] bug-1668: slots moved 73-75 -> 142-144, so the row offset rebases too.
 	local.ly = 254 + ((local.slot - 142) * 13)
 
+	//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
+	waitthread coop_mod/hudresend.scr::claim local.player local.slot local.slot
 	ihuddraw_virtualsize local.player local.slot 1
 	ihuddraw_align       local.player local.slot center top
 	ihuddraw_font        local.player local.slot "verdana-12"
@@ -705,6 +881,7 @@ xp_micro_popup local.player local.amount local.reason local.label:{
 		ihuddraw_alpha  local.player local.slot 0
 		ihuddraw_string local.player local.slot ""
 		local.player.flags["coop_xp_mp" + local.slot] = NIL
+		thread coop_mod/hudresend.scr::resend local.player local.slot local.slot 1
 	}
 }end
 
@@ -992,20 +1169,11 @@ xp_vehicle_killed local.killer:{
 // ammobox.scr. What follows is only what was genuinely missing.
 //=========================================================================
 
-// Sum of player deaths - no new counter, player.scr already keeps coop_deaths per player.
+// Team deaths THIS MAP - the level-wide counter player.scr::manageDead bumps on every true death (2026-09-25).
+// The old sum of per-player coop_deaths only moved with LMS on, and forgot anyone who disconnected.
 xp_teamDeaths:{
-	local.n = 0
-	if( $player == NULL ){ end local.n }
-	local.i = 1
-	while( local.i <= $player.size ){
-		local.p = $player[local.i]
-		local.i = local.i + 1
-		if( local.p == NIL ){ continue }
-		if( local.p == NULL ){ continue }
-		local.d = local.p.flags["coop_deaths"]
-		if( local.d == NIL ){ continue }
-		local.n = local.n + local.d
-	}
+	local.n = level.coop_xp_teamDeaths
+	if( local.n == NIL ){ local.n = 0 }
 	end local.n
 }end
 
@@ -1042,7 +1210,7 @@ xp_streak_kill local.killer:{
 	if( level.coop_xp_enabled != 1 ){ end }
 	if( local.killer == NULL ){ end }
 	local.hp = local.killer.health
-	local.dd = local.killer.flags["coop_deaths"]
+	local.dd = local.killer.flags["coop_xpDeaths"]
 	if( local.dd == NIL ){ local.dd = 0 }
 	if( local.killer.coop_xp_streak == NIL ){ local.killer.coop_xp_streak = 0 }
 	if( local.killer.coop_xp_streakHp != NIL && local.hp < local.killer.coop_xp_streakHp ){
@@ -1198,7 +1366,7 @@ xp_mission_bonuses:{
 	if( local.d == 0 ){
 		waitthread xp_team_award 50 "mission" "No Casualties"
 	}
-	if( level.coop_xp_dbnoEver != 1 ){
+	if( level.coop_xp_dbnoEver != 1 && local.d == 0 ){	//a true death that skipped DBNO is still "went down"
 		waitthread xp_team_award 30 "mission" "Nobody Went Down"
 	}
 	if( level.coop_alarmEver != 1 ){
@@ -1210,6 +1378,11 @@ xp_mission_bonuses:{
 		if( local.par > 0 && level.time < local.par ){
 			waitthread xp_team_award 40 "mission" "Ahead of Schedule"
 		}
+	}
+	//[user 2026-09-25] HARDCORE: +100 XP. Latched at map start (cannot be ticked at the exit); a vote-skipped map pays
+	//nothing; the team award already excludes players who joined in the second half of the map.
+	if( level.coop_hardcore == 1 && level.coop_voteSkipped != 1 ){
+		waitthread xp_team_award 100 "mission" "Hardcore"
 	}
 }end
 
@@ -1417,6 +1590,8 @@ xp_hud_popup local.player:{
 	// [217] modern brass-on-steel layered bar (design + assets: _research/ui_modernization.md 1.2-1.4)
 	// slots: 62 base plate, 63 fill, 64 shine sweep, 65 head glint, 66 rank-up halo,
 	//        67 emblem plate, 68 emblem, 69 gain text. Higher slot = drawn on top.
+	//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
+	waitthread coop_mod/hudresend.scr::claim local.player 62 69
 	ihuddraw_virtualsize local.player 62 1
 	ihuddraw_align       local.player 62 left top
 	ihuddraw_shader      local.player 62 "textures/hud/xpbar/xpbar_base"
@@ -1571,6 +1746,12 @@ xp_hud_popup local.player:{
 		ihuddraw_string local.player 69 ""
 		local.player.flags["coop_xp_popupOn"]   = NIL
 		local.player.flags["coop_xp_popupGain"] = NIL
+		//not when the debrief card is taking these slots over (bug-553/804): the map change after it
+		//wipes the HUD anyway, and the card claims 62-71 as it draws, but it draws ~0.5s from now
+		if( level.coop_xp_summaryActive != 1 ){
+			thread coop_mod/hudresend.scr::resend local.player 62 68 0
+			thread coop_mod/hudresend.scr::resend local.player 69 69 1
+		}
 	}
 }end
 
@@ -1602,8 +1783,14 @@ xp_summary:{
 	while( local.i <= $player.size ){
 		local.p = $player[local.i]
 		if( local.p != NULL && local.p.flags["coop_isActive"] == 1 ){
-			if( local.p.flags["coop_deaths"] == NIL || local.p.flags["coop_deaths"] == 0 ){
-				thread xp_award local.p 50 "mission" "Deathless"
+			//[2026-09-25] the XP death counter (not LMS's coop_deaths), and only for a player here since the first half of
+			//the map - a disconnect + rejoin resets per-player flags, and must not wipe a death.
+			local.xdz = local.p.flags["coop_xpDeaths"]
+			if( local.xdz == NIL ){ local.xdz = 0 }
+			if( local.xdz == 0 && local.p.flags["coop_xp_join"] != NIL ){
+				if( local.p.flags["coop_xp_join"] <= ( level.time * 0.5 ) ){
+					thread xp_award local.p 50 "mission" "Deathless"
+				}
 			}
 		}
 		local.i++
@@ -1708,6 +1895,9 @@ xp_summary_card local.p:{
 	if( local.p.flags["coop_xp_cardOn"] == 1 ){ end }		// [user 07-18 bug-804] one card per player - a second thread on the same slots is the glitch machine
 	local.p.flags["coop_xp_cardOn"] = 1
 	if( level.coop_xp_rankMax == NIL ){ level.coop_xp_rankMax = 21 }		// defensive: unset max -> ceil=floor+1 -> fill reads full (matches xp_hud_popup / xp_rankForTotal)
+	//[2026-09-25, bug-2906] the card (and xp_card_categories, which draws 62/66-68 later) takes over the
+	//gain popup's and ceremony's slots: claim them all now, so no late re-send of their teardowns lands on it
+	waitthread coop_mod/hudresend.scr::claim local.p 62 73
 
 	local.rank0 = local.p.flags["coop_xp_rankmapstart"]
 	local.rank1 = local.p.flags["coop_xp_rank"]
@@ -1722,7 +1912,9 @@ xp_summary_card local.p:{
 	ihuddraw_font        local.p 63 "facfont-20"
 	ihuddraw_color       local.p 63 0.95 0.9 0.7
 	ihuddraw_rect        local.p 63 0 56 0 0
-	ihuddraw_string      local.p 63 ( "SQUAD DEBRIEF  -  +" + local.map + " XP" )
+	local.cardTitle = "SQUAD DEBRIEF  -  +"
+	if( level.coop_hardcore == 1 ){ local.cardTitle = "HARDCORE DEBRIEF  -  +" }	//[user 2026-09-25]
+	ihuddraw_string      local.p 63 ( local.cardTitle + local.map + " XP" )
 	ihuddraw_alpha       local.p 63 1
 
 	// enlarged insignia CENTERED above the bar (halo behind), starting at the MATCH-START rank
@@ -2000,6 +2192,8 @@ xp_promo_ceremony local.player local.rank:{
 	local.player playsound coop_rankup_cine volume 3
 	thread xp_ping_unduck local.player
 
+	//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
+	waitthread coop_mod/hudresend.scr::claim local.player 70 73
 	ihuddraw_virtualsize local.player 70 1
 	ihuddraw_align       local.player 70 left top
 	ihuddraw_shader      local.player 70 "textures/hud/xpbar/xpbar_glow"
@@ -2060,6 +2254,11 @@ xp_promo_ceremony local.player local.rank:{
 		ihuddraw_string local.player 72 ""
 		ihuddraw_string local.player 73 ""
 		local.player.flags["coop_xp_ceremony"] = NIL
+		//not once the debrief has begun: its card owns 70/71 and a map change follows it
+		if( level.coop_xp_summaryRun != 1 ){
+			thread coop_mod/hudresend.scr::resend local.player 70 71 0
+			thread coop_mod/hudresend.scr::resend local.player 72 73 1
+		}
 	}
 }end
 

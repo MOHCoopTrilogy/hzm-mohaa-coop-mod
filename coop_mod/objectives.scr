@@ -124,11 +124,23 @@ coop_obj_toast local.player local.key local.text:{
 		if( local.player == NULL ){ end }
 	}
 
+	//[user 2026-09-25] "Hide Objective Cards" (Coop Options > HUD & Feedback): a PER-PLAYER choice, so it rides the
+	//player's userinfo (coop_hideObjCards, registered CVAR_USERINFO|CVAR_ARCHIVE at client launch in cl_keys.cpp -
+	//a cgame-only registration is too late for the first connect, bug-2749). Checked HERE, after the revive waits and
+	//BEFORE the shared busy latch and the hudresend claim: nothing is drawn, so nothing is claimed, and a skipped card
+	//never holds the queue for anyone else. The card is still marked seen above, so switching it back on does not
+	//replay old objectives. Two lines on purpose - a parenthesised call in a condition can kill the file (bug-2632).
+	local.hideCard = info_valueforkey local.player.userinfo "coop_hideObjCards"
+	if( local.hideCard == "1" ){ end }
+
 	level.coop_objToastBusy = 1
 
 	local.hold = float( getcvar "coop_objToastTime" )
 	if( local.hold < 1 ){ local.hold = 6 }
 
+	//[2026-09-25, bug-2906] claim the whole card, so another feature's re-sent teardown (revive channel,
+	//blueprint ack, XP micro popup) cannot land on it (coop_mod/hudresend.scr, TRAPS T8)
+	waitthread coop_mod/hudresend.scr::claim local.player 135 142
 	//heading
 	ihuddraw_virtualsize local.player 135 1
 	ihuddraw_align       local.player 135 left top
@@ -180,17 +192,45 @@ coop_obj_toast local.player local.key local.text:{
 
 	wait local.hold
 
-	//tear down every slot we touched, whether or not the player survived the hold
+	//[2026-09-25, bug-2904] FADE OUT, then make the clear STICK. Reported "the new objective card doesn't
+	//fade" by a player while it vanished fine for the host. Every ihuddraw_* write is a cgame message that
+	//rides the NEXT snapshot packet to that client exactly ONCE (SV_WriteCGMToClient clears the buffer after
+	//writing it; snapshots are unreliable UDP, no retransmit), and a client whose CGM buffer is nearly full
+	//is skipped outright (PF_MSG_SetClient). The host's loopback never loses a packet; a remote player who
+	//loses the one packet carrying the teardown keeps the card on screen for the rest of the map. So: a
+	//short fade, then the teardown sent four times over ~3s - it is idempotent, one surviving copy is enough.
 	if( local.player != NULL ){
-		//[user 08-08] bug-1592 - was `<= 141`, but the tracking hint draws on 142, so it was never
-		//cleared and stayed burned on screen for the rest of the map. The teardown range must cover
-		//EVERY slot this function can write; 135 heading, 136-141 text, 142 hint.
+		local.fa = 0.75
+		while( local.fa > 0 ){
+			local.s = 135
+			while( local.s <= 142 ){
+				ihuddraw_alpha local.player local.s local.fa
+				local.s++
+			}
+			wait 0.15
+			if( local.player == NULL ){ break }
+			local.fa = local.fa - 0.25
+		}
+	}
+
+	//tear down every slot we touched, whether or not the player survived the hold
+	//[user 08-08] bug-1592 - was `<= 141`, but the tracking hint draws on 142, so it was never
+	//cleared and stayed burned on screen for the rest of the map. The teardown range must cover
+	//EVERY slot this function can write; 135 heading, 136-141 text, 142 hint.
+	//The busy latch stays held until the last copy: a NEXT card claims the same slots, and a re-sent
+	//clear would blank it; dbno.scr also re-asserts its revive HUD on the latch's falling edge.
+	//[2026-09-25, bug-2906] the three later copies now come from coop_mod/hudresend.scr (+0.5, +1.5,
+	//+3 s - the same schedule), which also skips any slot another feature has drawn into since this
+	//teardown: the revive channel shares 135-140, the blueprint ack 141 and the XP micro popup 142.
+	if( local.player != NULL ){
 		local.s = 135
 		while( local.s <= 142 ){
 			ihuddraw_alpha  local.player local.s 0
 			ihuddraw_string local.player local.s ""
 			local.s++
 		}
+		thread coop_mod/hudresend.scr::resend local.player 135 142 1
+		wait 3
 	}
 	level.coop_objToastBusy = 0
 }end
@@ -574,6 +614,9 @@ coop_objPanel_refresh local.player:{
 	}
 	if( local.any == 0 ){ end }
 
+	//[2026-09-25, bug-2906] claim the panel's block: it overlaps the Service Record rows, whose close
+	//re-sends its clear for ~3s (coop_mod/hudresend.scr). Over-claiming only cancels re-sends.
+	waitthread coop_mod/hudresend.scr::claim local.player 156 215
 	// title bar: grey plate + "Mission Objectives:" + separator line - matches ui/coop_objectives.urc
 	ihuddraw_virtualsize local.player 156 1
 	ihuddraw_align       local.player 156 left top

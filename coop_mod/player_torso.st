@@ -148,16 +148,10 @@ state AIM
 	// Torso slot masks to upper bones; the legs keep their run/strafe anims underneath.
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		// [user 2026-08-28] PRONE BRACING keeps the PRONE pose. The unqualified COOP_BRACED rows below
-		// carry !POSITION_TYPE "prone" so a prone player who mounts falls through to the prone rows
-		// further down instead of matching coop_brace_stand_aim - which would have put a standing torso
-		// on a flat body. Bracing while prone is a STABILITY change, not a pose change: the prone aim
-		// already reads as braced, which is most of why prone is steady in the first place.
-		coop_brace_aim_pistol	: COOP_BRACED POSITION_TYPE "crouching" IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
-		coop_brace_aim_rifle	: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_aim_pistol	: COOP_BRACED IS_WEAPONCLASS_ACTIVE "mainhand" "pistol" !POSITION_TYPE "prone"
-		coop_brace_stand_aim	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// HZM coop [user 2026-08-24] PRONE. These action blocks ALREADY select by stance via
 		// POSITION_TYPE "crouching"/"standing", and the prone legs state calls moveposflags "prone",
@@ -752,9 +746,10 @@ state ATTACK_SMG_PRIMARY
 
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		coop_brace_shoot		: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_shoot_smg	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
 		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
@@ -809,9 +804,10 @@ state ATTACK_MG_PRIMARY
 
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		coop_brace_shoot_mg	: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_shoot_mg	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
 		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
@@ -905,9 +901,10 @@ state ATTACK_RIFLE_PRIMARY
 
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		coop_brace_shoot_rifle	: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_shoot	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
 		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
@@ -1055,9 +1052,10 @@ state ATTACK_PISTOL_PRIMARY
 
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		coop_brace_shoot_pistol	: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_shoot_pistol	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
 		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".
@@ -1163,9 +1161,10 @@ state ATTACK_SHOTGUN_PRIMARY
 	
 	action
 	{
-		// [user 2026-08-27] MOUNTED: retail's crouched aim-over-cover pose, above the stance rows, so a braced player reads as braced to everyone else.
-		coop_brace_shoot_mg	: COOP_BRACED POSITION_TYPE "crouching"
-		coop_brace_stand_shoot_mg	: COOP_BRACED !POSITION_TYPE "prone"
+		// [user 2026-09-25] MOUNTED = THE RMB AIM POSE: "when you use brace/mount in third person, it should be just like
+		// aiming over shoulder and holding right mouse down (rifle aimed, arm steady)". The mount forces COOP_ADS, so the
+		// per-weapon rows below serve it exactly as they serve RMB; the 08-27 braced-only poses (aim-over-cover /
+		// brace_stand) were removed. Prone keeps its prone pose; cover rows are unchanged.
 
 		// [user 2026-08-25] prone. Only the _AIM variants were patched first time round, so hip-fire
 		// and rechamber still played standing poses - "my upper torso pops up as though I am crouched".

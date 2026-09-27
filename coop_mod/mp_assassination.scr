@@ -1,0 +1,240 @@
+//=========================================================================
+// MP_ASSASSINATION.SCR - ASSASSINATION, an MP game MODE (user 2026-09-16, "build us an assassination game
+// mode based on the existing one"). Inspired by Mefy's Extended-Gametypes Assassination (VIP), but BUILT on
+// our own MP framework rather than importing Mefy's parallel gametype engine - the same reuse approach we
+// used for Domination (from KOTH). One team (the VIP side) has a single marked VIP; the other team hunts and
+// eliminates them.
+//
+// SCORING (continuous, no round/respawn-freeze - the lean model): the HUNTERS score each time they kill the
+// VIP (a new VIP is then designated from the VIP side); the VIP SIDE scores one point for every
+// coop_mpAsSurvive seconds their VIP stays alive. First side to coop_mpAsLimit wins; the map restarts for a
+// fresh match. The stock compass arrow points at the live VIP so both sides can find them.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun, which ONLY
+// coop_mod/mp.scr sets and which a level load wipes - so NOTHING here can run on a coop map. It uses the
+// armory (mp_modeUsesArmory stays 1). mp.scr dispatches through its seam (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (config, deploy the armory kit)
+//     mp.scr::mp_modeTick     -> mode_think     (keep the manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (VIP death = a hunter score + redesignate)
+//
+// ISOLATION: calls only mp_armory.scr and mp_progression.scr (both MP_MANIFEST, admitted by clause 10);
+// reads/writes only coop_mp* MP cvars + the engine frag/round/time limits; per-VIP health is set PER PLAYER,
+// never a cvar; names no coop cvar, coop_lo, ui/loadout or coop-only path; never giveInventory /
+// changeGameType / the coop_health cvar. set_objective_pos is the stock compass builtin KOTH also uses.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//Liveness probe (TRAPS T1).
+alive:{
+	end 1
+}end
+
+
+//isOn guard.
+isOn:{
+	if( level.coop_mpRun != 1 ){ end 0 }
+	if( level.coop_mpMode != "assassination" ){ end 0 }
+	end 1
+}end
+
+
+//=========================================================================
+// One-time config + manager start. Idempotent. Reads host cvars, zeroes the engine limits so it cannot end
+// the match first, resets scores, starts the loop. Same discipline as mp_koth.scr / mp_domination.scr.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpAsReady == 1 ){ end }
+	level.coop_mpAsReady = 1
+	level.coop_mpAsEnding = 0
+
+	//which team holds the VIP (host cvar coop_mpAsVipSide, default allies).
+	local.side = getcvar( "coop_mpAsVipSide" )
+	if( local.side != "axis" ){ local.side = "allies" }
+	level.coop_mpAsVipSide = local.side
+	local.hunters = "axis"
+	if( local.side == "axis" ){ local.hunters = "allies" }
+	level.coop_mpAsHunters = local.hunters
+
+	//score to win (host cvar coop_mpAsLimit, default 10).
+	local.lim = getcvar( "coop_mpAsLimit" )
+	if( local.lim == "" ){ local.lim = "10" }
+	level.coop_mpAsLimit = int( local.lim )
+	if( level.coop_mpAsLimit < 1 ){ level.coop_mpAsLimit = 10 }
+
+	//seconds of VIP survival that bank one point for the VIP side (host cvar coop_mpAsSurvive, default 30).
+	local.sv = getcvar( "coop_mpAsSurvive" )
+	if( local.sv == "" ){ local.sv = "30" }
+	level.coop_mpAsSurvive = int( local.sv )
+	if( level.coop_mpAsSurvive < 5 ){ level.coop_mpAsSurvive = 30 }
+
+	//the VIP's spawn health (host cvar coop_mpAsVipHealth, default 150 - a VIP is tougher than a grunt).
+	local.hp = getcvar( "coop_mpAsVipHealth" )
+	if( local.hp == "" ){ local.hp = "150" }
+	level.coop_mpAsVipHealth = int( local.hp )
+	if( level.coop_mpAsVipHealth < 1 ){ level.coop_mpAsVipHealth = 150 }
+
+	level.coop_mpAsVip = NULL
+	level.coop_mpAsNextSurvive = 0
+
+	setcvar "coop_mpAsScoreA" "0"
+	setcvar "coop_mpAsScoreX" "0"
+
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	setcvar "g_obj_alliedtext1" "Assassination"
+	setcvar "g_obj_axistext1" "Assassination"
+
+	println( "^~^~^ MPAS init gt=" + level.gametype + " vipside=" + level.coop_mpAsVipSide + " limit=" + level.coop_mpAsLimit + " survive=" + level.coop_mpAsSurvive + " viphp=" + level.coop_mpAsVipHealth )
+	thread as_loop
+}end
+
+
+//SPAWN EDGE. Config once, then deploy through the armory (players need weapons). VIP designation is done by
+//the manager, not here.
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. The manager owns the VIP + scoring; just keep it running.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpAsReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+//DEATH EDGE. If the victim was the VIP, the hunters just scored the elimination - award, announce, and clear
+//the VIP so the manager designates a fresh one.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpAsReady != 1 ){ end }
+	if( local.p != level.coop_mpAsVip ){ end }
+
+	level.coop_mpAsVip = NULL
+	waitthread as_award level.coop_mpAsHunters 1
+	local.tag = "AXIS"
+	if( level.coop_mpAsHunters == "allies" ){ local.tag = "ALLIES" }
+	iprintlnbold( local.tag + " eliminated the VIP!" )
+}end
+
+
+//=========================================================================
+// THE MANAGER. One loop per map, guarded coop_mpRun + a run-once flag. Once a second: keep a VIP designated,
+// mark them on the compass, and bank a survival point for the VIP side on the interval.
+//=========================================================================
+as_loop:{
+	if( level.coop_mpAsLoopOn == 1 ){ end }
+	level.coop_mpAsLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread as_tick
+		wait 1
+	}
+}end
+
+
+as_tick:{
+	if( level.coop_mpAsEnding == 1 ){ end }
+
+	//designate a VIP if there is none (first living, in-play player on the VIP side).
+	local.vip = level.coop_mpAsVip
+	if( local.vip == NULL || !( isAlive local.vip ) || local.vip.dmteam != level.coop_mpAsVipSide ){
+		local.vip = waitthread as_pickVip
+		level.coop_mpAsVip = local.vip
+		if( local.vip != NULL ){
+			local.vip health level.coop_mpAsVipHealth
+			level.coop_mpAsNextSurvive = ( level.time + level.coop_mpAsSurvive )
+			iprintlnbold( ( "" + local.vip.netname ) + " is the VIP - protect them!" )
+			println( "^~^~^ MPAS vip=" + local.vip.netname + " side=" + level.coop_mpAsVipSide )
+		}
+	}
+
+	//mark the live VIP on the stock compass and bank survival points on the interval.
+	if( local.vip != NULL && ( isAlive local.vip ) ){
+		set_objective_pos local.vip.origin
+		//[user 2026-09-16] draw the HUNTER bots to the VIP (team-gated so the VIP's own side is not pulled in).
+		waitthread coop_mod/mp_botobj.scr::botobj_set 1 local.vip.origin 8 level.coop_mpAsHunters
+		if( level.time >= level.coop_mpAsNextSurvive ){
+			waitthread as_award level.coop_mpAsVipSide 1
+			level.coop_mpAsNextSurvive = ( level.time + level.coop_mpAsSurvive )
+		}
+	}
+
+	local.sa = waitthread as_i "coop_mpAsScoreA"
+	local.sx = waitthread as_i "coop_mpAsScoreX"
+	if( local.sa >= level.coop_mpAsLimit ){ waitthread as_win "allies" local.sa local.sx }
+	else if( local.sx >= level.coop_mpAsLimit ){ waitthread as_win "axis" local.sa local.sx }
+}end
+
+
+//the first LIVING, in-play player on a side, or NULL. Used to designate the VIP.
+as_pickVip:{
+	local.r = NULL
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != level.coop_mpAsVipSide ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.r = local.p
+		break
+	}
+}end local.r
+
+
+//award N points to a side in its score cvar.
+as_award local.side local.n:{
+	if( local.side == "allies" ){
+		local.v = ( waitthread as_i "coop_mpAsScoreA" + local.n )
+		setcvar "coop_mpAsScoreA" ( "" + local.v )
+	}
+	else if( local.side == "axis" ){
+		local.v = ( waitthread as_i "coop_mpAsScoreX" + local.n )
+		setcvar "coop_mpAsScoreX" ( "" + local.v )
+	}
+}end
+
+
+//=========================================================================
+// The match win: credit progression (rounds for all + win_assassination for the winners), announce, hold the
+// banner, then reload the SAME map (the proven transition - mp_koth.scr / mp_domination.scr).
+//=========================================================================
+as_win local.side local.sa local.sx:{
+	if( level.coop_mpAsEnding == 1 ){ end }
+	level.coop_mpAsEnding = 1
+
+	waitthread coop_mod/mp_progression.scr::mp_awardTeamWin local.side "assassination"
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " WIN Assassination!  Allies " + local.sa + " : " + local.sx + " Axis" )
+	println( "^~^~^ MPAS win side=" + local.side + " scoreA=" + local.sa + " scoreX=" + local.sx + " map=" + getcvar( "mapname" ) )
+
+	setcvar "coop_mpAsScoreA" "0"
+	setcvar "coop_mpAsScoreX" "0"
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPAS restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//read an int cvar, "" -> 0. int() into a local BEFORE end (bug-2603 - never a call in the `}end <expr>` slot).
+as_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v

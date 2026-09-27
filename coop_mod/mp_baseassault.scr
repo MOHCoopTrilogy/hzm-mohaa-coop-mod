@@ -1,0 +1,698 @@
+//=========================================================================
+// MP_BASEASSAULT.SCR - BASE ASSAULT, an MP game MODE. Decision M21: original rules - 3 bases per
+// team, plant 15s, defuse 10s, fuse 60s, respawns on, SP map list.
+//
+// Each team has 3 bases (spawned as script_model entities using stock sandbag_wall models). Base
+// positions derived from spawn origins (same pattern as CTF - first 3 spawns per team side). To
+// attack: a player holds USE near an enemy base for 15s to "plant" on it. A teammate can hold USE
+// for 10s to defuse an active plant. Once planted, a 60s fuse timer counts down to destruction.
+// When a base is destroyed: model removed, iprint announcement. Respawns ON (continuous play, no
+// rounds). Win: destroy all 3 enemy bases. 30 min overall time limit.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun,
+// which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr dispatches into this file through its three seam labels (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (spawn edge: config, seed bases, deploy the kit)
+//     mp.scr::mp_modeTick     -> mode_think     (per-tick: drive plant/defuse/fuse timers, win check)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (victim death: normal respawns, cancel active plant)
+//
+// WIN MECHANISM. First team to destroy all 3 enemy bases wins. The match-win is a script score plus a
+// forced map restart (stuffsrv "map <name>"), exactly as KOTH / CTF end - the one proven,
+// gametype-agnostic win path in this mod (no archive, no gametype flip). On timeout: side with more
+// bases destroyed wins (draw = no winner, stays for another cycle).
+//
+// BASES ARE DERIVED FROM REAL TEAM SPAWN ORIGINS, NOT GUESSED. Same pattern as CTF: the first 3
+// spawn origins seen for each team become that team's bases.
+//
+// ISOLATION: calls only the MP file coop_mod/mp_armory.scr (in MP_MANIFEST, so clause 10 admits it);
+// names no coop cvar / coop_lo token / ui/loadout tree / coop armory code; never giveInventory /
+// changeGameType; never writes coop_health / coop_* state.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+//Liveness probe (TRAPS T1).
+alive:{
+	end 1
+}end
+
+//isOn guard.
+isOn:{
+	if( level.coop_mpRun != 1 ){ end 0 }
+	if( level.coop_mpMode != "baseassault" ){ end 0 }
+	end 1
+}end
+
+
+//=========================================================================
+// One-time Base Assault config. Idempotent (level flag). Reads host cvars, zeroes the engine's own
+// frag/round/time limits so the engine cannot end the match before we do, and starts the manager loop.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpBasReady == 1 ){ end }
+	level.coop_mpBasReady = 1
+	level.coop_mpBasEnding = 0
+
+	//plant time (seconds): host cvar coop_mpBasPlant, default 15.
+	local.pt = getcvar( "coop_mpBasPlant" )
+	if( local.pt == "" ){ local.pt = "15" }
+	level.coop_mpBasPlant = int( local.pt )
+	if( level.coop_mpBasPlant < 1 ){ level.coop_mpBasPlant = 15 }
+
+	//defuse time (seconds): host cvar coop_mpBasDefuse, default 10.
+	local.df = getcvar( "coop_mpBasDefuse" )
+	if( local.df == "" ){ local.df = "10" }
+	level.coop_mpBasDefuse = int( local.df )
+	if( level.coop_mpBasDefuse < 1 ){ level.coop_mpBasDefuse = 10 }
+
+	//fuse time (seconds): host cvar coop_mpBasFuse, default 60.
+	local.fu = getcvar( "coop_mpBasFuse" )
+	if( local.fu == "" ){ local.fu = "60" }
+	level.coop_mpBasFuse = int( local.fu )
+	if( level.coop_mpBasFuse < 5 ){ level.coop_mpBasFuse = 60 }
+
+	//overall match time limit (seconds): host cvar coop_mpBasTime, default 1800 (30 min).
+	local.tm = getcvar( "coop_mpBasTime" )
+	if( local.tm == "" ){ local.tm = "1800" }
+	level.coop_mpBasTimeout = int( local.tm )
+
+	//plant/defuse interaction radius (world units): host cvar coop_mpBasRadius, default 100.
+	local.rad = getcvar( "coop_mpBasRadius" )
+	if( local.rad == "" ){ local.rad = "100" }
+	level.coop_mpBasRadius = int( local.rad )
+	if( level.coop_mpBasRadius < 32 ){ level.coop_mpBasRadius = 100 }
+
+	level.coop_mpBasStart = level.time
+
+	//per-team base state: 3 bases each, keyed by side letter + base index (1-3)
+	//states: "alive", "planted", "destroyed"
+	local.i = 1
+	while( local.i <= 3 ){
+		level.coop_mpBasState["a"][local.i] = "alive"
+		level.coop_mpBasState["x"][local.i] = "alive"
+		level.coop_mpBasEnt["a"][local.i] = NIL
+		level.coop_mpBasEnt["x"][local.i] = NIL
+		level.coop_mpBasPos["a"][local.i] = NIL
+		level.coop_mpBasPos["x"][local.i] = NIL
+		level.coop_mpBasFuseAt["a"][local.i] = 0
+		level.coop_mpBasFuseAt["x"][local.i] = 0
+		level.coop_mpBasPlanter["a"][local.i] = NULL
+		level.coop_mpBasPlanter["x"][local.i] = NULL
+		level.coop_mpBasPlantStart["a"][local.i] = 0
+		level.coop_mpBasPlantStart["x"][local.i] = 0
+		level.coop_mpBasDefuser["a"][local.i] = NULL
+		level.coop_mpBasDefuser["x"][local.i] = NULL
+		level.coop_mpBasDefuseStart["a"][local.i] = 0
+		level.coop_mpBasDefuseStart["x"][local.i] = 0
+		local.i++
+	}
+
+	//spawn counters for base seeding (first 3 spawns per team)
+	level.coop_mpBasSpawnN["a"] = 0
+	level.coop_mpBasSpawnN["x"] = 0
+
+	//real base count per side. Default 3 (derive-from-spawn-origins path). Authored SP maps
+	//(bas_seedAuthored) override this with their hand-placed base count (may be 1 or 2 per side).
+	if( level.coop_mpBasN["a"] == NIL ){ level.coop_mpBasN["a"] = 3 }
+	if( level.coop_mpBasN["x"] == NIL ){ level.coop_mpBasN["x"] = 3 }
+
+	//running score lives in NON-archived cvars, reset for this fresh match
+	setcvar "coop_mpBasScoreA" "0"
+	setcvar "coop_mpBasScoreX" "0"
+
+	//stop the engine ending the match first
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	println( "^~^~^ MPBAS init gt=" + level.gametype + " plant=" + level.coop_mpBasPlant + " defuse=" + level.coop_mpBasDefuse + " fuse=" + level.coop_mpBasFuse + " time=" + level.coop_mpBasTimeout + " radius=" + level.coop_mpBasRadius )
+	thread bas_loop
+}end
+
+
+//=========================================================================
+// SPAWN EDGE. Config, seed a base from this spawn origin (up to 3 per team), deploy armory kit.
+//=========================================================================
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	waitthread bas_seedBase local.p
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//=========================================================================
+// MODE INIT (pre-spawn, from mp.scr::mp_modeInit). On the authored SP-campaign maps this script-spawns
+// the team spawn entities and builds the hand-placed destructible bases BEFORE any player picks a spawn.
+// On every other (stock DM/obj) map it is a no-op and the mode derives its bases from spawn origins.
+//=========================================================================
+mode_init:{
+	waitthread ensureConfig
+	waitthread bas_seedAuthored
+}end
+
+
+//=========================================================================
+// AUTHORED SEEDING. Ask coop_mod/mp_baseassault_maps.scr to spawn the authored team spawns + record the
+// hand-placed base positions for the current map. If it has an authored layout (total > 0), build those
+// bases directly and switch off the derive-from-spawn-origins path. Reaching mp_baseassault_maps.scr is
+// MP->MP (both in MP_MANIFEST; isolation clause 10).
+//=========================================================================
+bas_seedAuthored:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpBasAuthoredOn == 1 ){ end }
+	local.m = getcvar( "mapname" )
+	if( local.m == "" ){ end }
+	local.total = waitthread coop_mod/mp_baseassault_maps.scr::seed local.m
+	if( local.total == NIL ){ local.total = 0 }
+	if( local.total <= 0 ){ end }
+
+	level.coop_mpBasAuthoredOn = 1
+
+	//build each side's authored bases in listed order, indices 1..N
+	waitthread bas_buildAuthoredSide "a"
+	waitthread bas_buildAuthoredSide "x"
+	println( "^~^~^ MPBAS authored " + local.m + " basesA=" + level.coop_mpBasN["a"] + " basesX=" + level.coop_mpBasN["x"] )
+}end
+
+
+//build one side's authored bases from coop_mpBaSeed[side][1..N]. Sets coop_mpBasN + coop_mpBasSpawnN so the
+//win check and derive-path cap both track the real base count.
+bas_buildAuthoredSide local.side:{
+	local.n = level.coop_mpBaSeedN[local.side]
+	if( local.n == NIL ){ local.n = 0 }
+	level.coop_mpBasN[local.side] = local.n
+	level.coop_mpBasSpawnN[local.side] = local.n
+
+	local.i = 1
+	while( local.i <= local.n ){
+		local.pos = level.coop_mpBaSeed[local.side][local.i]
+		level.coop_mpBasPos[local.side][local.i] = local.pos
+		level.coop_mpBasState[local.side][local.i] = "alive"
+
+		local.ent = spawn script_model model "models/static/sandbag_wall.tik"
+		local.ent.origin = local.pos
+		local.yaw = level.coop_mpBaYaw[local.side][local.i]
+		if( local.yaw == NIL ){ local.yaw = 0 }
+		local.ent.angles = ( 0 local.yaw 0 )
+		local.ent droptofloor 512
+		local.ent solid
+		level.coop_mpBasEnt[local.side][local.i] = local.ent
+
+		local.tag = "Allied"
+		if( local.side == "x" ){ local.tag = "Axis" }
+		println( "^~^~^ MPBAS authoredBase side=" + local.side + " idx=" + local.i + " pos=" + local.pos )
+		local.i++
+	}
+	//clear any unused indices (2..3) so the count helpers never see a phantom "alive" base
+	while( local.i <= 3 ){
+		level.coop_mpBasState[local.side][local.i] = NIL
+		level.coop_mpBasPos[local.side][local.i] = NIL
+		local.i++
+	}
+}end
+
+
+//PER-TICK. Drive the base manager and per-player plant/defuse interactions.
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	waitthread bas_ensure
+	waitthread bas_tickPlayer local.p
+}end
+
+
+//DEATH EDGE. Normal respawns - cancel any active plant/defuse by the victim.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	waitthread bas_cancelPlayer local.p
+}end
+
+
+//=========================================================================
+// BASE SEEDING. The first 3 spawn origins seen for each team become that team's bases, offset 64
+// units to the side so the base does not sit right on the spawn point.
+//=========================================================================
+bas_seedBase local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpBasAuthoredOn == 1 ){ end }
+	local.side = "x"
+	if( local.p.dmteam == "allies" ){ local.side = "a" }
+	if( local.p.dmteam == "spectator" || local.p.dmteam == "" || local.p.dmteam == NIL ){ end }
+	if( local.p.isSpectator ){ end }
+
+	local.n = level.coop_mpBasSpawnN[local.side]
+	if( local.n == NIL ){ local.n = 0 }
+	if( local.n >= 3 ){ end }
+
+	//offset the base position slightly from the spawn origin (in front of the player's facing). NOTE: the
+	//engine's cos/sin take DEGREES (they DEG2RAD internally, scriptthread.cpp::EventCos) - the old radian
+	//pre-conversion collapsed the offset to a fixed ~(+64,0,0) regardless of yaw (bug-2660).
+	local.ang = local.p.angles
+	local.yaw = local.ang[1]
+	local.ox = ( cos local.yaw * 64 )
+	local.oy = ( sin local.yaw * 64 )
+	local.basePos = ( local.p.origin + ( local.ox local.oy 0 ) )
+
+	local.idx = ( local.n + 1 )
+	level.coop_mpBasPos[local.side][local.idx] = local.basePos
+	level.coop_mpBasSpawnN[local.side] = local.idx
+
+	//spawn the base entity
+	local.ent = spawn script_model model "models/static/sandbag_wall.tik"
+	local.ent.origin = local.basePos
+	local.ent droptofloor 512
+	local.ent solid
+	level.coop_mpBasEnt[local.side][local.idx] = local.ent
+
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintln( local.tag + " base " + local.idx + " established!" )
+	println( "^~^~^ MPBAS base side=" + local.side + " idx=" + local.idx + " pos=" + local.basePos )
+}end
+
+
+//=========================================================================
+// THE BASE MANAGER. One loop per map load, guarded on coop_mpRun. Drives fuse timers, the timeout
+// clock, and the win condition.
+//=========================================================================
+bas_loop:{
+	if( level.coop_mpBasLoopOn == 1 ){ end }
+	level.coop_mpBasLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread bas_tick
+		wait 1
+	}
+}end
+
+
+//idempotent guarantee the loop is running.
+bas_ensure:{
+	if( level.coop_mpBasReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+bas_tick:{
+	if( level.coop_mpBasEnding == 1 ){ end }
+
+	//drive fuse timers for both sides
+	waitthread bas_driveFuses "a"
+	waitthread bas_driveFuses "x"
+
+	//update the objective marker: point at the first planted enemy base (allies see axis, then
+	//vice versa), or the first alive enemy base if none planted.
+	waitthread bas_updateMarker
+
+	//BOTS: each squad attacks the enemy's first base (Phase 6 director). allies -> axis base ("x"[1]), axis ->
+	//allies base ("a"[1]). No-op per side until derived. Idempotent - re-points the node each tick.
+	local.botTgtAllies = level.coop_mpBasPos["x"][1]
+	local.botTgtAxis = level.coop_mpBasPos["a"][1]
+	waitthread coop_mod/mp_botdirector.scr::dir_attackEnemy 14 15 local.botTgtAllies local.botTgtAxis
+
+	//win check: count destroyed bases
+	local.da = waitthread bas_countDestroyed "a"
+	local.dx = waitthread bas_countDestroyed "x"
+	local.aa = waitthread bas_countAlive "a"
+	local.ax = waitthread bas_countAlive "x"
+	setcvar "coop_mpBasScoreA" ( "" + local.dx )
+	setcvar "coop_mpBasScoreX" ( "" + local.da )
+
+	println( "^~^~^ MPBAS tick destroyedA=" + local.da + " destroyedX=" + local.dx + " aliveA=" + local.aa + " aliveX=" + local.ax )
+
+	//all of a team's enemy bases destroyed: that team wins. The required total is the real base count per
+	//side - 3 on the derive-from-spawn path, or the authored count (1..3) on the SP-campaign maps.
+	local.aTotal = level.coop_mpBasN["a"]
+	local.xTotal = level.coop_mpBasN["x"]
+	if( local.aTotal == NIL ){ local.aTotal = 3 }
+	if( local.xTotal == NIL ){ local.xTotal = 3 }
+
+	if( local.xTotal >= 1 && local.dx >= local.xTotal ){
+		waitthread bas_win "allies" local.dx local.da
+		end
+	}
+	if( local.aTotal >= 1 && local.da >= local.aTotal ){
+		waitthread bas_win "axis" local.da local.dx
+		end
+	}
+
+	//timeout check
+	if( level.coop_mpBasTimeout > 0 && ( level.time - level.coop_mpBasStart ) >= level.coop_mpBasTimeout ){
+		//side with more bases destroyed wins
+		if( local.dx > local.da ){ waitthread bas_win "allies" local.dx local.da }
+		else if( local.da > local.dx ){ waitthread bas_win "axis" local.da local.dx }
+		else{
+			iprintlnbold( "BASE ASSAULT: Time expired - DRAW!" )
+			println( "^~^~^ MPBAS timeout draw" )
+			//reload for a fresh match
+			wait 5
+			local.m = getcvar( "mapname" )
+			if( local.m != "" ){ stuffsrv ( "map " + local.m ) }
+		}
+	}
+}end
+
+
+//=========================================================================
+// FUSE TIMER DRIVER. For each base of a side that is "planted", count down the fuse. On expiry,
+// destroy the base.
+//=========================================================================
+bas_driveFuses local.side:{
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState[local.side][local.i] == "planted" ){
+			local.fuseAt = level.coop_mpBasFuseAt[local.side][local.i]
+			if( local.fuseAt > 0 && level.time >= local.fuseAt ){
+				waitthread bas_destroyBase local.side local.i
+			}
+			else{
+				//announce fuse countdown at key intervals
+				local.remain = int( local.fuseAt - level.time )
+				if( local.remain == 30 || local.remain == 10 || local.remain == 5 ){
+					local.tag = "Allied"
+					if( local.side == "x" ){ local.tag = "Axis" }
+					iprintlnbold( local.tag + " base " + local.i + ": " + local.remain + "s until detonation!" )
+				}
+			}
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// DESTROY a base. Remove the model, mark as destroyed, announce.
+//=========================================================================
+bas_destroyBase local.side local.idx:{
+	level.coop_mpBasState[local.side][local.idx] = "destroyed"
+
+	//remove the entity
+	local.ent = level.coop_mpBasEnt[local.side][local.idx]
+	if( local.ent != NIL && local.ent != NULL ){
+		local.ent remove
+		level.coop_mpBasEnt[local.side][local.idx] = NULL
+	}
+
+	//clear plant state
+	level.coop_mpBasPlanter[local.side][local.idx] = NULL
+	level.coop_mpBasPlantStart[local.side][local.idx] = 0
+	level.coop_mpBasDefuser[local.side][local.idx] = NULL
+	level.coop_mpBasDefuseStart[local.side][local.idx] = 0
+	level.coop_mpBasFuseAt[local.side][local.idx] = 0
+
+	local.tag = "Allied"
+	if( local.side == "x" ){ local.tag = "Axis" }
+	iprintlnbold( local.tag + " BASE " + local.idx + " DESTROYED!" )
+	println( "^~^~^ MPBAS destroy side=" + local.side + " idx=" + local.idx )
+
+	//[MP CHALLENGES] credit the player who armed the charge that detonated (stored at plant-arm).
+	local.by = level.coop_mpBasPlantedBy[local.side][local.idx]
+	if( local.by != NIL && local.by != NULL ){
+		waitthread coop_mod/mp_progression.scr::mp_awardObj local.by "destroy" 1
+		level.coop_mpBasPlantedBy[local.side][local.idx] = NULL
+	}
+}end
+
+
+//=========================================================================
+// PER-PLAYER TICK. Handle plant/defuse interactions with enemy/friendly bases.
+//=========================================================================
+bas_tickPlayer local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.isSpectator ){ end }
+	if( !( isAlive local.p ) ){ end }
+	if( level.coop_mpBasEnding == 1 ){ end }
+
+	local.mySide = "x"
+	if( local.p.dmteam == "allies" ){ local.mySide = "a" }
+	if( local.p.dmteam == "spectator" || local.p.dmteam == "" || local.p.dmteam == NIL ){ end }
+
+	local.enemySide = "a"
+	if( local.mySide == "a" ){ local.enemySide = "x" }
+
+	local.useNow = local.p.useheld
+	if( local.useNow == NIL ){ local.useNow = 0 }
+
+	//if not pressing USE, cancel any active plant/defuse by this player
+	if( local.useNow != 1 ){
+		waitthread bas_cancelPlayer local.p
+		end
+	}
+
+	//pressing USE: check if near an enemy base (plant) or a friendly planted base (defuse)
+	//try ENEMY bases first (plant)
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState[local.enemySide][local.i] == "alive" ){
+			local.pos = level.coop_mpBasPos[local.enemySide][local.i]
+			if( local.pos != NIL ){
+				local.d = vector_length( local.p.origin - local.pos )
+				if( local.d <= level.coop_mpBasRadius ){
+					waitthread bas_tickPlant local.p local.enemySide local.i
+					end
+				}
+			}
+		}
+		local.i++
+	}
+
+	//try FRIENDLY bases (defuse a planted bomb)
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState[local.mySide][local.i] == "planted" ){
+			local.pos = level.coop_mpBasPos[local.mySide][local.i]
+			if( local.pos != NIL ){
+				local.d = vector_length( local.p.origin - local.pos )
+				if( local.d <= level.coop_mpBasRadius ){
+					waitthread bas_tickDefuse local.p local.mySide local.i
+					end
+				}
+			}
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// PLANT TICK. The player is holding USE near an enemy alive base. Track the plant time.
+//=========================================================================
+bas_tickPlant local.p local.side local.idx:{
+	if( local.p == NULL ){ end }
+
+	local.curPlanter = level.coop_mpBasPlanter[local.side][local.idx]
+
+	//if this player is already planting this base, check time
+	if( local.curPlanter == local.p ){
+		local.startT = level.coop_mpBasPlantStart[local.side][local.idx]
+		local.elapsed = ( level.time - local.startT )
+		if( local.elapsed >= level.coop_mpBasPlant ){
+			//plant complete: arm the fuse
+			level.coop_mpBasState[local.side][local.idx] = "planted"
+			level.coop_mpBasFuseAt[local.side][local.idx] = ( level.time + level.coop_mpBasFuse )
+			//[MP CHALLENGES] remember who armed it, so a detonation credits them a "destroy".
+			level.coop_mpBasPlantedBy[local.side][local.idx] = local.p
+			level.coop_mpBasPlanter[local.side][local.idx] = NULL
+			level.coop_mpBasPlantStart[local.side][local.idx] = 0
+			local.tag = "Allied"
+			if( local.side == "x" ){ local.tag = "Axis" }
+			iprintlnbold( local.p.netname + " planted on " + local.tag + " base " + local.idx + "! " + level.coop_mpBasFuse + "s fuse!" )
+			println( "^~^~^ MPBAS plant side=" + local.side + " idx=" + local.idx + " by=e" + local.p.entnum + " fuse=" + level.coop_mpBasFuse )
+			waitthread coop_mod/mp_progression.scr::mp_awardObj local.p "plant" 1
+		}
+		else{
+			//announce progress every 5 seconds
+			local.ei = int( local.elapsed )
+			if( local.ei > 0 && ( local.ei % 5 ) == 0 ){
+				local.ri = ( level.coop_mpBasPlant - local.ei )
+				iprintln( "Planting... " + local.ri + "s" )
+			}
+		}
+		end
+	}
+
+	//a different player was planting, or nobody: start this player's plant
+	if( local.curPlanter != NULL && local.curPlanter != local.p ){
+		//another player was already planting - they stopped (left range or died), so this player takes over
+		level.coop_mpBasPlanter[local.side][local.idx] = NULL
+	}
+
+	level.coop_mpBasPlanter[local.side][local.idx] = local.p
+	level.coop_mpBasPlantStart[local.side][local.idx] = level.time
+	iprintln( local.p.netname + " is planting on an enemy base..." )
+	println( "^~^~^ MPBAS plantStart side=" + local.side + " idx=" + local.idx + " by=e" + local.p.entnum )
+}end
+
+
+//=========================================================================
+// DEFUSE TICK. The player is holding USE near a friendly planted base. Track defuse time.
+//=========================================================================
+bas_tickDefuse local.p local.side local.idx:{
+	if( local.p == NULL ){ end }
+
+	local.curDefuser = level.coop_mpBasDefuser[local.side][local.idx]
+
+	//if this player is already defusing, check time
+	if( local.curDefuser == local.p ){
+		local.startT = level.coop_mpBasDefuseStart[local.side][local.idx]
+		local.elapsed = ( level.time - local.startT )
+		if( local.elapsed >= level.coop_mpBasDefuse ){
+			//defuse complete: cancel the fuse, restore to alive
+			level.coop_mpBasState[local.side][local.idx] = "alive"
+			level.coop_mpBasFuseAt[local.side][local.idx] = 0
+			level.coop_mpBasDefuser[local.side][local.idx] = NULL
+			level.coop_mpBasDefuseStart[local.side][local.idx] = 0
+			local.tag = "Allied"
+			if( local.side == "x" ){ local.tag = "Axis" }
+			iprintlnbold( local.p.netname + " DEFUSED " + local.tag + " base " + local.idx + "!" )
+			println( "^~^~^ MPBAS defuse side=" + local.side + " idx=" + local.idx + " by=e" + local.p.entnum )
+		}
+		else{
+			local.ei = int( local.elapsed )
+			if( local.ei > 0 && ( local.ei % 3 ) == 0 ){
+				local.ri = ( level.coop_mpBasDefuse - local.ei )
+				iprintln( "Defusing... " + local.ri + "s" )
+			}
+		}
+		end
+	}
+
+	//start this player's defuse
+	if( local.curDefuser != NULL && local.curDefuser != local.p ){
+		level.coop_mpBasDefuser[local.side][local.idx] = NULL
+	}
+
+	level.coop_mpBasDefuser[local.side][local.idx] = local.p
+	level.coop_mpBasDefuseStart[local.side][local.idx] = level.time
+	iprintln( local.p.netname + " is defusing a friendly base..." )
+	println( "^~^~^ MPBAS defuseStart side=" + local.side + " idx=" + local.idx + " by=e" + local.p.entnum )
+}end
+
+
+//=========================================================================
+// CANCEL a player's active plant or defuse (they died, stopped pressing USE, or left range).
+//=========================================================================
+bas_cancelPlayer local.p:{
+	if( local.p == NULL ){ end }
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasPlanter["a"][local.i] == local.p ){
+			level.coop_mpBasPlanter["a"][local.i] = NULL
+			level.coop_mpBasPlantStart["a"][local.i] = 0
+		}
+		if( level.coop_mpBasPlanter["x"][local.i] == local.p ){
+			level.coop_mpBasPlanter["x"][local.i] = NULL
+			level.coop_mpBasPlantStart["x"][local.i] = 0
+		}
+		if( level.coop_mpBasDefuser["a"][local.i] == local.p ){
+			level.coop_mpBasDefuser["a"][local.i] = NULL
+			level.coop_mpBasDefuseStart["a"][local.i] = 0
+		}
+		if( level.coop_mpBasDefuser["x"][local.i] == local.p ){
+			level.coop_mpBasDefuser["x"][local.i] = NULL
+			level.coop_mpBasDefuseStart["x"][local.i] = 0
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// The match win: announce, hold the banner, then reload the SAME map.
+//=========================================================================
+bas_win local.side local.won local.lost:{
+	if( level.coop_mpBasEnding == 1 ){ end }
+	level.coop_mpBasEnding = 1
+
+	//[MP CHALLENGES] credit the win (win_baseassault for the winners + rounds for all).
+	waitthread coop_mod/mp_progression.scr::mp_awardTeamWin local.side "baseassault"
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " WIN Base Assault!  Bases destroyed: " + local.won + " vs " + local.lost )
+	println( "^~^~^ MPBAS win side=" + local.side + " won=" + local.won + " lost=" + local.lost + " map=" + getcvar( "mapname" ) )
+
+	//fresh match next map load
+	setcvar "coop_mpBasScoreA" "0"
+	setcvar "coop_mpBasScoreX" "0"
+
+	wait 5
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPBAS restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//=========================================================================
+// Helpers
+//=========================================================================
+
+//count destroyed bases for a side.
+bas_countDestroyed local.side:{
+	local.n = 0
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState[local.side][local.i] == "destroyed" ){ local.n++ }
+		local.i++
+	}
+}end local.n
+
+//count alive (not destroyed) bases for a side.
+bas_countAlive local.side:{
+	local.n = 0
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState[local.side][local.i] == "alive" || level.coop_mpBasState[local.side][local.i] == "planted" ){ local.n++ }
+		local.i++
+	}
+}end local.n
+
+//update the shared objective-compass arrow: point at the first planted base, then the first alive enemy base.
+bas_updateMarker:{
+	//planted bases first (urgent target)
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState["a"][local.i] == "planted" && level.coop_mpBasPos["a"][local.i] != NIL ){
+			set_objective_pos level.coop_mpBasPos["a"][local.i]
+			end
+		}
+		local.i++
+	}
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState["x"][local.i] == "planted" && level.coop_mpBasPos["x"][local.i] != NIL ){
+			set_objective_pos level.coop_mpBasPos["x"][local.i]
+			end
+		}
+		local.i++
+	}
+	//fallback: first alive enemy base
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState["x"][local.i] == "alive" && level.coop_mpBasPos["x"][local.i] != NIL ){
+			set_objective_pos level.coop_mpBasPos["x"][local.i]
+			end
+		}
+		local.i++
+	}
+	local.i = 1
+	while( local.i <= 3 ){
+		if( level.coop_mpBasState["a"][local.i] == "alive" && level.coop_mpBasPos["a"][local.i] != NIL ){
+			set_objective_pos level.coop_mpBasPos["a"][local.i]
+			end
+		}
+		local.i++
+	}
+}end
+
+//read an int cvar, "" -> 0. int() into local BEFORE end (bug-2603).
+bas_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v

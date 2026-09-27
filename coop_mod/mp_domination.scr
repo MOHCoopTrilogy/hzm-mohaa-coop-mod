@@ -1,0 +1,306 @@
+//=========================================================================
+// MP_DOMINATION.SCR - DOMINATION, an MP game MODE (user 2026-09-16). "KOTH with THREE static capture points
+// scored at once, instead of one roving hill." There is no upstream Domination mod for MOHAA to load (stock
+// added Tug of War / Liberation; UberMod added bb/cyb/snd/ft), so this is built by REUSING our own KOTH's
+// proven machinery: the same radius team-count, the same capture-edge credit into mp_progression's "capture"
+// stat, the same per-second award loop, the same win + clean same-map restart. No per-map authoring: the
+// three points are DERIVED from the map's own team-spawn geometry (allied centroid / midfield / axis
+// centroid), the way KOTH derives its hill from spawn origins.
+//
+// SCORING: each point a team SOLELY holds banks 1 point per second for that team, so holding 2 of 3 scores
+// twice as fast as 1. First side to coop_mpDomLimit wins; the map then restarts for a fresh match.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun, which
+// ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here can run on a coop map. It uses the
+// armory (mp_modeUsesArmory stays 1), so players inherit the host weapon preset like KOTH/CTF. mp.scr
+// dispatches through its seam (a switch on level.coop_mpMode):
+//     mp.scr::mp_modeGiveKit -> mode_onSpawn   (config once, then deploy the armory kit)
+//     mp.scr::mp_modeTick     -> mode_think     (keep the manager alive)
+//     mp.scr::mp_modeOnDeath  -> mode_onDeath   (normal respawns; a death ends nothing)
+//
+// ISOLATION: calls only the two MP files mp_armory.scr and mp_progression.scr (both MP_MANIFEST, admitted by
+// isolation clause 10); reads/writes only coop_mp* MP cvars and the engine frag/round/time limits; the
+// per-point scores live in NON-archived cvars; names no coop cvar, coop_lo, ui/loadout or coop-only path;
+// never giveInventory / changeGameType / the coop_health cvar. set_objective_pos is the stock compass
+// builtin KOTH also uses (no new server->client shape).
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//Liveness probe (TRAPS T1). If this file parse-kills, the mode stays off.
+alive:{
+	end 1
+}end
+
+
+//isOn guard.
+isOn:{
+	if( level.coop_mpRun != 1 ){ end 0 }
+	if( level.coop_mpMode != "domination" ){ end 0 }
+	end 1
+}end
+
+
+//=========================================================================
+// One-time config + manager start. Idempotent (level flag). Reads host cvars, zeroes the engine limits so it
+// cannot end the match first, resets the scores, derives the three points, starts the loop. Same discipline
+// as mp_koth.scr::ensureConfig.
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpDomReady == 1 ){ end }
+	level.coop_mpDomReady = 1
+	level.coop_mpDomEnding = 0
+
+	//score to win: host cvar coop_mpDomLimit, default 300 (= 300 point-seconds).
+	local.lim = getcvar( "coop_mpDomLimit" )
+	if( local.lim == "" ){ local.lim = "300" }
+	level.coop_mpDomLimit = int( local.lim )
+	if( level.coop_mpDomLimit < 1 ){ level.coop_mpDomLimit = 300 }
+
+	//capture radius (world units), host cvar coop_mpDomRadius, default 350 (wider than KOTH's 200 - a control
+	//point is a zone, not a spot). A living player within this 3D distance of a point counts as holding it.
+	local.rad = getcvar( "coop_mpDomRadius" )
+	if( local.rad == "" ){ local.rad = "350" }
+	level.coop_mpDomRadius = int( local.rad )
+	if( level.coop_mpDomRadius < 64 ){ level.coop_mpDomRadius = 350 }
+
+	//state (all wiped on a restart - a restart is a fresh match). The three points are DERIVED from real
+	//player spawn origins recorded as players spawn (the way KOTH derives its hill), so we keep a running
+	//per-team origin SUM + COUNT and recompute the centroids on each spawn. getentarray/getentbyentnum for
+	//info_player_* is unreliable here (classnames vary by map/build), but a player's actual spawn origin is
+	//ground truth.
+	level.coop_mpDomN = 0
+	level.coop_mpDomPt[1] = NIL
+	level.coop_mpDomPt[2] = NIL
+	level.coop_mpDomPt[3] = NIL
+	level.coop_mpDomOwn[1] = ""
+	level.coop_mpDomOwn[2] = ""
+	level.coop_mpDomOwn[3] = ""
+	level.coop_mpDomASum = ( 0 0 0 )
+	level.coop_mpDomAN = 0
+	level.coop_mpDomXSum = ( 0 0 0 )
+	level.coop_mpDomXN = 0
+
+	setcvar "coop_mpDomScoreA" "0"
+	setcvar "coop_mpDomScoreX" "0"
+
+	//stop the engine ending the match first (same as KOTH)
+	setcvar "fraglimit" "0"
+	setcvar "roundlimit" "0"
+	setcvar "timelimit" "0"
+
+	println( "^~^~^ MPDOM init gt=" + level.gametype + " limit=" + level.coop_mpDomLimit + " radius=" + level.coop_mpDomRadius )
+	thread dom_loop
+}end
+
+
+//Record one real spawn origin for its team, then recompute the three points. Point 1 = allied centroid,
+//2 = midfield, 3 = axis centroid. Needs at least one spawn of EACH team before the points exist.
+dom_recordSpawn local.p:{
+	if( local.p == NULL ){ end }
+	local.t = local.p.dmteam
+	if( local.t == "allies" ){
+		level.coop_mpDomASum = ( level.coop_mpDomASum + local.p.origin )
+		level.coop_mpDomAN = ( level.coop_mpDomAN + 1 )
+	}
+	else if( local.t == "axis" ){
+		level.coop_mpDomXSum = ( level.coop_mpDomXSum + local.p.origin )
+		level.coop_mpDomXN = ( level.coop_mpDomXN + 1 )
+	}
+	else{ end }
+
+	if( level.coop_mpDomAN < 1 || level.coop_mpDomXN < 1 ){ end }
+
+	local.acen = ( level.coop_mpDomASum * ( 1.0 / level.coop_mpDomAN ) )
+	local.xcen = ( level.coop_mpDomXSum * ( 1.0 / level.coop_mpDomXN ) )
+	local.mid = ( ( local.acen + local.xcen ) * 0.5 )
+
+	level.coop_mpDomPt[1] = local.acen
+	level.coop_mpDomPt[2] = local.mid
+	level.coop_mpDomPt[3] = local.xcen
+
+	if( level.coop_mpDomN != 3 ){
+		level.coop_mpDomN = 3
+		set_objective_pos local.mid   //the stock compass arrow -> the contested centre (the one marker KOTH uses)
+		println( "^~^~^ MPDOM points A=" + local.acen + " MID=" + local.mid + " X=" + local.xcen )
+	}
+}end
+
+
+//SPAWN EDGE. Config once, record this spawn origin (feeds point derivation), then deploy through the armory
+//so the weapon preset is inherited (like KOTH/CTF).
+mode_onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	waitthread ensureConfig
+	if( local.p == NULL ){ end }
+	waitthread dom_recordSpawn local.p
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_armory.scr::giveKit local.p
+}end
+
+
+//PER-TICK. The manager owns the points + scoring; just keep it running (belt and braces if think somehow
+//dispatches before the first spawn started the loop).
+mode_think local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpDomReady != 1 ){ waitthread ensureConfig }
+}end
+
+
+//DEATH EDGE. Domination has normal respawns - a death ends nothing.
+mode_onDeath local.p:{
+	if( local.p == NULL ){ end }
+	end
+}end
+
+
+//=========================================================================
+// THE MANAGER. One loop per map load, guarded coop_mpRun + a run-once flag. One tick a second = one second
+// of hold per point.
+//=========================================================================
+dom_loop:{
+	if( level.coop_mpDomLoopOn == 1 ){ end }
+	level.coop_mpDomLoopOn = 1
+	while( level.coop_mpRun == 1 ){
+		waitthread dom_tick
+		wait 1
+	}
+}end
+
+
+dom_tick:{
+	if( level.coop_mpDomEnding == 1 ){ end }
+	if( level.coop_mpDomN < 1 ){ end }
+
+	local.heldA = 0
+	local.heldX = 0
+
+	for( local.i = 1; local.i <= level.coop_mpDomN; local.i++ ){
+		local.pos = level.coop_mpDomPt[local.i]
+		//[user 2026-09-16] draw the MP bots to each capture point (both teams). Coop-safe: coop_mpRun-gated.
+		waitthread coop_mod/mp_botobj.scr::botobj_set local.i local.pos 5 ""
+		local.a = waitthread dom_countNear "allies" local.pos
+		local.x = waitthread dom_countNear "axis" local.pos
+
+		//sole occupant of this point this second: "allies" / "axis" / "" (contested or empty)
+		local.sole = ""
+		if( local.a >= 1 && local.x < 1 ){ local.sole = "allies" }
+		else if( local.x >= 1 && local.a < 1 ){ local.sole = "axis" }
+
+		//TAKEOVER edge - a side becomes the sole holder when it wasn't the last owner. Credit the discrete
+		//"capture" stat (stat 4, shared with KOTH/CTF), announce, and record the new owner. Contested/empty
+		//clears the owner so a later re-take counts again.
+		if( local.sole == "" ){
+			level.coop_mpDomOwn[local.i] = ""
+		}
+		else if( local.sole != level.coop_mpDomOwn[local.i] ){
+			level.coop_mpDomOwn[local.i] = local.sole
+			waitthread dom_creditCapture local.sole
+			local.tag = "ALLIES"
+			if( local.sole == "axis" ){ local.tag = "AXIS" }
+			iprintlnbold( local.tag + " captured point " + local.i + "!" )
+		}
+
+		//bank a point this second for whoever solely holds it (held points stack).
+		if( local.sole == "allies" ){ local.heldA = ( local.heldA + 1 ) }
+		else if( local.sole == "axis" ){ local.heldX = ( local.heldX + 1 ) }
+	}
+
+	if( local.heldA >= 1 ){ waitthread dom_award "allies" local.heldA }
+	if( local.heldX >= 1 ){ waitthread dom_award "axis" local.heldX }
+
+	local.sa = waitthread dom_i "coop_mpDomScoreA"
+	local.sx = waitthread dom_i "coop_mpDomScoreX"
+	println( "^~^~^ MPDOM tick heldA=" + local.heldA + " heldX=" + local.heldX + " scoreA=" + local.sa + " scoreX=" + local.sx )
+
+	if( local.sa >= level.coop_mpDomLimit ){ waitthread dom_win "allies" local.sa local.sx }
+	else if( local.sx >= level.coop_mpDomLimit ){ waitthread dom_win "axis" local.sa local.sx }
+}end
+
+
+//count LIVING, in-play players of a side inside a point's radius (mirrors mp_koth.scr::koth_countInHill, but
+//around an arbitrary point so the one loop serves all three).
+dom_countNear local.team local.pos:{
+	local.n = 0
+	if( local.pos == NIL ){ end local.n }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam != local.team ){ continue }
+		if( local.p.isSpectator ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - local.pos )
+		if( local.d > level.coop_mpDomRadius ){ continue }
+		local.n++
+	}
+}end local.n
+
+
+//award N points to a side in its score cvar (N = number of points it solely holds this second).
+dom_award local.side local.n:{
+	if( local.side == "allies" ){
+		local.v = ( waitthread dom_i "coop_mpDomScoreA" + local.n )
+		setcvar "coop_mpDomScoreA" ( "" + local.v )
+	}
+	else if( local.side == "axis" ){
+		local.v = ( waitthread dom_i "coop_mpDomScoreX" + local.n )
+		setcvar "coop_mpDomScoreX" ( "" + local.v )
+	}
+}end
+
+
+//credit the per-player "capture" stat to the sole-holding side on a takeover edge (shared stat 4, exactly as
+//mp_koth.scr::koth_creditCapture does). Discrete per takeover, not per banked tick.
+dom_creditCapture local.side:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.dmteam != local.side ){ continue }
+		waitthread coop_mod/mp_progression.scr::mp_awardObj local.q "capture" 1
+	}
+}end
+
+
+//=========================================================================
+// The match win: credit progression (rounds for all + win_domination for the winners), announce, hold the
+// banner, then reload the SAME map (the proven transition - mp_koth.scr::koth_win). One-shot via the ending
+// flag.
+//=========================================================================
+dom_win local.side local.sa local.sx:{
+	if( level.coop_mpDomEnding == 1 ){ end }
+	level.coop_mpDomEnding = 1
+
+	waitthread coop_mod/mp_progression.scr::mp_awardTeamWin local.side "domination"
+
+	local.tag = "ALLIES"
+	if( local.side == "axis" ){ local.tag = "AXIS" }
+	iprintlnbold( local.tag + " WIN Domination!  Allies " + local.sa + " : " + local.sx + " Axis" )
+	println( "^~^~^ MPDOM win side=" + local.side + " scoreA=" + local.sa + " scoreX=" + local.sx + " map=" + getcvar( "mapname" ) )
+
+	setcvar "coop_mpDomScoreA" "0"
+	setcvar "coop_mpDomScoreX" "0"
+
+	wait 5
+	//[rotate] Same-map restart for a fresh match. Map ROTATION is time-based, owned by
+	//coop_mod/mp_rotate.scr::rotateTimer (coop_mpRotate 1) - NOT the match result - so a rotation server
+	//plays back-to-back matches on one map until the 20-min timer advances it.
+	local.m = getcvar( "mapname" )
+	if( local.m != "" ){
+		println( "^~^~^ MPDOM restart map=" + local.m )
+		stuffsrv ( "map " + local.m )
+	}
+}end
+
+
+//read an int cvar, "" -> 0. int() into a local BEFORE end (bug-2603 - never a call in the `}end <expr>` slot).
+dom_i local.name:{
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+}end local.v

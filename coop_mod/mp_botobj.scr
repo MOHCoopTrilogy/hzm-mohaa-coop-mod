@@ -1,0 +1,68 @@
+//=========================================================================
+// MP_BOTOBJ.SCR - MULTIPLAYER BOT OBJECTIVE ATTRACTION (user 2026-09-16, "get the bots to play objectives in
+// our modes ... and not break coop at all"). A tiny shared helper the MP modes call to point the multiplayer
+// bots at the current objective. It spawns "hzm_attractnode" entities (the engine's AttractiveNode, given a
+// script classname in navigate.cpp) at objective positions; BotMovement::MoveToBestAttractivePoint already
+// pulls idle/curious bots toward the nearest eligible node, so this is the missing "what is the objective"
+// half - the bots now push the hill, hunt the VIP, contest the capture points, etc. instead of only fighting.
+//
+// COOP-SAFE BY CONSTRUCTION (the standing rule): every entry is gated on level.coop_mpRun, which ONLY
+// coop_mod/mp.scr sets and which any level load wipes - so no node is ever spawned on a coop map. And even if
+// one were: coop AI is actor.cpp and never reads the attractiveNodes container; coop runs NO playerbots. So
+// this cannot change coop behaviour at all. This is an MP file (coop_mod/mp*.scr in MP_MANIFEST).
+//
+// Nodes are keyed by a small integer SLOT so a mode can keep a stable node per objective and just move it as
+// the objective moves (the hill relocates, the radio/VIP walks around) without churning entities.
+//=========================================================================
+
+//canary (TRAPS T1).
+alive:{
+	end 1
+}end
+
+
+//Spawn (once) or MOVE the node for a slot to an origin. priority: how strongly bots pursue it (>=5 is chased
+//even out of a curious wander - see the MoveToBestAttractivePoint call sites). team: "" = both teams are
+//attracted; "allies"/"axis" = only that team's bots (e.g. attract only the HUNTERS to the VIP). No-op if the
+//origin is NIL. MP-only.
+botobj_set local.slot local.origin local.priority local.team:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.origin == NIL ){ end }
+
+	//[bug-2781] SNAP THE OBJECTIVE TO THE FLOOR. push_boxCenter (and most callers) hand us the zone-box
+	//MID-HEIGHT - cz = (min+max)/2 - a point floating in mid-air. The bot navmesh only covers walkable
+	//ground, so MoveToBestAttractivePoint::CanMoveTo rejects a mid-air node -> the whole team loses its path
+	//and drifts straight at the raw origin, bunching on the nearest solid (the tank the user saw). A downward
+	//trace drops the node onto real ground so bots can actually path to it. Uses the droptofloor idiom from
+	//push_snapOne: start just ABOVE the point (never above a ceiling, bug-2766) and trace far down; trace
+	//returns the END point on a miss, so require the hit to sit above the trace bottom before trusting it.
+	local.top = ( local.origin[0] local.origin[1] ( local.origin[2] + 32 ) )
+	local.bot = ( local.origin[0] local.origin[1] ( local.origin[2] - 4096 ) )
+	local.g = trace local.top local.bot
+	if( local.g[2] > ( local.bot[2] + 1 ) ){ local.origin = ( local.g[0] local.g[1] ( local.g[2] + 16 ) ) }
+
+	local.n = level.coop_mpBotNode[local.slot]
+	if( local.n == NIL || local.n == NULL ){
+		local.n = spawn "hzm_attractnode"
+		//AttractiveNode's tunables are EV_SETTER events, so they are set via PROPERTY syntax (node.x = v),
+		//NOT command syntax (node x v) - the latter fails to COMPILE ("unknown command: priority").
+		local.n.priority = local.priority
+		local.n.max_dist = 99999             //effectively unlimited: a bot anywhere on the map is drawn to the objective
+		local.n.stay_time = 20               //linger ~20s once there (hold the point / stay on the target)
+		local.n.respawn_time = 5             //short cooldown before the same bot is re-drawn after it leaves
+		if( local.team != "" && local.team != NIL ){ local.n.team = local.team }
+		level.coop_mpBotNode[local.slot] = local.n
+	}
+	local.n.origin = local.origin
+}end
+
+
+//Remove the node for a slot (objective gone / mode ending).
+botobj_clear local.slot:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.n = level.coop_mpBotNode[local.slot]
+	if( local.n != NIL && local.n != NULL ){
+		local.n remove
+		level.coop_mpBotNode[local.slot] = NULL
+	}
+}end

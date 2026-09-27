@@ -14,6 +14,18 @@
 //=========================================================================
 waitTillSpawn:{
 //=========================================================================
+	//[bug-2968] AN MP SESSION NEVER BOOTS COOP FROM HERE. level.coop_mpRun is set ONLY by the MP entry script (a
+	//level load wipes it), so ==1 means this map is running as a multiplayer arena. On a CAMPAIGN-map arena (Push
+	//on m4l2/e1l1 via sv_mpForceArena) the map NAME is a coop name, so inCoopMode below answers TRUE and the coop
+	//branch ran coop_mod/main.scr::main mid-match: MP dynamic weather reached it through global/weather.scr, and
+	//the coop framework re-teamed every player and bot to Allies at coop health 750 (bug-2939; bug-2738's m3l3
+	//set_respawn noise was the same leak). MP is post-spawn by the time anything gets here, and post-spawn a raw
+	//'level waittill spawn' THROWS (bug-2736), so yield one frame - exactly what a true dm/obj arena already gets
+	//from the gametype!=0 branch below. Tested FIRST, so nothing coop is even asked.
+	if( level.coop_mpRun == 1 ){
+		waitframe
+		end
+	}
 	if(waitthread coop_mod/main.scr::inCoopMode){
 		if(level.coop_mainScriptLoaded == NIL){
 			waitthread coop_mod/main.scr::main
@@ -26,7 +38,18 @@ waitTillSpawn:{
 		}
 	}
 	else{
-		level waittill spawn
+		//[MP weather, bug-2731 follow-up] A script-less MP arena map (no coop main, so inCoopMode is
+		//false) has ALREADY spawned by the time a DEFERRED exec reaches here - and once the engine has
+		//spawned, 'level waittill spawn' is REMOVED, not merely already-fired (Level::ServerSpawned ->
+		//RemoveWaitTill(STRING_SPAWN)), so it THROWS "invalid waittill spawn for 'Level'" and kills the
+		//caller. That silently killed MP dynamic weather on every mohdm*/dm map (global/weather.scr execs
+		//this via waitTillSpawn). Only SP (gametype 0) execs weather pre-spawn and still needs the real
+		//wait; any MP gametype is post-spawn here, so yield one frame instead of throwing.
+		if( level.gametype != 0 ){
+			waitframe
+		} else {
+			level waittill spawn
+		}
 	}
 }end
 

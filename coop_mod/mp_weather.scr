@@ -1,0 +1,97 @@
+//=========================================================================
+// MP_WEATHER.SCR - DYNAMIC WEATHER for MULTIPLAYER (user 2026-09-18: "Dynamic Weather should be an option
+// you setup on all game modes when you start your server, same place we turn on the extra host features,
+// default on"). A thin MP bridge to the existing coop weather system (coop_mod/weather.scr): it picks a per-
+// map theme (snow / sand / rain) and starts the same fluid-random storm renderer coop uses.
+//
+// WHY THIS EXISTS: the coop weather system is kicked off from coop_mod/main.scr::main and reads the theme from
+// level.coop_weatherTheme, which each map's OWN coop script sets. MP runs the campaign/arena maps script-less
+// (the map script is skipped), so neither the starter nor the per-map theme line ever runs - MP maps got no
+// weather. This file supplies both halves for MP: a map->theme table (harvested from the coop map scripts)
+// and the start call, invoked from coop_mod/mp.scr::main.
+//
+// HOST TOGGLE: coop_mpWeather (MP-owned coop_mp* cvar). DEFAULT ON: mp.scr seeds "1" when unset (bug-2968). There
+// is no Host Rules row for it yet (bug-2936) - a host sets it from the console; "0" disables it. Every mode.
+//
+// COOP-SAFE: every entry is gated on level.coop_mpRun (only coop_mod/mp.scr sets it; a level load wipes it),
+// so nothing here runs on a coop map. It reaches coop_mod/weather.scr::coop_weather_init (allowlisted in the
+// isolation contract, MP_COOP_ALLOW) - the shared visual renderer, which touches no coop_mp*/coop_lo*/saved
+// coop state. MP file (coop_mod/mp*.scr in MP_MANIFEST).
+//=========================================================================
+
+//canary (TRAPS T1).
+alive:{
+	end 1
+}end
+
+
+//Host toggle: coop_mpWeather. DEFAULT ON (mp.scr seeds "1" when unset; bug-2968). It was OFF (bug-2939) because on a
+//Push campaign-map arena weather's spawn wait took replace.scr's coop branch and booted the coop framework, re-teaming
+//everyone to Allies; that branch can no longer run while coop_mpRun is set. Snow is still skipped below
+//(bug-2710/2796). Only "1" enables it - unset reads OFF here as belt-and-braces, since mp.scr seeds it first. 1/0.
+mp_weather_on:{
+	if( level.coop_mpRun != 1 ){ end 0 }
+	local.s = getcvar( "coop_mpWeather" )
+	if( local.s == "1" ){ end 1 }
+	end 0
+}end
+
+
+//ENTRY (called once from mp.scr::main - at prespawn on a stock map via global/ambient.scr, at ServerSpawned on a
+//script-less or campaign-map arena). If the toggle is on, force coop_dynWeather 1, set this
+//map's theme, and hand off to the shared coop weather renderer (which defers 0.5s then execs the native
+//global/weather.scr and the fluid-random storm driver). A theme of "none" (lobbies / themeless) is a no-op.
+mp_weather_init:{
+	if( level.coop_mpRun != 1 ){ end }
+	//run-once: mp.scr::main can be reached twice on a map (ambient.scr path + the E4 ServerSpawned hook), which
+	//would start two weather renderers. Guard so only the first wins.
+	if( level.coop_mpWeatherStarted == 1 ){ end }
+	level.coop_mpWeatherStarted = 1
+	local.on = waitthread mp_weather_on
+	if( local.on != 1 ){ end }
+
+	local.map = getcvar( "mapname" )
+	local.theme = waitthread mp_weather_theme local.map
+	if( local.theme == "none" ){
+		println( "^~^~^ MPWEATHER " + local.map + " theme=none (skipped)" )
+		end
+	}
+
+	//[bug-2710/2796] SNOW is skipped in MP until the MP snow-FX precache crash is fixed - ONLY snow crashes,
+	//so rain/sand still run. This is why weather could never be safely enabled; with snow gated out, a host
+	//can turn coop_mpWeather on (now default-seeded 1 on the fleet) and get rain on every non-snow map.
+	if( local.theme == "snow" ){
+		println( "^~^~^ MPWEATHER " + local.map + " theme=snow (skipped - snow-FX crash, bug-2710)" )
+		end
+	}
+
+	//the coop renderer is gated on coop_dynWeather==1 and reads level.coop_weatherTheme; set both, then start
+	//it exactly as coop_mod/main.scr::main does. coop_weatherForce (if a host set it) still overrides inside.
+	setcvar "coop_dynWeather" "1"
+	level.coop_weatherTheme = local.theme
+	//[2026-09-26 MP sandstorms] SAND STORMS: the dust roll-in (coop_mod/duststorm.scr) runs in MP only when this sets
+	//level.coop_dustMp - sand theme AND host toggle coop_mpDust not "0" (unset = ON). The toggle is read HERE, on
+	//the MP side, because a coop file may never name a coop_mp* token (check_mp_isolation clause 7).
+	if( local.theme == "sand" && getcvar( "coop_mpDust" ) != "0" ){ level.coop_dustMp = 1 }
+	println( "^~^~^ MPWEATHER " + local.map + " theme=" + local.theme )
+	if( level.coop_dustMp == 1 ){ println( "^~^~^ MPWEATHER " + local.map + " dust storms ON (coop_mpDust 0 = off)" ) }
+	thread coop_mod/weather.scr::coop_weather_init
+}end
+
+
+//Per-map theme, harvested from the coop map scripts' level.coop_weatherTheme declarations. Snow and sand maps
+//are listed; everything else (incl. the mohdm* arena maps, which have no coop script) defaults to rain storms
+//so every MP map gets weather. Lobbies are never loaded in MP so they need no entry.
+mp_weather_theme local.map:{
+	local.m = local.map
+	//SNOW maps
+	if( local.m == "m2l1" || local.m == "m2l3" || local.m == "m6l1a" || local.m == "m6l1b" || local.m == "m6l1c" || local.m == "m6l2a" || local.m == "m6l2b" || local.m == "m6l3a" || local.m == "m6l3e" || local.m == "t2l1" || local.m == "t2l2" || local.m == "t2l3" || local.m == "t2l4" ){
+		end "snow"
+	}
+	//SAND / desert maps
+	if( local.m == "m1l1" || local.m == "m1l2a" || local.m == "m1l2b" || local.m == "m1l3a" || local.m == "m1l3b" || local.m == "e1l1" || local.m == "e1l2" || local.m == "e1l3" || local.m == "e1l4" ){
+		end "sand"
+	}
+	//everything else = rain storms (the common default; covers the rest of the campaign + all mohdm* maps)
+	end "rain"
+}end "rain"

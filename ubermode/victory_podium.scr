@@ -1,0 +1,583 @@
+// This script spawns 3 crates for creating a 1st, 2nd, 3rd place podium for those with the highest kills in the game.
+// The podium spawns dummy player models for the 3 winners, based on highest kills, on their respective podium spots (1st on top of 2 crates, 2nd on one crate, 3rd on the floor).
+// If 2+ winners have the same kills, the player with the lowest deaths will be deemed the actual winner.
+// If 2+ winners still have the same kills and deaths, then the player who joined first (the lowest clientnum) will be deemed the actual winner.
+//
+// This script also spawns an intermission camera, and launches fireworks when all players are teleported to the camera near the end of the map (based on "timeduration" parameter).
+// If "timeduration" is set as 0 or NIL, then fireworks will not launch, since all while-loops end when the map's intermission actually begins (when scoreboard is visible, fading to black, changing maps).
+//
+// If camera origin & camera angles are set to "auto", then the script will automatically set the camera's origin & angles roughly 550 units away from "angle" parameter facing forward, with camera's angle +180 degrees from "angle" and looking 17 degrees upward.
+//
+// Parameters: origin, angle for podium players, camera origin (or "auto"), camera angles (or "auto"), time duration of fireworks (5 = 00:05 seconds of map time remaining to end game; 0 or NIL = no fireworks), ...
+// ... distance until exploding (default = 300), particle time (default = 2.5), explosion scale (default = 0.8).
+//
+// Example: exec global/victory_podium.scr ( 220 -41 48 ) -90 auto auto 5
+//
+// For testing where the podium will be, run "exec global/victory_podium.scr::test ( 220 -41 48 ) -90" and change origin + angle to spawn 3 visible solid crates.
+// For testing only the fireworks, run "exec global/victory_podium.scr::fireworks ( 220 -41 48 ) -90" and change origin + angle to continuously launch fireworks (to check distance, particle time, explosion scale, etc).
+// For testing the whole script & the $intermission_camera placement, simply type into console: "timelimit 0.5".
+//
+// exec global/victory_podium.scr::test ( 220 -41 48 ) -90	// testing purposes only; spawn and show the podium crates.
+// exec global/victory_podium.scr::fireworks ( 220 -41 48 ) -90	// testing purposes only; launch fireworks continuously.
+//
+// NOTE: If setcvar "timelimit" "0" or "", then the podium winners threads will never run, since the map will never end.
+// An optional thread ends the game immediately for "timeduration" seconds while launching fireworks, then ends the map.
+// NOTE: the "main" thread must run first too! ("exec global/victory_podium.scr ( -700 -1200 -3 ) -90 auto auto 5") must have executed already, otherwise the intermission camera will be missing.
+//
+// Parameters: origin, angle for podium players, time duration until map ends (0 to end now), distance until exploding, particle time, explosion scale.
+//
+// Example: exec global/victory_podium.scr::map_ended ( -700 -1200 -3 ) -90 7
+// Example: exec global/victory_podium.scr::map_ended $victory_podium[1].origin $victory_podium[1].angle 7
+//
+// Before the ::map_ended line, an optional "level.VP_winnertype = allies" or "axis" can be included to only show podium winners from that team (i.e. for a custom OBJ gametype).
+//
+
+main local.podium_origin local.podium_angle local.camera_origin local.camera_angles local.timeduration local.distance local.particletime local.explosionscale:
+
+	if(local.podium_origin == NIL || local.podium_origin[2] == NIL) { wait 1; println("----- ERROR victory_podium.scr: 'podium_origin' parameter is missing!"); end }
+	if(local.podium_angle == NIL) { wait 1; println("----- ERROR victory_podium.scr: 'podium_angle' parameter is missing!"); end }
+	if((local.camera_origin == NIL || local.camera_origin[2] == NIL) && local.camera_origin != "auto") { wait 1; println("----- ERROR victory_podium.scr: 'camera_origin' parameter is missing!"); end }
+	if((local.camera_angles == NIL || local.camera_angles[2] == NIL) && local.camera_angles != "auto") { wait 1; println("----- ERROR victory_podium.scr: 'camera_angles' parameter is missing!"); end }
+	if(local.podium_angle.size > 1) { wait 1; println("----- ERROR victory_podium.scr: 'podium_angle' parameter must be an angle integer!"); end }
+
+	if(local.timeduration == NIL) { local.timeduration = 0 } // distance, particletime, explosionscale don't matter if timeduration = 0, since fireworks will not be fired.
+	if(local.distance == NIL) { local.distance = 300 }
+	if(local.particletime == NIL) { local.particletime = 2.5 }
+	if(local.explosionscale == NIL) { local.explosionscale = 0.8 }
+	if(local.camera_origin == "auto" || local.camera_angles == "auto") { local.camera_origin = "auto"; local.camera_angles = "auto" }
+
+	removeclass PlayerIntermission
+	local.camera = spawn info_player_intermission targetname "intermission_camera"
+	if(local.camera_origin == "auto" && local.camera_angles == "auto")
+	{
+		local.PI = 3.14159265359
+		local.degrees = local.podium_angle
+		if(local.degrees >= 180) { local.degrees = local.degrees - 360 }
+		local.radians = local.degrees * (local.PI / 180)
+		local.sin = (sin local.radians) * 550
+		local.cos = (cos local.radians) * 550
+
+		local.camera.origin = local.podium_origin + ( local.cos local.sin 25 ) // camera lens is at player's feet origin, not their head! (if height is too low, camera will be inside the ground)
+		local.camera.angles = ( -17 (local.podium_angle + 180) 0 )
+	}
+	else
+	{
+		local.camera.origin = local.camera_origin
+		local.camera.angles = local.camera_angles
+	}
+
+	thread victory_podium local.podium_origin local.podium_angle 	// initialize the podium
+	thread countdown local.podium_origin local.podium_angle local.timeduration local.distance local.particletime local.explosionscale // wait until intermission begins
+	thread sound
+
+	while(game.game == NIL) { waitframe }
+	waitframe
+	if(level.check_player_IPs == 1) { end } // if cvars/adminstuff.scr already ran, end this to prevent "registerev intermission" from running twice (otherwise "unregisterev intermission" may be required).
+
+	if(game.game == "AA" && level.registerev_intermission != 1) { local.result = registerev intermission global/intermission_serverautoreopen.scr }
+	level.registerev_intermission = 1
+end
+
+//-----------------------------------------------------------------------------
+
+countdown local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale:
+
+	if(getcvar("timelimit") == "0" || getcvar("timelimit") == "")
+	{
+		thread time_change local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale
+		end
+	}
+	else
+	{
+		local.seconds = int(getcvar("timelimit")) * 60 - int(level.time)
+		local.timelimit_old = int(getcvar("timelimit"))
+	}
+
+	while(local.seconds > local.timeduration + 1)
+	{
+		if($intermission_camera == NULL) { wait 1; println("----- ERROR victory_podium.scr: $intermission_camera could not be found!"); end }
+		if($victory_podium == NULL) { wait 1; println("----- ERROR victory_podium.scr: $victory_podium could not be found!"); end }
+
+		local.seconds--
+		if(getcvar("timelimit") == "0" || getcvar("timelimit") == "")
+		{
+			thread time_change local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale
+			end
+		}
+		if(int(getcvar("timelimit")) != local.timelimit_old)
+		{
+			thread countdown local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale
+			end
+		}
+		wait 1
+	}
+
+	if(local.timeduration == 0)
+	{
+		wait 0.5
+		thread map_ended local.origin local.angle NIL local.distance local.particletime local.explosionscale 1
+	}
+	else { thread map_ended local.origin local.angle NIL local.distance local.particletime local.explosionscale }
+end
+
+time_change local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale:
+
+	while((getcvar("timelimit") == "0" || getcvar("timelimit") == "") && $intermission_camera != NULL && $victory_podium != NULL) { waitframe }
+
+	thread countdown local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale
+end
+
+//-----------------------------------------------------------------------------
+
+map_ended local.origin local.angle local.timeduration local.distance local.particletime local.explosionscale local.nofireworks:
+
+	if(level.VP_mapended == 1) { end }
+	level.VP_mapended = 1
+	if($intermission_camera == NULL || $victory_podium == NULL) { wait 1; println("----- ERROR victory_podium.scr: 'main' thread has never been executed!"); end }
+
+	if(local.timeduration != 0)
+	{
+		for(local.i = 1; local.i <= $player.size; local.i++)
+		{
+			if($player[local.i].dmteam != "spectator")
+			{
+				fadein 0.5 0 0 0 1
+				wait 0.1
+				thread cameracue // continuously cuecamera for players that were dead when this thread began.
+			}
+		}
+	}
+
+	thread spawn_victors // intermission has started
+	if(local.nofireworks != 1) { thread fireworks local.origin local.angle local.distance local.particletime local.explosionscale }
+	thread change_maps local.timeduration
+end
+
+cameracue:
+
+	while(1)
+	{
+		freezeplayer
+		$player nodamage
+		$player hide
+		cuecamera $intermission_camera
+		waitframe
+	}
+end
+
+change_maps local.time:
+
+	if(local.time == NIL || local.time < 0) { local.time = 1 }
+	else { local.time = int(local.time) }
+
+	local.c = 0
+	while(local.c <= local.time) { local.c++; wait 1 }
+
+	setcvar "timelimit" "1" // force map into intermission (only works if 60 seconds of map time already passed, if level.time > 60).
+end
+
+//-----------------------------------------------------------------------------
+
+test local.origin local.angle:
+
+	thread victory_podium local.origin local.angle 1
+end
+
+victory_podium local.origin local.angle local.test:
+
+	local.crate = waitthread crate local.origin local.angle local.test
+	thread crate (local.origin + ( 0 0 47 )) local.angle local.test
+	thread crate (local.origin + (local.crate.leftvector * 71)) local.angle local.test
+end
+
+spawn_victors:
+
+	$victory_podium solid
+	$victory_podium show
+
+	local.p = 1
+	for(local.i = 1; local.i <= int(getcvar("sv_maxclients")); local.i++)
+	{
+		if(local.i <= $player.size && $player[local.i] != NULL && $player[local.i] getconnstate != 1) // && $player[local.i].dmteam != "spectator"
+		{
+			if(level.VP_winnertype == "allies" && $player[local.i].dmteam == "allies") { local.players_init[local.p] = $player[local.i]; local.p++ }
+			else if(level.VP_winnertype == "axis" && $player[local.i].dmteam == "axis") { local.players_init[local.p] = $player[local.i]; local.p++ }
+			else { local.players_init[local.p] = $player[local.i]; local.p++ }
+		}
+	}
+
+	local.first_player = waitthread get_winning_player local.players_init
+
+	for(local.i = 1; local.i <= int(getcvar("sv_maxclients")); local.i++)
+	{
+		if(local.players_init != NIL && local.players_init[local.i] == local.first_player) { local.players_init[local.i] = NIL }
+	}
+	local.second_player = waitthread get_winning_player local.players_init
+
+	for(local.i = 1; local.i <= int(getcvar("sv_maxclients")); local.i++)
+	{
+		if(local.players_init != NIL && local.players_init[local.i] == local.second_player) { local.players_init[local.i] = NIL }
+	}
+	local.third_player = waitthread get_winning_player local.players_init
+
+	if(local.second_player == local.third_player) { local.third_player = NIL } // only for 2 or fewer players in the game.
+
+	if(local.first_player != NIL && local.first_player != NULL)
+	{
+		local.dummy = spawn script_model
+		local.dummy model local.first_player.model
+		local.dummy.origin = $victory_podium[2].origin + ( 0 0 47 )
+		local.dummy.angle = $victory_podium[2].angle
+		local.dummy nodamage
+
+		local.first_player thread avatar local.dummy
+	}
+	if(local.second_player != NIL && local.second_player != NULL)
+	{
+		local.dummy = spawn script_model
+		local.dummy model local.second_player.model
+		local.dummy.origin = $victory_podium[3].origin + ( 0 0 47 )
+		local.dummy.angle = $victory_podium[3].angle
+		local.dummy nodamage
+
+		local.second_player thread avatar local.dummy
+	}
+	if(local.third_player != NIL && local.third_player != NULL)
+	{
+		local.dummy = spawn script_model
+		local.dummy model local.third_player.model
+		local.dummy.origin = $victory_podium[1].origin + ($victory_podium[1].rightvector * 71)
+		local.dummy.angle = $victory_podium[1].angle
+		local.dummy nodamage
+
+		local.third_player thread avatar local.dummy
+	}
+
+	thread huddraw local.first_player local.second_player local.third_player
+end
+
+//-----------------------------------------------------------------------------
+
+get_winning_player local.players_init:
+
+	local.highest_kills = -9999999
+	for(local.i = 1; local.i <= int(getcvar("sv_maxclients")); local.i++)
+	{
+		if(local.players_init[local.i] != NIL && local.players_init[local.i] != NULL && local.players_init[local.i] getkills > local.highest_kills)
+		{
+			local.highest_kills = local.players_init[local.i] getkills
+		}
+	}
+
+	local.p = 1
+	for(local.i = 1; local.i <= int(getcvar("sv_maxclients")); local.i++)
+	{
+		if(local.players_init[local.i] != NIL && local.players_init[local.i] != NULL && local.players_init[local.i] getkills >= local.highest_kills)
+		{
+			local.players[local.p] = local.players_init[local.i]
+			local.p++
+		}
+	}
+
+	if(local.players.size == 1) { local.player = local.players[1] } // if there's only 1 player in the server, set him as the winner.
+	else
+	{
+		local.lowest_deaths = 9999999
+		for(local.i = 1; local.i <= local.players.size; local.i++)
+		{
+			if(local.players[local.i] != NIL && local.players[local.i] != NULL && local.players[local.i] getdeaths < local.lowest_deaths)
+			{
+				local.lowest_deaths = local.players[local.i] getdeaths
+			}
+		}
+
+		local.p = 1
+		for(local.i = 1; local.i <= local.players.size; local.i++)
+		{
+			if(local.players[local.i] != NIL && local.players[local.i] != NULL && local.players[local.i] getdeaths <= local.lowest_deaths)
+			{
+				local.players_2[local.p] = local.players[local.i]
+				local.p++
+			}
+		}
+
+		local.player = local.players_2[1]
+	}
+end local.player
+
+//-----------------------------------------------------------------------------
+
+avatar local.dummy:
+
+	local.avatar = spawn func_beam
+	local.avatar.origin = local.dummy.origin + ( 0 0 100 )
+	local.avatar endpoint (local.avatar.origin + ( 0 0 13 ))
+	local.avatar minoffset 0.0
+	local.avatar maxoffset 0.0
+	local.avatar color ( 1.0 1.0 1.0 )
+	local.avatar scale 7.0
+	local.avatar life 0
+	if(self.dmteam == "allies") { local.avatar shader ("textures/hud/allies_headicon") }
+	if(self.dmteam == "axis") { local.avatar shader ("textures/hud/axis_headicon") }
+	local.avatar numsegments 1
+	local.avatar alpha 0.80
+	local.avatar activate
+end
+
+crate local.origin local.angle local.test:
+
+	local.crate = spawn script_model
+	local.crate model "static/indycrate.tik"
+	local.crate.origin = local.origin
+	local.crate.angle = local.angle
+	if(local.test != 1)
+	{
+		local.crate.targetname = "victory_podium"
+		local.crate notsolid
+		local.crate hide
+	}
+	else { local.crate.targetname = "victory_podium_test" }
+end local.crate
+
+//-----------------------------------------------------------------------------
+
+huddraw local.first_player local.second_player local.third_player:
+
+	huddraw_virtualsize 3 1
+	huddraw_alpha 3 1
+	huddraw_font 3 "facfont-10"
+	huddraw_color 3 1.00000 0.84314 0.00000 // 0 1 0
+	huddraw_rect 3 100 170 600 20
+
+	if(local.first_player != NIL && local.first_player != NULL)
+	{
+		huddraw_string 3 ("First Place: " + netname local.first_player)
+	}
+	else
+	{
+		huddraw_string 3 ("No players on the leaderboard.")
+		huddraw_color 3 .5 .5 .5
+	}
+
+	if(local.second_player != NIL && local.second_player != NULL)
+	{
+		huddraw_virtualsize 2 1
+		huddraw_alpha 2 1
+		huddraw_font 2 "facfont-10"
+		huddraw_color 2 0.75294 0.75294 0.75294 // 1 1 0
+		huddraw_rect 2 100 195 600 20
+		huddraw_string 2 ("Second Place: " + netname local.second_player)
+	}
+
+	if(local.third_player != NIL && local.third_player != NULL)
+	{
+		huddraw_virtualsize 1 1
+		huddraw_alpha 1 1
+		huddraw_font 1 "facfont-10"
+		huddraw_color 1 0.80392 0.49804 0.19608 // 1 0 0
+		huddraw_rect 1 100 220 600 20
+		huddraw_string 1 ("Third Place: " + netname local.third_player)
+	}
+end
+
+fireworks local.origin local.angle local.distance local.particletime local.explosionscale:
+
+	if(local.distance == NIL) { local.distance = 300 }
+	if(local.particletime == NIL) { local.particletime = 2.5 }
+	if(local.explosionscale == NIL) { local.explosionscale = 0.8 }
+
+	if(level.VP_scriptmaster != 1) { waitthread sound }
+	while(1)
+	{
+		local.PI = 3.14159265359
+		local.degrees = local.angle - 90 + randomint(181)
+		if(local.degrees >= 180) { local.degrees = local.degrees - 360 }
+		local.radians = local.degrees * (local.PI / 180)
+		local.sin = (sin local.radians) * (randomint(200) + 100)
+		local.cos = (cos local.radians) * (randomint(200) + 100)
+
+		thread launch_firework (local.origin + ( local.cos local.sin 0 )) local.distance local.particletime local.explosionscale
+
+		local.wait = (randomint(10) + 5.000) / 10.000
+		wait local.wait
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+launch_firework local.origin local.distance local.particletime local.explosionscale:
+
+	local.firework = spawn script_model
+	local.firework model "static/v2.tik" 
+	local.firework.origin = local.origin
+	local.firework.angles = ( 0 90 0 )
+	local.firework light 1 .6 1 100
+	local.firework notsolid
+	local.firework.scale = .1
+	local.firework rotatey 50
+	local.firework speed 500
+
+	// Launchpad
+	local.coron3 = spawn script_model model "fx/corona_red.tik" scale "0.5"
+	local.coron3.origin = local.firework.origin + ( -4 0 0 )
+	local.coron3 thread blink
+
+	// Trailing smoke
+	local.firework.fire = spawn script_model model "projectiles/bazookashell_dm.tik" scale "1.00"
+	local.firework.fire.origin = local.firework.origin
+	local.firework.fire.angles = ( 90 0 0 )
+	local.firework.fire bind local.firework
+	local.firework.fire hide
+	local.firework.fire loopsound fwork_sparks
+
+	// Fire up and lift off
+	local.firework playsound fwork_launch
+	local.firework loopsound fwork_steam
+	local.firework light 1 .8 .6 300
+	local.firework moveup local.distance
+	local.firework waitmove
+	local.firework stoploopsound
+	local.firework.fire stoploopsound
+
+	// BOOM!!!
+	waitthread explode_rocket local.firework local.particletime local.explosionscale
+end
+
+explode_rocket local.rocket local.particletime local.explosionscale:
+
+	local.fx = waitthread make_fworks local.rocket.origin 10
+
+	local.explosion = spawn script_model
+	local.explosion model "fx/fx_truck_explosion.tik"
+	local.explosion.origin = local.rocket.origin
+	local.explosion notsolid
+	local.explosion.scale = local.explosionscale
+	local.explosion anim idle
+
+	local.rocket.fire unbind local.rocket
+	local.rocket.fire remove
+	local.rocket hide
+
+	// Start Firework Anim
+	wait .1
+	local.explosion remove
+	waitthread firefx local.fx
+
+	local.fx[1] playsound fwork_explo
+
+	// Light up the sky
+	local.fx[1] light (randomint(6) + 5.000 / 10) (randomint(7) + 4.000 / 10) (randomint(8) + 3.000 / 10) 4500 // 1 .8 .6 4500
+	wait .1
+	local.fx[1] light 0 0 0 0
+
+	wait local.particletime
+	waitthread removefx local.fx
+end
+
+make_fworks local.origin local.count:
+
+	local.fworkary = NIL
+	for(local.c = 1; local.c<=local.count;local.c++)
+	{
+		local.typeint = randomint(2)+1
+
+		if(local.typeint == 1) { local.fworkary[local.c] = waitthread spawn local.origin "fx/corona_red.tik" 2.5 }
+		else { local.fworkary[local.c] = waitthread spawn local.origin "static/corona_orange.tik" 1.75 }
+		
+		local.fworkary[local.c].angles = ( 0 90 0 )
+	}
+end local.fworkary
+
+firefx local.fx:
+
+	for(local.i = 1; local.i <= local.fx.size; local.i++)
+	{
+		local.fx[local.i] show
+		local.fx[local.i] physics_on
+		local.fx[local.i].velocity = waitthread get_velocity local.fx[local.i]
+		//local.fx[local.i] light 1 (randomfloat 50 / 100) 0 600
+	}
+end
+
+removefx local.fx:
+
+	for(local.i = 1; local.i <= local.fx.size; local.i++)
+	{
+		local.fx remove
+	}
+end
+
+get_velocity local.fwork:
+
+	local.destination = randomint(7) + 1
+	switch (local.destination)
+	{
+		case 1:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * -240 + local.fwork.upvector * 300
+		break
+		case 2:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * -160 + local.fwork.upvector * 400
+		break
+		case 3:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * -80 + local.fwork.upvector * 500
+		break
+		case 4:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * 0 + local.fwork.upvector * 600
+		break
+		case 5:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * 80 + local.fwork.upvector * 500
+		break
+		case 6:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * 160 + local.fwork.upvector * 400
+		break
+		case 7:
+		local.velocity = local.fwork.forwardvector * -300 + local.fwork.leftvector * 240 + local.fwork.upvector * 300
+		break
+	}
+end local.velocity
+
+spawn local.origin local.model local.scale local.tgname: // Just to clean everything up
+
+	local.spawn = spawn script_model model local.model
+	local.spawn.origin = local.origin
+	local.spawn scale local.scale
+	local.spawn notsolid
+	local.spawn hide
+	local.spawn targetname local.tgname
+	local.spawn gravity 0.5
+end local.spawn
+
+blink:
+
+	while(self != NULL)
+	{
+		if(self != NULL) { self hide }
+		
+		wait .5
+		if(self != NULL) { self show }
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+sound:
+
+	if(level.VP_scriptmaster == 1) { end }
+	level.VP_scriptmaster = 1
+
+	cache models/static/v2.tik
+	cache models/static/indycrate.tik
+	cache models/static/corona_orange.tik
+	cache models/fx/corona_red.tik
+
+	if(level.scriptmaster[fireworks] != 1)
+	{
+		level.mapname = getcvar "mapname"
+		local.master = spawn scriptmaster
+		local.master aliascache fwork_explo sound/weapons/explo/Explo_Bazooka2.wav soundparms 1.5 0.0 0.8 0.4 500 4000 auto loaded maps level.mapname
+		local.master aliascache fwork_launch sound/weapons/explo/Exp_LeadIn_06.wav soundparms 1.5 0.0 0.8 0.4 500 4000 auto loaded maps level.mapname
+		local.master aliascache fwork_steam sound/mechanics/Mec_SteamLoop_01.wav soundparms 1.0 0.0 1.0 0.0 300 2500 item loaded maps level.mapname
+		local.master aliascache fwork_sparks sound/mechanics/WeldingTorch.wav soundparms 1.0 0.0 1.0 0.0 200 1000 item loaded maps level.mapname
+		level.scriptmaster[fireworks] = 1
+	}
+end

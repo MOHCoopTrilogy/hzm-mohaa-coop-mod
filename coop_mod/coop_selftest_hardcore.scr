@@ -1,0 +1,275 @@
+//====================================================================
+// coop_selftest_hardcore.scr - HZM dev probes for the coop HARDCORE host rule (user 2026-09-25)
+//====================================================================
+// Cvar-gated (coop_st_hc 1) and INERT for real players. Boot the 2-player dedicated harness on a
+// combat map with Hardcore on and forced respawn, e.g.
+//   launch_dedicated_2player.ps1 -Map m1l1 -ServerCvars "coop_hardcore 1","coop_st_hc 1","g_forcerespawn 1"
+// Every check prints one machine-parseable line: ^~^~^ ST_HC <check> pass=0|1 ...
+// All damage goes through the REAL dbno monitor (st_dbno_damage = an engine damage event), never
+// dbno_enter - calling dbno_enter directly skips the threshold, which is exactly the rule under test.
+//
+//  health   max_health == health == hardcore.scr::effHealth (the lower of Player Health and 250),
+//           read 4s after spawn so server.scr::checkScoreboard has ticked (it re-derives every second)
+//  down     a burst above the scaled threshold (x health/750) DOWNS a full-health player, alive
+//  bleed    the bleed-out timer is half of coop_dbnoTimer
+//  lock     self-revive is blocked while a teammate is up, and unblocked once both are down
+//  wave     a true death respawns on the shared 20s wave (never < 5s away), not before
+//  reheal   max_health is still the Hardcore value after the respawn
+//  kitcap   level.coop_medkitCap == 1
+//  deploy   [bug-2928] a TEAMED spectator deployed by `respawn` and by primarydmweapon, on each player:
+//           fell~32 + hurt = a real walker; fell~0 + immune = left unhittable (spectator/noclip)
+//====================================================================
+
+st_hc_run:{
+	local.a = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 120
+	if( local.a == NULL ){
+		println "^~^~^ ST_HC abort=no_host"
+		end
+	}
+	//wait until the player is really IN the mission (coop_isActive): during an intro (m1l1's truck ride) players are
+	//not active and cannot be hurt, which reads as every rule failing
+	local.w = 0
+	//headless harness: no one clicks to deploy, so force it the way lobby.scr does for joiners (team/weapon select
+	//skipped for spectators, one direct respawn for a teamed player still waiting on the fire-click)
+	local.allActive = 0
+	while( local.w < 360 && local.a != NULL && local.allActive != 1 ){
+		local.allActive = 1
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( $player[local.i] != NULL ){
+				if( $player[local.i].flags["coop_isActive"] != 1 ){ local.allActive = 0 }
+			}
+		}
+		if( local.w % 10 == 0 ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.q = $player[local.i]
+				if( local.q != NULL ){
+					if( local.q.dmteam == "spectator" ){
+						local.q.flags["coop_stDeployHow"] = "join"
+						waitthread coop_mod/main.scr::skipTeamAndWeaponSelect local.q
+					}else if( local.q.flags["coop_isActive"] != 1 && local.q.flags["coop_stDeploy"] != 1 ){
+						local.q.flags["coop_stDeploy"] = 1
+						//[bug-2928] a TEAMED spectator (on allies, still at the fire-click - harness client 0 gets there by
+						//itself) must deploy the engine's way: primarydmweapon (Player::EventPrimaryDMWeapon) runs
+						//EndSpectator() and then EV_Player_Respawn. A bare `respawn` skips EndSpectator and has left the
+						//player unhittable - every hit dropped at Sentient::ArmorDamage's takedamage/noclip gate - even
+						//with bug-2958's spawn-movetype fix live. respawn stays for a player who is not spectating.
+						if( local.q.isSpectator ){
+							local.q.flags["coop_stDeployHow"] = "pdw"
+							local.q primarydmweapon "rifle"
+						}else{
+							local.q.flags["coop_stDeployHow"] = "respawn"
+							local.q respawn
+						}
+					}
+				}
+			}
+		}
+		wait 0.5
+		local.w++
+	}
+	if( local.a == NULL || local.a.flags["coop_isActive"] != 1 ){
+		println "^~^~^ ST_HC abort=never_active"
+		end
+	}
+	println ( "^~^~^ ST_HC begin map=" + level.coop_mapname + " hardcore=" + level.coop_hardcore + " activeAfter=" + ( local.w * 0.5 ) )
+	wait 6
+
+	// ---- health
+	local.want = waitthread coop_mod/hardcore.scr::effHealth
+	local.ax = getcvar "g_obj_axistext1"
+	local.ok = 0
+	if( local.a.max_health == local.want && local.a.health == local.want ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC health pass=" + local.ok + " hp=" + local.a.health + " max=" + local.a.max_health + " want=" + local.want + " axis1=" + local.ax )
+
+	// ---- kitcap
+	local.ok = 0
+	if( level.coop_medkitCap == 1 ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC kitcap pass=" + local.ok + " cap=" + level.coop_medkitCap )
+
+	// ---- lock (teammate up) - needs the second player alive and standing
+	local.b = waitthread coop_mod/coop_selftest.scr::selftest_findOther 30 local.a
+
+	// spawn protection (player.scr::spawnProtection, nodamage) must be over on both, or the hits land on nothing
+	local.w = 0
+	while( local.w < 120 && local.a != NULL && local.a.flags["coop_spawnProtOn"] == 1 ){
+		wait 0.25
+		local.w++
+	}
+	if( local.b != NULL ){
+		while( local.w < 240 && local.b != NULL && local.b.flags["coop_spawnProtOn"] == 1 ){
+			wait 0.25
+			local.w++
+		}
+	}
+	wait 1
+	local.pa = local.a.flags["coop_spawnProtOn"]
+	local.pu = local.a.flags["coop_spawnProtUntil"]
+	if( local.pa == NIL ){ local.pa = -1 }
+	if( local.pu == NIL ){ local.pu = -1 }
+	println ( "^~^~^ ST_HC prot a=" + local.a.entnum + " on=" + local.pa + " until=" + local.pu + " now=" + level.time + " waited=" + local.w )
+	// ---- immunity probe: a 10-point hit on each, then again on A after an explicit takedamage
+	local.h0 = local.a.health
+	waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.a 10
+	wait 0.2
+	local.h1 = local.a.health
+	local.hb0 = -1
+	local.hb1 = -1
+	if( local.b != NULL ){
+		local.hb0 = local.b.health
+		waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.b 10
+		wait 0.2
+		local.hb1 = local.b.health
+	}
+	local.a takedamage
+	waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.a 10
+	wait 0.2
+	local.h2 = local.a.health
+	local.nc = local.a.flags["coopDevNoclip"]
+	if( local.nc == NIL ){ local.nc = 0 }
+	local.ha = local.a.flags["coop_stDeployHow"]
+	if( local.ha == NIL ){ local.ha = "none" }
+	local.hb = "none"
+	if( local.b != NULL ){
+		local.hb = local.b.flags["coop_stDeployHow"]
+		if( local.hb == NIL ){ local.hb = "none" }
+	}
+	println ( "^~^~^ ST_HC immune a=" + local.h0 + ">" + local.h1 + " b=" + local.hb0 + ">" + local.hb1 + " aAfterTakedamage=" + local.h2 + " bEnt=" + local.b.entnum + " aTeam=" + local.a.dmteam + " aNoclip=" + local.nc + " aHow=" + local.ha + " bHow=" + local.hb )
+	//the rules under test need a player that TAKES damage: if A shrugged the probe off and B did not, swap them
+	if( local.h1 >= local.h0 && local.b != NULL && local.hb1 < local.hb0 ){
+		local.t = local.a
+		local.a = local.b
+		local.b = local.t
+		println "^~^~^ ST_HC swapped victim=B"
+	}
+	local.a health local.want
+	if( local.b != NULL ){ local.b healthonly local.want }
+	wait 2.5
+	// ---- down: a burst just above the scaled threshold on a full-health player
+	local.thr = int( 250 * local.want / 750 )
+	local.hit = ( local.thr + 10 )
+	waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.a local.hit
+	wait 1
+	local.al = 0
+	if( isAlive local.a ){ local.al = 1 }
+	local.dn = local.a.flags["coop_dbno_active"]
+	if( local.dn == NIL ){ local.dn = 0 }
+	local.ok = 0
+	if( local.al == 1 && local.dn == 1 ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC down pass=" + local.ok + " hit=" + local.hit + " thr=" + local.thr + " alive=" + local.al + " dbno=" + local.dn + " hp=" + local.a.health )
+
+	// ---- bleed
+	local.base = int( getcvar "coop_dbnoTimer" )
+	if( local.base <= 0 ){ local.base = 60 }
+	local.wantT = int( local.base / 2 )
+	local.gotT = local.a.flags["coop_dbno_timer_actual"]
+	if( local.gotT == NIL ){ local.gotT = -1 }
+	local.ok = 0
+	if( local.gotT == local.wantT ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC bleed pass=" + local.ok + " timer=" + local.gotT + " want=" + local.wantT )
+
+	// ---- lock
+	if( local.b == NULL ){
+		println "^~^~^ ST_HC lock pass=-1 why=no_second_player"
+	}else{
+		local.blk = waitthread coop_mod/hardcore.scr::selfReviveBlocked local.a
+		local.ok = 0
+		if( local.blk == 1 ){ local.ok = 1 }
+		println ( "^~^~^ ST_HC lock_mateUp pass=" + local.ok + " blocked=" + local.blk )
+		waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.b local.hit
+		wait 1
+		local.blk = waitthread coop_mod/hardcore.scr::selfReviveBlocked local.a
+		local.bd = local.b.flags["coop_dbno_active"]
+		if( local.bd == NIL ){ local.bd = 0 }
+		local.ok = 0
+		if( local.blk == 0 && local.bd == 1 ){ local.ok = 1 }
+		println ( "^~^~^ ST_HC lock_allDown pass=" + local.ok + " blocked=" + local.blk + " bDbno=" + local.bd )
+	}
+
+	// ---- wave: finish A off and time the respawn
+	waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.a 15000
+	local.t0 = level.time
+	local.wave = ( ( int( local.t0 / 20 ) + 1 ) * 20 )
+	if( ( local.wave - local.t0 ) < 5 ){ local.wave = ( local.wave + 20 ) }
+	wait 1
+	local.w = 0
+	while( local.w < 100 && local.a != NULL && !isAlive local.a ){
+		wait 0.5
+		local.w++
+	}
+	if( local.a == NULL ){
+		println "^~^~^ ST_HC wave pass=0 why=player_gone"
+		end
+	}
+	local.t1 = level.time
+	local.al = 0
+	if( isAlive local.a ){ local.al = 1 }
+	local.ok = 0
+	if( local.al == 1 && local.t1 >= ( local.wave - 0.1 ) && local.t1 <= ( local.wave + 4 ) ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC wave pass=" + local.ok + " died=" + local.t0 + " wave=" + local.wave + " back=" + local.t1 )
+
+	// ---- reheal
+	wait 4
+	local.ok = 0
+	if( local.a.max_health == local.want ){ local.ok = 1 }
+	println ( "^~^~^ ST_HC reheal pass=" + local.ok + " max=" + local.a.max_health + " want=" + local.want )
+
+	// ---- [bug-2928] deploy: the teamed-spectator deploy, both recipes, on BOTH players (not an entity-0 quirk)
+	waitthread st_hc_deploycycle local.a "respawn"
+	waitthread st_hc_deploycycle local.a "pdw"
+	if( local.b != NULL ){
+		waitthread st_hc_deploycycle local.b "respawn"
+		waitthread st_hc_deploycycle local.b "pdw"
+	}
+	println "^~^~^ ST_HC end"
+}end
+
+//====================================================================
+// [bug-2928] one deploy cycle on local.x. `spectator` clears dm_primary, so `join_team allies` then leaves it
+// ON ALLIES BUT STILL SPECTATING - the fire-click state a harness client reaches by itself. Deploy it with
+// local.how ("respawn" = the lobby.scr / st_autodeploy recipe, "pdw" = primarydmweapon, the engine's deploy),
+// then read two tells: lifted 32u, a walker falls ~32 and a MOVETYPE_NOCLIP body stays put (fell~0); and a
+// 10-point hit after an explicit takedamage, so a DAMAGE_NO window cannot be the reason it is shrugged off.
+//====================================================================
+st_hc_deploycycle local.x local.how:{
+	if( local.x == NULL ){ end }
+	local.sw = getcvar "g_teamswitchdelay"
+	setcvar "g_teamswitchdelay" "0"
+	local.x spectator
+	wait 0.5
+	if( local.x != NULL ){ local.x join_team "allies" }
+	setcvar "g_teamswitchdelay" local.sw
+	wait 0.5
+	if( local.x == NULL ){ end }
+	local.spec = local.x.isSpectator
+	local.team = local.x.dmteam
+	if( local.how == "pdw" ){
+		local.x primarydmweapon "rifle"
+	}else{
+		local.x respawn
+	}
+	wait 1.5
+	// outlast coop spawn protection and the engine's sv_invulnerabletime (both nodamage windows)
+	local.w = 0
+	while( local.w < 60 && local.x != NULL && local.x.flags["coop_spawnProtOn"] == 1 ){
+		wait 0.25
+		local.w++
+	}
+	wait 3
+	if( local.x == NULL ){ end }
+	local.spec2 = local.x.isSpectator
+	local.z0 = local.x.origin[2]
+	local.x.origin = ( local.x.origin + ( 0 0 32 ) )
+	wait 1
+	if( local.x == NULL ){ end }
+	local.fell = ( local.z0 + 32 - local.x.origin[2] )
+	local.h0 = local.x.health
+	local.x takedamage
+	waitthread coop_mod/coop_selftest_dbno.scr::st_dbno_damage local.x 10
+	wait 0.2
+	if( local.x == NULL ){ end }
+	local.h1 = local.x.health
+	local.imm = 0
+	if( local.h1 >= local.h0 ){ local.imm = 1 }
+	println ( "^~^~^ ST_HC deploy how=" + local.how + " e=" + local.x.entnum + " preSpec=" + local.spec + " preTeam=" + local.team + " postSpec=" + local.spec2 + " team=" + local.x.dmteam + " fell=" + local.fell + " hp=" + local.h0 + ">" + local.h1 + " immune=" + local.imm )
+	local.x healthonly local.h0
+}end

@@ -1,0 +1,2149 @@
+main:
+
+	if(getcvar("g_ubergametype") != "cyb" && getcvar("g_ubergametype") != "snd" && getcvar("g_ubergametype") != "ft")
+	{
+		local.r = randomint(3)
+		if(local.r == 0) { setcvar "g_ubergametype" "cyb" }
+		if(local.r == 1) { setcvar "g_ubergametype" "snd" }
+		if(local.r == 2) { setcvar "g_ubergametype" "ft" }
+	}
+	if(getcvar("g_ubergametype") == "cyb") { level.newgametype = cyb; setcvar "g_gametypestring" "Cyber Attack UBER" }
+	if(getcvar("g_ubergametype") == "snd") { level.newgametype = snd; setcvar "g_gametypestring" "Search & Destroy UBER" }
+	if(getcvar("g_ubergametype") == "ft")
+	{
+		level.newgametype = ft; setcvar "g_gametypestring" "Freeze Tag UBER"
+		if(level.meltlaser != 1) { level.meltlaser = 0 } 	// if = 1, then all players' melt lasers for Freeze Tag will be visible.
+		if(level.meltrespawn != 0) { level.meltrespawn = 1 } 	// melt repspawn = 1 for Freeze Tag by default, unless specified as = 0 in the main map script
+		thread players_meltlaser
+	}
+
+	if(level.newgametype == cyb) { setcvar "g_obj_axistext1" "Find bomb & destroy"; setcvar "g_obj_axistext2" "the enemy bombsite." }
+	if(level.newgametype == snd) { setcvar "g_obj_axistext1" "Defend or Destroy"; setcvar "g_obj_axistext2" "1 of 2 bombsites." }
+	if(level.newgametype == ft) { setcvar "g_obj_axistext1" "Kill enemy players"; setcvar "g_obj_axistext2" "& melt teammates." }
+
+	if(level.bombcamera != 1) { level.bombcamera = 0 }   		// if = 1, then all players' cameras will go to the bombsite that just blew up.
+	if(level.meltrespawn != 1) { level.meltrespawn = 0 } 		// if = 1, then all players that get melted/revived will not tele back to their dead bodies (regular respawn instead).
+	if(level.cameradistance == NIL) { level.cameradistance = 200 } 	// set the distance from the bombsite that the bombcamera will be facing (once exploded and only if level.bombcamera = 1).
+	if(level.round_starttime == NIL || level.round_starttime < 0) { level.round_starttime = 8 } // defaults
+	if(level.rounds_towin == NIL || level.rounds_towin < 1) { level.rounds_towin = 5 }
+ 	if(level.changesides != 0 && level.changesides != 1) { level.changesides = 0 }
+ 	if(level.keepsamesides != 1) { level.keepsamesides = 0 }
+	if(level.melttime == NIL || level.melttime <= 0) { level.melttime = 3 }
+	if(level.spectators_jointeams != 0 && level.spectators_jointeams != 1) { level.spectators_jointeams = 0 }
+
+	level.mef_weaponclasses = waitthread ubermode/get_player_weaponclass.scr::setup_weapon_classes
+	level.round_starttime_init = level.round_starttime
+
+	thread initialize
+	thread scores
+	thread players_hud
+	thread new_player_hud
+	thread players_alive_status
+	thread players_perteam_status
+
+	wait 1
+	if(getcvar("g_ubergametype") == "cyb" && level.bombsites != NIL && $bombexplosive != NULL) { println("----- Running Cyber Attack game mode.") }
+	if(getcvar("g_ubergametype") == "snd" && level.bombsites != NIL && $bombexplosive != NULL) { println("----- Running Search & Destroy game mode.") }
+	if(getcvar("g_ubergametype") != "ft" && (level.bombsites == NIL || level.bombsites == 0)) { println("----- ERROR. No bombsites were spawned!.") }
+	if(getcvar("g_ubergametype") != "ft" && $bombexplosive == NULL) { println("----- ERROR. No bomb explosive was spawned!.") }
+	if(getcvar("g_ubergametype") == "ft" && (level.bombsites == NIL || level.bombsites == 0) && $bombexplosive == NULL) { println("----- Running Freeze Tag game mode.") }
+	if(getcvar("g_ubergametype") == "ft" && level.bombsites != NIL) { println("----- ERROR. Bombsites incompatible with Freeze Tag!") }
+	if(getcvar("g_ubergametype") == "ft" && $bombexplosive != NULL) { println("----- ERROR. Bomb explosive incompatible with Freeze Tag!") }
+end
+
+//-----------------------------------------------------------------------------
+
+players_alive_status:
+
+  level.allies_count = NIL
+  level.axis_count = NIL
+  level.axis_total = NIL
+  level.allies_total = NIL
+  level.allies_count[0] = NIL // initialize [0] as NIL, that way .size = 0 instead of -1. $player[1] will be [0] in these arrays
+  level.axis_count[0] = NIL
+  level.allies_total[0] = NIL // allies/axis_total arrays are only used to make sure at least one player is on a team, before awarding a score point
+  level.axis_total[0] = NIL
+
+  level.spectate_enemyteam = 0
+  level.bomb_set = 0
+  level.bombisdead = 0
+  level.finalbombtick = 0
+  level.disable_defuse = 0
+  level.axis_blewupbomb = 0     // if either "blewup" level variables are 1, then the round ends
+  level.allies_blewupbomb = 0
+  level.axis_defusedbomb = 0
+  level.allies_defusedbomb = 0  // if either "defused" level variables are 1, then the round ends, only for search and destroy
+  level.allow_teams_to_win = 0
+  level.alliesplanted = 0
+  level.axisplanted = 0
+  level.explosives_dropped = 0
+  local.round_starttime = level.round_starttime
+
+  wait 0.25 // keep this long enough so the scoreboard can add a point.
+
+  huddraw_string 207 ("Round Starting Shortly..."); huddraw_color 207 1.0 1.0 1.0
+  level.change_team_score = 0
+  waitframe
+
+  while(level.round_starttime > 0) // waiting until the round begins
+  {
+	for(local.i = 1; local.i <= $player.size; local.i++)
+	{
+		if($player[local.i] != NULL)
+		{
+			$player[local.i] thread player_mef_weaponclass
+
+			if($player[local.i].dmteam == "spectator")
+			{
+				$player[local.i] thread player_fromspectator
+				if($player[local.i] getconnstate == 1 && $player[local.i].dmteam != "spectator") { $player[local.i] stufftext "spectator" } // force zombie players into spectator.
+			}
+		}
+	}
+	waitframe
+  }
+  for(local.i = 1; local.i <= $player.size; local.i++) // make spectators auto join teams once round starts, off by default.
+  {
+	if($player[local.i] != NULL && $player[local.i].dmteam == "spectator" && level.spectators_jointeams == 1)
+	{
+		$player[local.i] primarydmweapon mg; $player[local.i] auto_join_team // could also be primarydmweapon rifle
+	}
+  }
+
+  if(level.newgametype == "snd" && level.changesides != 1) { huddraw_string 207 ("Plant Team: Allies") }
+  if(level.newgametype == "snd" && level.changesides == 1) { huddraw_string 207 ("Plant Team: Axis") }
+  if(level.newgametype == "cyb") { huddraw_string 207 ("Find & Plant Bomb") }
+  if(level.newgametype == "ft") { huddraw_string 207 ("Kill All Enemy Players") }
+
+  while(level.change_team_score != 1)  // round has now started
+  {
+  	level.allies_count = NIL	// test[1] = 1, test[2] = 0, test[3] = 1, test[4] = 0 test.size = 4;
+  	level.axis_count = NIL		// test[1] = 1, test[2] = 0, test[3] = NIL, test[4] = 0 test.size = 3.
+  	level.axis_total = NIL
+  	level.allies_total = NIL
+  	level.allies_count[0] = NIL
+  	level.axis_count[0] = NIL
+  	level.allies_total[0] = NIL
+  	level.axis_total[0] = NIL
+
+	for(local.i = 1; local.i <= $player.size; local.i++)	// must use players' entnums, not their $player[clientnums]. players that leave can cause other players' clientnums to change, causing the arrays to become inaccurate.
+	{
+		if($player[local.i] != NULL && $player[local.i].fromspecthread != 1) // spectators are often assigned to a team before their weapons are chosen. wait until they're fully alive and carrying weapons first.
+		{
+			$player[local.i] thread player_mef_weaponclass
+
+			if($player[local.i].dmteam == "allies")
+			{
+				level.allies_total[$player[local.i].entnum] = 1; level.axis_total[$player[local.i].entnum] = NIL
+			}	
+			if($player[local.i].dmteam == "axis")
+			{
+				level.allies_total[$player[local.i].entnum] = NIL; level.axis_total[$player[local.i].entnum] = 1
+			}
+
+			if($player[local.i].dmteam == "spectator" || $player[local.i] getconnstate == 1) // lost connection mid-round, CS_ZOMBIE
+			{
+				level.allies_count[$player[local.i].entnum] = NIL; level.axis_count[$player[local.i].entnum] = NIL
+				level.allies_total[$player[local.i].entnum] = NIL; level.axis_total[$player[local.i].entnum] = NIL
+
+				$player[local.i] thread player_fromspectator
+				if($player[local.i] getconnstate == 1 && $player[local.i].dmteam != "spectator") { $player[local.i] stufftext "spectator" } // force zombie players into spectator.
+			}
+			if($player[local.i].dead != 1 && $player[local.i].dmteam != "spectator" && $player[local.i] getconnstate != 1) // fully alive, not in team-spectating mode.
+			{
+				if(isalive $player[local.i])
+				{
+					if($player[local.i].dmteam == "allies") { level.allies_count[$player[local.i].entnum] = 1; level.axis_count[$player[local.i].entnum] = NIL }
+					if($player[local.i].dmteam == "axis") { level.allies_count[$player[local.i].entnum] = NIL; level.axis_count[$player[local.i].entnum] = 1 }
+				}
+				else
+				{
+					level.allies_count[$player[local.i].entnum] = NIL; level.axis_count[$player[local.i].entnum] = NIL
+
+					level.allow_teams_to_win = 1
+					$player[local.i] thread frozen_player $player[local.i].mef_weaponclass
+					$player[local.i].dead = 1
+				}				
+			}
+		}
+	}
+	wait 1
+  }
+  level.round_starttime = local.round_starttime
+  thread players_alive_status
+end
+
+//-----------------------------------------------------------------------------
+
+players_perteam_status:
+
+	while(level.allow_teams_to_win != 1) { waitframe }
+
+	while(level.allow_teams_to_win == 1 && level.change_team_score != 1)
+	{
+		waitframe
+		if(level.allies_blewupbomb == 1 || level.allies_defusedbomb == 1) { thread addscore "allies"; break } // defusedbomb is for search & destroy only.
+		if(level.axis_blewupbomb == 1 || level.axis_defusedbomb == 1) { thread addscore "axis"; break }
+
+		if((level.allies_total.size <= 0 && level.axis_count.size <= 0) || (level.axis_total.size <= 0 && level.allies_count.size <= 0)) { thread addscore "draw"; break }
+
+		if(level.allies_total.size > 0 && level.axis_total.size > 0)
+		{	
+			if(level.bomb_set != 1)
+			{
+				if(level.allies_count.size <= 0 && level.axis_count.size <= 0) { thread addscore "draw"; break }	
+				if(level.allies_count.size > 0 && level.axis_count.size <= 0) { thread addscore "allies"; break }
+				if(level.allies_count.size <= 0 && level.axis_count.size > 0) { thread addscore "axis"; break }
+			}
+			if(level.bomb_set == 1)
+			{
+				if(level.alliesplanted == 1 && level.axis_count.size <= 0) { thread addscore "allies"; break } // if the allies planted and they killed all axis players, make them win.
+				if(level.axisplanted == 1 && level.allies_count.size <= 0) { thread addscore "axis"; break }
+
+				if((level.allies_count.size > 0 && level.axis_count.size <= 0) || (level.allies_count.size <= 0 && level.axis_count.size > 0)) { level.spectate_enemyteam = 1 }
+			}	
+		}	// if allies or axis killed all other enemies but the bomb is still planted, spectate the enemy team and wait until the bomb is defused before adding score.
+	}				
+	level.allow_teams_to_win = 0
+	waitthread reset_players
+
+	thread players_perteam_status
+end
+
+//-----------------------------------------------------------------------------
+
+player_mef_weaponclass:
+
+	if(self.weapcheck == 1 || self.mef_weaponclass != NIL) { end }
+	self.weapcheck = 1
+
+	local.team = self.dmteam
+	local.mef_weaponclass = waitthread ubermode/get_player_weaponclass.scr::main self
+	
+	if(isalive self && self.dmteam == local.team && self.dmteam != "spectator") // don't assign a weaponclass if the player died, switched teams, or went to spectator during the "waitthread" above.
+	{
+		self.mef_weaponclass = local.mef_weaponclass
+	}
+	if(self != NULL) { self.weapcheck = 0 }
+end
+
+//-----------------------------------------------------------------------------
+
+player_fromspectator:
+
+	if(self.fromspecthread == 1 || self.dmteam != "spectator") { end }
+	self.mef_weaponclass = NIL
+	self.fromspecthread = 1
+	self.weapcheck = 0
+	self.dead = 0
+
+	while(self != NULL && self.dmteam == "spectator") { waitframe }
+
+	local.teamcount = level.allies_count.size
+	local.teamcount2 = level.axis_count.size
+
+	while(self != NULL && self.dmteam != "spectator" && self.inventory.size < 1)
+	{
+		local.teamcount = level.allies_count.size // these keep memory of the current living allies/axis players 1 frame before the killent if-statement.
+		local.teamcount2 = level.axis_count.size
+		waitframe
+	}
+
+	if(self != NULL && self.dmteam != "spectator")
+	{
+		self.fromspecthread = 0
+
+		if(level.round_starttime <= 0 && (self.dmteam == "allies" || self.dmteam == "axis") && local.teamcount > 0 && local.teamcount2 > 0 && self.fromspecthread_init == 1)
+		{
+			self waitthread player_mef_weaponclass	// weaponclass will not be assigned if the player dies too quickly.
+
+			killent self.entnum 			// if players try to join a team while a round is in progress, and when both teams have at least 1 player, kill the team-switcher immediately.
+
+			self iprint ("Please wait. Round is currently in progress.")
+
+			if(level.newgametype == "snd") { self iprint ("You will respawn when this current round ends.") }
+			else { self iprint ("You will respawn when someone melts your frozen body.") }
+		}
+		else
+		{
+			self thread player_mef_weaponclass
+		}
+		self.fromspecthread_init = 1
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+frozen_player local.mef_weaponclass:
+
+	level.allow_teams_to_win = 1 // a player was frozen for the 1st time. teams can now win the round by killing all other players.
+
+	local.origin = trace self.origin (self.origin + ( 0 0 -10240 )) 0 // simulate "droptofloor" for the non-entity local.origin, only when there's no one left to spectate (tele to self frozen body).
+	self thread allow_player_to_spectate local.origin
+
+	if(level.newgametype == "snd") { end }
+	
+	local.ent = spawn script_model targetname "frozenplayerent"
+	local.ent model self.model
+	if(self.driving != 1) { local.ent.origin = self.origin }
+	if(self.driving == 1) { local.ent.origin = self.origin + ( 0 0 50 ) }
+	local.ent.angles = self.angles
+	local.ent notsolid
+	local.ent.team = self.dmteam
+	local.ent droptofloor
+
+	self.frozenent = local.ent
+	local.ent.frozenplayer = self
+	if(local.ent.team == "allies") { local.ent.teamcount = level.allies_count.size }
+	if(local.ent.team == "axis") { local.ent.teamcount = level.axis_count.size }
+
+	local.leftangle = self.angles[1] + 120
+	local.rightangle = self.angles[1] - 120
+	
+	local.sin1 = (waitthread ubermode/math.scr::sine self.angles[1]) * 20
+	local.cos1 = (waitthread ubermode/math.scr::cosine self.angles[1]) * 20
+	local.sin2 = (waitthread ubermode/math.scr::sine local.leftangle) * 20
+	local.cos2 = (waitthread ubermode/math.scr::cosine local.leftangle) * 20
+	local.sin3 = (waitthread ubermode/math.scr::sine local.rightangle) * 20
+	local.cos3 = (waitthread ubermode/math.scr::cosine local.rightangle) * 20
+
+	local.startpoint1 = local.ent.origin + ( local.cos1 local.sin1 100 )
+	local.endpoint1 = local.startpoint1 + ( 0 0 -100 )
+	local.startpoint2 = local.ent.origin + ( local.cos2 local.sin2 100 )
+	local.endpoint2 = local.startpoint2 + ( 0 0 -100 )
+	local.startpoint3 = local.ent.origin + ( local.cos3 local.sin3 100 )
+	local.endpoint3 = local.startpoint3 + ( 0 0 -100 )
+
+	if(local.ent.team == "allies") { local.color = ( 0 0 1 ) }
+	if(local.ent.team == "axis") { local.color = ( 1 0 0 ) }
+
+	thread spawn_beam local.startpoint1 local.endpoint1 local.color local.ent.entnum
+	thread spawn_beam local.startpoint2 local.endpoint2 local.color local.ent.entnum
+	thread spawn_beam local.startpoint3 local.endpoint3 local.color local.ent.entnum
+	
+	local.revivetrig = spawn trigger_use targetname ("revivetrig" + local.ent.entnum)
+	local.revivetrig.origin = local.ent.origin 		     
+	local.revivetrig setsize ( -35 -35 -5 ) ( 35 35 105 )
+
+	while(self != NULL && self.dmteam == local.ent.team && local.ent != NULL && local.ent.dying != 1 && local.ent.reviving != 1 && level.change_team_score != 1)
+	{
+		for(local.i = 1; local.i <= $player.size; local.i++)
+		{
+			if(isalive $player[local.i] && local.revivetrig != NULL && $player[local.i] istouching local.revivetrig && $player[local.i].dead != 1 && $player[local.i].dmteam != local.ent.team)
+			{	
+				if($player[local.i].dmteam == "allies") { $("beams" + local.ent.entnum) color ( .4 0 1 ) } // if an enemy player touches the frozen player, make the beam color purple (red/blue mix)
+				if($player[local.i].dmteam == "axis") { $("beams" + local.ent.entnum) color ( 1 0 .4 ) }
+				local.player = $player[local.i] // wait until the same enemy player stops touching the revivetrig.
+				local.ent.touched = 1
+			}
+			if(isalive local.player && local.revivetrig != NULL && local.ent.touched == 1 && (!(local.player istouching local.revivetrig) && local.player.dead != 1 && local.player.dmteam != local.ent.team) || local.colorreset == 1)
+			{ 
+				if(local.ent.team == "allies") { $("beams" + local.ent.entnum) color ( 0 0 1 ) } // return to normal color
+				if(local.ent.team == "axis") { $("beams" + local.ent.entnum) color ( 1 0 0 ) }
+				local.colorreset = 0
+				local.ent.touched = 0
+			}
+
+			local.holdtimer = 0
+			local.ent light 0 0 0 0
+			if(isalive $player[local.i] && level.newgametype == "ft" && (local.revivetrig == NULL || $player[local.i].useheld != 1 || !($player[local.i].melter istouching local.revivetrig) || $player[local.i].dead == 1 || level.change_team_score == 1)) { $player[local.i].lasermelting = 0 }
+
+			if(self != NULL && self.useheld != 1 && self.stoppingwatch != 1) { self stopwatch 0; self.stoppingwatch = 1 }
+			if($player[local.i] != NULL && $player[local.i].useheld != 1 && $player[local.i].stoppingwatch != 1) { $player[local.i] stopwatch 0; $player[local.i].stoppingwatch = 1 }
+
+			while(self != NULL && isalive $player[local.i] && local.revivetrig != NULL && (($player[local.i] istouching local.revivetrig && ($player[local.i].useheld == 1 || level.newgametype == "ft")) || (level.newgametype == "ft" && $player[local.i].melter istouching local.revivetrig && $player[local.i].useheld == 1)) && $player[local.i].dead != 1 && local.ent != NULL && $player[local.i].dmteam == local.ent.team && level.change_team_score != 1) // melting the frozen player
+			{
+				if(self != NULL && $player[local.i] != NULL && local.holdtimer <= 0) 
+				{
+					self iprint ("*** A teammate is melting you! ***") // $player[local.i] playsound med_kit
+					self stopwatch level.melttime; $player[local.i] stopwatch level.melttime
+					self.stoppingwatch = 0; $player[local.i].stoppingwatch = 0
+				}
+				if($player[local.i].dmteam == "allies")
+				{
+					$("beams" + local.ent.entnum) color ( 0 1 1 )
+					if(level.newgametype == "ft" && $player[local.i].melter istouching local.revivetrig) { local.ent light 0 1 1 100; $player[local.i].lasermelting = 1 }
+				}
+				if($player[local.i].dmteam == "axis")
+				{
+					$("beams" + local.ent.entnum) color ( 1 1 0 )
+					if(level.newgametype == "ft" && $player[local.i].melter istouching local.revivetrig) { local.ent light 1 1 0 100; $player[local.i].lasermelting = 1 }
+				}
+				local.colorreset = 1
+
+				if(local.holdtimer >= (level.melttime * 10)) 
+				{
+					$player[local.i].lasermelting = 0
+					self thread melt_frozen_player local.ent local.mef_weaponclass
+					local.ent.reviving = 1
+					break
+				}
+				local.holdtimer++
+				wait 0.1
+			}
+		}
+		waitframe
+
+		if(local.ent != NULL)
+		{
+			if(level.allies_blewupbomb == 1 || level.axis_blewupbomb == 1 || level.allies_defusedbomb == 1 || level.axis_defusedbomb == 1) { local.ent thread kill_frozen_players; local.ent.dying = 1 }
+			if((level.allies_total.size <= 0 && level.axis_count.size <= 0) || (level.axis_total.size <= 0 && level.allies_count.size <= 0)) { local.ent thread kill_frozen_players; local.ent.dying = 1 } // draw
+			if(level.allies_total.size > 0 && level.axis_total.size > 0)
+			{	
+				if(level.bomb_set != 1)
+				{
+					if(level.allies_count.size <= 0 && level.axis_count.size <= 0) { local.ent thread kill_frozen_players; local.ent.dying = 1; end } // draw
+					if(level.allies_count.size > 0 && level.axis_count.size <= 0) { local.ent thread kill_frozen_players; local.ent.dying = 1; end }  // allies
+					if(level.allies_count.size <= 0 && level.axis_count.size > 0) { local.ent thread kill_frozen_players; local.ent.dying = 1; end }  // axis
+				}				
+				if(level.bomb_set == 1)
+				{
+					if(level.alliesplanted == 1 && level.axis_count.size <= 0) { local.ent thread kill_frozen_players; local.ent.dying = 1; end } // if the allies planted and they killed all axis players
+					if(level.axisplanted == 1 && level.allies_count.size <= 0) { local.ent thread kill_frozen_players; local.ent.dying = 1; end }
+				}
+			}
+			local.entnum = local.ent.entnum
+			local.team = local.ent.team
+		}
+	}
+
+	while(local.ent != NULL && local.ent.revived != 1) { waitframe }
+
+	if($("revivetrig" + local.entnum) != NULL) { $("revivetrig" + local.entnum) remove }
+	if(self == NULL || (self != NULL && self.dmteam != local.team))
+	{
+		if($("beams" + local.entnum) != NULL) { $("beams" + local.entnum) remove }
+		if(local.ent != NULL) { local.ent remove }
+	}
+end
+
+spawn_beam local.startpoint local.endpoint local.color local.entnum:
+
+	local.laser = spawn func_beam targetname ("beams" + local.entnum)
+	local.laser minoffset 0.0
+	local.laser maxoffset 0.0
+	local.laser numsegments 1
+	local.laser life 0
+	local.laser color local.color
+	local.laser alpha 0.4
+	local.laser alwaysdraw
+	local.laser activate
+	local.laser scale 4
+	local.laser.origin = local.startpoint
+	local.laser endpoint local.endpoint
+	local.laser notsolid
+end
+
+//-----------------------------------------------------------------------------
+
+allow_player_to_spectate local.origin:
+
+	while(self != NULL && !isalive self && level.change_team_score != 1) { waitframe } // wait until the player respawns.
+	if(level.change_team_score == 1 || self == NULL) { end }			   // if they never respawn into team-spectator but a new match is starting, end immediately.
+	
+	local.team = self.dmteam
+	self.dead = 1    // player is frozen, but not "dead" anymore, so we need self.dead = 1.
+	self.newspec = 0 // indicates when the player needs to spectate a new person, 1 or 0.
+	self takeall
+	self hide
+	self notsolid
+	self noclip
+	waitframe // make sure the player is hidden first
+
+	if(level.allies_count.size > 0 || level.axis_count.size > 0)
+	{
+		for(local.i = 1; local.i <= $player.size; local.i++) // initially tele him to one of his living teammates, or to an enemy player if he was last one alive.
+		{
+			if((self.dmteam == "allies" && level.allies_count.size <= 0) || (self.dmteam == "axis" && level.axis_count.size <= 0))
+			{
+				if(isalive $player[local.i] && $player[local.i].dmteam != self.dmteam && $player[local.i].dead != 1 && $player[local.i] != self)
+				{
+					self.spectarget = $player[local.i]
+					break
+				}
+			}
+			if(isalive $player[local.i] && $player[local.i].dmteam == self.dmteam && $player[local.i].dead != 1 && $player[local.i] != self) 
+			{ 
+				self.spectarget = $player[local.i]
+				break 
+			}
+		}
+		self thread player_spectating local.team // need a faster while-loop in its own thread
+	}
+	
+	while(self != NULL && self.dmteam == local.team && self.dead == 1 && level.change_team_score != 1 && (level.allies_count.size > 0 || level.axis_count.size > 0) && level.round_starttime <= 0) // make sure to add these while loop conditions for internal while-loops too; if-statement true = "break".
+	{
+		if(self.useheld != 1 && self.fireheld != 1) { self.togglespectarget = 1 }
+		if((self.fireheld == 1 && self.useheld != 1 && self.togglespectarget == 1) || (self.newspec == 1 && self.useheld != 1 && self.fireheld != 1)) 
+		{
+			local.i++
+			if(local.i > $player.size) { local.i = 1 }
+			if($player[local.i].dead == 1 && $player[local.i].frozenent != NIL && $player[local.i].frozenent != NULL) { self.spectargetdead = 1 }
+			else { self.spectargetdead = 0 }
+
+			while($player[local.i] == NULL || ($player[local.i] == self && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)) || $player[local.i].dmteam != self.dmteam || !isalive $player[local.i] || ($player[local.i].dead == 1 && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)))
+			{
+				if(level.spectate_enemyteam == 1 || self == NULL || self.dmteam != local.team || self.dead != 1 || level.change_team_score == 1 || (level.allies_count.size <= 0 && level.axis_count.size <= 0) || level.round_starttime > 0) { break }		
+
+				local.i++
+				if(local.i > $player.size) { local.i = 1; waitframe }
+				if($player[local.i].dead == 1 && $player[local.i].frozenent != NIL && $player[local.i].frozenent != NULL) { self.spectargetdead = 1 }
+				else { self.spectargetdead = 0 }
+				waitframe	
+			}
+			while(level.spectate_enemyteam == 1 && ($player[local.i] == NULL || ($player[local.i] == self && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)) || $player[local.i].dmteam == self.dmteam || !isalive $player[local.i] || $player[local.i].dead == 1)) // round is over, a team has won
+			{
+				self.spectargetdead = 0
+				if(level.spectate_enemyteam != 1 || self == NULL || self.dmteam != local.team || self.dead != 1 || level.change_team_score == 1 || (level.allies_count.size <= 0 && level.axis_count.size <= 0) || level.round_starttime > 0) { break }
+
+				local.i++
+				if(local.i > $player.size) { local.i = 1; waitframe }
+				waitframe
+			}
+			self.newspec = 0
+			self.togglespectarget = 0
+		}
+		if(self.useheld == 1 && self.fireheld != 1 && self.togglespectarget == 1) 
+		{
+			local.i--
+			if(local.i < 1) { local.i = $player.size }
+			if($player[local.i].dead == 1 && $player[local.i].frozenent != NIL && $player[local.i].frozenent != NULL) { self.spectargetdead = 1 }
+			else { self.spectargetdead = 0 }
+
+			while($player[local.i] == NULL || ($player[local.i] == self && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)) || $player[local.i].dmteam != self.dmteam || !isalive $player[local.i] || ($player[local.i].dead == 1 && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)))
+			{
+				if(level.spectate_enemyteam == 1 || self == NULL || self.dmteam != local.team || self.dead != 1 || level.change_team_score == 1 || (level.allies_count.size <= 0 && level.axis_count.size <= 0) || level.round_starttime > 0) { break }
+
+				local.i--
+				if(local.i < 1) { local.i = $player.size; waitframe }
+				if($player[local.i].dead == 1 && $player[local.i].frozenent != NIL && $player[local.i].frozenent != NULL) { self.spectargetdead = 1 }
+				else { self.spectargetdead = 0 }
+				waitframe
+			}
+			while(level.spectate_enemyteam == 1 && ($player[local.i] == NULL || ($player[local.i] == self && ($player[local.i].frozenent == NIL || $player[local.i].frozenent == NULL)) || $player[local.i].dmteam == self.dmteam || !isalive $player[local.i] || $player[local.i].dead == 1)) // round is over, a team has won
+			{
+				self.spectargetdead = 0
+				if(level.spectate_enemyteam != 1 || self == NULL || self.dmteam != local.team || self.dead != 1 || level.change_team_score == 1 || (level.allies_count.size <= 0 && level.axis_count.size <= 0) || level.round_starttime > 0) { break }
+
+				local.i--
+				if(local.i < 1) { local.i = $player.size; waitframe }
+				waitframe
+			}
+			self.newspec = 0
+			self.togglespectarget = 0
+		}
+		waitframe
+		if(self != NULL && local.i <= $player.size && $player[local.i] != NULL) // one final check to ensure the spectarget or spectarget's frozen body != NULL
+		{
+			if(self.spectargetdead != 1) { self.spectarget = $player[local.i] }
+			if(self.spectargetdead == 1) { self.spectarget = $player[local.i].frozenent }
+		}
+	}
+	if(self != NULL) { self.spectarget = NULL }
+
+	if(isalive self && self.dmteam != local.team && self.dmteam != "spectator") // only if the player was team-spectating and decided to change teams mid-round. kill him after he respawns.
+	{
+		while(self != NULL && !isalive self) { waitframe }
+		if(self == NULL) { end }
+		self.dead = 0 // this makes sure the frozen_player thread can run again
+
+		if(level.newgametype == "cyb" || level.newgametype == "ft") // no frozen bodies in "snd".
+		{
+			$("revivetrig" + self.frozenent.entnum) remove // remove the old frozen body before the player dies again.
+			$("beams" + self.frozenent.entnum) remove
+			self.frozenent remove
+		}
+		killent self.entnum // "self kill" doesn't work if the player just respawned.
+	}
+
+	while(self != NULL && self.dead == 1 && level.allies_count.size <= 0 && level.axis_count.size <= 0 && level.change_team_score != 1 && level.round_starttime <= 0) // only if draw and there's no one to spectate, tele everyone to their frozen bodies.
+	{
+		local.specorg = local.origin + ( 0 0 100 )
+		self.origin = (trace local.specorg (local.specorg + ( 0 0 0 ) + ((angles_toforward self.viewangles) * -50)) 1) - ( 0 0 82.125 )
+		waitframe
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+player_spectating local.team:
+
+	while(self != NULL && !isalive self) { waitframe }	// if there's only one teammate left but he planted before dying, wait until allies/axis_count updates after finishing death animation, before beginning to spectate.
+	waitframe
+
+	while(self != NULL && self.dmteam == local.team && self.dead == 1 && level.change_team_score != 1 && (level.allies_count.size > 0 || level.axis_count.size > 0) && level.round_starttime <= 0)
+	{
+		if(level.allies_count.size == level.allies_total.size && level.axis_count.size == level.axis_total.size) { end } // if nobody is dead but somehow a player is spectating, end.
+
+	   	if(level.spectate_enemyteam != 1)
+		{
+			if(self.spectarget == NIL || self.spectarget == NULL || (self.spectarget.classname != ScriptModel && self.spectargetdead != 1 && (!isalive self.spectarget || self.spectarget.dmteam != self.dmteam || self.spectarget.dead == 1))) { self.newspec = 1 }
+		}
+	   	if(level.spectate_enemyteam == 1)
+		{
+			if(self.spectarget == NIL || self.spectarget == NULL || (self.spectarget.classname != ScriptModel && self.spectargetdead != 1 && (!isalive self.spectarget || self.spectarget.dmteam == self.dmteam || self.spectarget.dead == 1))) { self.newspec = 1 }
+		}
+
+		if((self getposition) == "crouching") { self forcelegsstate STAND } // if the spectating player crouches, he cannot stand back up. force him to stand again (sometimes it takes a few seconds to work)
+		if(self.spectarget != NIL && self.spectarget != NULL && (self.spectarget.classname == ScriptModel || self.spectargetdead == 1)) // spectating a frozen body
+		{
+			local.specorg = self.spectarget.origin + ( 0 0 100 )
+			self.origin = (trace local.specorg (local.specorg + ( 0 0 0 ) + ((angles_toforward self.viewangles) * -50)) 1) - ( 0 0 82.125 )
+			self physics_on
+		}
+		if(self.spectarget != NIL && self.spectarget != NULL && self.spectarget.classname != ScriptModel && self.spectargetdead != 1) // spectating a living player
+		{
+			if((self.spectarget getposition) == NIL) { local.hoffset = -5; local.specorg = self.spectarget.origin + ( 0 0 85 ) }
+			if((self.spectarget getposition) == "crouching") { local.hoffset = 0; local.specorg = self.spectarget.origin + ( 0 0 65 ) }
+			if((self.spectarget getposition) != "crouching" && (self.spectarget getposition) != NIL) { local.hoffset = 15; local.specorg = self.spectarget.origin + ( 0 0 85 ) }
+		
+			local.fwd_vec = angles_toforward self.spectarget.viewangles
+			self.origin = (trace local.specorg (local.specorg + ( 0 0 local.hoffset ) + ((angles_toforward self.spectarget.viewangles) * -50)) 1) - ( 0 0 82.125 )
+			self physics_off
+			self face self.spectarget.viewangles	// keep physics_off when following another player with rapidly changing viewangles (looking around), to prevent camera jittering.
+		}
+
+		if(self.spectarget == NIL || self.spectarget == NULL) // in case there's somehow no one to spectate and this while-loop hasn't ended yet, try again 3 more times to find a spectarget, otherwise end.
+		{ 
+			waitframe
+			self.newspec = 1; waitframe
+			if(self.spectarget == NIL || self.spectarget == NULL) { self.newspec = 1; waitframe } // when a spectarget leaves the game, it becomes NIL, not NULL. Without checking for NIL first, a NULL spectarget will crash the server.
+			if(self.spectarget == NIL || self.spectarget == NULL) { self.newspec = 1; waitframe }
+			if(self.spectarget == NIL || self.spectarget == NULL) { end }
+		}
+
+		self hide
+		waitframe
+	}
+	if(self != NULL) { self physics_on }
+end	
+
+//-----------------------------------------------------------------------------
+
+kill_frozen_players:
+
+	if(self.dying == 1) { end } // need this, otherwise death animations will be spamming like crazy
+
+	if(level.newgametype == "cyb" || level.newgametype == "ft")
+	{
+		if(self.team == "allies") { $("beams" + self.entnum) color ( 0 0 1 ) }
+		if(self.team == "axis") { $("beams" + self.entnum) color ( 1 0 0 ) }
+
+		if(self.teamcount <= 1 && level.bombisdead != 1 && level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1) { self hide } // if this player is the last living teammate to get frozen,
+							// hide the local.ent playermodel at first, since the player's dead body is right next to local.ent (only if the bomb wasn't destroyed or defused)
+		self svflags "-broadcast"
+		waitframe
+		self anim level.deathanims[randomint(level.deathanims.size)]
+
+		local.beamscale = 4.000000
+		for(local.n = 1; local.n <= 60; local.n++)
+		{
+			if($("beams" + self.entnum) == NULL) { break }
+
+			local.beamscale = local.beamscale - 0.066665
+			$("beams" + self.entnum) scale local.beamscale
+			wait 0.05
+		}
+		if($("beams" + self.entnum) != NULL) { $("beams" + self.entnum) remove }
+		self remove
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+melt_frozen_player local.ent local.mef_weaponclass:
+
+	if(local.ent.reviving == 1) { end }
+
+	$("beams" + local.ent.entnum) remove
+	local.team = local.ent.frozenplayer.dmteam
+
+	local.c = 1
+	while(level.meltrespawn != 1 && local.c <= $player.size)
+	{
+		while($player[local.c] != NULL && $("revivetrig" + local.ent.entnum) != NULL && $player[local.c] istouching $("revivetrig" + local.ent.entnum) && $player[local.c].dead != 1) // don't revive until all players are far enough away from the melted player,
+		{ 												    				// otherwise players get stuck inside each other.
+			waitframe
+			if(level.meltrespawn == 1 || local.ent.frozenplayer == NIL || local.ent.frozenplayer == NULL || local.ent.frozenplayer.dmteam != local.team) { break }
+			local.touching = 1
+		}
+		waitframe
+		if(local.touching == 1) { local.c = 1; local.touching = 0 }
+		local.c++
+	}
+	if(local.ent.frozenplayer == NIL || local.ent.frozenplayer == NULL || local.ent.frozenplayer.dmteam == "spectator") { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end }
+
+	if(level.allies_blewupbomb == 1 || level.axis_blewupbomb == 1 || level.allies_defusedbomb == 1 || level.axis_defusedbomb == 1) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end }
+	if((level.allies_total.size <= 0 && level.axis_count.size <= 0) || (level.axis_total.size <= 0 && level.allies_count.size <= 0)) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end } // draw
+	if(level.allies_total.size > 0 && level.axis_total.size > 0)
+	{	
+		if(level.bomb_set != 1)
+		{
+			if(level.allies_count.size <= 0 && level.axis_count.size <= 0) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end } // draw
+			if(level.allies_count.size > 0 && level.axis_count.size <= 0) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end }  // allies
+			if(level.allies_count.size <= 0 && level.axis_count.size > 0) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end }  // axis
+		}					
+		if(level.bomb_set == 1)
+		{
+			if(level.alliesplanted == 1 && level.axis_count.size <= 0) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end } // if the allies planted and they killed all axis players
+			if(level.axisplanted == 1 && level.allies_count.size <= 0) { $("revivetrig" + local.ent.entnum) remove; local.ent remove; end }
+		}
+	}
+
+	local.ent hide
+	if(!isalive self) { self respawn; waitframe } // if a player is melted but he never respawned yet, force him to respawn first									
+	waitframe
+	self noclip
+
+	self tele local.ent.origin	   // teleport them back to their frozen bodies.
+	//self.viewangles = local.ent.angles // this doesn't work until at least 0.1 seconds have passed after teleporting.
+	local.ent playsound med_canteen
+	self.dead = 0
+	self show
+	self solid
+	self thread ubermode/get_player_weaponclass.scr::give_weapons local.mef_weaponclass
+	self.mef_weaponclass = local.mef_weaponclass
+
+	if(level.meltrespawn == 1) { self respawn }
+	local.ent hide
+	waitframe
+
+	for(local.c = 1; local.c <= $player.size; local.c++) // if the player is melted, but he is still touching another player (two players frozen inside each other), respawn the melted player.
+	{
+		for(local.s = 1; $("revivetrig" + local.ent.entnum) != NULL && local.s <= $("revivetrig" + local.ent.entnum).size; local.s++)
+		{
+			if($player[local.c] istouching $("revivetrig" + local.ent.entnum)[local.s] && $player[local.c].dead != 1 && self istouching $("revivetrig" + local.ent.entnum)[local.s] && self.dead != 1 && $player[local.c] != self && level.meltrespawn != 1)
+			{
+				self respawn
+				wait 0.1
+			}
+		}
+	}
+
+	local.ent.revived = 1
+	waitframe
+	if(self != NULL) { self.viewangles = local.ent.angles } // matching viewangles does not work if the player was still dead and had to respawned with "self respawn".
+
+	waitframe
+	if($("revivetrig" + local.ent.entnum) != NULL) { $("revivetrig" + local.ent.entnum) remove }
+	local.ent remove
+end
+
+//-----------------------------------------------------------------------------
+
+reset_players:
+
+	level.spectate_enemyteam = 1
+	wait 3
+	level.change_team_score = 1
+
+	for(local.i = 1; local.i <= $player.size; local.i++) // reset everyone for the next round.
+	{						     // may cause double respawning for some players, but it makes sure that no one is still noclipping.
+		$player[local.i].weapcheck = 0
+		if(isalive $player[local.i]) { $player[local.i] respawn } // do not force dead players to respawn yet.
+	}
+
+	while(level.round_starttime <= 0) { waitframe }
+
+	for(local.i = 1; local.i <= $player.size; local.i++)
+	{
+		if!(isalive $player[local.i]) { $player[local.i] respawn } // new round has started, now we force dead players to respawn.
+
+		if(isalive $player[local.i] && $player[local.i].dead == 1) // make sure no one is stuck in team-spectator mode
+		{
+			$player[local.i].weapcheck = 0
+			$player[local.i] respawn
+			$player[local.i] show
+			$player[local.i] solid
+			$player[local.i].dead = 0
+			if($player[local.i].mef_weaponclass == NIL) { $player[local.i] thread ubermode/get_player_weaponclass.scr::give_weapons NIL }
+			else { $player[local.i].mef_weaponclass = NIL }
+		}
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral local.norotate:
+
+	if($bombexplosive != NULL) { end }
+	if(level.newgametype == "ft" || getcvar("g_ubergametype") == "ft") { end }
+	if(getcvar("g_ubergametype") == "cyb") { level.newgametype = cyb }
+	if(getcvar("g_ubergametype") == "snd") { level.newgametype = snd }
+	if(level.newgametype != "cyb" && level.newgametype != "snd") { level.newgametype = "cyb" }
+
+	if(level.bomborigin_allies_init == NIL) { level.bomborigin_allies_init = local.originallies }
+	if(level.bombangle_allies_init == NIL) { level.bombangle_allies_init = local.angleallies }
+	if(level.bomborigin_axis_init == NIL) { level.bomborigin_axis_init = local.originaxis }
+	if(level.bombangle_axis_init == NIL) { level.bombangle_axis_init = local.angleaxis }
+	if(level.bomborigin_central_init == NIL) { level.bomborigin_central_init = local.origincentral }
+	if(level.bombangle_central_init == NIL) { level.bombangle_central_init = local.anglecentral }
+
+	while($bombexplosive != NULL) { waitframe }
+
+	local.bombtrig = spawn trigger_use targetname "bombexplosive"
+	if(local.norotate == 1) { $bombexplosive.norotate = 1 } // if local.norotate = 1, keep bombs from rotating and instead use the local.angleallies, angleaxis, anglecentral parameters.
+	else { $bombexplosive.norotate = 0 }
+
+	if(level.newgametype == "snd") 
+	{ 
+		local.bombtrig model "animate/pulse_explosive_pickup.tik" 
+		if(level.changesides != 1)
+		{
+			if(local.originallies == NIL) { local.bombtrig.origin = level.bomborigin_allies_init }
+			else { local.bombtrig.origin = local.originallies }
+			if(local.angleallies == NIL) { local.bombtrig.angles = ( 0 level.bombangle_allies_init 0 ) }
+			else { local.bombtrig.angles = ( 0 local.angleallies 0 ) }
+			local.bombtrig light 0 0 1 125
+			local.bombtrig.team = "allies"
+
+			exec ubermode/flickerrotate.scr bombexplosive ( 0 0 1 ) 125 25 25 0
+		}
+		if(level.changesides == 1)
+		{
+			if(local.originaxis == NIL) { local.bombtrig.origin = level.bomborigin_axis_init }
+			else { local.bombtrig.origin = local.originaxis }
+			if(local.angleaxis == NIL) { local.bombtrig.angles = ( 0 level.bombangle_axis_init 0 ) }
+			else { local.bombtrig.angles = ( 0 local.angleaxis 0 ) }
+			local.bombtrig light 1 0 0 125
+			local.bombtrig.team = "axis"
+
+			exec ubermode/flickerrotate.scr bombexplosive ( 1 0 0 ) 125 0 25 25
+		}
+		local.bombtrig thread dummyavatar
+	}
+	if(level.newgametype == "cyb") 
+	{ 
+		local.bombtrig model "animate/pulse_radiobomb_pickup.tik"
+		if(local.origincentral == NIL) { local.bombtrig.origin = level.bomborigin_central_init }
+		else { local.bombtrig.origin = local.origincentral }
+		if(local.anglecentral == NIL) { local.bombtrig.angles = ( 0 level.bombangle_central_init 0 ) }
+		else { local.bombtrig.angles = ( 0 local.anglecentral 0 ) }
+		local.bombtrig light .25 0 .667 125
+
+		exec ubermode/flickerrotate.scr bombexplosive ( .25 0 .667 ) 125 0 25 0
+	}
+
+	local.bombtrig setsize ( -20 -20 -20 ) ( 20 20 20 )
+	local.bombtrig notsolid
+	local.bombtrig show
+	local.bombtrig droptofloor
+	local.bombtrig.origin += ( 0 0 20 )
+	local.bombtrig.scale = 1.50
+
+	local.bombtrig.originallies = local.originallies
+	local.bombtrig.originaxis = local.originaxis
+	local.bombtrig.origincentral = local.origincentral
+	local.bombtrig.angleallies = local.angleallies
+	local.bombtrig.angleaxis = local.angleaxis
+	local.bombtrig.anglecentral = local.anglecentral
+
+	local.bombtrig setthread pickup // call setthreads after all other bombtrig variables have been called.
+	local.bombtrig thread reset_bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral
+end
+
+pickup:
+
+	local.player = parm.other
+	if(level.newgametype == "snd" && level.round_starttime > 0 && ((local.player.dmteam == "axis" && level.changesides != 1) || (local.player.dmteam == "allies" && level.changesides == 1))) { end }
+
+	if(level.spectate_enemyteam == 1 || local.player.dead == 1) { $bombexplosive message (""); end }
+	if(level.round_starttime > 0) { $bombexplosive message ("*** You must wait for the round to begin. ***"); end }
+	if(level.round_starttime <= 0) { $bombexplosive message ("") }
+	if(local.player.dead == 1) { wait 0.1; end }
+
+	self nottriggerable
+
+	if(level.newgametype == "snd" && ((local.player.dmteam == "axis" && level.changesides != 1) || (local.player.dmteam == "allies" && level.changesides == 1)))
+	{
+		local.player iprint ("Your team is defending. You cannot pick up the bomb.")
+		wait 0.1
+		self triggerable
+		end
+ 	}
+	if(local.player.inuse == 1)
+	{
+		local.player iprint ("Cannot use. You are holding something already.")
+		wait 0.1
+		if(self != NULL) { self triggerable }
+		end
+ 	}
+	if(local.player.inuse != 1)
+	{
+		if(level.explosives_dropped != 1) { $bombexplosive message ("*** You have acquired the bomb. ***") }
+		if(level.explosives_dropped == 1) { $bombexplosive message ("*** You have picked up the bomb. ***") }
+		if(local.player.dmteam == "allies") { iprintlnbold("*** The Allies have the bomb! ***") }
+		if(local.player.dmteam == "axis") { iprintlnbold("*** The Axis have the bomb! ***") }
+
+		local.player.inuse = 1
+		local.r = randomint(2)
+		if(local.r == 0) { local.player playsound ledpickup1 }
+		if(local.r == 1) { local.player playsound ledpickup2 }
+
+    		local.player thread doit self.originallies self.angleallies self.originaxis self.angleaxis self.origincentral self.anglecentral
+		local.player thread reset_bomb self.originallies self.angleallies self.originaxis self.angleaxis self.origincentral self.anglecentral
+ 	}
+ 	self triggerable
+end
+
+doit local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral:
+
+   	if(level.newgametype == "snd") 
+	{ 
+		if(self.isdog != 1) { self attachmodel models/animate/explosive.tik "Bip01 R Thigh" 0.85 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) } //( -up +down, +forward -backward, +right -left )
+		if(self.isdog == 1) { self.dog attachmodel models/animate/explosive.tik "Bip01 Spine" 0.85 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) }
+	} 
+	if(level.newgametype == "cyb") 
+	{ 
+		if(self.isdog != 1) { self attachmodel models/animate/radiobomb.tik "Bip01 R Thigh" 0.75 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) }
+		if(self.isdog == 1) { self.dog attachmodel models/animate/radiobomb.tik "Bip01 Spine" 0.75 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) }
+	}
+
+   	self iprint ("*** Plant the bomb on the enemy's bombsite.*** ") // acquired the bomb
+   	$("bombhip" + self.entnum).angles = ( 0 180 20 )
+   	
+	if($"bombexplosive" != NULL) { $"bombexplosive" nottriggerable }
+  	waitframe
+   	if($"bombexplosive" != NULL) { $"bombexplosive" remove }
+   
+   	local.result = self waitthread scan_player local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral
+
+   	if(local.result != left)
+   	{
+		self.inuse = 0
+    		if($("bombhip" + self.entnum) != NULL) { $("bombhip" + self.entnum) remove }
+
+		if(level.bomb_set != 1) // dropped the bomb
+		{
+			level.explosives_dropped = 1 // only used to change center screen dialogue.
+			thread bomb_has_dropped
+
+			if(level.disable_defuse != 1)
+			{
+				if(level.bomb_went2spectator == 1 || self == NULL || (self != NULL && self.dmteam == "spectator"))  // if player goes to spectator, spawn the bomb at its old picked-up origin.
+				{ 
+					level.bomb_went2spectator = 0
+					goto bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral
+				}
+    				goto bomb self.origin self.angles[1] self.origin self.angles[1] self.origin self.angles[1]
+			}
+		}
+		else // planted the bomb
+		{
+    			//self stufftext "say *** I have planted the bomb! ***"
+			iprintlnbold("*** The bomb has been planted! ***")
+		}
+   	}
+	if(local.result == left)
+	{
+		level.explosives_dropped = 1
+		goto bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral
+	}
+end
+
+bomb_has_dropped:
+
+	waitframe // need to wait long enough for disable_defuse to change, if the round ended after a player dropped the bomb.
+	waitframe
+	waitframe
+	if(level.disable_defuse != 1) { iprintlnbold("*** The bomb has been dropped! ***") }
+end
+
+scan_player local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral:
+
+ 	local.result = ok
+ 	local.team = self.dmteam
+ 	while(1)
+  	{
+     		if(self == NULL)
+     		{
+   			local.result = left
+   			end local.result
+     		}
+		else if(self.isdog == 1 && self.bombdog != 1)
+		{
+			$("bombhip" + self.entnum) remove
+			if(level.newgametype == "snd") { self.dog attachmodel models/animate/explosive.tik "Bip01 Spine" 0.85 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) }
+			if(level.newgametype == "cyb") { self.dog attachmodel models/animate/radiobomb.tik "Bip01 Spine" 0.75 ("bombhip" + self.entnum) 1 -1 -1 -1 -1 ( 0 0 3 ) }
+			self.bombdog = 1
+		}
+     		else
+     		{
+			if($bombexplosive != NULL) { $bombexplosive remove } // make sure another $bombexplosive does not mysteriously respawn.
+
+  			if(self.dmteam != local.team || !isalive self || self.dead == 1 || self.dmteam == spectator || level.bomb_set == 1 || level.change_team_score == 1 || self.fellundermap == 1)
+    			{
+				self.bombdog = 0
+	   			if(self.dmteam == spectator || isalive self || self.fellundermap == 1) { level.bomb_went2spectator = 1 }
+    	   			end local.result
+    			}
+			for(local.i = 1; local.i <= level.bombsites; local.i++)
+			{
+				local.holdtime = 0
+				if(self.useheld != 1 && self.stoppingwatch != 1) { self stopwatch 0; self.stoppingwatch = 1 }
+
+				while(self != NULL && self.useheld == 1 && self.dmteam == local.team && isalive self && self.dead != 1 && self.dmteam != $("bombsitetrig_" + local.i).team && self istouching $("bombsitetrig_" + local.i) && self cansee $("expbox2_" + local.i) 90)
+				{
+					if(level.newgametype == "snd" && local.holdtime <= 0) { self.stoppingwatch = 0; self stopwatch 5 }    // hold for 5 seconds to plant the bomb
+					if(level.newgametype == "cyb" && local.holdtime <= 0) { self.stoppingwatch = 0; self stopwatch 1.5 }  // hold for 1.5 seconds to plant the bomb
+
+					local.holdtime++
+					if(level.newgametype == "snd" && local.holdtime >= 50) { thread bomb_planted local.i local.originallies local.originaxis local.origincentral self.dmteam; end local.result }
+					if(level.newgametype == "cyb" && local.holdtime >= 15) { thread bomb_planted local.i local.originallies local.originaxis local.origincentral self.dmteam; end local.result }
+					wait 0.1
+				}
+				while(self != NULL && self.useheld == 1 && self.dmteam == local.team && isalive self && self.dead != 1 && self.dmteam == $("bombsitetrig_" + local.i).team && self istouching $("bombsitetrig_" + local.i) && self cansee $("expbox2_" + local.i) 90)
+				{
+					self iprint ("You cannot plant on your team's bombsite.")
+					wait 0.5
+				}
+			}
+     		}
+     		waitframe
+  	}
+end local.result
+
+//-----------------------------------------------------------------------------
+
+reset_bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral:
+
+	while(level.spectate_enemyteam != 1) { waitframe }
+	while(level.spectate_enemyteam == 1) { waitframe }
+	
+	if(self != NULL && $("bombhip" + self.entnum) != NULL) { $("bombhip" + self.entnum) remove }
+	if($bombexplosive != NULL) { $bombexplosive remove }
+	if(self != NULL) { self.inuse = 0 }
+
+	waitframe
+	
+	thread bomb local.originallies local.angleallies local.originaxis local.angleaxis local.origincentral local.anglecentral
+end
+
+//-----------------------------------------------------------------------------
+
+bombsite local.origin local.angle local.team:
+
+	if(level.newgametype == "ft" || getcvar("g_ubergametype") == "ft") { end }
+	if(getcvar("g_ubergametype") == "cyb") { level.newgametype = cyb }
+	if(getcvar("g_ubergametype") == "snd") { level.newgametype = snd }
+	if(level.newgametype != "cyb" && level.newgametype != "snd") { level.newgametype = "cyb" }
+
+	if(level.bombsites == NIL) { level.bombsites = 0 }
+	level.bombsites++
+
+	local.table = spawn script_model targetname ("bombsite_" + level.bombsites)
+	local.table model "static/bunkertable.tik" 
+	local.table.origin = local.origin
+	local.table.angles = ( 0 local.angle 0 )
+	local.table solid
+	
+	local.leftside = local.table.angles[1] + 90
+	local.rightside = local.table.angles[1] - 90
+
+	local.sin4 = (waitthread ubermode/math.scr::sine local.leftside) * 35
+	local.cos4 = (waitthread ubermode/math.scr::cosine local.leftside) * 35
+	local.sin5 = (waitthread ubermode/math.scr::sine local.rightside) * 30
+	local.cos5 = (waitthread ubermode/math.scr::cosine local.rightside) * 30
+
+	local.ebox1 = spawn script_model targetname ("sitewall1_" + level.bombsites)
+	local.ebox1 model "static/static_powerbox1.tik"
+	local.ebox1.origin = local.table.origin + ( local.cos4 local.sin4 0 )
+	local.ebox1.angles = local.table.angles + ( 0 90 0 )
+	local.ebox1.scale = 0.85
+	local.ebox1 notsolid
+	local.ebox2 = spawn script_model targetname ("sitewall2_" + level.bombsites)
+	local.ebox2 model "static/static_electricbox1.tik" // cement side panel
+	local.ebox2.origin = local.table.origin + ( local.cos5 local.sin5 0 )
+	local.ebox2.angles = local.table.angles + ( 0 -90 0 )
+	local.ebox2.scale = 2
+	local.ebox2 notsolid
+
+	if(level.newgametype == "snd")
+	{
+		local.sin1 = (waitthread ubermode/math.scr::sine local.leftside) * 20
+		local.cos1 = (waitthread ubermode/math.scr::cosine local.leftside) * 20
+		local.sin2 = (waitthread ubermode/math.scr::sine local.rightside) * 5
+		local.cos2 = (waitthread ubermode/math.scr::cosine local.rightside) * 5
+		local.sin3 = (waitthread ubermode/math.scr::sine local.rightside) * 30
+		local.cos3 = (waitthread ubermode/math.scr::cosine local.rightside) * 30
+
+		local.sin6 = (waitthread ubermode/math.scr::sine local.table.angles[1]) * 19.5
+		local.cos6 = (waitthread ubermode/math.scr::cosine local.table.angles[1]) * 19.5
+		local.sin7 = (waitthread ubermode/math.scr::sine local.table.angles[1]) * -17   // multiply by negative or local.table.angles[1] + 180	
+		local.cos7 = (waitthread ubermode/math.scr::cosine local.table.angles[1]) * -17 // gives the same sine & cosine numbers.
+
+		local.expbox1 = spawn script_model targetname ("expbox1_" + level.bombsites)
+		local.expbox1 model "static/exp_crate1.tik" 
+		local.expbox1.origin = local.table.origin + ( local.cos1 local.sin1 52 )
+		local.expbox1.angles = local.table.angles + ( 0 90 0 )
+		local.expbox1 solid
+		local.expbox2 = spawn script_model targetname ("expbox2_" + level.bombsites)
+		local.expbox2 model "static/exp_crate2.tik" 
+		local.expbox2.origin = local.table.origin + ( local.cos2 local.sin2 52 )
+		local.expbox2.angles = local.table.angles + ( 0 90 0 )
+		local.expbox2 solid
+		local.expbox3 = spawn script_model targetname ("expbox3_" + level.bombsites) // tnt box
+		local.expbox3 model "static/exp_crate3.tik" 
+		local.expbox3.origin = local.table.origin + ( local.cos3 local.sin3 52 )
+		local.expbox3.angles = local.table.angles + ( 0 90 0 )
+		local.expbox3 solid
+
+		local.pulsetrig = spawn trigger_use targetname ("bombsitetrig_" + level.bombsites)
+		local.pulsetrig model "animate/pulse_explosive.tik"
+		local.pulsetrig.origin = local.table.origin + ( local.cos6 local.sin6 52 )
+		local.pulsetrig.angles = local.table.angles + ( 0 -90 0 )
+		local.pulsetrig setsize ( -30 -30 -30 ) ( 30 30 30 )
+		local.pulsetrig notsolid
+		local.pulsetrig show
+		
+		if(level.changesides != 1) { local.pulsetrig.team = "axis"; local.pulsetrig light 1 0 0 125 }
+		if(level.changesides == 1) { local.pulsetrig.team = "allies"; local.pulsetrig light 0 0 1 125 }
+	}
+
+	if(level.newgametype == "cyb")
+	{
+		local.sin1 = (waitthread ubermode/math.scr::sine local.leftside) * 28
+		local.cos1 = (waitthread ubermode/math.scr::cosine local.leftside) * 28
+		local.sin2 = (waitthread ubermode/math.scr::sine local.table.angles[1]) * 5
+		local.cos2 = (waitthread ubermode/math.scr::cosine local.table.angles[1]) * 5
+		local.sin3 = (waitthread ubermode/math.scr::sine local.rightside) * 30
+		local.cos3 = (waitthread ubermode/math.scr::cosine local.rightside) * 30
+
+		local.sin6 = (waitthread ubermode/math.scr::sine local.table.angles[1]) * 17
+		local.cos6 = (waitthread ubermode/math.scr::cosine local.table.angles[1]) * 17
+		local.sin7 = (waitthread ubermode/math.scr::sine local.table.angles[1]) * -17   // multiply by negative or local.table.angles[1] + 180
+		local.cos7 = (waitthread ubermode/math.scr::cosine local.table.angles[1]) * -17 // gives the same sine & cosine numbers.
+
+		local.expbox1 = spawn script_model targetname ("expbox1_" + level.bombsites)
+		local.expbox1 model "animate/naxosradar.tik" 
+		local.expbox1.origin = local.table.origin + ( local.cos1 local.sin1 52 )
+		local.expbox1.angles = local.table.angles + ( 0 0 0 )
+		local.expbox1.scale = 1.3
+		local.expbox1 solid
+		local.expbox2 = spawn script_model targetname ("expbox2_" + level.bombsites)
+		local.expbox2 model "animate/military_radio.tik" 
+		local.expbox2.origin = local.table.origin + ( local.cos2 local.sin2 52 )
+		local.expbox2.angles = local.table.angles + ( 0 0 0 )
+		local.expbox2 solid
+		local.expbox3 = spawn script_model targetname ("expbox3_" + level.bombsites) // wire mesh ring
+		local.expbox3 model "animate/naxosantenna.tik" 
+		local.expbox3.origin = local.table.origin + ( local.cos3 local.sin3 52 )
+		local.expbox3.angles = local.table.angles + ( 0 0 0 )
+		local.expbox3.scale = 1.3
+		local.expbox3 solid
+
+		local.pulsetrig = spawn trigger_use targetname ("bombsitetrig_" + level.bombsites)
+		local.pulsetrig model "animate/pulse_radiobomb.tik"
+		local.pulsetrig.origin = local.table.origin + ( local.cos6 local.sin6 52 )
+		local.pulsetrig.angles = local.table.angles + ( 0 0 0 )
+		local.pulsetrig setsize ( -30 -30 -30 ) ( 30 30 30 )
+		local.pulsetrig notsolid
+		local.pulsetrig show
+		local.pulsetrig.team = local.team
+		local.pulsetrig.initteam = local.team
+		
+		if(local.team == "allies") { local.pulsetrig light 0 0 1 125 }
+		if(local.team == "axis") { local.pulsetrig light 1 0 0 125 }
+	}
+	local.backlid = spawn script_model targetname ("sitewall3_" + level.bombsites)
+	local.backlid model "static/cratelid1.tik"
+	local.backlid.origin = local.table.origin + ( local.cos7 local.sin7 20 )
+	local.backlid.angles = local.table.angles + ( -90 0 0 )
+	local.backlid.scale = 3.9
+	local.backlid notsolid
+
+	local.pulsetrig thread dummyavatar
+end
+
+bombsites_remove:
+
+	for(local.s = 1; local.s <= level.bombsites; local.s++)
+	{
+		$("bombsite_" + local.s) remove
+		$("sitewall1_" + local.s) remove
+		$("sitewall2_" + local.s) remove
+		$("expbox1_" + local.s) remove
+		$("expbox2_" + local.s) remove
+		$("expbox3_" + local.s) remove
+		$("bombsitetrig_" + local.s) remove
+		$("sitewall3_" + local.s) remove
+	}
+	level.bombsites = 0
+end
+
+//-----------------------------------------------------------------------------
+
+dummyavatar:
+
+	if(self.team == NIL) { wait 1 }
+	if(self == NULL || self.team == NIL) { end }
+
+	while(level.bombisdead == 1 || level.change_team_score == 1) { waitframe }
+
+	local.avatar = spawn func_beam
+	local.avatar.origin = self.origin + ( 0 0 30 )
+	local.avatar endpoint (local.avatar.origin + ( 0 0 13 ))
+	local.avatar minoffset 0.0
+	local.avatar maxoffset 0.0
+	local.avatar color ( 1 1 1 )
+	local.avatar scale 7.0
+	local.avatar life 0
+	if(self.team == "allies") { local.avatar shader ("textures/hud/allies_headicon") }
+	if(self.team == "axis") { local.avatar shader ("textures/hud/axis_headicon") }
+	local.avatar numsegments 1
+	local.avatar alpha 0.80
+	local.avatar activate
+
+	while(self != NULL)
+	{
+		if(level.bombisdead == 1) { local.avatar deactivate }
+		else { local.avatar activate }
+
+		if(self.team == "allies") { local.avatar shader ("textures/hud/allies_headicon") }
+		if(self.team == "axis") { local.avatar shader ("textures/hud/axis_headicon") }
+		waitframe
+	}
+	local.avatar remove
+end
+
+//-----------------------------------------------------------------------------
+
+bomb_planted local.i local.originallies local.originaxis local.origincentral local.team:
+
+	if(level.bomb_set == 1) { end }
+	level.bomb_set = 1
+	huddraw_string 207 ("Bomb Planted!")
+
+	if(local.team == "allies")
+	{
+		level.alliesplanted = 1
+		local.r = randomint(15)
+		if(local.r == 0) { $player playsound dfr_objective_o01 }
+		if(local.r == 1) { $player playsound dfr_objective_o02 }
+		if(local.r == 2) { $player playsound dfr_objective_o03 }
+		if(local.r == 3) { $player playsound dfr_objective_o04 }
+		if(local.r == 4) { $player playsound dfr_objective_o05 }
+		if(local.r == 5) { $player playsound dfr_objective_o06 }
+		if(local.r == 6) { $player playsound dfr_objective_o07 }
+		if(local.r == 7) { $player playsound dfr_objective_o08 }
+		if(local.r == 8) { $player playsound dfr_objective_o09 }
+		if(local.r == 9) { $player playsound dfr_objective_o10 }
+		if(local.r == 10) { $player playsound dfr_objective_o11 }
+		if(local.r == 11) { $player playsound dfr_objective_o12 }
+		if(local.r == 12) { $player playsound dfr_objective_o13 }
+		if(local.r == 13) { $player playsound dfr_objective_o14 }
+		if(local.r == 14) { $player playsound dfr_objective_o15 }
+	}	
+	if(local.team == "axis")
+	{
+		level.axisplanted = 1
+		local.r = randomint(11)
+		if(local.r == 0) { $player playsound den_objective_o01 }
+		if(local.r == 1) { $player playsound den_objective_o02 }
+		if(local.r == 2) { $player playsound den_objective_o03 }
+		if(local.r == 3) { $player playsound den_objective_o04 }
+		if(local.r == 4) { $player playsound den_objective_o05 }
+		if(local.r == 5) { $player playsound den_objective_o06 }
+		if(local.r == 6) { $player playsound den_objective_o07 }
+		if(local.r == 7) { $player playsound den_objective_o08 }
+		if(local.r == 8) { $player playsound den_objective_o09 }
+		if(local.r == 9) { $player playsound den_objective_o10 }
+		if(local.r == 10) { $player playsound den_objective_o11 }
+	}
+
+	$("bombsitetrig_" + local.i).norotate = 1
+	if(local.team == "allies") { exec ubermode/flickerrotate.scr $("bombsitetrig_" + local.i) ( 1 0 0 ) 125 18 18 0 1 }
+	if(local.team == "axis") { exec ubermode/flickerrotate.scr $("bombsitetrig_" + local.i) ( 0 0 1 ) 125 0 18 18 1 }
+
+	if(level.newgametype == "snd")
+	{
+
+		$("bombsitetrig_" + local.i).model = "animate/pulse_explosive_pickup.tik"
+		$("bombsitetrig_" + local.i) playsound plantedbomb
+		local.planttimer = 450
+	}
+	if(level.newgametype == "cyb")
+	{
+		$("bombsitetrig_" + local.i).model = "animate/pulse_radiobomb_pickup.tik"
+		$("bombsitetrig_" + local.i) playsound radiobombplant
+		local.planttimer = 450
+	}
+
+	thread bomb_defuse_check local.i local.team
+
+	$("bombsitetrig_" + local.i) loopsound bombticker	
+	while(local.planttimer >= 100 && level.bomb_set == 1) // count down until there's 10 seconds remaining.
+	{
+		wait 0.1
+		local.planttimer--
+	}
+	$("bombsitetrig_" + local.i) stoploopsound
+
+	if(level.bomb_set == 1)
+	{
+		$("bombsitetrig_" + local.i) loopsound finalbombticker // level.finalbombtick not needed, but could be used for other scripts.
+		level.finalbombtick = 1
+		huddraw_color 207 1.0 1.0 0.0
+	}
+
+	while(local.planttimer > 0 && level.bomb_set == 1) // count down the remaining 10 seconds.
+	{
+		wait 0.1
+		local.planttimer--
+	}
+	$("bombsitetrig_" + local.i) stoploopsound
+
+	if(level.bomb_set == 1) { thread blowup_bomb local.i local.team; end }
+	if(level.bomb_set != 1)
+	{
+		level.finalbombtick = 0
+		level.alliesplanted = 0
+ 		level.axisplanted = 0
+		if(level.newgametype == "snd") { $("bombsitetrig_" + local.i).model = "animate/pulse_explosive.tik" }
+		if(level.newgametype == "cyb") { $("bombsitetrig_" + local.i).model = "animate/pulse_radiobomb.tik" }
+		$("bombsitetrig_" + local.i).flickerremove = 1
+		
+		if(local.team == "allies" && level.round_starttime <= 0) // the bombsite's team = allies, the axis defused the bomb, so play an axis "bomb defused" dialog.
+		{
+			local.r = randomint(10)
+			if(local.r == 0) { $player playsound den_diffused_d01 }
+			if(local.r == 1) { $player playsound den_diffused_d02 }
+			if(local.r == 2) { $player playsound den_diffused_d03 }
+			if(local.r == 3) { $player playsound den_diffused_d04 }
+			if(local.r == 4) { $player playsound den_diffused_d05 }
+			if(local.r == 5) { $player playsound den_diffused_d06 }
+			if(local.r == 6) { $player playsound den_diffused_d07 }
+			if(local.r == 7) { $player playsound den_diffused_d08 }
+			if(local.r == 8) { $player playsound den_diffused_d09 }
+			if(local.r == 9) { $player playsound den_diffused_d10 }
+		}		
+		if(local.team == "axis" && level.round_starttime <= 0)
+		{
+			local.r = randomint(11)
+			if(local.r == 0) { $player playsound dfr_diffused_d01 }
+			if(local.r == 1) { $player playsound dfr_diffused_d02 }
+			if(local.r == 2) { $player playsound dfr_diffused_d03 }
+			if(local.r == 3) { $player playsound dfr_diffused_d04 }
+			if(local.r == 4) { $player playsound dfr_diffused_d05 }
+			if(local.r == 5) { $player playsound dfr_diffused_d06 }
+			if(local.r == 6) { $player playsound dfr_diffused_d07 }
+			if(local.r == 7) { $player playsound dfr_diffused_d08 }
+			if(local.r == 8) { $player playsound dfr_diffused_d09 }
+			if(local.r == 9) { $player playsound dfr_diffused_d10 }
+			if(local.r == 10) { $player playsound dfr_diffused_d11 }
+		}
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+bomb_defuse_check local.i local.team:
+
+   while(level.disable_defuse != 1)
+   {
+	for(local.c = 1; local.c <= $player.size; local.c++)
+	{
+		local.holdtime = 0
+		while($player[local.c] != NULL && $player[local.c].useheld == 1 && $player[local.c].dmteam != local.team && isalive $player[local.c] && $player[local.c].dead != 1 && $player[local.c] istouching $("bombsitetrig_" + local.i) && level.disable_defuse != 1)
+		{
+			if(level.newgametype == "snd" && local.holdtime <= 0) { $player[local.c].stoppingwatch = 0; $player[local.c] stopwatch 5 }    // hold for 5 seconds to defuse the bomb
+			if(level.newgametype == "cyb" && local.holdtime <= 0) { $player[local.c].stoppingwatch = 0; $player[local.c] stopwatch 1.5 }  // hold for 1.5 seconds to defuse the bomb
+
+			local.holdtime++
+			if(level.newgametype == "snd" && local.holdtime >= 50) 
+			{
+				level.allow_teams_to_win = 1
+				if($player[local.c].dmteam == "allies") { level.allies_defusedbomb = 1 }
+				if($player[local.c].dmteam == "axis") { level.axis_defusedbomb = 1 }
+				level.bomb_set = 0  
+				level.alliesplanted = 0
+ 				level.axisplanted = 0
+				huddraw_string 207 ("Bomb Defused."); huddraw_color 207 1.0 0.0 0.0
+				end
+			}
+			if(level.newgametype == "cyb" && local.holdtime >= 15) 
+			{
+				$player[local.c] thread doit $player[local.c].origin $player[local.c].origin $player[local.c].origin // give the cyber attack bomb back to the player who defused it.
+				level.bomb_set = 0
+				level.alliesplanted = 0
+ 				level.axisplanted = 0
+				huddraw_string 207 ("Find & Plant Bomb"); huddraw_color 207 1.0 1.0 1.0
+				end
+			}
+			wait 0.1
+		}
+		if($player[local.c] != NULL && $player[local.c].useheld != 1 && $player[local.c].stoppingwatch != 1) { $player[local.c] stopwatch 0; $player[local.c].stoppingwatch = 1 }
+	}
+   waitframe
+   }
+end
+
+//-----------------------------------------------------------------------------
+
+blowup_bomb local.i local.team:
+
+	level.disable_defuse = 1
+
+	local.r = ((randomint(20) + 1.0000) / 10.0000) 	// make sure at least one variable has enough significant figures (decimal places),
+							// otherwise the game will round to the nearest integer.
+	if(level.bombcamera == 1) { thread camera local.i local.r }
+	wait local.r
+
+	$("bombsitetrig_" + local.i).flickerremove = 1
+	level.bombisdead = 1 
+	huddraw_string 207 ("Target Destroyed."); huddraw_color 207 1.0 0.0 0.0
+
+	local.expboxfire1 = spawn script_model
+	local.expboxfire1.origin = $("expbox1_" + local.i).origin //+ ( 0 5 0 )
+	local.expboxfire1.angles = ( 0 270 0 )
+	local.expboxfire1 notsolid
+	local.expboxfire2 = spawn script_model
+	local.expboxfire2.origin = $("expbox2_" + local.i).origin //+ ( 0 5 0 )
+	local.expboxfire2.angles = ( 0 270 0 )
+	local.expboxfire2 notsolid
+	local.expboxfire3 = spawn script_model targetname "expboxfire3" // tnt box or wire mesh ring
+	local.expboxfire3.origin = $("expbox3_" + local.i).origin //+ ( 0 5 0 )
+	local.expboxfire3.angles = ( 0 270 0 )
+	local.expboxfire3 notsolid
+
+	if(level.newgametype == "snd")
+	{
+		local.expboxfire1 model "emitters/fireandsmoke.tik"
+		local.expboxfire2 model "emitters/firefill.tik"
+		local.expboxfire3 model "emitters/fireandsmoke.tik"
+		local.expboxfire1.scale = 0.35
+		local.expboxfire2.scale = 0.4
+		local.expboxfire3.scale = 0.35
+
+		$("expbox1_" + local.i).model = "static/exp_crate1a.tik" 
+		$("expbox2_" + local.i).model = "static/exp_crate2a.tik" 
+		$("expbox3_" + local.i).model = "static/exp_crate3a.tik" 
+	}
+	if(level.newgametype == "cyb")
+	{
+		local.expboxfire1 model "emitters/adamspark.tik"
+		local.expboxfire2 model "emitters/electric_arc.tik"
+		local.expboxfire3 model "emitters/adamspark.tik"
+		local.expboxfire1.scale = 0.75
+		local.expboxfire2.scale = 1
+		local.expboxfire3.scale = 0.75
+
+		$("expbox1_" + local.i).model = "animate/naxosradar_d.tik" 
+		$("expbox3_" + local.i).model = "animate/naxosantenna_d.tik" 
+	}
+	$("bombsitetrig_" + local.i).model = "" // this also turns off the light
+
+	local.damageorigin1 = $("expbox1_" + local.i).origin + ( 0 0 25 )
+	local.damageorigin2 = $("expbox3_" + local.i).origin + ( 0 0 25 )
+
+	local.explode1 = spawn script_model
+	local.explode1.origin = $("bombsitetrig_" + local.i).origin - ( 0 0 52 )
+	local.explode1 model "animate//fx_mortar_higgins.tik"
+	local.explode1 notsolid
+	local.explode1.scale = 0.6
+
+	local.explode2 = spawn script_model
+	local.explode2.origin = $("bombsitetrig_" + local.i).origin - ( 0 0 52 )
+	local.explode2 model "emitters/explosion_mine.tik" // this has its own explosion sound. // "animate/fx_mortar_dirt.tik"
+	local.explode2 notsolid
+	local.explode2.scale = 1	
+
+	local.explode3 = spawn script_model
+	local.explode3 model "fx/fx_truck_explosion.tik"
+	local.explode3.origin = $("bombsitetrig_" + local.i).origin
+	local.explode3 notsolid
+	local.explode3.scale = 1
+	local.explode3 anim aaaa
+
+	local.r = randomint(4)
+	if(local.r == 0) { $("bombsitetrig_" + local.i) playsound explode_building_large1 }
+	if(local.r == 1) { $("bombsitetrig_" + local.i) playsound explode_building_large2 }
+	if(local.r == 2) { $("bombsitetrig_" + local.i) playsound explode_building_large3 }
+	if(local.r == 3) { $("bombsitetrig_" + local.i) playsound explode_building_large4 }
+
+	radiusdamage local.damageorigin1 1000 600
+	radiusdamage local.damageorigin2 1000 600
+	thread jitter_large 0
+
+	waitframe
+	local.explode1 anim start
+	local.explode2 anim start
+	local.explode3 anim idle	
+
+	wait 3
+
+	level.allow_teams_to_win = 1
+	if(local.team == "allies") { level.allies_blewupbomb = 1 }
+	if(local.team == "axis") { level.axis_blewupbomb = 1 }
+
+	wait 3
+
+	if(level.newgametype == "snd")
+	{
+		$("expbox1_" + local.i).model = "static/exp_crate1.tik" 
+		$("expbox2_" + local.i).model = "static/exp_crate2.tik" 
+		$("expbox3_" + local.i).model = "static/exp_crate3.tik" 
+		$("bombsitetrig_" + local.i).model = "animate/pulse_explosive.tik" 
+	}
+	if(level.newgametype == "cyb")
+	{
+		$("expbox1_" + local.i).model = "animate/naxosradar.tik" 
+		$("expbox3_" + local.i).model = "animate/naxosantenna.tik" 
+		$("bombsitetrig_" + local.i).model = "animate/pulse_radiobomb.tik" 
+	}
+	local.expboxfire1 remove
+	local.expboxfire2 remove
+	local.expboxfire3 remove
+	local.explode1 remove
+	local.explode2 remove
+	local.explode3 remove
+end
+
+//-----------------------------------------------------------------------------
+
+camera local.i local.r:
+
+	local.sin = (waitthread ubermode/math.scr::sine $("bombsite_" + local.i).angles[1]) * level.cameradistance
+	local.cos = (waitthread ubermode/math.scr::cosine $("bombsite_" + local.i).angles[1]) * level.cameradistance
+
+	fadein 0.5 0 0 0 1
+	wait 0.1
+	local.camera = spawn func_camera
+	local.camera.origin = $("bombsitetrig_" + local.i).origin + ( local.cos local.sin 55 )
+	local.camera.angles = $("bombsite_" + local.i).angles + ( 20 180 0 )
+	local.camera targetname bombcam
+
+	if($player != NULL)
+	{
+		drawhud 0
+		freezeplayer
+		$player nodamage
+		$player hide
+	}
+	cuecamera $bombcam
+	for(local.i = 1; local.i <= $player.size; local.i++)
+	{
+		$player[local.i].temp_cuecamera_origin = $player[local.i].origin
+
+		if($player[local.i].dog != NIL && $player[local.i].dog != NULL) { $player[local.i].dog hide } 	// without first classifying ".dog" as an object, the game assumes it's a variable that doesn't exist.
+	}									   				// therefore check for NIL first, before checking for NULL.
+	if($player != NULL) { $player tele local.camera.origin }
+
+	wait (6.0000 + local.r)
+	local.camera remove
+	if($player != NULL)
+	{
+		releaseplayer
+		$player takedamage
+		$player show
+		drawhud 1
+	}
+	for(local.i = 1; local.i <= $player.size; local.i++)
+	{
+		$player[local.i] tele $player[local.i].temp_cuecamera_origin
+		$player[local.i].temp_cuecamera_origin = NIL
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+jitter_large local.time:
+
+	if(local.time > 0 && local.time != NIL) { wait local.time }
+
+	waitexec global/earthquake.scr .35 10 0 0 // from MOHAA's original obj/obj_team1.scr
+	waitexec global/earthquake.scr .23 6 0 0
+	waitexec global/earthquake.scr 1 1 0 0
+	waitexec global/earthquake.scr 1.25 .3 0 1
+end
+
+//-----------------------------------------------------------------------------
+
+players_meltlaser: // for Freeze Tag only
+
+	while($player.size < 1) { wait 1 }
+	while($player.size >= 1)
+	{
+		for(local.i = 1; local.i <= $player.size; local.i++)
+		{
+			if($player[local.i].ft_laser != 1)
+			{	
+				$player[local.i].ft_laser = 1
+				$player[local.i] thread spawn_meltlaser
+			}
+		}
+		wait 1
+	}
+	thread players_meltlaser
+end
+
+spawn_meltlaser:
+
+	local.laser = spawn func_beam targetname "lasermelterbeam"
+	local.laser minoffset 0.0
+	local.laser maxoffset 0.0
+	local.laser numsegments 1
+	local.laser life 0
+	local.laser color ( 1 1 1 )
+	local.laser alpha 0.4
+	local.laser alwaysdraw
+	local.laser deactivate
+	local.laser scale 0.5
+	local.laser setsize ( -50 -50 -50 ) ( 50 50 50 )
+	local.laser notsolid
+
+	local.groundtarget = spawn script_model
+	local.groundtarget model "static/jug.tik" // need a model for script_models to do "loopsound".
+	local.groundtarget setsize ( -1 -1 -1 ) ( 1 1 1 )
+	local.groundtarget notsolid
+	local.groundtarget.scale = 0.01 // don't use "hide", otherwise loopsound will not work.
+	self.melter = local.groundtarget // using the groundtarget script_model for "istouching" frozen body, instead of the laser itself.
+
+	local.holdcount = 0
+	while(self != NULL)
+	{
+		local.laser endpoint local.groundtarget.origin
+		local.laser deactivate
+		local.fwd_vec = angles_toforward self.viewangles
+		local.laser.origin = self gettagposition "Bip01 Head"
+		local.range = 10240
+		local.groundtarget light 0 0 0 0
+
+		if(local.holdcount >= 10) // briefly make all players notsolid & all frozen bodies solid, trace the laser, then return players & frozen bodies back to normal (before any wait times).
+		{
+			$player notsolid
+			if($frozenplayerent != NULL) { $frozenplayerent solid; $frozenplayerent setsize ( -20 -20 0 ) ( 20 20 100 ) }
+		}
+		local.groundtarget.origin = trace (local.laser.origin + local.fwd_vec * 1) (local.laser.origin + local.fwd_vec * local.range) 0
+		if(local.holdcount >= 10)
+		{
+			if($frozenplayerent != NULL) { $frozenplayerent notsolid; $frozenplayerent setsize ( 0 0 0 ) ( 0 0 0 ) }
+			for(local.i = 1; local.i <= $player.size; local.i++)
+			{
+				if(isalive $player[local.i] && $player[local.i].dmteam != "spectator" && $player[local.i].dead != 1) { $player[local.i] solid }
+			}
+		}
+
+		if(self.loopingsound == 1) { self stoploopsound; local.groundtarget stoploopsound } // only run loopsounds and stoploopsounds once, instead of spamming them.
+		self.loopingsound = 0
+
+		if(!isalive self || self.useheld != 1 || self.dead == 1 || self.dmteam == "spectator" || level.round_starttime > 0) { local.holdcount = 0 }
+
+		if(local.holdcount >= 10 && isalive self && self.useheld == 1 && self.dead != 1 && self.dmteam != "spectator" && level.round_starttime <= 0)
+		{
+			if(level.meltlaser == 1) { local.laser activate } // all players have an invisible laser by default, unless level.meltlaser = 1
+
+			if(self.lasermelting != 1) // not melting yet
+			{
+				if(self.dmteam == "allies")
+				{
+					if(self.loopingsound != 1) { self loopsound m2l3machineloop; local.groundtarget loopsound m2l3machineloop }
+					self.loopingsound = 1
+					local.groundtarget light 0 0 1 100
+					if(level.meltlaser == 1) { local.laser color ( 0 0 1 ) }
+				}
+				if(self.dmteam == "axis")
+				{
+					if(self.loopingsound != 1) { self loopsound m2l3radio1; local.groundtarget loopsound m2l3radio1 }
+					self.loopingsound = 1
+					local.groundtarget light 1 0 0 100
+					if(level.meltlaser == 1) { local.laser color ( 1 0 0 ) }
+				}
+			}
+			if(self.lasermelting == 1) // melting a player, change colors & loopsound
+			{
+				if(self.loopingsound != 1) { self loopsound weldingtorch; local.groundtarget loopsound weldingtorch }
+				self.loopingsound = 1
+				local.groundtarget light 0 0 0 0
+				if(self.dmteam == "allies")
+				{
+					//local.groundtarget light 0 1 1 100 // light is added in "frozen_player" thread
+					if(level.meltlaser == 1) { local.laser color ( 0 1 1 ) }
+				}
+				if(self.dmteam == "axis")
+				{
+					//local.groundtarget light 1 1 0 100
+					if(level.meltlaser == 1) { local.laser color ( 1 1 0 ) }
+				}
+			}
+		}
+		local.holdcount++
+		waitframe
+	}
+	local.laser remove
+	local.groundtarget remove
+end
+
+//-----------------------------------------------------------------------------
+
+addscore local.teamwinner:
+
+	waitframe
+	level.disable_defuse = 1
+
+	if(level.allies_total.size <= 0 || level.axis_total.size <= 0) { thread ubermode/messagetrig_print.scr::message "*** Nobody on other team, no point awarded! ***" 3; end }
+
+	if(local.teamwinner == "draw") { thread ubermode/messagetrig_print.scr::message "*** Draw! No team points awarded. ***" 3 }
+
+	if((local.teamwinner == "allies" && (level.allies_count.size > 0 || level.alliesplanted == 1)) || level.allies_blewupbomb == 1) 
+	{	
+		if(level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1) // in search and destroy if a team defused the bomb, ignore these dialogs since the victory "bomb defused" dialogs are in bomb_planted thread.
+		{
+			local.r = randomint(11)
+			if(local.r == 0) { $player playsound dfr_victory_v01 }
+			if(local.r == 1) { $player playsound dfr_victory_v02 }
+			if(local.r == 2) { $player playsound dfr_victory_v03 }
+			if(local.r == 3) { $player playsound dfr_victory_v04 }
+			if(local.r == 4) { $player playsound dfr_victory_v05 }
+			if(local.r == 5) { $player playsound dfr_victory_v06 }
+			if(local.r == 6) { $player playsound dfr_victory_v07 }
+			if(local.r == 7) { $player playsound dfr_victory_v08 }
+			if(local.r == 8) { $player playsound dfr_victory_v09 }
+			if(local.r == 9) { $player playsound dfr_victory_v10 }
+			if(local.r == 10) { $player playsound dfr_victory_v11 }
+		}
+
+		thread ubermode/messagetrig_print.scr::message "*** Allies win this round! ***" 3
+
+		while(level.change_team_score != 1) { wait 0.1 } // wait for frozen players to die and wait for lasers to disappear.
+		waitframe
+		level.POINTS[allies]++
+	}	
+	if((local.teamwinner == "axis" && (level.axis_count.size > 0 || level.axisplanted == 1)) || level.axis_blewupbomb == 1)
+	{	
+		if(level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1)
+		{
+			local.r = randomint(17)
+			if(local.r == 0) { $player playsound den_victory_v01 }
+			if(local.r == 1) { $player playsound den_victory_v02 }
+			if(local.r == 2) { $player playsound den_victory_v03 }
+			if(local.r == 3) { $player playsound den_victory_v04 }
+			if(local.r == 4) { $player playsound den_victory_v05 }
+			if(local.r == 5) { $player playsound den_victory_v06 }
+			if(local.r == 6) { $player playsound den_victory_v07 }
+			if(local.r == 7) { $player playsound den_victory_v08 }
+			if(local.r == 8) { $player playsound den_victory_v09 }
+			if(local.r == 9) { $player playsound den_victory_v10 }
+			if(local.r == 10) { $player playsound den_victory_v11 }
+			if(local.r == 11) { $player playsound den_victory_v12 }
+			if(local.r == 12) { $player playsound den_victory_v13 }
+			if(local.r == 13) { $player playsound den_victory_v14 }
+			if(local.r == 14) { $player playsound den_victory_v15 }
+			if(local.r == 15) { $player playsound den_victory_v16 }
+			if(local.r == 16) { $player playsound den_victory_v17 }
+		}
+
+		thread ubermode/messagetrig_print.scr::message "*** Axis win this round! ***" 3
+
+		while(level.change_team_score != 1) { waitframe } // wait for frozen players to die and wait for lasers to disappear.
+		waitframe
+		level.POINTS[axis]++
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+scores:
+
+	level.POINTS[allies] = 0
+	level.POINTS[axis] = 0
+	level.POINTS[total] = 0
+
+	while(1)
+	{
+		local.pointstotal = level.POINTS[total]
+		level.POINTS[total] = level.POINTS[allies] + level.POINTS[axis]
+
+		if(level.POINTS[total] != local.pointstotal) // this runs only once, after the total points have changed.
+		{
+			if(level.newgametype != "ft" && (level.POINTS[total] % 3) == 0) // every 3 rounds, switch sides
+			{
+				if(level.keepsamesides != 1) { level.changesides++ }
+				if(level.changesides >= 2) { level.changesides = 0 }
+				thread ubermode/messagetrig_print.scr::message "*** Bombsites are switching sides. ***" 3
+				iprintlnbold("*** Bombsites are switching sides. ***")
+			}
+			huddraw_string 202 ("Allies: " + level.POINTS[allies])
+			huddraw_string 204 ("Axis: " + level.POINTS[axis])
+		}
+
+		if(level.bombsites != NIL && level.bombsites > 0)
+		{
+  			for(local.b = 1; local.b <= level.bombsites; local.b++) // this changes the bombsites' team defenders, and changes the bombsites' and bombexplosive's lights (needed these lights in a continuous while-loop, such as in "scores" thread,
+  			{							// since having them changed with one code line in other threads wasn't working).
+				if(level.newgametype == "snd")
+				{
+					if(level.changesides != 1 && $("bombsitetrig_" + local.b) != NULL) 
+					{
+						$("bombsitetrig_" + local.b).team = "axis"; $("bombsitetrig_" + local.b) light 1 0 0 125
+						if($bombexplosive != NULL) { $bombexplosive light 0 0 1 125 }
+					}
+					if(level.changesides == 1 && $("bombsitetrig_" + local.b) != NULL) 
+					{
+						$("bombsitetrig_" + local.b).team = "allies"; $("bombsitetrig_" + local.b) light 0 0 1 125
+						if($bombexplosive != NULL) { $bombexplosive light 1 0 0 125 }
+					}
+				}
+				
+				if(level.newgametype == "cyb")
+				{
+					if(level.changesides != 1 && $("bombsitetrig_" + local.b) != NULL) 
+					{
+						if($("bombsitetrig_" + local.b).initteam == "allies") {	$("bombsitetrig_" + local.b).team = "allies"; $("bombsitetrig_" + local.b) light 0 0 1 125 }
+						if($("bombsitetrig_" + local.b).initteam == "axis") {	$("bombsitetrig_" + local.b).team = "axis"; $("bombsitetrig_" + local.b) light 1 0 0 125 }
+					}
+					if(level.changesides == 1 && $("bombsitetrig_" + local.b) != NULL)
+					{
+						if($("bombsitetrig_" + local.b).initteam == "allies") {	$("bombsitetrig_" + local.b).team = "axis"; $("bombsitetrig_" + local.b) light 1 0 0 125 }
+						if($("bombsitetrig_" + local.b).initteam == "axis") {	$("bombsitetrig_" + local.b).team = "allies"; $("bombsitetrig_" + local.b) light 0 0 1 125 }
+					}
+				}
+  			}
+		}
+
+		if(level.POINTS[allies] >= level.rounds_towin || level.POINTS[axis] >= level.rounds_towin) // end the game
+		{
+			if(level.VP_scriptmaster == 1) { exec ubermode/victory_podium.scr::map_ended $victory_podium[1].origin $victory_podium[1].angle 5 } 
+			else { setcvar "timelimit" "1" }
+		}
+		
+		level.round_starttime = level.round_starttime - 0.1
+		if(level.round_starttime <= 0) { level.round_starttime = 0 }
+		wait 0.1
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+new_player_hud:
+
+	while($player.size < 1) { wait 1 }
+	while($player.size >= 1)
+	{
+		for(local.i = 1; local.i <= $player.size; local.i++)
+		{
+			if($player[local.i].HUDcybsnd != 1 && $player[local.i] getconnstate != 1)
+			{
+				$player[local.i] thread huddraw
+				$player[local.i] thread huddraw_players
+				$player[local.i].HUDcybsnd = 1
+			}
+			if($player[local.i] getconnstate == 1) { $player[local.i].HUDcybsnd = 0 }
+		}
+		wait 3
+	}
+	thread new_player_hud
+end
+
+huddraw: // using huddraw_ in a server must not be continuously called in a loop. minimize calling them as much as possible (avoid CGM buffer is full for client [player]).
+
+	waitframe
+	huddraw_align  206 right top
+	huddraw_alpha  206 1.0
+	huddraw_font   206 "facfont-20"
+	huddraw_rect   206 -171 66 50 14
+	if(level.newgametype == "cyb") { huddraw_string 206 ("= Cyber Attack = ") }
+	if(level.newgametype == "snd") { huddraw_string 206 ("= Search & Destroy = ") }
+	if(level.newgametype == "ft") { huddraw_string 206 ("= Freeze Tag = ") }
+
+	huddraw_shader 205 ("textures/hud/allies")
+	huddraw_align  205 right top
+	huddraw_alpha  205 1.0
+	huddraw_rect   205 -175 88 15 15
+
+	huddraw_align  202 right top // allies points
+	huddraw_alpha  202 1.0
+	huddraw_font   202 "facfont-20"
+	huddraw_rect   202 -155 88 50 14
+	huddraw_color  202 1.0 1.0 1.0
+	huddraw_string 202 ("Allies: " + level.POINTS[allies])
+
+	huddraw_shader 203 ("textures/hud/axis")
+	huddraw_align  203 right top
+	huddraw_alpha  203 1.0
+	huddraw_rect   203 -175 110 15 15
+	
+	huddraw_align  204 right top // axis points
+	huddraw_alpha  204 1.0
+	huddraw_font   204 "facfont-20"
+	huddraw_rect   204 -155 110 50 14
+	huddraw_color  204 1.0 1.0 1.0
+	huddraw_string 204 ("Axis: " + level.POINTS[axis])
+
+	huddraw_align  207 right top // time until round begins
+	huddraw_alpha  207 1.0
+	huddraw_font   207 "facfont-20"
+	huddraw_rect   207 -171 132 50 14
+
+	if(level.round_starttime > 0) 
+	{
+		huddraw_string 207 ("Round Starting Shortly..."); huddraw_color 207 1.0 1.0 1.0
+	}
+	if(level.round_starttime <= 0 && level.bomb_set != 1 && level.finalbombtick != 1 && level.bombisdead != 1 && level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1)
+	{
+		if(level.newgametype == "cyb") { huddraw_string 207 ("Find & Plant Bomb") }
+		if(level.newgametype == "snd" && level.changesides != 1) { huddraw_string 207 ("Plant Team: Allies") }
+		if(level.newgametype == "snd" && level.changesides == 1) { huddraw_string 207 ("Plant Team: Axis") }
+  		if(level.newgametype == "ft") { huddraw_string 207 ("Kill All Enemy Players") }
+		huddraw_color 207 1.0 1.0 1.0
+	}
+	if(level.bomb_set == 1 && level.finalbombtick != 1 && level.bombisdead != 1 && level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1) 
+	{
+		huddraw_string 207 ("Bomb Planted!"); huddraw_color 207 1.0 1.0 1.0 // white
+	}
+	if(level.bomb_set != 1 && level.finalbombtick == 1 && level.bombisdead != 1 && level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1)
+	{
+		huddraw_string 207 ("Bomb Planted!"); huddraw_color 207 1.0 1.0 0.0 // yellow
+	}
+	if(level.bomb_set != 1 && level.finalbombtick != 1 && level.bombisdead == 1 && level.allies_defusedbomb != 1 && level.axis_defusedbomb != 1)
+	{
+		huddraw_string 207 ("Target Destroyed."); huddraw_color 207 1.0 0.0 0.0
+	}
+	if(level.bomb_set != 1 && level.finalbombtick != 1 && level.bombisdead != 1 && (level.allies_defusedbomb == 1 || level.axis_defusedbomb == 1)) 
+	{
+		huddraw_string 207 ("Bomb Defused."); huddraw_color 207 1.0 0.0 0.0
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+huddraw_players:
+
+	waitframe
+	huddraw_shader 208 ("textures/hud/allies")
+	huddraw_align  208 left bottom
+	huddraw_alpha  208 1.0
+	huddraw_rect   208 12 -148 25 25
+
+	huddraw_align  209 left bottom
+	huddraw_alpha  209 1.0
+	huddraw_font   209 "facfont-20"
+	huddraw_rect   209 46 -143 55 19
+	huddraw_color  209 1.0 1.0 1.0
+	huddraw_string 209 (level.allies_count.size + " / " + level.allies_total.size)
+
+	huddraw_shader 210 ("textures/hud/axis")
+	huddraw_align  210 left bottom
+	huddraw_alpha  210 1.0
+	huddraw_rect   210 12 -118 25 25
+	
+	huddraw_align  211 left bottom // axis points
+	huddraw_alpha  211 1.0
+	huddraw_font   211 "facfont-20"
+	huddraw_rect   211 46 -113 55 19
+	huddraw_color  211 1.0 1.0 1.0
+	huddraw_string 211 (level.axis_count.size + " / " + level.axis_total.size)
+end
+
+players_hud:
+
+	local.allies_count = level.allies_count.size
+	local.axis_count = level.axis_count.size
+	local.allies_total = level.allies_total.size
+	local.axis_total = level.axis_total.size
+
+	while(1)
+	{
+		if(level.allies_count.size != local.allies_count || level.allies_total.size != local.allies_total)
+		{
+			huddraw_string 209 (level.allies_count.size + " / " + level.allies_total.size)
+			thread players_hud_color allies local.allies_count local.allies_total
+		}
+		if(level.axis_count.size != local.axis_count || level.axis_total.size != local.axis_total)
+		{
+			huddraw_string 211 (level.axis_count.size + " / " + level.axis_total.size)
+			thread players_hud_color axis local.axis_count local.axis_total
+		}
+
+		local.allies_count = level.allies_count.size
+		local.axis_count = level.axis_count.size
+		local.allies_total = level.allies_total.size
+		local.axis_total = level.axis_total.size
+		waitframe
+	}
+end
+
+players_hud_color local.team local.count local.total:
+
+	if(level.change_team_score == 1 || local.total == 0) { end }
+
+	if(local.team == "allies")
+	{
+		local.num = 209
+		if(level.allies_count.size < local.count) { huddraw_color local.num 0.4 0.4 1.0; local.color = blue }
+		if(level.allies_count.size > local.count) { huddraw_color local.num 0.4 1.0 1.0; local.color = teal }
+	}
+	if(local.team == "axis")
+	{
+		local.num = 211
+		if(level.axis_count.size < local.count) { huddraw_color local.num 1.0 0.4 0.4; local.color = red }
+		if(level.axis_count.size > local.count) { huddraw_color local.num 1.0 1.0 0.4; local.color = yellow }
+	}
+
+	local.allies_count = level.allies_count.size
+	local.axis_count = level.axis_count.size
+	local.allies_total = level.allies_total.size
+	local.axis_total = level.axis_total.size
+
+	local.c = 0
+	while(1)
+	{
+		if(local.team == "allies" && (level.allies_count.size != local.allies_count || level.allies_total.size != local.allies_total)) { end }
+		if(local.team == "axis" && (level.axis_count.size != local.axis_count || level.axis_total.size != local.axis_total)) { end }
+
+		local.c++
+		if(local.c == 1)
+		{
+			if(local.color == blue) { huddraw_rect 208 	16 -143 16 16 } // 12 -148: X + 4, Y + 5
+			if(local.color == teal) { huddraw_rect 208 	8 -153 34 34 } // 12 -148: X - 4, Y - 5
+			if(local.color == red) { huddraw_rect 210 	16 -113 16 16 } // 12 -118: X + 4, Y + 5
+			if(local.color == yellow) { huddraw_rect 210 	8 -123 34 34 } // 12 -118: X - 4, Y - 5
+		}
+
+		if(local.c == 3)
+		{
+			if(local.color == blue) { huddraw_rect 208 	14 -145 19 19 }
+			if(local.color == teal) { huddraw_rect 208 	10 -151 31 31 }
+			if(local.color == red) { huddraw_rect 210 	14 -115 19 19 }
+			if(local.color == yellow) { huddraw_rect 210 	10 -121 31 31 }
+		}
+		if(local.c == 5)
+		{
+			if(local.color == blue) { huddraw_rect 208 	13 -147 22 22 }
+			if(local.color == teal) { huddraw_rect 208 	11 -149 28 28 }
+			if(local.color == red) { huddraw_rect 210 	13 -117 22 22 }
+			if(local.color == yellow) { huddraw_rect 210 	11 -119 28 28 }
+		}
+		if(local.c == 7)
+		{
+			if(local.color == blue) { huddraw_rect 208 	12 -148 25 25 }
+			if(local.color == teal) { huddraw_rect 208 	12 -148 25 25 }
+			if(local.color == red) { huddraw_rect 210 	12 -118 25 25 }
+			if(local.color == yellow) { huddraw_rect 210 	12 -118 25 25 }
+		}
+
+		if(local.c >= 40) { huddraw_color local.num 1.0 1.0 1.0; end }
+		waitframe
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+initialize:
+
+  level.deathanims[0] = "death_fall_to_knees"
+  level.deathanims[1] = "death_fall_back"
+  level.deathanims[2] = "death_chest"
+  level.deathanims[3] = "death_choke"
+  level.deathanims[4] = "death_crotch"
+  level.deathanims[5] = "death_headpistol"
+  level.deathanims[6] = "death_frontchoke"
+  level.deathanims[7] = "death_twist"
+  level.deathanims[8] = "death_collapse"
+  level.deathanims[9] = "death_shoot"
+
+  level.mapname = getcvar "mapname"
+  local.master = spawn ScriptMaster
+
+  if(level.scriptmaster[bombticker] != 1) { local.master aliascache bombticker sound/items/Item_Timer_01.wav soundparms .7 0 1 0 10000 10000 auto loaded maps level.mapname }
+  if(level.scriptmaster[finalbombticker] != 1) { local.master aliascache finalbombticker sound/items/final_countdown.wav soundparms .7 0 1 0 10000 10000 auto loaded maps level.mapname }
+
+  if(level.scriptmaster[radiobomb_walkie] != 1) { local.master aliascache radiobombplant sound/items/RadioBomb.wav soundparms 1 .2 .9 .1 100 2000 item loaded maps level.mapname }
+  if(level.scriptmaster[plantedbomb] != 1) { local.master aliascache plantedbomb sound/items/Item_BangaloreAssemble_01.wav soundparms 1 0 1 0 100 2000 item loaded maps level.mapname }
+
+  if(level.scriptmaster[led_trap] != 1 && level.scriptmaster[radiobomb_walkie] != 1)
+  {
+  	local.master aliascache ledpickup1 sound/items/Item_Bangaloredirt01.WAV soundparms 1.5 .2 .8 .4 250 1000 weapon loaded maps level.mapname
+  	local.master aliascache ledpickup2 sound/items/Item_Bangaloredirt02.WAV soundparms 1.5 .2 .8 .4 250 1000 weapon loaded maps level.mapname
+  }
+
+  if(level.scriptmaster[explode_building_large] != 1)
+  {
+  	if(level.mapname != "m5l1a" && level.mapname != "m5l1b" && level.mapname != "m5l2a" && level.mapname != "m5l2b" && level.mapname != "m5l3")
+	{
+		if(level.mapname != "m1l2b")
+		{
+			local.master aliascache explode_building_large1 sound/weapons/explo/Explo_StoneLarge1.wav soundparms 1.2 .2 .8 .4 2000 8000 auto loaded maps level.mapname
+		}
+  		local.master aliascache explode_building_large2 sound/weapons/explo/Explo_StoneLarge2.wav soundparms 1.2 .2 .8 .4 2000 8000 auto loaded maps level.mapname
+	}
+	if(level.scriptmaster[truck_sounds] != 1)
+	{
+  		local.master aliascache explode_building_large3 sound/weapons/explo/Explo_MetalMed1.wav soundparms 1.2 .2 .8 .4 2000 8000 auto loaded maps level.mapname
+  		local.master aliascache explode_building_large4 sound/weapons/explo/Explo_MetalMed4.wav soundparms 1.2 .2 .8 .4 2000 8000 auto loaded maps level.mapname
+	}
+  }
+
+  if(level.newgametype == "ft")
+  {
+	if(level.scriptmaster[detonator_switch] != 1 && level.scriptmaster[weldingtorch] != 1)
+	{
+		local.master aliascache weldingtorch sound/mechanics/WeldingTorch.wav soundparms 1 0 1 0 100 1000 item loaded maps level.mapname
+	}
+	local.master aliascache m2l3radio1 sound/mechanics/Mec_RadioLoop_04.wav soundparms 1 0 1 0 100 1000 auto loaded maps level.mapname
+	local.master aliascache m2l3machineloop sound/amb/Amb_MachineLoop_04.wav soundparms 1 0 1 0 100 1000 auto loaded maps level.mapname
+  }
+
+if(level.mapname[2] != "/" && level.mapname[3] != "/")  // ERROR: Expecting streamed or loaded in ubersound and got 'ScriptThread' on alias [alias]; class is not a valid channel on [alias]
+{							// errors will appear if using "local" instead of "auto" parameter.
+	// allies
+	local.master alias dfr_victory_v01 sound/dialogue/Multiplayer/a/AMdfr_v_01a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias dfr_victory_v02 sound/dialogue/Multiplayer/a/AMdfr_v_01h.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias dfr_victory_v03 sound/dialogue/Multiplayer/a/AMdfr_v_01j.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias dfr_victory_v04 sound/dialogue/Multiplayer/a/AMdfr_v_02a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias dfr_victory_v05 sound/dialogue/Multiplayer/a/AMdfr_v_02j.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias dfr_victory_v06 sound/dialogue/Multiplayer/a/AMdfr_v_03a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias dfr_victory_v07 sound/dialogue/Multiplayer/a/AMdfr_v_03h.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias dfr_victory_v08 sound/dialogue/Multiplayer/a/AMdfr_v_03j.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias dfr_victory_v09 sound/dialogue/Multiplayer/a/AMdfr_v_04h.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias dfr_victory_v10 sound/dialogue/Multiplayer/a/AMdfr_v_04j.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias dfr_victory_v11 sound/dialogue/Multiplayer/a/AMdfr_v_06h.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Your parents would be proud." maps level.mapname
+
+	local.master alias dfr_objective_o01 sound/dialogue/Multiplayer/a/AMdfr_o_04a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The bomb is in position." maps level.mapname
+	local.master alias dfr_objective_o02 sound/dialogue/Multiplayer/a/AMdfr_o_04h.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The bomb is in position." maps level.mapname
+	local.master alias dfr_objective_o03 sound/dialogue/Multiplayer/a/AMdfr_o_04j.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The bomb is in position." maps level.mapname
+	local.master alias dfr_objective_o04 sound/dialogue/Multiplayer/a/AMdfr_o_05a.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias dfr_objective_o05 sound/dialogue/Multiplayer/a/AMdfr_o_05h.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias dfr_objective_o06 sound/dialogue/Multiplayer/a/AMdfr_o_05j.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias dfr_objective_o07 sound/dialogue/Multiplayer/a/AMdfr_o_06a.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias dfr_objective_o08 sound/dialogue/Multiplayer/a/AMdfr_o_06h.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias dfr_objective_o09 sound/dialogue/Multiplayer/a/AMdfr_o_06j.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias dfr_objective_o10 sound/dialogue/Multiplayer/a/AMdfr_o_07a.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosive charge is good to go!" maps level.mapname
+	local.master alias dfr_objective_o11 sound/dialogue/Multiplayer/a/AMdfr_o_07h.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosive charge is good to go!" maps level.mapname
+	local.master alias dfr_objective_o12 sound/dialogue/Multiplayer/a/AMdfr_o_07j.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosive charge is good to go!" maps level.mapname
+	local.master alias dfr_objective_o13 sound/dialogue/Multiplayer/a/AMdfr_o_08a.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+	local.master alias dfr_objective_o14 sound/dialogue/Multiplayer/a/AMdfr_o_08h.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+	local.master alias dfr_objective_o15 sound/dialogue/Multiplayer/a/AMdfr_o_08j.WAV soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+
+	// axis
+	local.master alias den_victory_v01 sound/dialogue/Multiplayer/g/GRden_v_01a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias den_victory_v02 sound/dialogue/Multiplayer/g/GRden_v_01c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias den_victory_v03 sound/dialogue/Multiplayer/g/GRden_v_01i.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Good job team!" maps level.mapname
+	local.master alias den_victory_v04 sound/dialogue/Multiplayer/g/GRden_v_02a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias den_victory_v05 sound/dialogue/Multiplayer/g/GRden_v_02b.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias den_victory_v06 sound/dialogue/Multiplayer/g/GRden_v_02c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias den_victory_v07 sound/dialogue/Multiplayer/g/GRden_v_02d.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory is ours!" maps level.mapname
+	local.master alias den_victory_v08 sound/dialogue/Multiplayer/g/GRden_v_03a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias den_victory_v09 sound/dialogue/Multiplayer/g/GRden_v_03b.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias den_victory_v10 sound/dialogue/Multiplayer/g/GRden_v_03i.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Victory!" maps level.mapname
+	local.master alias den_victory_v11 sound/dialogue/Multiplayer/g/GRden_v_04a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias den_victory_v12 sound/dialogue/Multiplayer/g/GRden_v_04b.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias den_victory_v13 sound/dialogue/Multiplayer/g/GRden_v_04c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias den_victory_v14 sound/dialogue/Multiplayer/g/GRden_v_04d.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias den_victory_v15 sound/dialogue/Multiplayer/g/GRden_v_04i.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Outstanding performance!" maps level.mapname
+	local.master alias den_victory_v16 sound/dialogue/Multiplayer/g/GRden_v_06a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Your parents would be proud." maps level.mapname
+	local.master alias den_victory_v17 sound/dialogue/Multiplayer/g/GRden_v_06b.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Your parents would be proud." maps level.mapname
+
+	local.master alias den_objective_o01 sound/dialogue/Multiplayer/g/GRden_o_04a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The bomb is in position." maps level.mapname
+	local.master alias den_objective_o02 sound/dialogue/Multiplayer/g/GRden_o_04c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The bomb is in position." maps level.mapname
+	local.master alias den_objective_o03 sound/dialogue/Multiplayer/g/GRden_o_05a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias den_objective_o04 sound/dialogue/Multiplayer/g/GRden_o_05c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias den_objective_o05 sound/dialogue/Multiplayer/g/GRden_o_05i.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "The charge has been placed." maps level.mapname
+	local.master alias den_objective_o06 sound/dialogue/Multiplayer/g/GRden_o_06a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias den_objective_o07 sound/dialogue/Multiplayer/g/GRden_o_06c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias den_objective_o08 sound/dialogue/Multiplayer/g/GRden_o_06i.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives in place." maps level.mapname
+	local.master alias den_objective_o09 sound/dialogue/Multiplayer/g/GRden_o_08a.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+	local.master alias den_objective_o10 sound/dialogue/Multiplayer/g/GRden_o_08b.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+	local.master alias den_objective_o11 sound/dialogue/Multiplayer/g/GRden_o_08c.wav soundparms 1.2 0 1 0 10000 10000 auto streamed subtitle "Explosives ready!" maps level.mapname
+}
+end

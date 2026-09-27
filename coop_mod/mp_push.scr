@@ -134,6 +134,11 @@ ensureConfig:{
 		waitthread coop_mod/mp_arena_spawns.scr::ensureSpawns local.amap
 	}
 
+	//[user 2026-09-18] start the map's environmental ambience (vanilla loopsounds the arena skipped -
+	//radios/fire/machinery, plus a wind bed on the scene-driven maps). Runs after push_seedAuthored so
+	//the wind bed can anchor to the corridor ends. MP-owned (coop_mod/mp_ambience.scr).
+	waitthread coop_mod/mp_ambience.scr::start
+
 	//[user 2026-09-18] NO MUSIC in Push. The environmental ambient SOUNDS (crickets/wind/fire via
 	//global/ambient.scr -> global/ambience.scr) already run on the arena path and are exactly what the user
 	//wants; the musical soundtrack (music/<map>.mus) is NOT - so we start nothing here (the arena's default
@@ -199,11 +204,99 @@ push_seedAuthored:{
 	if( local.m == "" ){ end }
 	waitthread coop_mod/mp_push_maps.scr::seed local.m
 	if( level.coop_mpPushZN == NIL ){ level.coop_mpPushZN = 0 }
+	//[2026-09-19] Fallback to BSP-derived Push data for campaign maps with no ViPER conversion (t3l1 etc.).
+	//gen_push_from_bsp.py harvests spawns + a zone chain from the map's navmesh; same consumer, same format.
+	if( level.coop_mpPushZN < 2 ){
+		waitthread coop_mod/mp_push_bsp.scr::seed local.m
+		if( level.coop_mpPushZN == NIL ){ level.coop_mpPushZN = 0 }
+	}
 	if( level.coop_mpPushZN >= 2 ){
+		waitthread push_groundSnapAll		//[bug-2760] snap every spawn to the real floor (harvested Z is unreliable)
 		waitthread push_blInit
 		waitthread push_openGates local.m
-		println( "^~^~^ MPPUSH battle-line armed " + local.m + " zones=" + level.coop_mpPushZN )
+		level.coop_mpPushTitle = waitthread coop_mod/mp_maptitles.scr::title local.m
+		println( "^~^~^ MPPUSH battle-line armed " + local.m + " (" + level.coop_mpPushTitle + ") zones=" + level.coop_mpPushZN )
 	}
+}end
+
+
+//=========================================================================
+// [bug-2760] GROUND-SNAP every team spawn to the real walkable floor. The harvested spawn Z (from the ViPER
+// conversion for the 7 authored maps, and from gen_push_from_bsp.py for the Tier-1/2 maps) is unreliable:
+// some spawns land BELOW the floor (players spawn stuck and jump to escape - m2l1 axis home at Z-211) and
+// some land high in the AIR (players fall on spawn - t3l1 allies). A downward trace from well above each
+// spawn finds the actual floor and re-seats the spawn just above it, so both failure modes self-correct on
+// EVERY map with no per-map hand-authoring. Runs once at seed (prespawn), before the line is armed; the
+// info_player_* spawns are notsolid so a trace passes through them and hits real world geometry.
+// Iterates the same targetname groups push_grp toggles (al/ax + h,2..9), via the proven $(name) lookup.
+//=========================================================================
+push_groundSnapAll:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.pre[1] = "al"
+	local.pre[2] = "ax"
+	local.snapped = 0
+	for( local.s = 1; local.s <= 2; local.s++ ){
+		for( local.i = 1; local.i <= 9; local.i++ ){
+			local.suf = ( "" + local.i )
+			if( local.i == 1 ){ local.suf = "h" }
+			local.gname = ( local.pre[local.s] + local.suf )
+			local.ents = $(local.gname)
+			if( local.ents == NIL ){ continue }
+			for( local.k = 1; local.k <= local.ents.size; local.k++ ){
+				local.e = local.ents[local.k]
+				if( local.e == NULL ){ continue }
+				if( waitthread push_snapOne local.e ){ local.snapped = ( local.snapped + 1 ) }
+			}
+		}
+	}
+	println( "^~^~^ MPPUSH ground-snapped " + local.snapped + " spawns" )
+}end
+
+
+// Snap ONE spawn entity DOWN to the floor beneath it - the stock "droptofloor" idiom (cybersnd.scr:281 traces
+// straight down FROM the origin, never from above). Returns 1 if it moved it.
+//
+// [bug-2766] The old form traced from origin+1200 DOWN. On any map with overhead geometry (Berlin buildings,
+// Ardennes terrain/roofs, indoor upper floors) that trace start sits ABOVE a ceiling/roof, so the first solid
+// the downward trace hits is the ROOF, and the spawn was re-seated on top of it - OUTSIDE the map. That broke
+// EVERY Push map at once (bots spawning out of bounds). The fix has two guards that make a lift impossible:
+//   1. start the trace only 64u above the feet, so it can never begin above a ceiling the spawn sits under; and
+//   2. only ever snap DOWN - if the floor is at or above the authored origin, the spawn is already grounded (or
+//      is a below-floor harvest artefact we must NOT lift, since lifting is what threw players onto roofs).
+// This still fixes the dominant complaint (spawns high in the air / "falling from the sky"): the floor is far
+// below such a spawn, so it snaps down onto it. A true void spawn (no floor within 4096u) is left as authored.
+push_snapOne local.e:{
+	if( local.e == NULL ){ end 0 }
+	local.o = local.e.origin
+	local.top = ( local.o + ( 0 0 64 ) )
+	local.bot = ( local.o + ( 0 0 -4096 ) )
+	//[bug-2835] mode 2 = the PLAYER-MOVEMENT mask (MASK_PLAYERSOLID minus bodies - scriptthread.cpp EventTrace):
+	//snap onto what a walking player actually stands on. The default MASK_SOLID trace cannot see playerclip/fence
+	//floors, so on m5l1a's gate courtyard it fell THROUGH the walked surface (~z -37) onto solid ground ~90u below
+	//(z -127) and seated the spawn UNDER the map - bots spawned there frozen at full throttle (soak e24: pz -111,
+	//blk climbing, position never changing) until they died and respawned elsewhere.
+	//[bug-2843] a small BOX, not a point: m4l2's allies-home point traces slipped through the ground (~z 337) at two
+	//of the three home spawns and hit a surface ~460u below, so those players spawned UNDER the map (soak: z -104
+	//at the home XY). A zero-size trace can pass a terrain/patch seam; a 16u box cannot.
+	local.g = trace local.top local.bot 2 ( -8 -8 0 ) ( 8 8 8 )
+	if( local.g == NIL ){ end 0 }
+	//no-hit / void guard: trace returns the end point when it hits nothing; require the floor to sit above the
+	//bottom endpoint by a clear margin (real surface), else leave the spawn where the harvest put it.
+	if( local.g[2] <= ( local.bot[2] + 16 ) ){ end 0 }
+	//SNAP DOWN ONLY: the floor must be below the authored origin. Never lift a spawn - that is what launched
+	//spawns onto roofs / out of the map (bug-2766). Already-grounded and below-floor spawns are left alone.
+	if( local.g[2] >= ( local.o[2] - 8 ) ){ end 0 }
+	//[bug-2843 -> bug-2859] DROP CAP. The m4l2 under-map leak was a POINT trace falling ~460u through the ground; the
+	//box trace above fixes that on its own. But some maps' pathnodes FLOAT well above the floor (e3l2: 120-304u - the
+	//SP AI drops nodes to the floor at load, the BSP keeps the authored height), so a 64u cap refused 22 e3l2 spawns
+	//and left them in mid-air. 384u seats all of those and still refuses a 460u-class leak.
+	if( ( local.o[2] - local.g[2] ) > 384 ){
+		println( "^~^~^ MPPUSH snap REFUSED " + local.e.targetname + " at " + local.o + " floor " + local.g[2] + " (drop > 384)" )
+		end 0
+	}
+	//seat the origin a small step above the floor so the player is never embedded (a tiny drop is harmless).
+	local.e.origin = ( local.g[0] local.g[1] ( local.g[2] + 16 ) )
+	end 1
 }end
 
 
@@ -211,6 +304,7 @@ push_seedAuthored:{
 //the first contested zone.
 push_blInit:{
 	level.coop_mpPushReadyBL = 1
+	level.coop_mpPushFlip = 0	//[bug-2745] side-swap disabled - see push_roundReset. Each team keeps its own spawn class.
 	//start the front at the MIDDLE of the corridor so both sides have equal ground to gain or lose.
 	local.mid = int( ( level.coop_mpPushZN + 1 ) / 2 )
 	if( local.mid < 1 ){ local.mid = 1 }
@@ -384,6 +478,13 @@ push_publishTargets:{
 
 	waitthread coop_mod/mp_botobj.scr::botobj_set 20 local.alliesGoal 7 "allies"
 	waitthread coop_mod/mp_botobj.scr::botobj_set 21 local.axisGoal 7 "axis"
+
+	//[bug-2826] PER-MAP AXIS CONGESTION FLANKS. The soak found axis lags allies badly on the Allied-campaign
+	//push maps because axis funnels through a narrow bottleneck allies don't have. This adds secondary AXIS
+	//attract-nodes (slots 22+) at soak-derived flank waypoints so the axis team SPLITS across several forward
+	//targets instead of piling into one - thinning the jam. No-op on maps not in the validated set; applied
+	//once per map load (its own guard). Generated from docs/tools/axis_chokes.json by gen_bot_flanks.py.
+	waitthread coop_mod/mp_botflanks.scr::applyAxisFlanks
 }end
 
 
@@ -475,8 +576,224 @@ push_openGates local.map:{
 	if( local.map == "m3l3"  ){ waitthread push_gates_m3l3 }
 	if( local.map == "m4l2"  ){ waitthread push_gates_m4l2 }
 	if( local.map == "m5l1b" ){ waitthread push_gates_m5l1b }
+	if( local.map == "t3l1"  ){ waitthread push_gates_t3l1 }
+	if( local.map == "t2l1"  ){ waitthread push_gates_t2l1 }
+	if( local.map == "m3l1b" ){ waitthread push_gates_m3l1b }
+	if( local.map == "m2l3"  ){ waitthread push_gates_m2l3 }
+	if( local.map == "e1l1"  ){ waitthread push_gates_e1l1 }
+	if( local.map == "t1l3"  ){ waitthread push_gates_t1l3 }
+	if( local.map == "m5l3"  ){ waitthread push_gates_m5l3 }
+	if( local.map == "t1l2"  ){ waitthread push_gates_t1l2 }
+	if( local.map == "e3l2"  ){ waitthread push_gates_e3l2 }
 	//m4l1 / m5l1a: no named gate/door/clip path-blockers in the coop script - corridors open at load; nothing
 	//to fire. (Bots still can't cross a WORLDSPAWN-baked choke; coop_mpPushWalk carries the line across.)
+	//t2l3 / t2l4 / m5l2a / m5l2b: BSP-derived Push maps, gate-openers not yet authored - the auto zones + spawns
+	//run on the fallback battle line; add per-map openers here once a playtest identifies a hard path blocker.
+
+	//[bug-2828] AUTO-HARVESTED blockers: the blocker-probe sweep (bot_blocklog -> bot_soak_blockers.py ->
+	//gen_push_gates.py -> mp_push_blockers.scr) notsolids every scripted path-blocker the bots actually hit on
+	//each map. Runs additively to the hand-authored handlers above (notsolid is idempotent).
+	waitthread coop_mod/mp_push_blockers.scr::applyPushBlockers
+}end
+
+
+//e3l2 (POW camp): the blocker-probe (^~^~^ BOTBLOCK, 2026-09-22) found bots with a valid path jammed on shut
+//'pow1_door' RotatingDoors (149 hits) and the destructible 'exploder' FencePost line (78 hits) across the
+//baked corridor - the SP mission opens the doors / the fence gets blown as it progresses; Push does neither.
+//notsolid carves them out of the bot navmesh (see push_openGates). rescue_truck_clip is a minor route clip.
+push_gates_e3l2:{
+	//[bug-2857 user 2026-09-23] "allies blocked in by a gate that opens in SP after a few missions ... make sure the
+	//doors are all removed for their path forward (including the gate)" - pow1_door is that gate (the locked
+	//picket-fence pair the SP opens after the POW rescue). REMOVE it (notsolid left a visible walk-through fence) and
+	//every door on the map. "remove the second tank from the road ... it blocks a lot of path": $tank2 (cannon section).
+	if( $pow1_door != NULL ){
+		for( local.i = $pow1_door.size; local.i >= 1; local.i-- ){
+			if( $pow1_door[local.i] != NULL ){ $pow1_door[local.i] remove }
+		}
+	}
+	if( $tank2 != NULL ){ $tank2 remove }
+	thread push_e3l2_doors
+	if( $rescue_truck_clip != NULL ){ $rescue_truck_clip notsolid }
+	//the 'exploder' FencePost line is a large ARRAY and the first re-soak showed a broadcast notsolid did not
+	//take (563 BOTBLOCK hits remained) - iterate each element, and RETRY for ~15s in case some spawn late.
+	thread push_gates_e3l2_fence
+	thread push_gates_e3l2_walls
+	println( "^~^~^ MPPUSHGATE e3l2 openers fired (pow1_door, truck clip; fence + walls deferred)" )
+}end
+
+
+//[bug-2836 user 2026-09-23] Monte Battaglia had ONE door forward. SP opens more ways by blowing destructible
+//walls (exploder sets 1+5 at the allied spawn, 7+9 by the progression door - fx tehao_explosionWall) with
+//scripted air strikes that Push never runs; the fence pass below only made them walk-through while still VISIBLE.
+//Fire the same global/exploder.scr::explode so each breach is real and visible (intact wall hidden + notsolid,
+//rubble shown), then notsolid the rubble: the Recast bot mesh is world-only and cannot see entity rubble, so solid
+//rubble would just be a new snag. NOTE: Push launches a campaign map as a SCRIPT-LESS arena (level.cpp, sv_mpForceArena)
+//so maps/e3l2.scr - and its `exec global/exploder.scr` - never runs; the first soak logged "arrays never initialised".
+//exploder.scr main is generic (no $player / waittill / level.script) - start it ourselves, non-blocking, then poll.
+push_gates_e3l2_walls:{
+	if( level.exploders == NIL ){
+		exec global/exploder.scr
+	}
+	local.k = 0
+	while( level.exploders == NIL && local.k < 100 ){
+		waitframe
+		local.k++
+	}
+	if( level.exploders == NIL ){
+		println( "^~^~^ MPPUSHGATE e3l2 walls SKIPPED (exploder.scr arrays never initialised)" )
+		end
+	}
+	local.sets[1] = 1
+	local.sets[2] = 5
+	local.sets[3] = 7
+	local.sets[4] = 9
+	for( local.s = 1; local.s <= 4; local.s++ ){
+		waitthread global/exploder.scr::explode local.sets[local.s]
+	}
+	//explodersmashedON re-solidifies after a pause + two frames - notsolid the rubble after it, and again later.
+	for( local.pass = 1; local.pass <= 3; local.pass++ ){
+		wait 1
+		for( local.i = 1; local.i <= level.explodersmasheds; local.i++ ){
+			local.p = level.explodersmashed[local.i]
+			if( local.p != NULL ){
+				if( local.p.set == 1 || local.p.set == 5 || local.p.set == 7 || local.p.set == 9 ){
+					local.p notsolid
+				}
+			}
+		}
+	}
+	println( "^~^~^ MPPUSHGATE e3l2 walls 1/5/7/9 blown to SP breach state, rubble notsolid" )
+}end
+
+
+push_e3l2_doors:{
+	waitframe
+	local.n = waitthread push_doorsAll "remove"
+	println( "^~^~^ MPPUSHGATE e3l2 doors removed=" + local.n )
+}end
+
+
+push_gates_e3l2_fence:{
+	//notsolid the fence AND its debris. The first pass showed that clearing 'exploder' exposed 'exploderchunk'
+	//pieces (solid gibs) that then blocked - iterate both, and RETRY for ~15s to catch any that spawn late.
+	local.k = 0
+	while( local.k < 15 ){
+		if( $exploder != NULL ){
+			for( local.i = 1; local.i <= $exploder.size; local.i++ ){
+				if( $exploder[local.i] != NULL ){ $exploder[local.i] notsolid }
+			}
+		}
+		if( $exploderchunk != NULL ){
+			for( local.j = 1; local.j <= $exploderchunk.size; local.j++ ){
+				if( $exploderchunk[local.j] != NULL ){ $exploderchunk[local.j] notsolid }
+			}
+		}
+		local.k++
+		wait 1
+	}
+	println( "^~^~^ MPPUSHGATE e3l2 fence+chunk notsolid pass complete" )
+}end
+
+
+//t2l1 (Bastogne barns): the SP mission swings two barn door pairs open (scene13/scene14_doorL/R). Push skips
+//the scene, so make them notsolid so the corridor through the barns is passable. BSP-derived Push map.
+push_gates_t2l1:{
+	if( $scene13_doorL != NULL ){ $scene13_doorL notsolid }
+	if( $scene13_doorR != NULL ){ $scene13_doorR notsolid }
+	if( $scene14_doorL != NULL ){ $scene14_doorL notsolid }
+	if( $scene14_doorR != NULL ){ $scene14_doorR notsolid }
+	println( "^~^~^ MPPUSHGATE t2l1 openers fired (barn doors)" )
+}end
+
+
+//m3l1b (Omaha bunkers): the SP mission opens the bunker entrance/exit doors, a floor hatch and removes the
+//exit lock as it advances. Push opens them all at load so the bunker interior route is passable. BSP-derived.
+push_gates_m3l1b:{
+	if( $door_bunker_exit != NULL ){ $door_bunker_exit notsolid }
+	if( $door_bunker_exit_lock != NULL ){ $door_bunker_exit_lock remove }
+	if( $door_bunker_entrance_lower != NULL ){ $door_bunker_entrance_lower notsolid }
+	if( $door_bunker_entrance_upper != NULL ){ $door_bunker_entrance_upper notsolid }
+	if( $door_floor_hatch1 != NULL ){ $door_floor_hatch1 notsolid }
+	println( "^~^~^ MPPUSHGATE m3l1b openers fired (bunker doors/hatch/lock)" )
+}end
+
+
+//--- Tier-2 gate openers (BSP-derived maps). Simple notsolid clears of the mission's path blockers; the nav
+//obstacle map re-carves them. Exploder-breach maps (t1l2, m5l3 extras) can gain the m3l3 recipe after a playtest.
+push_gates_m2l3:{
+	if( $choochootraindoor != NULL ){ $choochootraindoor notsolid }	// the train-car door the mission opens
+	println( "^~^~^ MPPUSHGATE m2l3 openers fired (train door)" )
+}end
+
+push_gates_e1l1:{
+	if( $tankgate != NULL ){ $tankgate notsolid }			// the tank gate the SP mission swings open
+	println( "^~^~^ MPPUSHGATE e1l1 openers fired (tank gate)" )
+}end
+
+push_gates_t1l3:{
+	if( $removableclip != NULL ){ $removableclip notsolid }
+	if( $pushtank != NULL ){ $pushtank notsolid }
+	println( "^~^~^ MPPUSHGATE t1l3 openers fired (removable clip + push-tank)" )
+}end
+
+push_gates_m5l3:{
+	if( $tankclip != NULL ){ $tankclip notsolid }
+	println( "^~^~^ MPPUSHGATE m5l3 openers fired (tank clip)" )
+}end
+
+//t1l2 (Bocage): fully connected but the SP mission blasts a wall breach (exploder 7) that IS the route
+//forward; Push skips it so the corridor stays walled and the front stalls. Same recipe as m3l3: build the
+//exploder registry, fire breach 7, then force the debris notsolid so the hole is passable.
+push_gates_t1l2:{
+	exec global/exploder.scr
+	thread global/exploder.scr::explode 7
+	thread push_gates_t1l2_clearBreach
+	println( "^~^~^ MPPUSHGATE t1l2 openers fired (breach 7)" )
+}end
+
+push_gates_t1l2_clearBreach:{
+	wait 1
+	if( level.exploder != NIL && level.exploders != NIL ){
+		for( local.i = 1; local.i <= level.exploders; local.i++ ){
+			if( level.exploder[local.i] != NULL ){ level.exploder[local.i] notsolid }
+		}
+	}
+	if( level.explodersmashed != NIL && level.explodersmasheds != NIL ){
+		for( local.i = 1; local.i <= level.explodersmasheds; local.i++ ){
+			if( level.explodersmashed[local.i] != NULL ){ level.explodersmashed[local.i] notsolid }
+		}
+	}
+	println( "^~^~^ MPPUSHGATE t1l2 breach forced notsolid (walkable)" )
+}end
+
+
+//t3l1 (Berlin): the mission clears a truck collision ($s10_truck notsolid, maps/t3l1.scr:91) and blasts a
+//breach (exploder 28) as it advances. Push skips the mission, so clear the truck and fire the breach at load,
+//then force the exploder + smashed debris notsolid so the hole is passable (the m3l3 recipe - debris ships
+//SOLID by default and would otherwise wall the opening). BSP-derived Push map (mp_push_bsp.scr).
+push_gates_t3l1:{
+	if( $s10_truck != NULL ){ $s10_truck notsolid }
+	//exploder registry must be built before explode() (MP skips the map script that execs it); global, entity-only.
+	exec global/exploder.scr
+	thread global/exploder.scr::explode 28
+	thread push_gates_t3l1_clearBreach
+	println( "^~^~^ MPPUSHGATE t3l1 openers fired (truck + breach 28)" )
+}end
+
+
+push_gates_t3l1_clearBreach:{
+	wait 1
+	if( level.exploder != NIL && level.exploders != NIL ){
+		for( local.i = 1; local.i <= level.exploders; local.i++ ){
+			if( level.exploder[local.i] != NULL ){ level.exploder[local.i] notsolid }
+		}
+	}
+	if( level.explodersmashed != NIL && level.explodersmasheds != NIL ){
+		for( local.i = 1; local.i <= level.explodersmasheds; local.i++ ){
+			if( level.explodersmashed[local.i] != NULL ){ level.explodersmashed[local.i] notsolid }
+		}
+	}
+	println( "^~^~^ MPPUSHGATE t3l1 breach forced notsolid (walkable)" )
 }end
 
 
@@ -511,30 +828,315 @@ push_gates_m3l3:{
 	thread global/exploder.scr::explode 2
 	thread global/exploder.scr::explode 3
 	thread global/exploder.scr::explode 4
+	//[user 2026-09-18] the breach holes opened VISUALLY but stayed SOLID (invisible walls): the
+	//exploder debris is shown SOLID by default (global/exploder.scr::explodersmashedON), so the
+	//rubble blocks the openings. After the blast settles, force the whole exploder set (intact pieces
+	//AND debris) notsolid so players and bots can actually pass through the holes.
+	thread push_gates_m3l3_clearBreach
 	println( "^~^~^ MPPUSHGATE m3l3 openers fired (exploder init + wall breaches 1-4 + tank barrel)" )
+}end
+
+
+//Make the m3l3 tank-breach walls actually passable: notsolid every exploder + smashed-debris piece
+//once the blast has applied its solidity (explodersmashedON defaults them SOLID). On m3l3 the
+//exploders ARE the breach wall, so this opens the route without touching anything else.
+push_gates_m3l3_clearBreach:{
+	wait 1
+	if( level.exploder != NIL && level.exploders != NIL ){
+		for( local.i = 1; local.i <= level.exploders; local.i++ ){
+			if( level.exploder[local.i] != NULL ){ level.exploder[local.i] notsolid }
+		}
+	}
+	if( level.explodersmashed != NIL && level.explodersmasheds != NIL ){
+		for( local.i = 1; local.i <= level.explodersmasheds; local.i++ ){
+			if( level.explodersmashed[local.i] != NULL ){ level.explodersmashed[local.i] notsolid }
+		}
+	}
+	println( "^~^~^ MPPUSHGATE m3l3 breach forced notsolid (walkable)" )
 }end
 
 
 //m4l2: the parked-convoy road blockers, rail clips, bunker doors and the side gate the SP mission clears.
 push_gates_m4l2:{
-	if( $engine != NULL ){ $engine notsolid }
-	if( $car01 != NULL ){ $car01 notsolid }
-	if( $car02 != NULL ){ $car02 notsolid }
-	if( $car03 != NULL ){ $car03 notsolid }
-	if( $car04 != NULL ){ $car04 notsolid }
-	if( $car05 != NULL ){ $car05 notsolid }
-	if( $car06 != NULL ){ $car06 notsolid }
+	//[bug-2844 user 2026-09-23] "the train is still there, but does not have clipping, and it goes through a fence";
+	//then "the train that crashes needs to be removed completely". The crash train (engine + 6 cars + its wheel-spark
+	//models + the kill trigger bound to it) only exists for the SP ending (maps/m4l2.scr start_train, after you board the
+	//escape truck). Push never plays that ending, so REMOVE all of it.
+	if( $engine != NULL ){ $engine remove }
+	for( local.i = 1; local.i <= 6; local.i++ ){
+		local.car = $("car0" + local.i)
+		if( local.car != NULL ){ local.car remove }
+	}
+	if( $sparks1 != NULL ){ $sparks1 remove }
+	if( $sparks2 != NULL ){ $sparks2 remove }
+	if( $sparks3 != NULL ){ $sparks3 remove }
+	if( $trainkill_trigger != NULL ){ $trainkill_trigger remove }
 	if( $trainclip != NULL ){ $trainclip notsolid }
 	if( $getawaytruckclip != NULL ){ $getawaytruckclip notsolid }
 	if( $clip1 != NULL ){ $clip1 notsolid }
 	if( $clip2 != NULL ){ $clip2 notsolid }
 	if( $trainswitch1 != NULL ){ $trainswitch1 notsolid }
-	if( $leftgate02 != NULL ){ $leftgate02 notsolid }
+	//[bug-2847] leftgate02/rightgate02 (across the escape truck's road north, y~4870) stay CLOSED: opened, the navmesh
+	//led axis up that road OUT of the playable map, where they piled against the sky-caulk boundary wall (y~6450).
+	//The SP player never passes them (only the getaway truck drives through). navlinks/m4l2_mp.txt cuts the mesh.
 	if( $fakecamptruck_collision != NULL ){ $fakecamptruck_collision notsolid }
 	if( $fakegetawaytruck_collision != NULL ){ $fakegetawaytruck_collision notsolid }
 	if( $bunkerdoor1 != NULL ){ $bunkerdoor1 unlock }
 	if( $bunkerdoor2 != NULL ){ $bunkerdoor2 unlock }
+	//[2026-09-20 bug-2746] the rail-yard gates the SP mission opens (elevator gates + the track-side gates the
+	//derailing train crashes through). Push skips that scene, so axis were walled behind them. notsolid them all.
+	//[bug-2862] the elevator gates are NOT notsolid any more - they are the shaft's safety doors and the Push
+	//auto-elevator (push_m4l2_elevator) opens/closes them as the cab arrives/leaves, exactly like SP.
+	thread push_m4l2_elevator
+	//[bug-2846/2858/2862 user 2026-09-23] leftgate01/rightgate01 - the track gates at the end of the rail yard - stay
+	//CLOSED: "the map is far too short with the gate open ... get the bots to use the buildings and tunnels". A navmesh
+	//dump (nav_dump) showed the ONLY link between the station/tunnel side and the rest is the ELEVATOR - the SP route is
+	//yard -> lift down -> tunnel -> station. push_m4l2_elevator runs it; navlinks/m4l2_mp.txt cuts the gate line and
+	//adds the bot "elevator" link. (bug-2746 had opened these for the OLD layout.)
+	thread push_m4l2_doors
+	//$camptruck_pathgate is a Waypoint (the camp truck's path node), not a blocker - notsolid on it was a Script Error
+	if( $crash_path != NULL ){ $crash_path notsolid }
 	println( "^~^~^ MPPUSHGATE m4l2 openers fired" )
+}end
+
+
+//[bug-2862 user 2026-09-23] m4l2 AUTO-ELEVATOR. In SP the lift between the yard-side upper floor (top stop
+//$elevator_way1, exit NORTH through $elevator_gate_1) and the tunnel under the station (bottom stop $elevator_way2,
+//exit SOUTH through $elevator_gate_2) is player-operated (maps/m4l2.scr elevator_movedown/moveup + the coop
+//coop_liftManager); Push never runs that script, so the cab sat frozen and the tunnel/station route - the only way
+//round the closed track gates - was dead. Here it cycles on its own: dwell at a stop with that stop's gate OPEN
+//(gates move down 70 = open, up 70 = closed), close it, ride 4s, open the other. A gate is only ever open where the
+//cab is, so nobody walks into an empty shaft. Bots use it through a navlinks "elevator" link: they wait at the closed
+//gate / stand in the cab while BotMovement holds off its stuck recovery (engine bug-2862).
+push_m4l2_elevator:{
+	if( $elevator_cab == NULL || $elevator_way1 == NULL || $elevator_way2 == NULL ){ end }
+	if( $elevator_gate_1 == NULL || $elevator_gate_2 == NULL ){ end }
+	//the SP use-switches call level-script threads Push does not have
+	if( $elevator_movedown_trigger != NULL ){ $elevator_movedown_trigger nottriggerable }
+	if( $elevator_moveup_trigger != NULL ){ $elevator_moveup_trigger nottriggerable }
+	if( $elevator_switch != NULL ){
+		$elevator_switch bind $elevator_cab
+		$elevator_switch anim off
+	}
+	//[bug-2864] faster than SP (cab 4s, gates 0.75s, 7s dwell = ~26s round trip): with the track gates closed this
+	//lift is the ONLY link between the two halves of the map, and the first gates-closed soak had axis queueing at
+	//both landings. 2s ride / 0.5s gates / 3s dwell = ~13s round trip; a waiting bot boards within ~0.3s.
+	//[user 2026-09-25] "the elevator goes up and down way too fast" + "many stuck trying to board" / "struggle to exit
+	//the elevator too": a 3s stop left no time for riders to get OFF before the queue pressed IN through the same
+	//one-man doorway, so both jammed in the gate and the cab left anyway (live log: CLEARWAIT gave-up step=gate2close x5,
+	//BOTFROZEN in the bottom doorway). Back toward SP: 4s ride, 0.75s gates, 6s stop at each landing.
+	$elevator_cab time 4
+	$elevator_gate_1 time 0.75
+	$elevator_gate_2 time 0.75
+	level.coop_mpElevDwell = 6
+	//the cab starts at the top: open the top gate (SP elevatorprep)
+	$elevator_gate_1 movedown 70
+	$elevator_gate_1 waitmove
+	println( "^~^~^ MPPUSHGATE m4l2 auto-elevator running" )
+	//[bug-2879 probe] each step stamps level.coop_mpElevStep; push_m4l2_elevwatch reports a step that never finishes
+	//(a mover blocked by a player - the user saw bots under the cab stall the lift) with who is in and around the shaft
+	level.coop_mpElevStep = level.time
+	level.coop_mpElevWhat = "start"
+	thread push_m4l2_elevwatch
+	while( 1 ){
+		wait level.coop_mpElevDwell
+		level.coop_mpElevWhat = "gate1close"
+		level.coop_mpElevStep = level.time
+		waitthread push_m4l2_clearof $elevator_gate_1 16 0
+		level.coop_mpElevStep = level.time
+		$elevator_gate_1 playsound elevator_gate
+		$elevator_gate_1 moveup 70
+		$elevator_gate_1 waitmove
+		wait 0.25
+		level.coop_mpElevWhat = "cabdown"
+		level.coop_mpElevStep = level.time
+		//[bug-2912] 16u pad: the centre-point test missed a body overlapping the cab's footprint by up to 16u
+		waitthread push_m4l2_clearof $elevator_cab 16 1
+		level.coop_mpElevStep = level.time
+		$elevator_cab playsound elevator_run
+		$elevator_cab moveto $elevator_way2
+		$elevator_cab waitmove
+		level.coop_mpElevWhat = "gate2open"
+		level.coop_mpElevStep = level.time
+		println( "^~^~^ MPELEV cab=bottom t=" + level.time )
+		waitthread push_m4l2_clearof $elevator_gate_2 0 2
+		level.coop_mpElevStep = level.time
+		$elevator_gate_2 playsound elevator_gate
+		$elevator_gate_2 movedown 70
+		$elevator_gate_2 waitmove
+		wait level.coop_mpElevDwell
+		level.coop_mpElevWhat = "gate2close"
+		level.coop_mpElevStep = level.time
+		waitthread push_m4l2_clearof $elevator_gate_2 16 0
+		level.coop_mpElevStep = level.time
+		$elevator_gate_2 playsound elevator_gate
+		$elevator_gate_2 moveup 70
+		$elevator_gate_2 waitmove
+		wait 0.25
+		level.coop_mpElevWhat = "cabup"
+		level.coop_mpElevStep = level.time
+		$elevator_cab playsound elevator_run
+		$elevator_cab moveto $elevator_way1
+		$elevator_cab waitmove
+		level.coop_mpElevWhat = "gate1open"
+		level.coop_mpElevStep = level.time
+		println( "^~^~^ MPELEV cab=top t=" + level.time )
+		waitthread push_m4l2_clearof $elevator_gate_1 0 2
+		level.coop_mpElevStep = level.time
+		$elevator_gate_1 playsound elevator_gate
+		$elevator_gate_1 movedown 70
+		$elevator_gate_1 waitmove
+		level.coop_mpElevWhat = "dwelltop"
+		level.coop_mpElevStep = level.time
+	}
+}end
+
+//[bug-2879] a mover never moves INTO someone: a player in a gate's path / on its edge (local.below 0), or in the
+//shaft under the cab (local.below 1), jammed it - the lift stalled and crushed them (probe2 rounds 2-3). Wait for them
+//to step clear, at most 4s, then move anyway (logged). Bounds are the entity's own box (origin + getmins/getmaxs).
+push_m4l2_clearof local.ent local.pad local.below:{
+	if( local.ent == NULL ){ end }
+	local.t0 = level.time
+	local.lo = local.ent.origin + local.ent.getmins
+	local.hi = local.ent.origin + local.ent.getmaxs
+	//mode 2 (a gate OPENING - sliding down into the floor): only someone inside its own footprint is in the way, not a
+	//player standing beside it (round 10: 6 "stalls" that were the 6s wait for a bot merely touching the gate face)
+	local.opening = 0
+	if( local.below == 2 ){
+		local.pad = 0 - 4
+		local.below = 0
+		local.opening = 1
+	}
+	//[bug-2912 user 2026-09-25] a CLOSING gate or a DESCENDING cab never moves into a player: it waits as long as it
+	//takes (logged every 10s). The old 6s "move anyway" hung the lift loop on a blocked mover (TRAPS T16) and lifted
+	//or crushed whoever stood there - it existed for bots posted on the gate line, which the bot lift protocol
+	//(BotMovement::LiftThink) no longer does. No shove / teleport fallback (user rule). An OPENING gate slides away
+	//from whoever touches it, so it keeps the 6s bound.
+	local.busy = NIL
+	local.nextLog = level.time + 10
+	local.rescue = 0
+	while( 1 ){
+		local.busy = NIL
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL ){ continue }
+			if( local.p.health <= 0 ){ continue }
+			local.o = local.p.origin
+			if( local.o[0] < local.lo[0] - local.pad || local.o[0] > local.hi[0] + local.pad ){ continue }
+			if( local.o[1] < local.lo[1] - local.pad || local.o[1] > local.hi[1] + local.pad ){ continue }
+			if( local.below == 1 ){
+				if( local.o[2] > local.lo[2] ){ continue }
+			}else{
+				if( local.o[2] + 96 < local.lo[2] || local.o[2] > local.hi[2] + 8 ){ continue }
+			}
+			local.busy = local.p
+		}
+		if( local.busy == NIL ){ break }
+		if( local.opening == 1 && level.time - local.t0 >= 6 ){ break }
+		//[bug-2912] someone in the SHAFT under the cab (it is at the top, about to come down): open the bottom gate so
+		//they can walk out, and shut it again once they have
+		if( local.below == 1 && local.rescue == 0 ){
+			local.rescue = 1
+			println( "^~^~^ MPELEV SHAFTRESCUE who=" + local.busy.entnum + " at=" + local.busy.origin )
+			$elevator_gate_2 playsound elevator_gate
+			$elevator_gate_2 movedown 70
+		}
+		if( level.time >= local.nextLog ){
+			local.nextLog = level.time + 10
+			println( "^~^~^ MPELEV CLEARWAIT step=" + level.coop_mpElevWhat + " who=" + local.busy.entnum + " at=" + local.busy.origin + " waited=" + ( level.time - local.t0 ) )
+		}
+		wait 0.25
+	}
+	if( local.rescue == 1 ){
+		$elevator_gate_2 waitmove
+		waitthread push_m4l2_clearof $elevator_gate_2 16 0
+		$elevator_gate_2 playsound elevator_gate
+		$elevator_gate_2 moveup 70
+		$elevator_gate_2 waitmove
+	}
+	if( local.busy != NIL ){
+		println( "^~^~^ MPELEV CLEARWAIT gave-up step=" + level.coop_mpElevWhat + " who=" + local.busy.entnum + " at=" + local.busy.origin )
+	}
+}end
+
+//[bug-2879 probe] a lift step that has not finished in 8s is stalled: say which step and who is near the cab
+push_m4l2_elevwatch:{
+	local.lastReport = 0
+	while( 1 ){
+		wait 1
+		if( $elevator_cab == NULL ){ end }
+		local.age = level.time - level.coop_mpElevStep
+		if( local.age > 8 && level.time - local.lastReport > 5 ){
+			local.lastReport = level.time
+			println( "^~^~^ MPELEV STALL step=" + level.coop_mpElevWhat + " age=" + local.age + " cab=" + $elevator_cab.origin )
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.p = $player[local.i]
+				if( local.p == NULL ){ continue }
+				if( vector_length( local.p.origin - $elevator_cab.origin ) < 260 ){
+					println( "^~^~^ MPELEV STALLNEAR e=" + local.p.entnum + " at=" + local.p.origin + " health=" + local.p.health )
+				}
+			}
+		}
+	}
+}end
+
+
+//[bug-2855/2857] Every func_rotatingdoor on the map, OPENED ("open") or REMOVED ("remove"). The navmesh is world-only,
+//so it routes bots through doors as if they were open air; a SHUT door is then a wall they grind (bot CheckUse only
+//fires on a door dead ahead within 64u at eye level). Most campaign doors are unnamed, so walk the entity table.
+//.classname is the C++ class ("RotatingDoor"), not the BSP classname - the first m4l2 pass matched neither (opened=0).
+push_doorsAll local.mode:{
+	local.max = int( getcvar( "maxentities" ) )
+	if( local.max < 1 || local.max > 2048 ){ local.max = 1024 }
+	local.count = 0
+	for( local.n = 0; local.n < local.max; local.n++ ){
+		local.e = getentbyentnum local.n
+		if( local.e == NULL ){ continue }
+		if( local.e.classname == "RotatingDoor" || local.e.classname == "func_rotatingdoor" ){
+			if( local.mode == "remove" ){
+				local.e remove
+			}else{
+				local.e unlock
+				local.e open $world
+			}
+			local.count++
+		}
+	}
+	end local.count
+}end
+
+
+//[bug-2855 user 2026-09-23] "open doors ... the way single-player does" - m4l2's route through the buildings (station,
+//the tunnel under the tracks, the huts south of them, the bunker doors by the escape truck) is 13 func_rotatingdoor, all
+//wait -1 (once open, they stay open, as after an SP player passes). The navmesh cannot see doors, so it routed bots
+//through them while they were SHUT: the worst soak bot sat 55% of a run against the one at (-2070,826); bot CheckUse
+//only fires on a door dead ahead within 64u at eye level. Push opens them all at round start. Also clears the SP
+//props that floated once the sandbag under them was removed (user: "a floating kar98 sniper and box").
+//The doors and props are UNNAMED, so walk the entity table (getentbyentnum) and match class / exact position.
+push_m4l2_doors:{
+	waitframe
+	local.max = int( getcvar( "maxentities" ) )
+	if( local.max < 1 || local.max > 2048 ){ local.max = 1024 }
+	local.doors = waitthread push_doorsAll "open"
+	local.props = 0
+	for( local.n = 0; local.n < local.max; local.n++ ){
+		local.e = getentbyentnum local.n
+		if( local.e == NULL ){ continue }
+		//the rifle ammo box (3380,2989,302) and the breakable crate (3396,2983,278) that sat on the sandbag
+		if( vector_length( local.e.origin - ( 3380 2989 302 ) ) < 12 || vector_length( local.e.origin - ( 3396 2983 278 ) ) < 12 ){
+			if( local.e.classname != "Player" ){
+				local.e remove
+				local.props++
+			}
+		}
+	}
+	if( $kar98sniper != NULL ){ $kar98sniper remove; local.props++ }
+	if( $get_kar98sniper_trigger != NULL ){
+		for( local.i = $get_kar98sniper_trigger.size; local.i >= 1; local.i-- ){
+			if( $get_kar98sniper_trigger[local.i] != NULL ){ $get_kar98sniper_trigger[local.i] remove }
+		}
+	}
+	println( "^~^~^ MPPUSHGATE m4l2 doors opened=" + local.doors + " props removed=" + local.props )
 }end
 
 
@@ -612,6 +1214,9 @@ push_hud local.left:{
 	while( local.i <= $player.size ){
 		local.p = $player[local.i]
 		if( local.p != NULL ){
+			//[2026-09-25, bug-2906] claim on every redraw: a round reset redraws the same frame that the
+			//last round's re-sent clear (push_hudClear) is still running (coop_mod/mp_hudresend.scr)
+			waitthread coop_mod/mp_hudresend.scr::claim local.p 150 155
 			//base frame (dim), small, centred at x320.
 			ihuddraw_virtualsize local.p 150 1
 			ihuddraw_align       local.p 150 left top
@@ -653,6 +1258,17 @@ push_hud local.left:{
 			ihuddraw_rect        local.p 154 388 local.lblY 0 0
 			ihuddraw_alpha       local.p 154 1
 			ihuddraw_string      local.p 154 local.timestr
+
+			//[2026-09-19] mission TITLE, centred just above the bar (e.g. "Fall of Berlin"). Slot 155.
+			if( level.coop_mpPushTitle != NIL && level.coop_mpPushTitle != "" ){
+				ihuddraw_virtualsize local.p 155 1
+				ihuddraw_align       local.p 155 center top
+				ihuddraw_font        local.p 155 "verdana-12"
+				ihuddraw_color       local.p 155 0.90 0.90 0.94
+				ihuddraw_rect        local.p 155 320 438 0 0
+				ihuddraw_alpha       local.p 155 1
+				ihuddraw_string      local.p 155 level.coop_mpPushTitle
+			}
 		}
 		local.i++
 	}
@@ -669,6 +1285,9 @@ push_hudClear:{
 			ihuddraw_alpha local.p 152 0
 			ihuddraw_alpha local.p 153 0
 			ihuddraw_alpha local.p 154 0
+			ihuddraw_alpha local.p 155 0
+			//one-shot: push_tick stops redrawing while coop_mpPushEnding is up, so a lost clear stayed
+			thread coop_mod/mp_hudresend.scr::resend local.p 150 155 0	//bug-2906
 		}
 		local.i++
 	}
@@ -706,10 +1325,29 @@ push_win local.side local.reason:{
 	if( local.a >= level.coop_mpPushToWin || local.x >= level.coop_mpPushToWin ){
 		local.mw = "Allies"
 		if( local.x > local.a ){ local.mw = "Axis" }
-		iprintlnbold( "PUSH - " + local.mw + " WIN THE MATCH " + local.a + " : " + local.x + "!   New series - sides swap." )
+		iprintlnbold( "PUSH - " + local.mw + " WIN THE MATCH " + local.a + " : " + local.x + "!" )
 		println( "^~^~^ MPPUSH series winner=" + local.mw )
 		setcvar "coop_mpPushWinsA" "0"
 		setcvar "coop_mpPushWinsX" "0"
+
+		//[user 2026-09-18] SERVER MAP ROTATION. On a rotation server (coop_mpPushRotate 1) a completed MATCH
+		//advances to the next Push map; a full reload is correct here (the match is over, not a round). Re-arm
+		//the arena gate first. Default off, so normal listen play just keeps swapping sides on the same map.
+		if( getcvar( "coop_mpPushRotate" ) == "1" ){
+			local.next = waitthread push_nextMap
+			if( local.next != "" ){
+				local.nextTitle = waitthread coop_mod/mp_maptitles.scr::title local.next
+				iprintlnbold( "Next map: " + local.nextTitle )
+				println( "^~^~^ MPPUSH rotate -> " + local.next + " (" + local.nextTitle + ")" )
+				setcvar "sv_mpForceArena" "1"
+				//[bug-2751] MP end-of-round card fills the pre-reload pause (replaces the bare wait 4).
+				local.matchHead = ( local.mw + " WIN THE MATCH" )
+				waitthread coop_mod/xp.scr::xp_mp_roundcard local.matchHead
+				stuffsrv ( "map " + local.next )
+				end
+			}
+		}
+		iprintlnbold( "New series - sides swap." )
 	}
 	else{
 		iprintlnbold( "Sides swap - next round starting..." )
@@ -719,9 +1357,77 @@ push_win local.side local.reason:{
 	//user wants the round to turn over in place. push_roundReset flips the attack ends, recentres the front and
 	//restarts the clock. Team membership is untouched, so no one is benched to spectator and the series score
 	//stays coherent; players simply respawn on their new side.
-	wait 5
+	//[bug-2751] MP end-of-round card fills the between-rounds pause (replaces the bare wait 5).
+	local.roundHead = ( local.tag + " WIN THE ROUND" )
+	waitthread coop_mod/xp.scr::xp_mp_roundcard local.roundHead
 	waitthread push_roundReset
 }end
+
+
+//=========================================================================
+// Next Push map in the rotation (server rotation only). Cycles the 7 authored Push maps in order.
+//=========================================================================
+push_nextMap:{
+	local.m = getcvar( "mapname" )
+	//[2026-09-19] TEST POOL: coop_mpPushTestPool 1 rotates the new BSP-derived Tier-1 maps instead of the
+	//live 7, so a separate bot test server can soak them without changing the production Push rotation.
+	local.tp = getcvar( "coop_mpPushTestPool" )
+	if( local.tp == "1" ){
+		//Tier-1 BSP-derived pool
+		local.list[1] = "t3l1"
+		local.list[2] = "t2l1"
+		local.list[3] = "t2l3"
+		local.list[4] = "t2l4"
+		local.list[5] = "m5l2a"
+		local.list[6] = "m3l1b"
+		local.count = 6
+		//[bug-2747] m5l2b pulled (SP tank-drive map, on-foot players fall through the world).
+	} else {
+		if( local.tp == "2" ){
+			//Tier-2 BSP-derived pool (10 node-rich campaign maps)
+			local.list[1] = "m2l3"
+			local.list[2] = "m1l3a"
+			local.list[3] = "m1l3b"
+			local.list[4] = "e1l1"
+			local.list[5] = "e3l1"
+			local.list[6] = "e3l2"
+			local.list[7] = "e3l3"
+			local.list[8] = "t1l1"
+			local.list[9] = "t1l2"
+			local.list[10] = "t1l3"
+			local.count = 10
+			//[bug-2832 2026-09-23] m5l3 PULLED (Rocket Facility) - allies spawn inside a building and jam in a
+			//stairwell corner, axis spawn OFF the playable map. User: not a good map for Push. Seed/gates stay inert.
+		} else {
+			//PUBLIC live pool: the 7 ViPER-authored maps + the 7 validated Tier-1 BSP-derived maps (both sides
+			//break through, confirmed over an hour soak). Tier-2 stays in the test pool (coop_mpPushTestPool 2)
+			//until it has soaked longer.
+			local.list[1] = "m1l2b"
+			local.list[2] = "m2l1"
+			local.list[3] = "m3l3"
+			local.list[4] = "m4l1"
+			local.list[5] = "m4l2"
+			local.list[6] = "m5l1a"
+			local.list[7] = "m5l1b"
+			local.list[8] = "t3l1"
+			local.list[9] = "t2l1"
+			local.list[10] = "t2l3"
+			local.list[11] = "t2l4"
+			local.list[12] = "m5l2a"
+			local.list[13] = "m3l1b"
+			//[2026-09-20 bug-2747] m5l2b PULLED - it is the SP King Tiger tank-DRIVE map; its geometry is built
+			//for the vehicle, and on-foot MP players fall THROUGH the world. Unsuitable for Push.
+			local.count = 13
+		}
+	}
+	local.idx = 0
+	for( local.i = 1; local.i <= local.count; local.i++ ){
+		if( local.list[local.i] == local.m ){ local.idx = local.i }
+	}
+	local.nxt = ( local.idx + 1 )
+	if( local.nxt > local.count ){ local.nxt = 1 }
+	local.out = local.list[local.nxt]
+}end local.out
 
 
 //=========================================================================
@@ -733,8 +1439,14 @@ push_win local.side local.reason:{
 push_roundReset:{
 	if( level.coop_mpRun != 1 ){ end }
 
-	if( level.coop_mpPushFlip == 1 ){ level.coop_mpPushFlip = 0 }
-	else{ level.coop_mpPushFlip = 1 }
+	//[2026-09-20 bug-2745] SIDE-SWAP DISABLED. The flip physically swapped spawn ends by enabling the OTHER
+	//team's spawn CLASS (allies->info_player_axis groups, axis->info_player_allied groups). But the engine's
+	//GetRandomTeamSpawnpoint is team-class-locked (DM_Team::GetRandomSpawnpointWithMetric, per-team spawnpoint
+	//list by class), so after the first round flip the AXIS team had every info_player_axis spawn disabled and
+	//could not spawn at all (user: "two matches in a row I can't spawn as axis, both on Push"). Push is a
+	//SYMMETRIC tug-of-war - both teams push the same shared front from their own fixed home ends - so no side
+	//swap is needed. Keep flip 0 permanently; each team always keeps its own spawn class enabled.
+	level.coop_mpPushFlip = 0
 
 	local.mid = int( ( level.coop_mpPushZN + 1 ) / 2 )
 	if( local.mid < 1 ){ local.mid = 1 }
@@ -747,6 +1459,18 @@ push_roundReset:{
 	waitthread push_applySpawns
 	waitthread push_publishTargets
 	waitthread push_hud level.coop_mpPushTime
+
+	//[bug-2895] a new round starts from the SPAWNS. Nobody used to move at the turnover: the winners stood deep in
+	//the losers' end, the front was recentred on top of them and they out-numbered its band on the first ticks, so
+	//the front slid one zone a second back into the losers' spawn - e1l1 soak round 10 chained 19 "breakthroughs"
+	//4-9s apart after the one real win (m1l3a 18, e3l1 11, m3l1b 10, t2l4 11). respawn on a living player re-inits
+	//it at its team's spawn (alienx/basebuild.scr relocates players the same way); spectators are left alone.
+	for( local.ri = 1; local.ri <= $player.size; local.ri++ ){
+		local.rp = $player[local.ri]
+		if( local.rp == NULL ){ continue }
+		if( local.rp.dmteam != "allies" && local.rp.dmteam != "axis" ){ continue }
+		local.rp respawn
+	}
 
 	local.tag = "allies attack the HIGH end"
 	if( level.coop_mpPushFlip == 1 ){ local.tag = "allies attack the LOW end" }

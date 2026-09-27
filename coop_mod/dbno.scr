@@ -131,6 +131,16 @@ dbno_monitor local.player:{
 		if( local.cvCached <= 0 ){
 			if( level.coop_dbnoThresholdOverride != NIL && level.coop_dbnoThresholdOverride > 0 ){ local.threshold = level.coop_dbnoThresholdOverride }
 		}
+		//[user 2026-09-25] HARDCORE: the knock-down threshold scales with the (lower) Hardcore health. At 250 HP a flat
+		//250 burst is already lethal - the engine kills in the same call (sentient.cpp ArmorDamage) - so nobody would
+		//ever go down and the bleed-out / self-revive rules would never run. x health/750 keeps the classic ratio
+		//(250 -> 83 at 250 HP; m3l1a's 150 -> 50). An explicit coop_dbnoThreshold still wins.
+		if( level.coop_hardcore == 1 && local.cvCached <= 0 && level.coop_health != NIL ){
+			if( level.coop_health > 0 && level.coop_health < 750 ){
+				local.threshold = int( local.threshold * level.coop_health / 750 )
+				if( local.threshold < 1 ){ local.threshold = 1 }
+			}
+		}
 
 		if( local.cumulative >= local.threshold && isAlive local.player && local.player.flags["coop_dbno_active"] != 1 && local.player.flags["coop_dbno_dead"] != 1 ){
 			local.cumulative = 0
@@ -198,11 +208,13 @@ dbno_enter local.player local.hitclass:{
 
 	local.base_timer = int( getcvar "coop_dbnoTimer" )
 	if( local.base_timer <= 0 ){ local.base_timer = 60 }
+	if( level.coop_hardcore == 1 ){ local.base_timer = int( local.base_timer / 2 ) }	//[user 2026-09-25] Hardcore: half the bleed-out
 
 	local.actual_timer = local.base_timer
 
 	if( local.hitclass == "head" ){
 		local.actual_timer = 45
+		if( level.coop_hardcore == 1 ){ local.actual_timer = 22 }
 	}
 
 	local.player.flags["coop_dbno_active"]       = 1
@@ -244,6 +256,8 @@ dbno_enter local.player local.hitclass:{
 		if( $player[local.i] && $player[local.i] != local.player ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
 				local.o = $player[local.i]
+				//[2026-09-25, bug-2906] claim on show; dbno_downBannerClear re-sends the hide (hudresend.scr)
+				waitthread coop_mod/hudresend.scr::claim local.o 216 216
 				ihuddraw_virtualsize local.o 216 1
 				ihuddraw_align       local.o 216 center top
 				ihuddraw_font        local.o 216 "verdana-12"
@@ -429,6 +443,7 @@ dbno_fade_manager:{
 	local.hud_slot = 20
 	local.timer    = self.flags["coop_dbno_timer_actual"]
 
+	waitthread coop_mod/hudresend.scr::claim self local.hud_slot local.hud_slot	//bug-2906
 	ihuddraw_shader      self local.hud_slot "textures/mohmenu/black.tga"
 	ihuddraw_virtualsize self local.hud_slot 1
 	ihuddraw_rect        self local.hud_slot 0 0 640 480
@@ -505,6 +520,8 @@ dbno_fade_manager:{
 		}
 	}
 	ihuddraw_alpha self local.hud_slot 0
+	//bug-2906: a lost clear leaves the black overlay over a revived player; stops if he goes down again
+	thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 0 "coop_dbno_active"
 }end
 
 
@@ -686,11 +703,13 @@ dbno_die local.player:{
 	ihuddraw_alpha local.player 28 0
 	ihuddraw_alpha local.player 29 0
 
+	waitthread coop_mod/hudresend.scr::claim local.player 20 20	//bug-2906
 	ihuddraw_alpha local.player 20 1.0
 	wait 0.5
 
 	ihuddraw_alpha local.player 20 0
 	ihuddraw_rect  local.player 20 0 0 0 0
+	thread coop_mod/hudresend.scr::resendUnless local.player 20 20 0 "coop_dbno_active"
 
 	//[user 2026-08-10] NULL guard - same class as the HUD teardowns fixed elsewhere this pass, but
 	//this one also touches sounds/height/damage on the player, so an absent player throws on several
@@ -735,6 +754,7 @@ dbno_downBannerClear:{
 		if( local.p != NULL ){
 			ihuddraw_alpha  local.p 216 0
 			ihuddraw_string local.p 216 ""
+			thread coop_mod/hudresend.scr::resend local.p 216 216 1	//bug-2906; a new banner claims 216
 		}
 		local.i++
 	}
@@ -863,6 +883,11 @@ dbno_teamrevive_monitor local.downed:{
 						ihuddraw_string local.reviver 135 ""
 						ihuddraw_alpha  local.reviver 136 0
 						ihuddraw_alpha  local.reviver 137 0
+						//[2026-09-25, bug-2906] every one-shot hide in this monitor is re-sent, alpha alone
+						//(it hides text and bars alike and never zeroes a bar's shader), and every visible
+						//draw claims first, so a re-send cannot blank a channel that restarts
+						//(coop_mod/hudresend.scr, TRAPS T8)
+						thread coop_mod/hudresend.scr::resend local.reviver 135 137 0
 					}
 				}
 				local.reviver    = local.best
@@ -916,6 +941,7 @@ dbno_teamrevive_monitor local.downed:{
 				// no kit: say so in the SAME slot the healing text uses, and do not progress
 				if( local.shown != 2 ){
 					local.shown = 2
+					waitthread coop_mod/hudresend.scr::claim local.reviver 135 137	//bug-2906
 					ihuddraw_string local.reviver 135 "You are out of medkits."
 					ihuddraw_alpha  local.reviver 135 1
 					ihuddraw_alpha  local.reviver 136 0
@@ -925,6 +951,8 @@ dbno_teamrevive_monitor local.downed:{
 			}else{
 				if( local.shown != 1 ){
 					local.shown = 1
+					waitthread coop_mod/hudresend.scr::claim local.reviver 135 137	//bug-2906
+					waitthread coop_mod/hudresend.scr::claim local.downed 138 140
 					ihuddraw_string local.reviver 135 "Healing Player"
 					ihuddraw_alpha  local.reviver 135 1
 					ihuddraw_alpha  local.reviver 136 0.8
@@ -953,12 +981,14 @@ dbno_teamrevive_monitor local.downed:{
 						ihuddraw_string local.reviver 135 ""
 						ihuddraw_alpha  local.reviver 136 0
 						ihuddraw_alpha  local.reviver 137 0
+						thread coop_mod/hudresend.scr::resend local.reviver 135 137 0	//bug-2906
 					}
 					if( local.downed != NULL ){
 						ihuddraw_alpha  local.downed 138 0
 						ihuddraw_string local.downed 138 ""
 						ihuddraw_alpha  local.downed 139 0
 						ihuddraw_alpha  local.downed 140 0
+						thread coop_mod/hudresend.scr::resend local.downed 138 140 0
 					}
 					local.downed.flags["coop_dbno_healing"] = NIL
 					//[user 2026-08-10] "I dont think we got the XP for reviving a player, at least it didnt pop up".
@@ -1024,6 +1054,7 @@ dbno_teamrevive_monitor local.downed:{
 					if( local.look == 1 ){
 						if( local.c.flags["coop_revivePrompt"] != 1 ){
 							local.c.flags["coop_revivePrompt"] = 1
+							waitthread coop_mod/hudresend.scr::claim local.c 135 135	//bug-2906
 							ihuddraw_virtualsize local.c 135 1
 							ihuddraw_align       local.c 135 center center
 							ihuddraw_font        local.c 135 "verdana-12"
@@ -1043,6 +1074,7 @@ dbno_teamrevive_monitor local.downed:{
 							local.c.flags["coop_revivePrompt"] = NIL
 							ihuddraw_alpha  local.c 135 0
 							ihuddraw_string local.c 135 ""
+							thread coop_mod/hudresend.scr::resend local.c 135 135 0	//bug-2906
 						}
 					}
 				}
@@ -1060,12 +1092,14 @@ dbno_teamrevive_monitor local.downed:{
 						ihuddraw_string local.reviver 135 ""
 						ihuddraw_alpha  local.reviver 136 0
 						ihuddraw_alpha  local.reviver 137 0
+						thread coop_mod/hudresend.scr::resend local.reviver 135 137 0	//bug-2906
 					}
 					if( local.downed != NULL ){
 						ihuddraw_alpha  local.downed 138 0
 						ihuddraw_string local.downed 138 ""
 						ihuddraw_alpha  local.downed 139 0
 						ihuddraw_alpha  local.downed 140 0
+						thread coop_mod/hudresend.scr::resend local.downed 138 140 0
 					}
 					if( local.downed != NULL ){ local.downed.flags["coop_dbno_healing"] = NIL }
 					local.reviver    = NULL
@@ -1092,6 +1126,7 @@ dbno_teamrevive_monitor local.downed:{
 			ihuddraw_string local.reviver 135 ""
 			ihuddraw_alpha  local.reviver 136 0
 			ihuddraw_alpha  local.reviver 137 0
+			thread coop_mod/hudresend.scr::resend local.reviver 135 137 0	//bug-2906
 		}
 	}
 	if( local.downed != NULL ){
@@ -1100,6 +1135,7 @@ dbno_teamrevive_monitor local.downed:{
 			ihuddraw_string local.downed 138 ""
 			ihuddraw_alpha  local.downed 139 0
 			ihuddraw_alpha  local.downed 140 0
+			thread coop_mod/hudresend.scr::resend local.downed 138 140 0
 		}
 		local.downed.flags["coop_dbno_healing"] = NIL
 	}
@@ -1120,6 +1156,7 @@ dbno_teamrevive_monitor local.downed:{
 				local.c.flags["coop_revivePrompt"] = NIL
 				ihuddraw_alpha  local.c 135 0
 				ihuddraw_string local.c 135 ""
+				thread coop_mod/hudresend.scr::resend local.c 135 135 0	//bug-2906
 			}
 		}
 		local.k++
@@ -1270,6 +1307,7 @@ dbno_ai_revive local.player:{
 	local.player playsound coop_exhale1
 	local.player stufftext ( "s_volume " + getcvar( "coop_tinnitusBaseVol" ) )	// restore world SFX after AI revive
 
+	waitthread coop_mod/hudresend.scr::claim local.player 33 33	//bug-2906
 	ihuddraw_align  local.player 33 center center
 	ihuddraw_font   local.player 33 "handle-23"
 	ihuddraw_color  local.player 33 0.4 1.0 0.4
@@ -1280,6 +1318,8 @@ dbno_ai_revive local.player:{
 	if( local.player != NULL ){
 		ihuddraw_alpha  local.player 33 0
 		ihuddraw_string local.player 33 ""
+		//33 is shared with the medkit/self-revive text, which claims it; and a new down stops it outright
+		thread coop_mod/hudresend.scr::resendUnless local.player 33 33 0 "coop_dbno_active"
 	}
 }end
 
@@ -1288,6 +1328,7 @@ dbno_countdown_hud:{
 	local.hud_slot = 27
 	local.timer    = self.flags["coop_dbno_timer_actual"]
 
+	waitthread coop_mod/hudresend.scr::claim self local.hud_slot local.hud_slot	//bug-2906
 	ihuddraw_virtualsize self local.hud_slot 1
 	ihuddraw_align       self local.hud_slot center center
 	ihuddraw_alpha       self local.hud_slot 1
@@ -1307,6 +1348,8 @@ dbno_countdown_hud:{
 
 	ihuddraw_alpha  self local.hud_slot 0
 	ihuddraw_string self local.hud_slot ""
+	//bug-2906: a lost clear leaves "BLEEDING OUT: Ns" frozen on a revived remote player
+	thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 1 "coop_dbno_active"
 }end
 
 
@@ -1317,6 +1360,9 @@ dbno_letgo_monitor:{
 	local.hud_slot       = 28
 	local.medic_cooldown = 0
 
+	//[2026-09-25, bug-2906] claim on show (alpha goes to 1 here and stays up; the text is swapped by
+	//string alone), and every one-shot clear below is re-sent (coop_mod/hudresend.scr, TRAPS T8)
+	waitthread coop_mod/hudresend.scr::claim self local.hud_slot local.hud_slot
 	ihuddraw_virtualsize self local.hud_slot 1
 	ihuddraw_string      self local.hud_slot ""
 	ihuddraw_align       self local.hud_slot center center
@@ -1338,10 +1384,22 @@ dbno_letgo_monitor:{
 		if( self.useheld == 1 ){
 			local.have_kit = self.flags["coop_medkits"]
 			if( local.have_kit == NIL ){ local.have_kit = 0 }
+			//[user 2026-09-25] HARDCORE: while self-revive is locked (a teammate is up) the kit cannot be used down, so this
+			//hold is a give-up, exactly as with no kit - never a hold that does nothing. Re-checked below while held.
+			local.hcLocked = 0
+			if( local.have_kit >= 1 && level.coop_hardcore == 1 ){
+				local.hcLocked = waitthread coop_mod/hardcore.scr::selfReviveBlocked self
+				if( local.hcLocked == 1 ){ local.have_kit = 0 }
+			}
 			local.hold_frames = 0
 
 			while( self != NULL && self.flags["coop_dbno_active"] == 1 && self.useheld == 1 ){
 				local.hold_frames++
+				//the lock lifted mid-hold (the last teammate went down or left): medkit.scr self-revive owns the kit again
+				if( local.hcLocked == 1 && local.hold_frames % 10 == 0 ){
+					local.hcLocked = waitthread coop_mod/hardcore.scr::selfReviveBlocked self
+					if( local.hcLocked != 1 ){ local.have_kit = 1 }
+				}
 				// With a medkit, the USE-hold is the self-revive (medkit.scr) - do nothing here so the two
 				// never race on the same key. With NO medkit, holding USE is a deliberate give-up.
 				if( local.have_kit < 1 ){
@@ -1349,11 +1407,13 @@ dbno_letgo_monitor:{
 						self.flags["coop_dbno_elapsed"] = self.flags["coop_dbno_elapsed"] + 1
 					}
 					if( local.hold_frames == 20 ){
+						waitthread coop_mod/hudresend.scr::claim self local.hud_slot local.hud_slot
 						ihuddraw_string self local.hud_slot "Giving up..."
 					}
 					if( local.hold_frames >= 60 ){
 						ihuddraw_string self local.hud_slot ""
 						ihuddraw_alpha  self local.hud_slot 0
+						thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 1 "coop_dbno_active"
 						self.flags["coop_dbno_letgo"] = 1
 						self.flags["coop_dbno_active"] = NIL
 						//[user 08-02] mirror DBNO into the engine (coop_setdbno) so turret/vehicle mount can refuse it
@@ -1363,10 +1423,12 @@ dbno_letgo_monitor:{
 						self forcelegsstate DBNO_BLEEDOUT	//[213] slump during the give-up fade
 						waitthread coop_dbnoBedStop self
 						self playsound m1l1_death
+						waitthread coop_mod/hudresend.scr::claim self 20 20
 						ihuddraw_alpha self 20 1.0
 						wait 1.5
 						ihuddraw_alpha self 20 0
 						ihuddraw_rect  self 20 0 0 0 0
+						thread coop_mod/hudresend.scr::resendUnless self 20 20 0 "coop_dbno_active"
 						self damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
 						end
 					}
@@ -1382,6 +1444,11 @@ dbno_letgo_monitor:{
 				}
 			}
 			ihuddraw_string self local.hud_slot ""
+			//"Giving up..." was up (held 20+ frames, released before 60): re-send the blank, string
+			//ONLY - alpha stays 1 for the rest of this down so the next hold can show it again
+			if( local.hold_frames >= 20 ){
+				thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 2 ""
+			}
 		}
 		waitframe
 	}
@@ -1390,6 +1457,7 @@ dbno_letgo_monitor:{
 	ihuddraw_string self local.hud_slot ""
 	ihuddraw_alpha  self local.hint_slot 0
 	ihuddraw_string self local.hint_slot ""
+	thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 1 "coop_dbno_active"	//bug-2906
 }end
 
 
@@ -1414,6 +1482,8 @@ dbno_medic_callout local.player:{
 		if( $player[local.i] ){
 			if( $player[local.i].flags["coop_isActive"] == 1 ){
 				local.o = $player[local.i]
+				//[2026-09-25, bug-2906] claim on show; dbno_downBannerClear re-sends the hide (hudresend.scr)
+				waitthread coop_mod/hudresend.scr::claim local.o 216 216
 				ihuddraw_virtualsize local.o 216 1
 				ihuddraw_align       local.o 216 center top
 				ihuddraw_font        local.o 216 "verdana-12"
@@ -1486,6 +1556,7 @@ dbno_marker_manager local.player:{
 		if( (local.spin % 180) == 0 ){
 			for( local.i = 1; local.i <= $player.size; local.i++ ){
 				if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 && $player[local.i] != local.player ){
+					waitthread coop_mod/hudresend.scr::claim $player[local.i] local.coop_downLabelSlot local.coop_downLabelSlot	//bug-2906
 					ihuddraw_virtualsize $player[local.i] local.coop_downLabelSlot 1
 					ihuddraw_align $player[local.i] local.coop_downLabelSlot left top
 					ihuddraw_font $player[local.i] local.coop_downLabelSlot "verdana-12"
@@ -1510,6 +1581,13 @@ dbno_marker_manager local.player:{
 			//label when either of them was revived
 			ihuddraw_alpha $player[local.i] local.coop_downLabelSlot 0
 			ihuddraw_string $player[local.i] local.coop_downLabelSlot ""
+			//[2026-09-25, bug-2906] re-send the clear - but only on 30/31. On 36/37 this label already
+			//collides with the viewer's own medkit icon + count (medkit.scr:5-16; its font/string writes
+			//zero the icon's shader), and repeating that clear would repeat the damage. Fix the slot
+			//choice first, then harden those two.
+			if( local.coop_downLabelSlot == 30 || local.coop_downLabelSlot == 31 ){
+				thread coop_mod/hudresend.scr::resend $player[local.i] local.coop_downLabelSlot local.coop_downLabelSlot 1
+			}
 		}
 		local.i++
 	}

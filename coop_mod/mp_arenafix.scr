@@ -1,0 +1,137 @@
+//=========================================================================
+// MP_ARENAFIX.SCR - open the invisible SP path-clips on ported SP campaign maps run as MP arenas, so bots
+// route AROUND the (still-solid) scenic tanks instead of funnelling into them. [user 2026-09-21]
+//
+// THE PROBLEM: sv_mpForceArena runs these SP maps SCRIPT-LESS. Two things follow. (1) A tank the SP script
+// would have driven away sits frozen and SOLID. (2) The SP script also notsolids a set of invisible clip
+// brushes at map start (m5l1b: the $tank_block[] array) that fence off the tank's scripted driving lane -
+// in the arena those clips stay solid, the recast obstacle-carve walls those lanes out of the navmesh, and
+// bots are left one funnel that dead-ends at the tank.
+//
+// THE FIX (user 2026-09-21: NOT interested in bots walking through the tank): leave the tanks SOLID and only
+// open the INVISIBLE path-clips (targetname contains "block"), exactly as the SP script does. That restores
+// the alternate navmesh lanes so bots path AROUND the solid tank (which is carved from the mesh as an
+// obstacle). Nothing visible is ever made non-solid, so there is no walk-through. If bots still jam after the
+// lanes open, the fix is navmesh tuning (Recast params / a wider route-around), never notsoliding the tank.
+// Vehicles are detected only to LOG them (kept solid) as a nav-tuning reference.
+//
+// ISOLATION: MP-owned (coop_mod/mp*.scr, in MP_MANIFEST), gated on level.coop_mpRun (which only coop_mod/mp.scr
+// sets and a level load wipes, so this can never run on a coop map). Calls NO coop code; the substring helper
+// is inlined (clause 10). Reads entity classname/model/targetname; writes `notsolid` only on the clip brushes.
+//=========================================================================
+
+//canary (TRAPS T1).
+alive:{
+	end 1
+}end
+
+
+//does the string contain the keyword? (inlined - MP files may not call coop_mod/main.scr::containsText).
+//Simple forward scan with single-char restart; good enough for targetnames, which have no tricky overlaps.
+mpaf_has local.s local.t:{
+	if( local.s == NIL || local.t == NIL || local.s == "" || local.t == "" ){ end 0 }
+	if( local.s.size < local.t.size ){ end 0 }
+	local.index = 0
+	for( local.i = 0; local.i < local.s.size; local.i++ ){
+		if( local.s[local.i] == local.t[local.index] ){
+			local.index = ( local.index + 1 )
+			if( local.index == local.t.size ){ end 1 }
+		}
+		else{
+			local.index = 0
+			if( local.s[local.i] == local.t[0] ){ local.index = 1 }
+		}
+	}
+}end 0
+
+
+//does the string START with the prefix? At most prefix-length comparisons. [bug-2983]
+mpaf_prefix local.s local.p:{
+	if( local.s == NIL || local.p == NIL || local.s == "" || local.p == "" ){ end 0 }
+	if( local.s.size < local.p.size ){ end 0 }
+	for( local.i = 0; local.i < local.p.size; local.i++ ){
+		if( local.s[local.i] != local.p[local.i] ){ end 0 }
+	}
+}end 1
+
+
+//is this a vehicle / gun we LOG as left solid? Diagnostic only - nothing here changes the game.
+//[bug-2983] By the exact C++ class name (what .classname returns), one comparison each: the colliding vehicle and
+//turret classes (VehicleSoundEntity / TriggerVehicle / VehiclePoint are not colliders and stay out). A static prop
+//(ScriptModel / Animate / ScriptSlave / ScriptOrigin) by its model's folder, a bounded prefix test.
+//WHY: the old test ran 5 class + 13 model keyword scans, character by character, on EVERY entity - every bot player
+//included - and on m4l2 with the bots already joined the sweep ran past the script VM's 3s-per-frame limit
+//(MAX_EXECUTION_TIME): "Command overflow", the thread died inside the sweep, mp.scr never reached Push (0 MPPUSH
+//lines) and all 12 bots spawned on one point. It is time-based, so it struck only on a loaded machine (1 run in 4).
+mpaf_isVehicle local.c local.m:{
+	if( local.c == "VehicleTank" || local.c == "VehicleTankTandem" || local.c == "DrivableVehicle" ){ end 1 }
+	if( local.c == "DrivableVehicleTandem" || local.c == "Vehicle" || local.c == "VehicleBase" ){ end 1 }
+	if( local.c == "VehicleHalfTrack" || local.c == "VehicleWheelsX2" || local.c == "VehicleWheelsX4" ){ end 1 }
+	if( local.c == "VehicleTurretGun" || local.c == "VehicleTurretGunTandem" || local.c == "TurretGun" ){ end 1 }
+	if( local.c == "FixedTurret" || local.c == "PortableTurret" || local.c == "CarryableTurret" ){ end 1 }
+	if( local.c == "VehicleCollisionEntity" ){ end 1 }
+	if( local.c != "ScriptModel" && local.c != "Animate" && local.c != "ScriptSlave" && local.c != "ScriptOrigin" ){ end 0 }
+	if( waitthread mpaf_prefix local.m "models/vehicles/" ){ end 1 }
+	if( waitthread mpaf_prefix local.m "models/animate/vehicle" ){ end 1 }
+	if( waitthread mpaf_prefix local.m "models/statweapons/flak" ){ end 1 }
+}end 0
+
+
+//THE SWEEP. getentarray "classname" returns nothing at runtime (mp_sweepAI note), so walk entnums. World
+//geometry (models "*0"/"*1") never matches a vehicle class, so it is untouched.
+mp_arenafix:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpArenaFixDone == 1 ){ end }
+	level.coop_mpArenaFixDone = 1
+
+	local.max = int( getcvar( "maxentities" ) )
+	if( local.max <= 0 ){ local.max = 1024 }
+	//[bug-2983] start past the human client slots (a player is never a path-clip or a vehicle). The bots sit in the
+	//slots after them (sv_maxbots) and now cost only the class comparisons. Measured on m4l2, same 521 entities:
+	//86743 keyword-scan iterations per sweep before, 4007 after.
+	local.i = int( getcvar( "sv_maxclients" ) )
+	if( local.i < 0 ){ local.i = 0 }
+	local.n = 0
+	while( local.i < local.max ){
+		local.e = getentbyentnum local.i
+		if( local.e != NULL && local.e != NIL ){
+			local.tn = local.e.targetname
+			if( local.tn == NIL ){ local.tn = "" }
+			local.clip = 0
+			if( local.tn != "" ){
+				local.clip = waitthread mpaf_has local.tn "block"
+			}
+			//[user 2026-09-21] OPEN THE INVISIBLE SP PATH-CLIPS ONLY - the tanks stay SOLID (the user does not
+			//want bots walking through them). Campaign maps place invisible clip brushes the SP script notsolids
+			//at map start to open a scripted/vehicle lane (m5l1b: the $tank_block[] array, line 34). In the
+			//script-less MP arena they stay solid, so the recast obstacle carve walls off those lanes and bots
+			//funnel onto the one open path - straight at the tank. Opening them (targetname contains "block")
+			//restores the alternate routes so bots path AROUND the still-solid tank (which is carved from the
+			//navmesh as an obstacle). Only the invisible clips are touched, so there is no walk-through anywhere.
+			if( local.clip == 1 ){
+				local.m = local.e.model
+				local.c = local.e.classname
+				//coerce NIL to "" so the diagnostic println below never throws on a clip missing one of them.
+				if( local.m == NIL ){ local.m = "" }
+				if( local.c == NIL ){ local.c = "" }
+				local.e notsolid
+				local.n = ( local.n + 1 )
+				println( "^~^~^ MPARENAFIX openclip ent=" + local.i + " class=" + local.c + " model=" + local.m + " tn=" + local.tn )
+			}
+			//VEHICLES are LEFT SOLID on purpose; logged so we can see each tank/turret when tuning the navmesh - if
+			//bots still jam on one, its route-around lane is the thing to fix, not its solidity.
+			else{
+				local.c = local.e.classname
+				if( local.c != NIL && local.c != "" ){
+					local.m = local.e.model
+					if( local.m == NIL ){ local.m = "" }
+					if( waitthread mpaf_isVehicle local.c local.m ){
+						println( "^~^~^ MPARENAFIX solid-vehicle ent=" + local.i + " class=" + local.c + " model=" + local.m + " tn=" + local.tn )
+					}
+				}
+			}
+		}
+		local.i = ( local.i + 1 )
+	}
+	println( "^~^~^ MPARENAFIX opened " + local.n + " path-clip(s); tanks left solid" )
+}end

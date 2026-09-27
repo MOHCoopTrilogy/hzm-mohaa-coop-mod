@@ -63,6 +63,11 @@ main:{
 	if( level.coop_mpRun == 1 ){ end }
 	level.coop_mpRun = 1
 
+	//[user 2026-09-25] "5 minutes is good": MP bodies linger coop_mpCorpseLinger (engine default now 300s, capped at
+	//coop_mpCorpseMax bodies - body.cpp). Every existing profile saved the OLD default 45 (CVAR_ARCHIVE), so lift exactly
+	//that value here; a host who chose anything else keeps it. MP-owned cvar set inside mp.scr (isolation clause 12c).
+	if( getcvar( "coop_mpCorpseLinger" ) == "45" ){ setcvar "coop_mpCorpseLinger" "300" }
+
 	//[MP modes slice 1] THE MODE SCAFFOLD. The host picks the MP game mode with the cvar coop_mpMode:
 	//   "" / "none"  -> today's behaviour EXACTLY (the armory deathmatch path below, byte-identical)
 	//   "gungame"    -> FFA Gun Game (coop_mod/mp_gungame.scr)
@@ -129,6 +134,21 @@ main:{
 	//   so after any coop map in this process primarydmweapon was refused and nobody could spawn. Only that
 	//   exact value is cleared - a server's own dmflags are left alone. Coop sets it again on its next map.
 	if( int( getcvar( "dmflags" ) ) == 532676608 ){ setcvar "dmflags" "0" }
+
+	//[user 2026-09-18] ENGINE-ENFORCE the weapon preset via dmflags - the airtight layer. The armory preset
+	//(presetBansClass) only gates the ARMORY; a player using the stock weapon menu, or a weapon pickup, is
+	//gated by the engine DF_WEAPON_NO_* dmflags bits (player.cpp UserSelectWeapon / PrimaryDMWeapon). So we
+	//rebuild the class bits (22-28) from level.coop_mpPreset on EVERY arena load - dmflags is not archived and
+	//otherwise inherits a stale coop/rifle-only ban across map changes (that is why FT/Dom were rifle-only).
+	//Non-weapon dmflags bits are preserved. Bit map: rifle 1<<22, sniper 1<<23, smg 1<<24, mg 1<<25,
+	//rocket/heavy 1<<26, shotgun 1<<27, landmine 1<<28; mask of all seven = 532676608.
+	local.dfCur = int( getcvar( "dmflags" ) )
+	local.dfBase = ( local.dfCur - ( local.dfCur & 532676608 ) )
+	local.dfBan = 0
+	if( level.coop_mpPreset == "rifles" ){ local.dfBan = 528482304 }        //rifle only (bans sniper+smg+mg+rocket+shotgun+landmine)
+	else if( level.coop_mpPreset == "snipers" ){ local.dfBan = 524288000 }  //sniper only
+	else if( level.coop_mpPreset == "riflesnipers" ){ local.dfBan = 520093696 } //rifle + sniper only
+	setcvar "dmflags" ( "" + ( local.dfBase + local.dfBan ) )
 
 	//[MP armories slice 2] Liveness probe (TRAPS T1). If coop_mod/mp_armory.scr parse-kills, ::alive is
 	//unreachable and returns NIL, so level.coop_mpArmoryLive stays 0 and every edge below keeps today's
@@ -213,16 +233,18 @@ main:{
 	if( getcvar( "coop_mpDbno" ) == "" ){ setcvar "coop_mpDbno" "0" }
 	if( getcvar( "coop_mpMedkits" ) == "" ){ setcvar "coop_mpMedkits" "1" }
 
-	//[Dynamic Weather in MP - 2026-09-18] Host toggle coop_mpWeather (Host Rules checkbox). MP maps load
-	//script-less so the coop weather starter + per-map theme never run; mp_weather.scr supplies both and reaches
-	//the shared coop renderer. Reaches an MP file (MP->MP); it in turn calls the allowlisted
-	//weather.scr::coop_weather_init.
-	//DEFAULT OFF (bug-2710): user confirmed weather crashes the listen-server client loading m2l1 Push -
-	//MP arena maps skip the map's *_precache.scr, so the snow renderer uses FX the client never registered ->
-	//crash. Coop is unaffected (its map script precaches normally). Was briefly default ON per the user's
-	//request; a crashing default is not shippable, so weather is opt-in until the MP precache gap is fixed and
-	//CLIENT-verified, then this flips back to "1". mp_weather_on also treats unset as OFF (belt-and-suspenders).
-	if( getcvar( "coop_mpWeather" ) == "" ){ setcvar "coop_mpWeather" "0" }
+	//[Dynamic Weather in MP - 2026-09-18] Host toggle coop_mpWeather. MP maps load script-less so the coop weather
+	//starter + per-map theme never run; mp_weather.scr supplies both and reaches the shared coop renderer (MP->MP,
+	//then the allowlisted weather.scr::coop_weather_init). There is NO menu row for it yet (bug-2936) - console only.
+	//HISTORY: default OFF after bug-2710 (a listen-client crash loading m2l1 Push, pinned on SNOW, which bug-2796 now
+	//skips in MP); ON briefly (bug-2936); OFF again (bug-2939) because weather's spawn wait took the COOP branch of
+	//replace.scr::waitTillSpawn on a CAMPAIGN-map arena and booted the coop framework mid-match, re-teaming every
+	//player and bot to Allies at coop health 750.
+	//[2026-09-26, bug-2968] DEFAULT ON. Fixed at the root: waitTillSpawn, global/weather.scr and weather's MP entry
+	//never touch coop main while coop_mpRun is set. Proven by headless 10-bot Push soaks on m4l2 (rain) and e1l1
+	//(sand): no coop main load, teams 5/5 throughout, kills, Script Errors at the weather-off baseline. Snow maps
+	//still skip weather (mp_weather.scr). A host turns it off with coop_mpWeather 0.
+	if( getcvar( "coop_mpWeather" ) == "" ){ setcvar "coop_mpWeather" "1" }
 	thread coop_mod/mp_weather.scr::mp_weather_init
 
 	//[MP Progression slice 1] Kill-attribution session counters. THREADED (not waitthread) and in its
@@ -240,11 +262,25 @@ main:{
 	//and mohdm* maps (no Actors). Re-swept briefly to catch any that finish spawning a frame or two late.
 	waitthread mp_clearArenaAI
 
+	//[user 2026-09-21] ARENA FIXUP: the ported SP maps run script-less, so a vehicle the SP script would have
+	//DRIVEN AWAY (tanks/trucks/half-tracks) stays frozen solid in a path/chokepoint and bots pile against it
+	//("stuck on the tank"). Walk the entity list and make every scenic vehicle non-solid so bots/players pass
+	//through. BEFORE mp_vehicles::onMapInit, so it only touches the map's pre-placed props, never the drivable/
+	//mannable vehicles that mode adds. Self-gated on coop_mpRun; a no-op on the dm/mohdm* maps (no such props).
+	waitthread coop_mod/mp_arenafix.scr::mp_arenafix
+
 	//[MP mode ONE-TIME init, pre-spawn] Some modes must set up the level BEFORE the first player spawns
 	//(e.g. Push on the converted SP maps has to script-spawn its team spawn points - those bsps carry
 	//none, so without this the first spawn has nowhere to go). Runs here in main (prespawn), guarded on
 	//coop_mpRun; a no-op for modes with no init. Separate from the per-player mp_modeGiveKit seam.
 	waitthread mp_modeInit
+
+	//[bug-2786/2794] START ENVIRONMENTAL AMBIENCE FOR EVERY MODE. Previously only mp_push.scr called
+	//mp_ambience::start, so Freeze Tag / rifles / every non-push arena was dead silent. DEFERRED (not called
+	//here at prespawn) because the levelwide emitter must spawn/anchor AFTER the level is populated - doing it
+	//at prespawn made it spawn/anchor on none and threw script errors. Push starts its own positional bed in
+	//its mode init; mp_ambStartDeferred covers the other modes once a player exists (or after a grace).
+	thread mp_ambStartDeferred
 
 	//[DMG PROBE] global health tracer for the "nothing dies" investigation. Threaded once here; gated per
 	//iteration on coop_mpDmgProbe so it is silent until enabled AND then immediately watches every ALREADY-alive
@@ -255,6 +291,11 @@ main:{
 	//script-spawned team spawns exist; a no-op unless enabled and the map has an authored layout. Guarded
 	//on coop_mpRun inside the file, so it can never touch a coop map.
 	waitthread coop_mod/mp_vehicles.scr::onMapInit
+
+	//[user 2026-09-18] TIMED server map rotation (coop_mpRotate 1). Self-gates + resumes its banked elapsed
+	//time across the per-match reloads; a no-op on listen play (cvar unset). Push keeps its own side-swap
+	//rotation (mp_push.scr) and does not set coop_mpRotate.
+	thread coop_mod/mp_rotate.scr::rotateTimer
 
 	thread mp_manage
 }end
@@ -270,6 +311,30 @@ main:{
 // firing (self=victim, 11 args) on a 2026-09-14 bot match. So a future event-driven hook is now a
 // viable option for discrete edges; this poll stays for the per-tick state it owns.
 //=========================================================================
+//=========================================================================
+// [bug-2794] Deferred environmental-ambience start for the non-Push modes. Calling mp_ambience::start at
+// prespawn (from mp.scr::main) made its levelwide emitter spawn/anchor on `none` (no players, model not
+// ready) and threw 'loopsound applied to NIL'. Wait until the level is populated (or a short grace for a
+// bot-only lobby), then start it once. Push starts its own positional bed in its mode init; the
+// coop_mpAmbienceOn guard inside start() keeps this a no-op if that already ran.
+//=========================================================================
+mp_ambStartDeferred:{
+	local.t = 0
+	while( level.coop_mpRun == 1 && local.t < 30 ){
+		if( level.coop_mpAmbienceOn == 1 ){ end }
+		if( $player != NULL && $player.size >= 1 ){
+			waitthread coop_mod/mp_ambience.scr::start
+			end
+		}
+		wait 0.5
+		local.t = ( local.t + 1 )
+	}
+	if( level.coop_mpRun == 1 && level.coop_mpAmbienceOn != 1 ){
+		waitthread coop_mod/mp_ambience.scr::start
+	}
+}end
+
+
 mp_manage:{
 	//let the first clients finish connecting
 	wait 1

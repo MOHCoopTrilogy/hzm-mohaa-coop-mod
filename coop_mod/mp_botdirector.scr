@@ -1,0 +1,75 @@
+//=========================================================================
+// MP_BOTDIRECTOR.SCR - MULTIPLAYER BOT SQUAD DIRECTOR (user 2026-09-17, "I want multiplayer bots to be
+// smart, play objectives ... And ensure none of it hurts coop"). Phase 6 of the vetted MP-bot plan
+// (_research/mp_bot_ai_plan.md). A thin ROLE layer on top of mp_botobj.scr: instead of every bot piling onto
+// one shared objective node, the director splits a team's pursuit into ATTACK / DEFEND priority bands using
+// the AttractiveNode team filter, so attackers push the point and defenders hold it. It also extends objective
+// awareness to the symmetric modes (CTF / Demolition / Base Assault) that previously seeded no node at all
+// (completeness gap: only assassination/domination/koth were wired before this).
+//
+// This is a HELPER library the MP modes call; it OWNS no loop. It reuses mp_botobj.scr::botobj_set/botobj_clear
+// (already isolation-allowlisted) for the actual node mechanics, so no new node grammar is introduced here.
+//
+// COOP-SAFE BY CONSTRUCTION (the standing rule): every entry is gated on level.coop_mpRun, which ONLY
+// coop_mod/mp.scr sets and which any level load wipes - so nothing here ever runs on a coop map. And even if it
+// did: coop AI is actor.cpp and never reads the attractiveNodes container; coop runs NO playerbots. So this
+// cannot change coop behaviour at all. This is an MP file (coop_mod/mp*.scr in MP_MANIFEST).
+//
+// TUNING: bot_squadroles (default 1) toggles the attack/defend split. When 0 the director degrades to a single
+// shared node per contested point (plain objective attraction, the pre-Phase-6 behaviour) - a clean A/B/rollback
+// switch that, like every bot_* cvar, is invisible to the isolation checker (RX_MP_TOKEN is coop_mp*, not bot_*).
+//=========================================================================
+
+//canary (TRAPS T1).
+alive:{
+	end 1
+}end
+
+
+//Read bot_squadroles once. Returns 1 (split into attack/defend bands) or 0 (single shared node). MP-only.
+dir_roles:{
+	if( level.coop_mpRun != 1 ){ end 0 }
+	local.rc = getcvar "bot_squadroles"
+	if( local.rc == "0" ){ end 0 }
+	end 1
+}end
+
+
+//CONTESTED POINT (Push / KotH-style single frontline both sides fight over). atkTeam pushes IN (chase band),
+//defTeam HOLDS it (a slightly lower band so defenders commit to the point without over-running past it). slotA
+//and slotD must be distinct node slots the caller keeps stable across ticks. When bot_squadroles is off, a
+//single both-teams node on slotA is used and slotD is cleared. No-op if origin is NIL. Idempotent (moves the
+//existing node). MP-only.
+dir_contest local.slotA local.slotD local.origin local.atkTeam local.defTeam:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.origin == NIL ){ end }
+
+	local.roles = waitthread dir_roles
+	if( local.roles == 0 ){
+		waitthread coop_mod/mp_botobj.scr::botobj_set local.slotA local.origin 7 ""
+		waitthread coop_mod/mp_botobj.scr::botobj_clear local.slotD
+		end
+	}
+
+	waitthread coop_mod/mp_botobj.scr::botobj_set local.slotA local.origin 8 local.atkTeam
+	waitthread coop_mod/mp_botobj.scr::botobj_set local.slotD local.origin 6 local.defTeam
+}end
+
+
+//SYMMETRIC OFFENSE (CTF / Demolition / Base Assault): each team pursues the ENEMY objective. alliesTarget is
+//the AXIS objective (the allies' goal), axisTarget is the ALLIES objective (the axis' goal). Team-filtered so
+//allies bots go for one and axis bots for the other. Per side is a no-op if its target is NIL (objective not
+//yet derived). Idempotent. MP-only.
+dir_attackEnemy local.slotAllies local.slotAxis local.alliesTarget local.axisTarget:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.alliesTarget != NIL ){ waitthread coop_mod/mp_botobj.scr::botobj_set local.slotAllies local.alliesTarget 7 "allies" }
+	if( local.axisTarget  != NIL ){ waitthread coop_mod/mp_botobj.scr::botobj_set local.slotAxis  local.axisTarget  7 "axis" }
+}end
+
+
+//Tear down the director's nodes for a set of slots (mode ending). MP-only.
+dir_clear2 local.s1 local.s2:{
+	if( level.coop_mpRun != 1 ){ end }
+	waitthread coop_mod/mp_botobj.scr::botobj_clear local.s1
+	waitthread coop_mod/mp_botobj.scr::botobj_clear local.s2
+}end

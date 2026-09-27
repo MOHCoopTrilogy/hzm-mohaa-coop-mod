@@ -1,0 +1,704 @@
+//=========================================================================
+// HZM coop - DUST STORM ROLL-IN  [user 2026-09-26, bug-2963]
+// "can we make dust storms also have the dust/fog effect roll in that you see at the beginning of the
+// breakthrough campaign where it really does obscure vision?" + "with respective sound".
+//
+// On the sand-theme maps (weather.scr sand branch) a full sand storm now ROLLS IN: over ~20 s the fog
+// closes to a tan (night: dark) wall, then each player's retail-style sand sheet + blowing sand fades in
+// over their own view, and a strong wind swells. It holds at least 45 s, then rolls out over ~25 s (sheet
+// and wind leave first) back to EXACTLY the map's fog. A medium storm (pattern 2) is a light haze.
+//
+//   coop_dust 1/0        = master (seta in coop_defaults.cfg). 0 = storms only draw the streaks again.
+//   coop_dustNow ""/1/0  = TEST override: 1 forces a full storm now, 0 forces it off, "" follows the
+//                          weather. Reset to "" at every map load (coop_dust_boot) so a forced storm
+//                          never carries into the next map. Test aliases: coop_mod/cfg/dusttest.cfg.
+//   coop_maptest != 0    = no random storms (they permanently shorten AI sight - see FOG below), forced only.
+//
+// HOW IT IS BUILT (vet: docs/proposals/duststorm_2026-09-26/vet_dust.md "Corrected build plan"):
+//   FOG     - one driver thread, 0.2 s tick, owns $world fog while level.coop_dustOwnsFog == 1 (set BEFORE
+//             the first write, cleared LAST). fogmode.scr's profile keeper and e1l1's fog zones stand down
+//             on that flag. Writes only changed fields (every setter re-sends the whole fog configstring).
+//             HARD LIMITS: distance never below 1250 - Actor::FixAIParameters permanently LOWERS every
+//             actor's max engage distance to 0.828 x the current fog distance and never raises it again,
+//             and 1024 (the default) / 0.828 = 1237; fog start never below 0.15 x distance - except a
+//             DEFAULT-ON map's own authored look (below), which may start lower (retail e1l1: 50).
+//             Restore = coop_fog_apply on profile maps (all six fogged sand maps have one; it also keeps the
+//             native weather's saved fog in sync, bug-1345), else ramp out to 16000/15900 and farplane 0.
+//   SHEET   - one per player, models/emitters/coop_dustveil_day|night.tik attached to that player's "eyes
+//             bone" and bound to that client alone (svflags +singleclient, the collectible.scr pattern).
+//             cgame keeps it camera-locked in third person, cover and script cameras (cg_modelanim.c,
+//             bug-2963); while scoped it is hidden like retail (fog only). Faded with `alpha` at retail's
+//             0.0125 per step (0.05 s here - retail's per-FRAME rate at 20 fps); hidden while dead /
+//             spectating / inactive; faded out indoors (officer.scr::coop_hasOpenSky + hysteresis);
+//             DELETED at storm end so it never holds one of the player's 16 child slots.
+//   SOUND   - the shipped "Strong Wind" (coop_snd_wind_strong) looped on the sheet itself: private to its
+//             owner, one loop per entity (bug-2432), 35% indoors. The map-wide sand wind bed (weather.scr)
+//             is pulled to 50% at full strength through level.coop_dustWindScale.
+//   Markers (developer 1): ^~^~^ DUST start / hold / restore / step / sheet.
+// DEFAULT-ON MAPS [user 2026-09-26, bug-2973: "go ahead and apply dustnow to the appropriate maps as default"]:
+//   a map in coop_dust_defaultOn (one line per map; only e1l1 - the one retail map with a sandstorm) STARTS
+//   inside a full storm and holds it for the whole level - no roll-in from clear, no roll-out - with its
+//   own look; its sand streaks are held at full too (weather.scr). Coop only: MP keeps random storms.
+//   coop_dustNow 0 still rolls it out for a test; coop_dust 0 turns it off. Other maps: random, unchanged.
+// Never on Omaha (m3l1a/m3l1b).
+// MP [2026-09-26 MP sandstorms]: runs in an MP session only where coop_mod/mp_weather.scr set level.coop_dustMp (sand
+// theme + host toggle coop_mpDust, which is read on the MP side - a coop file may never name a coop_mp*
+// token, check_mp_isolation clause 7). Three coop-only assumptions are handled for it: the map name falls
+// back to the engine's (an arena runs no coop main, so level.coop_mapname is unset), 'in play' is alive +
+// on a team (MP sets no coop_isActive), and bots get no sheet (they render nothing; coop_dustBotSheets 1
+// gives them one, for headless tests). Fog, sound and the veil models are the same code as coop.
+//=========================================================================
+
+//=========================================================================
+// Map boot. Called from weather.scr::coop_weather_init in the FIRST frame, before its first wait:
+// the veil models are registered at map load, not mid-game (a mid-game model registration hitches every
+// client - the bug-2710/2796 class). Also clears a forced storm left over from the previous map.
+//=========================================================================
+coop_dust_boot:{
+//=========================================================================
+	if( level.coop_mpRun == 1 && level.coop_dustMp != 1 ){ end }
+	local.m = waitthread coop_dust_mapName
+	if( local.m == "" ){ end }
+	if( local.m == "m3l1a" || local.m == "m3l1b" ){ end }
+
+	local.now = getcvar( "coop_dustNow" )
+	if( local.now != "" ){
+		println( "^~^~^ DUST coop_dustNow was " + local.now + " - reset at map load (a forced storm never carries into the next map)" )
+		setcvar "coop_dustNow" ""
+	}
+
+	local.sand = waitthread coop_dust_isSandMap local.m
+	if( local.sand == 1 ){
+		cache models/emitters/coop_dustveil_day.tik
+		cache models/emitters/coop_dustveil_night.tik
+		println( "^~^~^ DUST boot map=" + local.m + " veil models cached" )
+	}
+}end
+
+//=========================================================================
+coop_dust_isSandMap local.m:{
+//=========================================================================
+	if( local.m == "e1l1" || local.m == "e1l2" || local.m == "e1l3" || local.m == "e1l4" ){ end 1 }
+	if( local.m == "m1l1" || local.m == "m1l2a" || local.m == "m1l2b" ){ end 1 }
+	if( local.m == "m1l3a" || local.m == "m1l3b" ){ end 1 }
+}end 0
+
+//=========================================================================
+// DEFAULT-ON MAPS [bug-2973]. A map listed here is INSIDE a full storm from map start for the whole level, the
+// way retail runs its sandstorm - which it does on exactly one map, e1l1 (maps/e1l1/storm.scr, emitters_cube;
+// no other retail map references it). ONE LINE PER MAP: the storm look, then `end 1`. The look arguments:
+//   fog distance, fog start (bias), colour r g b, veil alpha (the sheet's peak; the random storms use 0.8)
+// Coop only - MP keeps the random storms (bug-2972). Returns 1 for a listed map, else 0. It also SETS the
+// look (coop_dust_setLook), so call it after coop_dust_profile.
+//=========================================================================
+coop_dust_defaultOn local.m:{
+//=========================================================================
+	if( level.coop_mpRun == 1 ){ end 0 }
+	// e1l1 = retail's OWN e1l1 values (maps/e1l1.scr:2-5 level.farDist / fogBias / fogColor, InitEnvironment),
+	// retail's full sheet alpha 1 (storm.scr fades 0 -> 1 by 0.0125, i.e. 4 s). 1500 also leaves AI sight exactly
+	// where the e1l1 fog profile (1500) already holds it all level: 0.828 x 1500 = 1242, the 1024 default untouched.
+	if( local.m == "e1l1" ){ waitthread coop_dust_setLook 1500.0 50.0 0.35 0.24 0.16 1.0; end 1 }
+}end 0
+
+//=========================================================================
+// A default-on map's own storm look. FLOATS (the fog step divides these - TRAPS T4). The fog-start floor
+// drops to this look's own fraction when it is below the usual 0.15 (retail e1l1 starts its fog at 50u).
+//=========================================================================
+coop_dust_setLook local.far local.bias local.r local.g local.b local.alpha:{
+//=========================================================================
+	level.coop_dustFar      = local.far * 1.0
+	level.coop_dustBias     = local.bias * 1.0
+	level.coop_dustR        = local.r
+	level.coop_dustG        = local.g
+	level.coop_dustB        = local.b
+	level.coop_dustAlphaMax = local.alpha
+	if( level.coop_dustBfFloor == NIL ){ level.coop_dustBfFloor = 0.15 }	// weather.scr asks before coop_dust_profile ran
+	local.bf = level.coop_dustBias / level.coop_dustFar
+	if( local.bf < level.coop_dustBfFloor ){ level.coop_dustBfFloor = local.bf }
+}end
+
+//=========================================================================
+// The map name: coop's, else the engine's (an MP arena runs no coop main, so level.coop_mapname is unset).
+//=========================================================================
+coop_dust_mapName:{
+//=========================================================================
+	local.m = level.coop_mapname
+	if( local.m == NIL || local.m == "" ){ local.m = getcvar( "mapname" ) }
+	if( local.m == NIL ){ local.m = "" }
+}end local.m
+
+//=========================================================================
+// Per-map full-storm look (research_dust.md section 4). Day maps get tan walls, night maps dark ones.
+// A map forced to sand through coop_weatherForce gets the generic day look.
+//=========================================================================
+coop_dust_profile local.m:{
+//=========================================================================
+	// FLOATS on purpose: int / int is C integer division here (TRAPS T4) and the fog step divides these
+	level.coop_dustFar   = 1500.0
+	level.coop_dustBias  = 300.0
+	level.coop_dustR     = 0.50
+	level.coop_dustG     = 0.40
+	level.coop_dustB     = 0.28
+	level.coop_dustNight = 0
+	level.coop_dustBfFloor  = 0.15		//[bug-2973] fog start never below 0.15 x distance (a default-on look may lower it)
+	level.coop_dustAlphaMax = 0.8		//[bug-2973] the veil's peak alpha (a default-on look may raise it)
+
+	if( local.m == "e1l1" ){
+		level.coop_dustFar  = 1250.0
+		level.coop_dustBias = 250.0
+		level.coop_dustR    = 0.38
+		level.coop_dustG    = 0.27
+		level.coop_dustB    = 0.17
+	} else if( local.m == "e1l3" ){
+		level.coop_dustR    = 0.58
+		level.coop_dustG    = 0.47
+		level.coop_dustB    = 0.33
+	} else if( local.m == "e1l4" ){
+		level.coop_dustR     = 0.12
+		level.coop_dustG     = 0.10
+		level.coop_dustB     = 0.08
+		level.coop_dustNight = 1
+	} else if( local.m == "m1l1" || local.m == "m1l2a" || local.m == "m1l2b" ){
+		level.coop_dustR     = 0.09
+		level.coop_dustG     = 0.085
+		level.coop_dustB     = 0.075
+		level.coop_dustNight = 1
+	} else if( local.m == "m1l3a" || local.m == "m1l3b" ){
+		level.coop_dustR     = 0.10
+		level.coop_dustG     = 0.09
+		level.coop_dustB     = 0.08
+		level.coop_dustNight = 1
+	}
+}end
+
+//=========================================================================
+// THE DRIVER. Threaded once per map from weather.scr (sand branch), after the weather pattern is seeded.
+//=========================================================================
+coop_dust_start:{
+//=========================================================================
+	if( level.coop_mpRun == 1 && level.coop_dustMp != 1 ){ end }
+	if( level.coop_dustStarted == 1 ){ end }
+	local.m = waitthread coop_dust_mapName
+	if( local.m == "m3l1a" || local.m == "m3l1b" ){ end }
+	level.coop_dustStarted = 1
+	level.coop_dustMap = local.m		// the markers print this: level.coop_mapname is NIL in MP, and "str" + NIL throws
+	level.coop_dustBotSheets = 0
+	if( getcvar( "coop_dustBotSheets" ) == "1" ){ level.coop_dustBotSheets = 1 }
+
+	waitthread coop_dust_profile local.m
+	level.coop_dustDefaultOn = waitthread coop_dust_defaultOn local.m	//[bug-2973] AFTER the profile: it sets its own look
+	level.coop_dustStrength  = 0.0
+	level.coop_dustRising    = 1
+	level.coop_dustOwnsFog   = 0
+	level.coop_dustWindScale = 1.0
+	level.coop_dustSheet["x"] = 0		// the per-entnum arrays, created before anything indexes them
+	level.coop_dustAlpha["x"] = 0
+	level.coop_dustRetry["x"] = 0
+	level.coop_dustShown["x"] = 0
+	level.coop_dustOn["x"] = 0
+	level.coop_dustVol["x"] = 0
+	level.coop_dustIssued["x"] = 0
+	level.coop_dustClosed["x"] = 0
+	level.coop_dustIndoor["x"] = 0
+	local.mp = 0		// level.coop_mpRun is unset in coop, and "str" + none throws (TRAPS "Script Error")
+	if( level.coop_mpRun == 1 ){ local.mp = 1 }
+	println( "^~^~^ DUST armed map=" + local.m + " far=" + level.coop_dustFar + " night=" + level.coop_dustNight + " defaulton=" + level.coop_dustDefaultOn + " mp=" + local.mp )
+
+	thread coop_dust_sheets
+
+	local.s = 0.0
+	local.peakAt = 0 - 1000
+	local.active = 0
+	local.holdSaid = 0
+	local.n = 0
+	local.first = 1
+	while( 1 ){
+		local.forced = 0
+		local.f = getcvar( "coop_dustNow" )
+		if( local.f == "1" ){
+			local.forced = 1
+			local.target = 1.0
+		} else if( local.f == "0" ){
+			local.forced = 1
+			local.target = 0.0
+		} else {
+			local.target = waitthread coop_dust_autoTarget
+		}
+
+		//[bug-2973] a DEFAULT-ON map STARTS inside the storm: on the very first tick (~0.5 s into the map, before
+		//anyone has spawned) jump straight to full instead of rolling in from clear. Only then - a later
+		//dustoff / duston rolls out and in like any storm.
+		if( local.first == 1 ){
+			local.first = 0
+			if( level.coop_dustDefaultOn == 1 && local.forced == 0 && local.target >= 1 ){
+				local.s = 1.0
+				local.peakAt = level.time
+				println( "^~^~^ DUST default-on map=" + level.coop_dustMap + " - the level starts inside the storm, held for the whole level" )
+			}
+		}
+
+		// a weather-driven storm holds its peak at least 45 s (the random driver re-rolls every 15-50 s);
+		// a forced one obeys the test override at once
+		if( local.forced == 0 && local.target < local.s && local.s > 0 ){
+			if( ( level.time - local.peakAt ) < 45 ){ local.target = local.s }
+		}
+
+		// roll-in 20 s (0.01 per 0.2 s), roll-out 25 s (0.008 per 0.2 s)
+		if( local.s < local.target ){
+			local.s = local.s + 0.01
+			if( local.s >= local.target ){
+				local.s = local.target
+				local.peakAt = level.time
+			}
+			level.coop_dustRising = 1
+			local.holdSaid = 0
+		} else if( local.s > local.target ){
+			local.s = local.s - 0.008
+			if( local.s < local.target ){ local.s = local.target }
+			level.coop_dustRising = 0
+		}
+		// land exactly on 0: script float compares carry a 0.0001 dead band, so float residue from 125 steps of
+		// 0.008 would otherwise sit just off zero
+		if( local.s < 0.001 ){ local.s = 0.0 }
+
+		if( local.active == 0 && local.s > 0 ){
+			waitthread coop_dust_begin local.target local.forced
+			local.active = 1
+			local.n = 0
+		}
+		level.coop_dustStrength = local.s
+		level.coop_dustWindScale = 1.0 - ( 0.5 * local.s )
+
+		if( local.active == 1 ){
+			waitthread coop_dust_fogStep local.s
+			if( local.holdSaid == 0 && local.s > 0 && local.s == local.target ){
+				local.holdSaid = 1
+				println( "^~^~^ DUST hold s=" + local.s + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color )
+			}
+			local.n++
+			if( local.n >= 25 ){
+				local.n = 0
+				println( "^~^~^ DUST step s=" + local.s + " target=" + local.target + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color )
+			}
+			if( local.s <= 0 ){
+				waitthread coop_dust_restore
+				local.active = 0
+			}
+		}
+		wait 0.2
+	}
+}end
+
+//=========================================================================
+// Where the weather wants the storm: pattern 3 = full storm, 2 = haze, else clear.
+//=========================================================================
+coop_dust_autoTarget:{
+//=========================================================================
+	if( getcvar( "coop_dust" ) == "0" ){ end 0.0 }
+	//[bug-2973] a default-on map: its storm is the map's own look, held all level - ahead of the maptest stand-down,
+	//which exists for the RANDOM storms (e1l1 at 1500 moves no actor's sight: its fog profile is 1500 already)
+	if( level.coop_dustDefaultOn == 1 ){ end 1.0 }
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){ end 0.0 }
+	if( level.weatherpattern == NIL ){ end 0.0 }
+	local.p = int( level.weatherpattern )
+	if( local.p >= 3 ){ end 1.0 }
+	if( local.p == 2 ){ end 0.4 }
+}end 0.0
+
+//=========================================================================
+// A storm starts: record where the fog is, take ownership BEFORE the first write.
+//=========================================================================
+coop_dust_begin local.target local.forced:{
+//=========================================================================
+	// raw $world values - the restore on a map with no profile puts these back
+	level.coop_dustOrigD = $world.farplane
+	level.coop_dustOrigB = $world.farplane_bias
+	level.coop_dustOrigC = $world.farplane_color
+	if( level.coop_dustOrigD == NIL ){ level.coop_dustOrigD = 0 }
+	if( level.coop_dustOrigB == NIL ){ level.coop_dustOrigB = 0 }
+	if( level.coop_dustOrigC == NIL ){ level.coop_dustOrigC = ( 0 0 0 ) }
+
+	level.coop_dustProfile = 0
+	level.coop_dustNoFog = 0
+	if( level.coop_fogProfileLoaded == 1 && level.coop_fogDist > 0 ){
+		// the profile is what the keeper holds, and what coop_fog_apply restores (a profile with no fog
+		// distance cannot restore "fog off" - coop_fog_apply skips farplane at 0 - so it takes the path below)
+		level.coop_dustProfile = 1
+		level.coop_dustD0 = level.coop_fogDist
+		level.coop_dustB0 = level.coop_fogBias
+		level.coop_dustR0 = level.coop_fogR
+		level.coop_dustG0 = level.coop_fogG
+		level.coop_dustB0c = level.coop_fogB
+	} else {
+		level.coop_dustD0 = level.coop_dustOrigD
+		level.coop_dustB0 = level.coop_dustOrigB
+		level.coop_dustR0 = level.coop_dustOrigC[0]
+		level.coop_dustG0 = level.coop_dustOrigC[1]
+		level.coop_dustB0c = level.coop_dustOrigC[2]
+	}
+	if( level.coop_dustD0 <= 0 ){
+		// no fog on this map (m1l1, m1l2a, m1l2b): come in from a wall far past everything, in the storm's
+		// own colour, so there is no zero-start substitution and no sky pop (vet 19)
+		level.coop_dustNoFog = 1
+		level.coop_dustD0  = 16000.0
+		level.coop_dustB0  = 15900.0
+		level.coop_dustR0  = level.coop_dustR
+		level.coop_dustG0  = level.coop_dustG
+		level.coop_dustB0c = level.coop_dustB
+	}
+
+	// the floor: 1250, or the map's own fog if that is already closer (it already set the actors)
+	level.coop_dustFloor = 1250
+	if( level.coop_dustD0 < 1250 ){ level.coop_dustFloor = level.coop_dustD0 }
+
+	level.coop_dustWroteD = 0 - 1
+	level.coop_dustWroteB = 0 - 1
+	level.coop_dustWroteR = 0 - 1
+	level.coop_dustWroteG = 0 - 1
+	level.coop_dustWroteBc = 0 - 1
+	level.coop_dustWroteC = ( 0 0 0 )
+
+	level.coop_dustOwnsFog = 1
+	println( "^~^~^ DUST start map=" + level.coop_dustMap + " target=" + local.target + " forced=" + local.forced + " from dist=" + level.coop_dustD0 + " bias=" + level.coop_dustB0 + " col=" + level.coop_dustR0 + " " + level.coop_dustG0 + " " + level.coop_dustB0c + " profile=" + level.coop_dustProfile + " nofog=" + level.coop_dustNoFog + " storm=" + level.coop_dustFar + "/" + level.coop_dustBias )
+}end
+
+//=========================================================================
+// Put the fog where strength local.s says. Eased (smoothstep), distance interpolated in 1/d so the wall
+// closes in evenly rather than all at the end. Writes only what changed; re-asserts the distance if
+// something else moved it.
+//=========================================================================
+coop_dust_fogStep local.s:{
+//=========================================================================
+	local.e = local.s * local.s * ( 3.0 - ( 2.0 * local.s ) )
+
+	local.inv0 = 1.0 / level.coop_dustD0
+	local.inv1 = 1.0 / level.coop_dustFar
+	local.d = 1.0 / ( local.inv0 + ( ( local.inv1 - local.inv0 ) * local.e ) )
+	if( local.d < level.coop_dustFloor ){ local.d = level.coop_dustFloor }
+
+	local.bf0 = ( level.coop_dustB0 * 1.0 ) / level.coop_dustD0		// * 1.0: never int / int (TRAPS T4)
+	local.bf1 = ( level.coop_dustBias * 1.0 ) / level.coop_dustFar
+	local.bf = local.bf0 + ( ( local.bf1 - local.bf0 ) * local.e )
+	if( local.bf < level.coop_dustBfFloor ){ local.bf = level.coop_dustBfFloor }	//[bug-2973] 0.15 unless the look is lower
+	if( local.bf > 0.995 ){ local.bf = 0.995 }
+	local.b = local.d * local.bf
+
+	local.r = level.coop_dustR0 + ( ( level.coop_dustR - level.coop_dustR0 ) * local.e )
+	local.g = level.coop_dustG0 + ( ( level.coop_dustG - level.coop_dustG0 ) * local.e )
+	local.bl = level.coop_dustB0c + ( ( level.coop_dustB - level.coop_dustB0c ) * local.e )
+
+	local.di = int( local.d + 0.5 )
+	local.bi = int( local.b + 0.5 )
+
+	// colour first, then bias, then distance: one configstring re-send per changed field
+	local.dr = local.r - level.coop_dustWroteR
+	local.dg = local.g - level.coop_dustWroteG
+	local.db = local.bl - level.coop_dustWroteBc
+	// SCALED x 1e6 on purpose: script float compares carry a 0.0001 DEAD BAND (scriptvariable.cpp greaterthan:
+	// "a - b >= 0.0001"), so a squared colour step of ~1e-5 compared directly can never be ">" anything - the
+	// fog colour stalled 0.003-0.007 short of the storm colour until this was measured (DUSTPROBE, bug-2963).
+	local.eps = 10.0								// ~0.002 per channel on the ramp
+	if( local.s >= 1 || local.s <= 0 ){ local.eps = 0.5 }	// at the peak and the end, land exactly
+	//[bug-2973] ...or when something ELSE moved the colour / bias (as the distance below always did): a default-on
+	//storm is held for the whole level, so any stray writer - a map's own fog init, the native weather's snapshot -
+	//must not stick. $world getters return exactly the floats last set, so this is quiet when nothing moved.
+	local.curC = $world.farplane_color
+	local.drift = 0
+	if( level.coop_dustWroteR >= 0 && local.curC != level.coop_dustWroteC ){ local.drift = 1 }
+	if( local.drift == 1 || ( ( local.dr * local.dr ) + ( local.dg * local.dg ) + ( local.db * local.db ) ) * 1000000.0 > local.eps ){
+		$world farplane_color ( local.r local.g local.bl )
+		level.coop_dustWroteR = local.r
+		level.coop_dustWroteG = local.g
+		level.coop_dustWroteBc = local.bl
+		level.coop_dustWroteC = ( local.r local.g local.bl )
+	}
+	local.curB = $world.farplane_bias
+	if( local.bi != level.coop_dustWroteB || local.curB != local.bi ){
+		$world farplane_bias local.bi
+		level.coop_dustWroteB = local.bi
+	}
+	local.cur = $world.farplane
+	if( local.di != level.coop_dustWroteD || local.cur != local.di ){
+		$world farplane local.di
+		level.coop_dustWroteD = local.di
+	}
+}end
+
+//=========================================================================
+// The storm is over: hand the fog back exactly, then give up ownership (LAST).
+//=========================================================================
+coop_dust_restore:{
+//=========================================================================
+	local.how = "recorded"
+	if( level.coop_dustProfile == 1 && level.coop_fogProfileLoaded == 1 ){
+		waitthread coop_mod/fogmode.scr::coop_fog_apply
+		local.how = "profile"
+	} else if( level.coop_dustNoFog == 1 ){
+		// we are at 16000/15900 in the storm colour by now: put the map's own bias/colour back, then fog off
+		$world farplane_bias level.coop_dustOrigB
+		$world farplane_color level.coop_dustOrigC
+		$world farplane 0
+		local.how = "fogoff"
+	} else {
+		$world farplane_color level.coop_dustOrigC
+		$world farplane_bias level.coop_dustOrigB
+		$world farplane level.coop_dustOrigD
+	}
+	level.coop_dustOwnsFog = 0
+
+	local.pd = "none"
+	if( level.coop_dustProfile == 1 ){ local.pd = "" + level.coop_fogDist + "/" + level.coop_fogBias + " col=" + level.coop_fogR + " " + level.coop_fogG + " " + level.coop_fogB }
+	println( "^~^~^ DUST restore how=" + local.how + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color + " profile=" + local.pd + " orig=" + level.coop_dustOrigD + "/" + level.coop_dustOrigB )
+}end
+
+//=========================================================================
+// PER-PLAYER SHEETS. One thread for everybody, 0.05 s tick (the fade step). Sky test + sound every 0.25 s.
+//=========================================================================
+coop_dust_sheets:{
+//=========================================================================
+	local.tick = 0
+	local.slot = 0
+	local.any = 0
+	while( 1 ){
+		local.tick++
+		local.slow = 0
+		if( local.tick >= 5 ){
+			local.tick = 0
+			local.slow = 1
+			local.slot++
+			if( local.slot > 4 ){ local.slot = 0 }
+		}
+
+		local.s = level.coop_dustStrength
+		if( ( local.s > 0 || local.any == 1 ) && $player != NULL ){
+			// sheet opacity: from 6 s into the roll-in; gone 10 s into the roll-out (sheet + wind leave first)
+			if( level.coop_dustRising == 1 ){
+				local.f = ( local.s - 0.3 ) / 0.7
+				local.w = local.s
+			} else {
+				local.f = ( local.s - 0.6 ) / 0.4
+				local.w = ( local.s - 0.2 ) / 0.8
+			}
+			if( local.f < 0 ){ local.f = 0 }
+			if( local.f > 1 ){ local.f = 1 }
+			if( local.w < 0 ){ local.w = 0 }
+			if( local.w > 1 ){ local.w = 1 }
+			local.alphaTarget = level.coop_dustAlphaMax * local.f		//[bug-2973] 0.8, or a default-on look's own (e1l1: 1)
+
+			local.any = 0
+			local.n = $player.size
+			local.i = 1
+			while( local.i <= local.n ){
+				if( $player[local.i] != NULL ){
+					local.has = waitthread coop_dust_sheetTick local.i local.s local.alphaTarget local.w local.slow local.slot
+					if( local.has == 1 ){ local.any = 1 }
+				}
+				local.i++
+			}
+		}
+		wait 0.05
+	}
+}end
+
+//=========================================================================
+// One player, one tick. Players cross the thread boundary as an INDEX (numbers always bind - TRAPS T5).
+// Returns 1 while this player still has a sheet.
+//=========================================================================
+coop_dust_sheetTick local.i local.s local.alphaTarget local.w local.slow local.slot:{
+//=========================================================================
+	local.p = $player[local.i]
+	if( local.p == NULL ){ end 0 }
+	local.e = local.p.entnum
+	// [2026-09-26 MP sandstorms] bots render nothing: no sheet (coop_dustBotSheets 1 gives them one, for headless tests)
+	if( level.coop_mpRun == 1 && level.coop_dustBotSheets != 1 ){
+		local.bot = isBot( local.p )
+		if( local.bot == 1 ){ end 0 }
+	}
+	local.sheet = level.coop_dustSheet[local.e]
+	local.has = 1
+	if( local.sheet == NIL || local.sheet == NULL ){ local.has = 0 }
+
+	// storm over: delete (not hide) - frees the player's child slot
+	if( local.s <= 0 ){
+		if( local.has == 1 ){
+			local.sheet stoploopsound
+			local.sheet delete
+			println( "^~^~^ DUST sheet off ent=" + local.e )
+		}
+		level.coop_dustSheet[local.e] = NULL
+		end 0
+	}
+
+	local.ok = 1
+	if( !isAlive local.p ){
+		local.ok = 0
+	} else if( local.p.dmteam == "spectator" ){
+		local.ok = 0
+	} else if( level.coop_mpRun == 1 ){
+		// [2026-09-26 MP sandstorms] MP sets no coop_isActive: in play = alive (above), not spectating, on a team
+		if( local.p.isSpectator ){
+			local.ok = 0
+		} else if( local.p.dmteam != "allies" && local.p.dmteam != "axis" ){
+			local.ok = 0
+		}
+	} else if( local.p.flags["coop_isActive"] != 1 ){
+		local.ok = 0
+	}
+
+	if( local.ok == 0 ){
+		if( local.has == 1 && level.coop_dustShown[local.e] == 1 ){
+			local.sheet stoploopsound
+			local.sheet alpha 0
+			local.sheet anim idle
+			local.sheet hide
+			level.coop_dustShown[local.e] = 0
+			level.coop_dustAlpha[local.e] = 0
+			level.coop_dustOn[local.e] = 0
+			level.coop_dustVol[local.e] = 0
+			level.coop_dustIssued[local.e] = 0
+			println( "^~^~^ DUST sheet hidden ent=" + local.e + " (dead / spectating / inactive)" )
+		}
+		end local.has
+	}
+
+	if( local.has == 0 ){
+		if( level.coop_dustRetry[local.e] != NIL && level.time < level.coop_dustRetry[local.e] ){ end 0 }
+		local.sheet = waitthread coop_dust_sheetMake local.i
+		if( local.sheet == NIL || local.sheet == NULL ){ end 0 }
+	}
+
+	if( level.coop_dustShown[local.e] != 1 ){
+		local.sheet show
+		level.coop_dustShown[local.e] = 1
+		println( "^~^~^ DUST sheet shown ent=" + local.e + " peak=" + level.coop_dustAlphaMax )
+	}
+
+	// indoors? one up-trace per 0.25 s, rotating round the feet and four points 48u out, so a lintel,
+	// an eave or an awning overhead does not read as a roof. Indoors only after all five read closed
+	// (1.25 s); outdoors again on the first open one.
+	if( local.slow == 1 ){
+		local.pos = local.p.origin
+		if( local.slot == 1 ){ local.pos[0] = local.pos[0] + 48 }
+		if( local.slot == 2 ){ local.pos[1] = local.pos[1] + 48 }
+		if( local.slot == 3 ){ local.pos[0] = local.pos[0] - 48 }
+		if( local.slot == 4 ){ local.pos[1] = local.pos[1] - 48 }
+		local.open = waitthread coop_mod/officer.scr::coop_hasOpenSky local.pos
+		if( local.open == 1 ){
+			level.coop_dustClosed[local.e] = 0
+			level.coop_dustIndoor[local.e] = 0
+		} else {
+			if( level.coop_dustClosed[local.e] == NIL ){ level.coop_dustClosed[local.e] = 0 }
+			level.coop_dustClosed[local.e] = level.coop_dustClosed[local.e] + 1
+			if( level.coop_dustClosed[local.e] >= 5 ){ level.coop_dustIndoor[local.e] = 1 }
+		}
+	}
+	local.indoor = 0
+	if( level.coop_dustIndoor[local.e] == 1 ){ local.indoor = 1 }
+
+	// the sheet fades at retail's 0.0125 per step
+	local.t = local.alphaTarget
+	if( local.indoor == 1 ){ local.t = 0 }
+	local.a = level.coop_dustAlpha[local.e]
+	if( local.a == NIL ){ local.a = 0 }
+	local.a0 = local.a
+	if( local.a < local.t ){
+		local.a = local.a + 0.0125
+		if( local.a > local.t ){ local.a = local.t }
+	} else if( local.a > local.t ){
+		local.a = local.a - 0.0125
+		if( local.a < local.t ){ local.a = local.t }
+	}
+	if( local.a != local.a0 ){
+		local.sheet alpha local.a
+		level.coop_dustAlpha[local.e] = local.a
+	}
+
+	// blowing sand with the sheet, outdoors only
+	local.on = 0
+	if( local.indoor == 0 && local.alphaTarget > 0.1 ){ local.on = 1 }
+	if( level.coop_dustOn[local.e] != local.on ){
+		if( local.on == 1 ){
+			local.sheet anim "on"
+		} else {
+			local.sheet anim idle
+		}
+		level.coop_dustOn[local.e] = local.on
+	}
+
+	// the storm wind, private to this player, eased 0.06 per 0.25 s
+	if( local.slow == 1 ){
+		local.vt = 0.9 * local.w
+		if( local.indoor == 1 ){ local.vt = local.vt * 0.35 }
+		local.v = level.coop_dustVol[local.e]
+		if( local.v == NIL ){ local.v = 0 }
+		if( local.v < local.vt ){
+			local.v = local.v + 0.06
+			if( local.v > local.vt ){ local.v = local.vt }
+		} else if( local.v > local.vt ){
+			local.v = local.v - 0.06
+			if( local.v < local.vt ){ local.v = local.vt }
+		}
+		level.coop_dustVol[local.e] = local.v
+		local.last = level.coop_dustIssued[local.e]
+		if( local.last == NIL ){ local.last = 0 }
+		if( local.v < 0.02 ){
+			if( local.last > 0 ){
+				local.sheet stoploopsound
+				level.coop_dustIssued[local.e] = 0
+			}
+		} else {
+			local.dv = local.v - local.last
+			if( ( local.dv * local.dv ) * 10000.0 > 4.0 ){		// re-issue on a 0.02 change (scaled: 0.0001 compare dead band)
+				local.sheet loopsound coop_snd_wind_strong local.v
+				level.coop_dustIssued[local.e] = local.v
+			}
+		}
+	}
+}end 1
+
+//=========================================================================
+// Make one player's sheet. Parked 512u BELOW the feet, hidden, bound to this client, then attached: a
+// successful attach moves it to the eyes at once (Entity::attach -> setOrigin from the tag), so still
+// being down there means the attach failed (16-child cap, missing tag) - delete it and retry in 5 s rather
+// than leave a sheet standing in the world (vet 5; weapturret.cpp's P_CreateViewModel does the same).
+// NEVER set .origin on it afterwards: Entity::setOrigin(vec) DETACHES an attached entity.
+//=========================================================================
+coop_dust_sheetMake local.i:{
+//=========================================================================
+	local.p = $player[local.i]
+	if( local.p == NULL ){ end NULL }
+	local.e = local.p.entnum
+	local.tik = "models/emitters/coop_dustveil_day.tik"
+	if( level.coop_dustNight == 1 ){ local.tik = "models/emitters/coop_dustveil_night.tik" }
+
+	local.pos = local.p.origin
+	local.pos[2] = local.pos[2] - 512
+	local.m = spawn local.tik
+	local.m hide
+	local.m notsolid
+	local.m.origin = local.pos
+	local.m alpha 0
+	local.m svflags "+singleclient" local.p
+	local.m attach local.p "eyes bone" 1 ( 0 0 0 )
+
+	local.o = local.m.origin
+	local.po = local.p.origin
+	if( local.o[2] < ( local.po[2] - 64 ) ){
+		println( "^~^~^ DUST sheet attach FAILED ent=" + local.e + " at=" + local.o + " - deleted, retry in 5s" )
+		local.m delete
+		level.coop_dustRetry[local.e] = level.time + 5
+		end NULL
+	}
+	local.m anim idle
+
+	level.coop_dustSheet[local.e] = local.m
+	level.coop_dustShown[local.e] = 0
+	level.coop_dustAlpha[local.e] = 0
+	level.coop_dustOn[local.e] = 0
+	level.coop_dustVol[local.e] = 0
+	level.coop_dustIssued[local.e] = 0
+	level.coop_dustClosed[local.e] = 0
+	level.coop_dustIndoor[local.e] = 0
+	println( "^~^~^ DUST sheet on ent=" + local.e + " tik=" + local.tik )
+}end local.m

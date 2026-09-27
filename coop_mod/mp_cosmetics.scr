@@ -1,0 +1,313 @@
+//=========================================================================
+// MP_COSMETICS.SCR - apply a MP player's chosen cosmetics (body skin / gloves / helmet) at spawn.
+// Step 1 of the MP cosmetics feature (_research/mp_cosmetics_plan.md): BODY + GLOVES. Helmet needs the
+// hatless-twin Axis/Allied bodies (step 2) and is stubbed here.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded by level.coop_mpRun, which
+// ONLY coop_mod/mp.scr sets. Called from mp_armory.scr::giveKit on the spawn edge.
+//
+// ISOLATION (clause 10): calls NO coop code. It mirrors coop's glove surface-bit recipe (gloves.scr)
+// and body-model swap (helmet.scr) INLINE - never calling them. It writes ONLY MP-owned state: the
+// player's model (an entity command), the "hand" surface bits (an entity command), and the E3 MP 1P
+// glove cvar coop_mp_glove (NOT the coop cvar coop_gloveIdx - E3 makes cg_modelanim read coop_mp_glove
+// when coop_mp_session is set). Per-player picks live in self.flags["coop_mp_SKIN"/"_GLOVE"/"_HELM"].
+//=========================================================================
+
+//Inert entry.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// APPLY - set the player's body model and gloves from their committed cosmetic picks. Called
+// (waitthread) from mp_armory.scr::giveKit AFTER the weapon give. A model swap resets surfaces, so the
+// glove bits are written AFTER the body model (same ordering coop uses). The DEBUG force cvars let a
+// bot playtest exercise the apply path (bots never open the armory).
+//=========================================================================
+apply local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpRun != 1 ){ end }
+
+	//side for the carried userinfo cvars (dmteam axis -> x, else a; same rule as mp_armory::sideOf).
+	local.side = "a"
+	if( local.p.dmteam == "axis" ){ local.side = "x" }
+	local.u = local.p.userinfo
+
+	//SKIN: a fresh name-bus pick this life (coop_mp_SKIN stem) wins; else the CARRIED userinfo id
+	//(coop_mp<side>_cosSkin), resolved to a stem via skinGet - this is what makes the choice persist
+	//across maps/servers/sessions like the coop loadout.
+	local.skin = local.p.flags["coop_mp_SKIN"]
+	if( ( local.skin == NIL || local.skin == "" ) && local.u != NIL ){
+		local.skKey = ( "coop_mp" + local.side + "_cosSkin" )
+		local.skId = info_valueforkey local.u local.skKey
+		if( local.skId != NIL && local.skId != "" ){
+			//EARNED: a carried skin id is only worn if the player has unlocked it. Without this the
+			//userinfo carry would let a locked pick (chosen at the menu / edited in) bypass the gate the
+			//name-bus path enforces. A locked pick simply leaves the default body (skin stays empty).
+			local.cu = waitthread cosUnlocked local.p "k" local.skId
+			if( local.cu == 1 ){
+				local.rs = waitthread skinGet local.side local.skId
+				if( local.rs["stem"] != "" ){ local.skin = local.rs["stem"] }
+			}
+		}
+	}
+
+	//GLOVE: fresh pick, else carried id.
+	local.glove = local.p.flags["coop_mp_GLOVE"]
+	if( ( local.glove == NIL || local.glove == "" ) && local.u != NIL ){
+		local.glKey = ( "coop_mp" + local.side + "_cosGlove" )
+		local.glId = info_valueforkey local.u local.glKey
+		if( local.glId != NIL && local.glId != "" ){
+			local.cu = waitthread cosUnlocked local.p "v" local.glId
+			if( local.cu == 1 ){ local.glove = int( local.glId ) }
+		}
+	}
+
+	//HELMET: fresh pick, else carried id resolved via helmGet into the coop_mp_HELM flag the block below reads.
+	if( ( local.p.flags["coop_mp_HELM"] == NIL || local.p.flags["coop_mp_HELM"] == "" ) && local.u != NIL ){
+		local.hKey = ( "coop_mp" + local.side + "_cosHelm" )
+		local.hId = info_valueforkey local.u local.hKey
+		if( local.hId != NIL && local.hId != "" ){
+			local.cu = waitthread cosUnlocked local.p "h" local.hId
+			if( local.cu == 1 ){
+				local.rh = waitthread helmGet local.side local.hId
+				local.p.flags["coop_mp_HELM"] = local.rh["tik"]
+			}
+		}
+	}
+
+	//DEBUG overrides (force cosmetics onto everyone incl. bots so the apply path is bot-verifiable).
+	local.tSkin = getcvar( "coop_mpCosTestSkin" )
+	if( local.tSkin != "" ){ local.skin = local.tSkin }
+	local.tGlove = getcvar( "coop_mpCosTestGlove" )
+	if( local.tGlove != "" ){ local.glove = int( local.tGlove ) }
+
+	//BODY. Wear the chosen skin tik. Empty = leave whatever the engine/DM model gave (no change). The
+	//model command resets surfaces + attachments, so it must run before the glove bits below. Step 2
+	//swaps this to the "_nohat" twin so the helmet layer can attach; step 1 wears the plain tik.
+	if( local.skin != NIL && local.skin != "" ){
+		local.p model ( "models/player/" + local.skin + ".tik" )
+		waitframe
+		if( local.p == NULL ){ end }
+		println( "^~^~^ MPCOS body e" + local.p.entnum + " skin=" + local.skin + " model=" + local.p.model )
+	}
+
+	//GLOVES. 3P: encode idx 0-7 into the "hand" surface skin bits (mirrors gloves.scr::glove_writeBits;
+	//the +/- args MUST be quoted - an unquoted +/- is a script parse killer, TRAPS T1 / bug-533). 1P:
+	//the E3 MP glove cvar coop_mp_glove (change-only stufftext), which cg_modelanim reads in an MP session.
+	if( local.glove != NIL && local.glove != "" && local.glove != 0 ){
+		waitthread writeGloveBits local.p local.glove
+		if( local.p == NULL ){ end }
+		if( local.p.flags["coop_mp_gloveSent"] != local.glove ){
+			local.p.flags["coop_mp_gloveSent"] = local.glove
+			local.p stufftext ( "set coop_mp_glove " + local.glove )
+		}
+		println( "^~^~^ MPCOS glove e" + local.p.entnum + " idx=" + local.glove )
+	}
+
+	//HELMET. coop_mp_HELM holds an exact-fit head-prop tik path, or "" / "std" = the body's own baked
+	//look (no attach), or "none" = hide the baked head covering and attach nothing. This mirrors coop's
+	//SOLVED recipe (helmet.scr): the coop_helmets pieces carry head-bone-local geometry, so the FULL
+	//attachmodel signature with a ZERO offset lands pixel-perfect and follows the head 1:1 - the bare
+	//2-arg attach used before is what made a worn piece sit sideways/orbit (bug-535). For any non-std
+	//pick we first hide the model's own baked helmet surfaces (mirrors helmet.scr's nodraw belt-and-
+	//braces) so the chosen piece does not double up on a hatted skin. Removal is by tag (safe no-op).
+	local.helm = local.p.flags["coop_mp_HELM"]
+	local.tHelm = getcvar( "coop_mpCosTestHelm" )
+	if( local.tHelm != "" ){ local.helm = local.tHelm }
+	if( local.helm != NIL && local.helm != "" && local.helm != "std" ){
+		waitthread hideBakedHelmet local.p
+		if( local.p == NULL ){ end }
+		local.p removeattachedmodel "Bip01 Head"
+		if( local.helm != "none" ){
+			local.p attachmodel local.helm "Bip01 Head" 1.0 "coop_mp_helmetProp" 0 -1 -1 -1 -1 ( 0 0 0 )
+		}
+		println( "^~^~^ MPCOS helm e" + local.p.entnum + " helm=" + local.helm )
+	}
+}end
+
+
+//=========================================================================
+// Hide a skin's OWN baked head covering so a chosen exact-fit helmet does not render on top of it.
+// This is a compact mirror of the surface-nodraw belt-and-braces in coop_mod/helmet.scr (clause 10:
+// mirrored INLINE, never called). Every +/- surface arg is QUOTED (an unquoted +/- is a parse killer,
+// TRAPS T1 / bug-533). A surface a given model does not have simply warns "group not found" and no-ops
+// (entity.cpp:4214), so the whole blanket is safe across the mixed US/German/Italian MP skin set.
+//=========================================================================
+hideBakedHelmet local.ent:{
+	if( local.ent == NULL ){ end }
+	local.ent surface us_helmet "+nodraw"
+	local.ent surface us_helmet_inside "+nodraw"
+	local.ent surface bob_helmet_camo "+nodraw"
+	local.ent surface helmet "+nodraw"
+	local.ent surface helmet_mk2a "+nodraw"
+	local.ent surface hat "+nodraw"
+	local.ent surface officer_hat "+nodraw"
+	local.ent surface officerhat "+nodraw"
+	local.ent surface officercap "+nodraw"
+	local.ent surface creasecap "+nodraw"
+	local.ent surface ssncocap "+nodraw"
+	local.ent surface camocover "+nodraw"
+	local.ent surface crusher "+nodraw"
+	local.ent surface german_beret "+nodraw"
+	local.ent surface ax_ital_infhat "+nodraw"
+	local.ent surface ax_ital_volhat "+nodraw"
+}end
+
+
+//=========================================================================
+// SERVER ROSTERS. Side-specific skins (existing shipped model stems - Allied from the coop armory set,
+// Axis from the stock/HRRTM game paks), a shared helmet list, a shared glove list. Curated + extensible
+// (add rows here and a matching UI cfg). id is a 2-digit string; returns "" stem for an unknown id.
+// Used by mp_armory.scr::applyMarker to validate a cosmetic pick and by the UI name push.
+//=========================================================================
+skinGet local.side local.id:{
+	//[bug-2762] FULL skin rosters live in their own generated data files (coop_mod/mp_skins_a.scr /
+	//mp_skins_x.scr) with range sub-switches, to stay under the morpheus per-file switch-case ceiling that a
+	//single 186-case skinGet blew ("Couldn't compile"). MP->MP (both in MP_MANIFEST). Returns stem+name.
+	local.r["stem"] = ""
+	local.r["name"] = ""
+	if( local.side == "a" ){
+		local.r = waitthread coop_mod/mp_skins_a.scr::skinGet_a local.id
+	}else{
+		local.r = waitthread coop_mod/mp_skins_x.scr::skinGet_x local.id
+	}
+	end local.r
+}end local.r
+
+
+helmGet local.side local.id:{
+	local.r["tik"] = ""
+	local.r["name"] = "STANDARD ISSUE"
+	//[bug-2761] SIDE-SPECIFIC helmets (user 2026-09-20: axis were being offered allied helmets). Allied get
+	//US/UK/Soviet headgear; axis get German/Italian. All are real head-bone-local coop_helmets pieces (the
+	//same set coop uses), so a plain attachmodel to "Bip01 Head" with a zero offset lands pixel-perfect
+	//(helmet.scr:463-469). 01=Standard Issue, 02=No Helmet on both sides; the rest are per-side and EARNED
+	//(cosNeed h: id>=3 -> (id-2)*15 kills). Both sides pass 'side' from apply / the generator parses each.
+	if( local.side == "a" ){
+		switch( local.id ){
+			case "01": local.r["tik"] = "std"; local.r["name"] = "STANDARD ISSUE"; break
+			case "02": local.r["tik"] = "none"; local.r["name"] = "NO HELMET"; break
+			case "03": local.r["tik"] = "models/coop_helmets/coop_helmet_plain.tik"; local.r["name"] = "M1 STEEL POT"; break
+			case "04": local.r["tik"] = "models/coop_helmets/coop_helmet_net.tik"; local.r["name"] = "NETTED HELMET"; break
+			case "05": local.r["tik"] = "models/coop_helmets/coop_helmet_29th.tik"; local.r["name"] = "29TH INFANTRY"; break
+			case "06": local.r["tik"] = "models/coop_helmets/coop_helmet_brit_mk2.tik"; local.r["name"] = "BRODIE MK2"; break
+			case "07": local.r["tik"] = "models/coop_helmets/coop_helmet_uk_helmet.tik"; local.r["name"] = "BRITISH HELMET"; break
+			case "08": local.r["tik"] = "models/coop_helmets/coop_helmet_brit_beret.tik"; local.r["name"] = "BRITISH BERET"; break
+			case "09": local.r["tik"] = "models/coop_helmets/coop_helmet_brit_cmdhat.tik"; local.r["name"] = "COMMANDO CAP"; break
+			case "10": local.r["tik"] = "models/coop_helmets/coop_helmet_us_tankhat.tik"; local.r["name"] = "US TANKER"; break
+			case "11": local.r["tik"] = "models/coop_helmets/coop_helmet_soviet_hat.tik"; local.r["name"] = "SOVIET CAP"; break
+			case "12": local.r["tik"] = "models/coop_helmets/coop_helmet_woolcap.tik"; local.r["name"] = "WOOL CAP"; break
+		}
+	} else {
+		switch( local.id ){
+			case "01": local.r["tik"] = "std"; local.r["name"] = "STANDARD ISSUE"; break
+			case "02": local.r["tik"] = "none"; local.r["name"] = "NO HELMET"; break
+			case "03": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_helmet.tik"; local.r["name"] = "STAHLHELM"; break
+			case "04": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_covered.tik"; local.r["name"] = "COVERED STAHLHELM"; break
+			case "05": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_splinter.tik"; local.r["name"] = "SPLINTER HELMET"; break
+			case "06": local.r["tik"] = "models/coop_helmets/coop_helmet_dak_hat.tik"; local.r["name"] = "AFRIKA KORPS CAP"; break
+			case "07": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_hat.tik"; local.r["name"] = "FIELD CAP"; break
+			case "08": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_creasecap.tik"; local.r["name"] = "CREASE CAP"; break
+			case "09": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_officercap.tik"; local.r["name"] = "OFFICER CAP"; break
+			case "10": local.r["tik"] = "models/coop_helmets/coop_helmet_ss_officerhat.tik"; local.r["name"] = "SS OFFICER CAP"; break
+			case "11": local.r["tik"] = "models/coop_helmets/coop_helmet_ssncocap.tik"; local.r["name"] = "SS NCO CAP"; break
+			case "12": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_crusher.tik"; local.r["name"] = "CRUSHER CAP"; break
+			case "13": local.r["tik"] = "models/coop_helmets/coop_helmet_ger_tankhat.tik"; local.r["name"] = "PANZER CAP"; break
+			case "14": local.r["tik"] = "models/coop_helmets/coop_helmet_ss_mutze.tik"; local.r["name"] = "SS MUTZE"; break
+			case "15": local.r["tik"] = "models/coop_helmets/coop_helmet_ital_volhat.tik"; local.r["name"] = "ITALIAN CAP"; break
+			case "16": local.r["tik"] = "models/coop_helmets/coop_helmet_ital_infhat.tik"; local.r["name"] = "ITALIAN HELMET"; break
+		}
+	}
+	end local.r
+}end local.r
+
+
+//=========================================================================
+// COSMETIC CHALLENGES / UNLOCKS. Cosmetics are EARNED, not free (user 2026-09-15). Each option unlocks
+// at a kill milestone on the player's carried MP progression total (coop_mpProgKills, loaded by
+// mp_progression.scr::ensureLoaded on the team-flip edge). The ladder is by option id so higher-numbered
+// pieces cost more play: skins 0/10/20.. , helmets 01+02 free then 15/30.. , gloves 0/5/10.. . The
+// Service Record shows the player's total so they can see how close they are. mp_armory::applyMarker
+// calls cosUnlocked before it accepts a cosmetic pick, so the server is authoritative.
+//=========================================================================
+cosNeed local.field local.id:{
+	local.n = int( local.id )
+	local.need = 0
+	if( local.field == "k" ){ local.need = ( ( local.n - 1 ) * 10 ) }
+	if( local.field == "h" ){
+		if( local.n >= 3 ){ local.need = ( ( local.n - 2 ) * 15 ) }
+	}
+	if( local.field == "v" ){ local.need = ( local.n * 5 ) }
+	if( local.need < 0 ){ local.need = 0 }
+	end local.need
+}end local.need
+
+
+cosUnlocked local.p local.field local.id:{
+	if( local.p == NULL ){ end 0 }
+
+	//[MP CHALLENGES] the granular path: a completed challenge that REWARDS this exact cosmetic unlocks it.
+	//Skins are per side (sk:<a|x>:<id>), helmets/gloves are shared (hl:<id> / gl:<id>). isUnlocked reads
+	//the player's derived challenge unlock store. field codes: k=skin, h=helmet, v=glove.
+	local.tok = ""
+	if( local.field == "k" ){
+		local.side = "x"
+		if( local.p.dmteam == "allies" ){ local.side = "a" }
+		local.tok = ( "sk:" + local.side + ":" + local.id )
+	} else if( local.field == "h" ){
+		local.tok = ( "hl:" + local.id )
+	} else if( local.field == "v" ){
+		local.tok = ( "gl:" + local.id )
+	}
+	if( local.tok != "" ){
+		if( waitthread coop_mod/mp_challenges.scr::isUnlocked local.p local.tok == 1 ){ end 1 }
+	}
+
+	//fallback: the cumulative-kill threshold keeps EVERY cosmetic obtainable even if no challenge covers it.
+	local.need = waitthread cosNeed local.field local.id
+	if( local.need <= 0 ){ end 1 }
+	local.tot = local.p.flags["coop_mpProgKills"]
+	if( local.tot == NIL ){ local.tot = 0 }
+	if( local.tot >= local.need ){ end 1 }
+	end 0
+}end
+
+
+//glove list mirrors the coop 7-glove set (index 0-6 -> hand surface bits).
+gloveName local.idx:{
+	local.n = "BARE HANDS"
+	switch( local.idx ){
+		case 1: local.n = "GRAY GLOVES"; break
+		case 2: local.n = "BLACK GLOVES"; break
+		case 3: local.n = "BROWN GLOVES"; break
+		case 4: local.n = "TAN GLOVES"; break
+		case 5: local.n = "WINTER GLOVES"; break
+		case 6: local.n = "ALPINE GLOVES"; break
+	}
+	end local.n
+}end local.n
+
+
+//=========================================================================
+// Write glove index 0-7 into the "hand" surface bits. Clear all three bits first (surface sets/clears
+// individual flags, it does not assign), then set the combination. Every +/- argument is QUOTED - an
+// unquoted +/- is a Morpheus parse killer that takes the whole file down (TRAPS T1, bug-533/1308).
+//=========================================================================
+writeGloveBits local.ent local.idx:{
+	if( local.ent == NULL ){ end }
+
+	local.ent surface hand "-skin1"
+	local.ent surface hand "-skin2"
+	local.ent surface hand "-skin4"
+
+	if( local.idx == 1 ){ local.ent surface hand "+skin1" }
+	else if( local.idx == 2 ){ local.ent surface hand "+skin2" }
+	else if( local.idx == 3 ){ local.ent surface hand "+skin1" local.ent surface hand "+skin2" }
+	else if( local.idx == 4 ){ local.ent surface hand "+skin4" }
+	else if( local.idx == 5 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin1" }
+	else if( local.idx == 6 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin2" }
+	else if( local.idx == 7 ){ local.ent surface hand "+skin4" local.ent surface hand "+skin1" local.ent surface hand "+skin2" }
+}end

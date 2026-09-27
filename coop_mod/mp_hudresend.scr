@@ -1,0 +1,91 @@
+//=========================================================================
+// mp_hudresend.scr - make a one-shot ihuddraw teardown STICK on a remote client (MP copy)
+//=========================================================================
+// [2026-09-25, bug-2906] The multiplayer twin of coop_mod/hudresend.scr - read that file for the
+// why. It exists only because MP scripts may call no coop helper outside MP_COOP_ALLOW
+// (docs/tools/check_mp_isolation.py clause 10), and coop files may not name an MP one (clause 1).
+// Same contract: every VISIBLE draw into a hardened slot claims first; resend is threaded after the
+// owner's own one-shot teardown and re-sends only to slots whose generation has not moved.
+// Its own generation namespace (flags coop_mpHudGen<slot>): coop code that also runs in MP
+// (xp.scr popups, player.scr limp warning) claims through the coop file, on slots no MP owner uses.
+//=========================================================================
+
+
+//=========================================================================
+// claim local.player local.first local.last
+//=========================================================================
+claim local.player local.first local.last:{
+	if( local.player == NIL || local.player == NULL ){ end }
+	local.s = local.first
+	while( local.s <= local.last ){
+		local.g = local.player.flags["coop_mpHudGen" + local.s]
+		if( local.g == NIL ){ local.g = 0 }
+		local.player.flags["coop_mpHudGen" + local.s] = local.g + 1
+		local.s++
+	}
+}end
+
+
+//=========================================================================
+// resend local.player local.first local.last local.str
+//   local.str 0 = re-send alpha 0 only. Enough to hide any layer, and never zeroes a shader.
+//   local.str 1 = alpha 0 AND string "", for a teardown that blanked the string too. Never for an
+//             element re-shown later with alpha alone: a string write also zeroes the slot's shader
+//             (cg_parsemsg.cpp), so it would come back empty.
+//   local.str 2 = string "" ONLY, for text whose alpha stays up while the owner swaps it in and out
+//             by string alone (dbno.scr "Giving up...") - an alpha 0 there would hide the next one.
+//=========================================================================
+resend local.player local.first local.last local.str:{
+	waitthread resendUnless local.player local.first local.last local.str ""
+}end
+
+
+//=========================================================================
+// resendUnless local.player local.first local.last local.str local.stop
+//   As resend, and also stops for good the moment local.player.flags[local.stop] == 1. A second,
+//   coarser guard for the dense 20-39 downed/medkit cluster, where a state flag (coop_dbno_active,
+//   coop_isActive) says "a new owner is about to draw here" before any single draw does.
+//=========================================================================
+resendUnless local.player local.first local.last local.str local.stop:{
+	if( local.player == NIL || local.player == NULL ){ end }
+
+	//snapshot every slot's generation in the frame of the owner's own teardown
+	local.s = local.first
+	while( local.s <= local.last ){
+		local.g = local.player.flags["coop_mpHudGen" + local.s]
+		if( local.g == NIL ){ local.g = 0 }
+		local.gen[local.s] = local.g
+		local.s++
+	}
+
+	local.pass = 1
+	while( local.pass <= 3 ){
+		if( local.pass == 1 ){
+			wait 0.5
+		} else if( local.pass == 2 ){
+			wait 1
+		} else {
+			wait 1.5
+		}
+		if( local.player == NULL ){ end }
+		if( local.stop != "" ){
+			if( local.player.flags[local.stop] == 1 ){ end }
+		}
+
+		local.s = local.first
+		while( local.s <= local.last ){
+			local.g = local.player.flags["coop_mpHudGen" + local.s]
+			if( local.g == NIL ){ local.g = 0 }
+			if( local.g == local.gen[local.s] ){
+				if( local.str != 2 ){
+					ihuddraw_alpha local.player local.s 0
+				}
+				if( local.str == 1 || local.str == 2 ){
+					ihuddraw_string local.player local.s ""
+				}
+			}
+			local.s++
+		}
+		local.pass++
+	}
+}end

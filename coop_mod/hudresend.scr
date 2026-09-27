@@ -1,0 +1,105 @@
+//=========================================================================
+// hudresend.scr - make a one-shot ihuddraw teardown STICK on a remote client
+//=========================================================================
+// [2026-09-25, bug-2906] Every ihuddraw_* write is a cgame message that rides the NEXT snapshot to
+// that client exactly ONCE: SV_WriteCGMToClient (sv_game.c:514) clears the per-client buffer after
+// writing it, snapshots are unreliable UDP with no retransmit, and PF_MSG_SetClient silently skips a
+// client whose buffer is nearly full. The listen host runs over loopback and never loses one, so a
+// lost teardown only ever strands a REMOTE player's HUD - and nothing rewrites an idle slot, so it
+// stays for the rest of the map. bug-2904 fixed the NEW OBJECTIVE card inline; this is the same
+// repair, shared by every other transient element.
+//
+// THE CONTRACT - both halves, or the re-send becomes the bug:
+//   claim  - every VISIBLE draw into a hardened slot calls it first. The hidden->shown edge is
+//            enough; a per-tick redraw of an element already on screen need not.
+//            It bumps that slot's generation for that player.
+//   resend - thread it right after the owner's own one-shot teardown. It re-sends the same hidden
+//            state at +0.5 s, +1.5 s and +3 s (four copies counting the owner's), but only to slots
+//            whose generation has not moved - so a copy can never blank whatever drew there next.
+//   A tenant that draws into a hardened slot WITHOUT claiming can be blanked for up to 3 s after
+//   somebody else's teardown. _research/hud_slot_map.md lists who shares what.
+//
+// Not needed when a map change follows the teardown at once: a remote client resets every slot on
+// a map load (cl_cgame.cpp CL_InitCGame -> CL_InitClientSavedData).
+// MP scripts may not call this file (check_mp_isolation clause 10); they use mp_hudresend.scr.
+//=========================================================================
+
+
+//=========================================================================
+// claim local.player local.first local.last
+//=========================================================================
+claim local.player local.first local.last:{
+	if( local.player == NIL || local.player == NULL ){ end }
+	local.s = local.first
+	while( local.s <= local.last ){
+		local.g = local.player.flags["coop_hudGen" + local.s]
+		if( local.g == NIL ){ local.g = 0 }
+		local.player.flags["coop_hudGen" + local.s] = local.g + 1
+		local.s++
+	}
+}end
+
+
+//=========================================================================
+// resend local.player local.first local.last local.str
+//   local.str 0 = re-send alpha 0 only. Enough to hide any layer, and never zeroes a shader.
+//   local.str 1 = alpha 0 AND string "", for a teardown that blanked the string too. Never for an
+//             element re-shown later with alpha alone: a string write also zeroes the slot's shader
+//             (cg_parsemsg.cpp), so it would come back empty.
+//   local.str 2 = string "" ONLY, for text whose alpha stays up while the owner swaps it in and out
+//             by string alone (dbno.scr "Giving up...") - an alpha 0 there would hide the next one.
+//=========================================================================
+resend local.player local.first local.last local.str:{
+	waitthread resendUnless local.player local.first local.last local.str ""
+}end
+
+
+//=========================================================================
+// resendUnless local.player local.first local.last local.str local.stop
+//   As resend, and also stops for good the moment local.player.flags[local.stop] == 1. A second,
+//   coarser guard for the dense 20-39 downed/medkit cluster, where a state flag (coop_dbno_active,
+//   coop_isActive) says "a new owner is about to draw here" before any single draw does.
+//=========================================================================
+resendUnless local.player local.first local.last local.str local.stop:{
+	if( local.player == NIL || local.player == NULL ){ end }
+
+	//snapshot every slot's generation in the frame of the owner's own teardown
+	local.s = local.first
+	while( local.s <= local.last ){
+		local.g = local.player.flags["coop_hudGen" + local.s]
+		if( local.g == NIL ){ local.g = 0 }
+		local.gen[local.s] = local.g
+		local.s++
+	}
+
+	local.pass = 1
+	while( local.pass <= 3 ){
+		if( local.pass == 1 ){
+			wait 0.5
+		} else if( local.pass == 2 ){
+			wait 1
+		} else {
+			wait 1.5
+		}
+		if( local.player == NULL ){ end }
+		if( local.stop != "" ){
+			if( local.player.flags[local.stop] == 1 ){ end }
+		}
+
+		local.s = local.first
+		while( local.s <= local.last ){
+			local.g = local.player.flags["coop_hudGen" + local.s]
+			if( local.g == NIL ){ local.g = 0 }
+			if( local.g == local.gen[local.s] ){
+				if( local.str != 2 ){
+					ihuddraw_alpha local.player local.s 0
+				}
+				if( local.str == 1 || local.str == 2 ){
+					ihuddraw_string local.player local.s ""
+				}
+			}
+			local.s++
+		}
+		local.pass++
+	}
+}end

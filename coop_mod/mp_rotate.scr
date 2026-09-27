@@ -1,0 +1,141 @@
+//=========================================================================
+// MP_ROTATE.SCR - generic server map rotation for the non-Push MP modes (user 2026-09-18). Push owns its
+// own 7-map cycle (mp_push.scr::push_nextMap, tied to the side-swap series); this is the mode-agnostic pool
+// for Freeze Tag, Domination and any other mode that ends a match with a same-map restart.
+//
+// CONTRACT: nextMap returns the map AFTER the current one in the pool, but ONLY when the host cvar
+// coop_mpRotate is 1. Otherwise (a listen server, or a single-map 24/7 server) it returns "" and the caller
+// keeps its existing same-map restart - so this file changes nothing unless a server opts in. If the current
+// map is not in the pool it returns the first entry, so a rotation server started off-pool still joins the
+// cycle. The CALLER re-arms the one-shot sv_mpForceArena before the transition (the arena launch is what
+// makes these run the MP framework - see coop_mod/mp.scr / level.cpp mp_force_arena).
+//
+// MP-ONLY (coop_mod/mp*.scr, entered only from the MP match-end path, itself guarded by level.coop_mpRun):
+// reads only coop_mpRotate + mapname, returns a string; never giveInventory / changeGameType / a coop path.
+//
+// THE POOL: the full stock MP map set (9 dm + 14 obj), boot-verified 2026-09-18 (all 23 load as arenas).
+// Full paths, because getcvar("mapname") returns the prefixed path (e.g. "dm/stalingrad_3_dm"). To trim a
+// map that plays poorly for a symmetric mode, delete its line and renumber - nothing else references it.
+//=========================================================================
+nextMap:{
+	if( getcvar( "coop_mpRotate" ) != "1" ){ end "" }
+
+	local.m = getcvar( "mapname" )
+
+	//[bug-2782 / rotation B] TYPE-AWARE POOLS so a mode rotates only maps that fit its gametype instead of
+	//one flat dm+obj mix. The host picks the set with coop_mpRotatePool: "dm" (default - the stock deathmatch
+	//maps, right for Freeze Tag / rifles / any team-arena mode), "obj" (the objective maps), or "all" (both).
+	//A THIRD set - the ported SP campaign maps - is HELD OUT by default (coop_mpRotateSP 0) until bot
+	//navigation is validated on them (bug-2781); set coop_mpRotateSP 1 to fold them into the dm/all rotation.
+	local.dm[1] = "dm/Ramelle"
+	local.dm[2] = "dm/SAVING_PRIVATE_RYAN"
+	local.dm[3] = "dm/bot_Foy_East"
+	local.dm[4] = "dm/bot_Foy_West"
+	local.dm[5] = "dm/german"
+	local.dm[6] = "dm/operation_fubar"
+	local.dm[7] = "dm/siegecastle_dm"
+	local.dm[8] = "dm/stalingrad_3_dm"
+	local.dm[9] = "dm/thesiege_dm"
+	local.nDm = 9
+
+	local.obj[1]  = "obj/CapturedBase"
+	local.obj[2]  = "obj/LastStand"
+	local.obj[3]  = "obj/bastogne"
+	local.obj[4]  = "obj/blitzschnee"
+	local.obj[5]  = "obj/bobobjaa01"
+	local.obj[6]  = "obj/bobobjaa02"
+	local.obj[7]  = "obj/bobobjaa03"
+	local.obj[8]  = "obj/dogwhite"
+	local.obj[9]  = "obj/obj_hms_hood"
+	local.obj[10] = "obj/obj_lakeside_ai"
+	local.obj[11] = "obj/obj_praha1945"
+	local.obj[12] = "obj/obj_radararea"
+	local.obj[13] = "obj/omaha_beach"
+	local.obj[14] = "obj/wilhelmstein_1767_obj"
+	local.nObj = 14
+
+	//ported SP campaign maps that load as arenas (mp_arena_spawns injects distributed spawns). HELD until
+	//bug-2781 bot-nav is confirmed good on them - see coop_mpRotateSP above.
+	local.sp[1]  = "t3l1"
+	local.sp[2]  = "t2l1"
+	local.sp[3]  = "t2l3"
+	local.sp[4]  = "t2l4"
+	local.sp[5]  = "m2l3"
+	local.sp[6]  = "m1l3a"
+	local.sp[7]  = "m3l1b"
+	local.sp[8]  = "m5l2a"
+	local.sp[9]  = "m5l3"
+	local.sp[10] = "e1l1"
+	local.sp[11] = "e3l1"
+	local.sp[12] = "e3l2"
+	local.nSp = 12
+
+	local.pool = getcvar( "coop_mpRotatePool" )
+	if( local.pool == "" ){ local.pool = "dm" }
+
+	//build the active list from the chosen set(s)
+	local.k = 0
+	if( local.pool == "obj" ){
+		for( local.i = 1; local.i <= local.nObj; local.i++ ){ local.k++; local.list[local.k] = local.obj[local.i] }
+	} else {
+		for( local.i = 1; local.i <= local.nDm; local.i++ ){ local.k++; local.list[local.k] = local.dm[local.i] }
+		if( local.pool == "all" ){
+			for( local.i = 1; local.i <= local.nObj; local.i++ ){ local.k++; local.list[local.k] = local.obj[local.i] }
+		}
+		if( getcvar( "coop_mpRotateSP" ) == "1" ){
+			for( local.i = 1; local.i <= local.nSp; local.i++ ){ local.k++; local.list[local.k] = local.sp[local.i] }
+		}
+	}
+	local.n = local.k
+	if( local.n < 1 ){ end "" }
+
+	local.idx = 0
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		if( local.list[local.i] == local.m ){ local.idx = local.i }
+	}
+	local.nxt = ( local.idx + 1 )
+	if( local.nxt > local.n ){ local.nxt = 1 }
+	local.out = local.list[local.nxt]
+}end local.out
+
+
+//=========================================================================
+// rotateTimer - TIME-BASED map rotation (user 2026-09-18: "they should be timed"). Started once per map
+// load from mp.scr::main; self-gates on coop_mpRotate so it is inert unless the server opted in.
+//
+// WHY A PERSISTENT ELAPSED CVAR, NOT A SIMPLE wait: Freeze Tag and Domination RELOAD the map on every
+// round/match end (mp_rounds.scr / mp_domination.scr do stuffsrv "map <same>"), which kills every level
+// thread - a plain `wait 1200; rotate` would be reset by the first round. So this loop banks 10 s at a
+// time into coop_mpRotateElapsed, a NON-archived cvar that survives an in-process map reload the way the
+// series-score cvars do. Each reload the timer restarts and RESUMES from the banked total, so elapsed is
+// the real wall time spent on this map across all its match reloads. At coop_mpRotateTime minutes it zeroes
+// the bank, re-arms the one-shot sv_mpForceArena, and advances to the next pool map. (A few seconds of load
+// time between reloads go uncounted - negligible against a 20-min window.)
+//=========================================================================
+rotateTimer:{
+	if( getcvar( "coop_mpRotate" ) != "1" ){ end }
+	if( level.coop_mpRotateTimerRun == 1 ){ end }
+	level.coop_mpRotateTimerRun = 1
+
+	local.mins = int( getcvar( "coop_mpRotateTime" ) )
+	if( local.mins < 1 ){ local.mins = 20 }
+	local.limit = ( local.mins * 60 )
+
+	while( level.coop_mpRun == 1 ){
+		wait 10
+		local.el = ( int( getcvar( "coop_mpRotateElapsed" ) ) + 10 )
+		setcvar "coop_mpRotateElapsed" ( "" + local.el )
+		if( local.el >= local.limit ){
+			local.nxt = waitthread nextMap
+			if( local.nxt == "" ){ end }
+			setcvar "coop_mpRotateElapsed" "0"
+			setcvar "sv_mpForceArena" "1"
+			local.nxtTitle = waitthread coop_mod/mp_maptitles.scr::title local.nxt
+			iprintlnbold( "Time up - next map: " + local.nxtTitle )
+			println( "^~^~^ MPROT timed rotate -> " + local.nxt + " after " + local.mins + " min" )
+			wait 3
+			stuffsrv ( "map " + local.nxt )
+			end
+		}
+	}
+}end

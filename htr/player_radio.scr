@@ -1,0 +1,304 @@
+// 22 November 2005 17:20:57 
+// Added code for radio drop. The radio will drop if hgeld too long
+
+main:
+
+	self.flying = 1 //stop them using the plane
+
+	local.team = self.dmteam
+	
+	level.clockside = local.team
+
+	level.hudyellow = local.team
+	
+	local.locate_time = getcvar "countdown_locate"
+	local.locate_time = int local.locate_time
+	
+	if(local.locate_time == 0)
+	{
+		setcvar "countdown_locate" "0"
+	}
+
+	local.locate = level.countdown[local.team]["seconds"] - local.locate_time
+
+	if(local.locate <= 0 )
+	{
+		local.locate = local.locate_time - level.countdown[local.team]["seconds"]
+		local.locate = 60 - local.locate_time
+	}	
+
+	
+	local.held_for = 0	//Time help for before the radio is dropped
+	local.max_hold_time = int (getcvar("countdown_hold_for"))
+
+	// if only 1 player per team are in the game dissable the radio drop feature.
+	if($player.size <= 2)
+	{
+		local.team_no = waitexec htr/nagle.scr::team_count
+
+		if(local.team_no[local.team] < 2 )
+		{
+			local.max_hold_time = 0
+		}
+	}
+
+	if(local.max_hold_time > 0)
+	{
+		thread display
+		self.no_usemine = 1 //stop them using a mine
+		self.no_usemedic = 1 //stop medics
+	
+		self iprint ("You have " + local.max_hold_time + " seconds to pass the radio") 
+	}
+
+	local.use_held = 0 // if the player holds use for 2 seconds then pass the radio
+
+	while(isalive self && self.dmteam == local.team && self != NULL && self != NIL)
+	{
+
+		local.origin = self.origin
+		wait 1
+	//	level.countdown_seconds[local.team]--
+			
+		level.countdown[local.team]["seconds"]--
+
+		if (level.countdown[local.team]["seconds"] <= 0)
+		{
+
+			level.countdown[local.team]["minutes"]--
+
+			if(level.countdown[local.team]["minutes"] <= -1 )
+			{
+				$player stoploopsound final_countdown
+				level.countdown[local.team]["minutes"] = 0
+				exec htr/hud.scr local.team
+
+				waitthread blow_up local.team
+				$pelvis_bomb delete
+				$pelvis_radio delete
+
+				waitexec htr/camera.scr local.team
+	
+				
+				end
+			}
+
+			level.countdown[local.team]["seconds"] = 60
+		}
+		else if (level.countdown[local.team]["seconds"] <= 10 && level.countdown[local.team]["minutes"] <= 0 && local.ticking != 1)
+		{
+			$player loopsound final_countdown 
+			level.hudcolour[local.team] = 1
+			local.ticking = 1
+		}
+
+		exec htr/hud.scr local.team
+	
+		if(local.locate_time != 0)
+		{
+			if(level.countdown[local.team]["seconds"] == local.locate)
+			{
+				local.pos = waitexec htr/mapdesc.scr::get_player_position self.origin
+
+				if(local.pos != "" && local.pos != NULL && local.pos != NIL)
+				{
+					exec htr/hud.scr::location ("Radio location: " +  local.pos ) local.locate_time
+					local.locate = level.countdown[local.team]["seconds"] - local.locate_time
+
+					if(local.locate <= 0 )
+					{
+						local.locate = local.locate_time - level.countdown[local.team]["seconds"]
+						local.locate = 60 - local.locate_time
+					}
+				}
+			}
+			else
+			{
+			//	exec htr/hud.scr::location ""
+			}
+
+
+		}
+
+		// Add 1 second to the time the radio was held for.
+		local.held_for++
+
+		if( local.max_hold_time  > 0)
+		{
+			thread display_hold_time (local.max_hold_time - local.held_for)
+
+			if(local.held_for == local.max_hold_time) // IF the player has held this radio for the maximun hold time then drop the radio and dissallow 
+			{					  // them to pick it up next.
+				local.origin = $pelvis_radio.origin::"hog"	
+				level.last_had_radio = self
+				break
+			}				
+			
+		}
+
+		//check if we have held use for 2 seconds to pass the radio
+		if(self.useheld == 1)
+		{
+			local.use_held++
+
+			if(local.use_held == 2)
+			{
+				// if we are next to a player facing them etc 
+				local.player = waitthread check_players
+
+				// pass the radio
+				if(local.player != NIL)
+				{
+					//clear stuff
+					$pelvis_radio delete
+					self light 0 0 0 0
+					
+					waitframe
+
+					//give the new player the radio
+					exec htr/radio.scr::give_radio local.player
+								
+					//tell them so they know
+					self iprint "You passed the radio"
+					local.player iprint "You have been passed the radio"
+					
+					//exit this
+					self.flying = 0 //allow them to use the plane again
+					end 
+				}
+			
+				local.use_held = 0
+			}		
+		}
+		else
+		{
+			local.use_held = 0
+		}
+
+		//exec htr/hud.scr local.team
+	}
+
+	self.flying = 0 //allow them to use the plane again
+
+	self stufftext "hidemenu dday1"
+
+	$pelvis_radio delete
+
+	self light 0 0 0 0
+
+	exec htr/radio.scr local.origin
+
+	if (local.ticking == 1)
+	{
+		$player stoploopsound final_countdown
+	}
+
+	level.hudyellow = "none"
+
+	exec htr/hud.scr::countdown
+
+	local.locate_time = getcvar("countdown_death_print")
+
+	if(local.locate_time == "1")
+	{
+		local.team  = waitexec htr/strings.scr::to_upper local.team  0
+
+		local.pos = waitexec htr/mapdesc.scr::get_player_position self.origin
+		
+		if(local.pos != "" || local.pos != NULL || local.pos != NIL)
+		{
+			iprintlnbold_noloc (local.team  + " have dropped the radio! " + local.pos)
+		}
+		else
+		{
+			iprintlnbold_noloc (local.team  + " have dropped the radio!")
+		}
+	}
+
+end
+
+blow_up local.team:
+
+	for(local.i = 1; local.i <= $player.size; local.i++)
+	{
+		if($player[local.i].dmteam != local.team)
+		{
+			thread boom $player[local.i].origin
+		}
+	}
+end
+
+boom local.place:
+
+	local.Exp3 = spawn "fx/scriptbazookaexplosion.tik"
+	local.Exp4 = spawn "animate/fx_mortar_dirt.tik"
+	local.Exp3 radiusdamage 0
+	local.Exp3.origin = local.place
+	local.Exp4.origin = local.place
+	local.Exp3 anim start
+	local.Exp4 anim start
+
+	wait 1
+	local.Exp3 delete	
+	local.Exp4 delete
+ 
+end
+
+display_hold_time local.time:
+
+	self stufftext ("set HTR_secondsleft You must pass the radio, Time Left: " + local.time)
+
+end
+
+display:
+
+	self stufftext "globalwidgetcommand dday1 shader townhallwindow"
+	self stufftext "globalwidgetcommand dday1 fgcolor 1.00 1.00 1.00 1.00"
+	self stufftext "globalwidgetcommand dday1 bgcolor 0.50 0.50 0.50 0.00"
+	self stufftext "globalwidgetcommand dday1 fadein 0"
+	self stufftext "globalwidgetcommand dday1 menu dday1 640 480 NONE 0"
+	self stufftext "globalwidgetcommand dday1 virtualres 1" 
+	self stufftext "globalwidgetcommand dday1 fullscreen 1" 
+
+	self stufftext "globalwidgetcommand june6 borderstyle NONE"
+	self stufftext "globalwidgetcommand june6 shader townhallwindow" // textures/hud/healthback"
+	self stufftext "globalwidgetcommand june6 rect 16 420 200 15"
+	self stufftext "globalwidgetcommand june6 fgcolor 1.00 1.00 1.00 1.00"
+	self stufftext "globalwidgetcommand june6 bgcolor 0.00 0.00 0.00 0.00"
+	self stufftext "globalwidgetcommand june6 linkcvar HTR_secondsleft"
+
+	self stufftext "showmenu dday1"
+
+end
+
+check_players:
+
+	local.radius = 30.0 * 30.0
+
+	for(local.i = 1;local.i <= $player.size;local.i++)
+	{
+		local.player = $player[local.i]
+
+		if(local.player.dmteam == self.dmteam && isalive local.player)
+		{
+			if(local.player != self)
+			{
+				local.vector_dist = ( local.player.origin - self.origin )	// get vector between distance?
+				local.dist_sqr = local.vector_dist * local.vector_dist		// get square distance
+		
+				local.radius = 50.0 * 50.0					// 50.0 close
+				if(local.dist_sqr <= local.radius)				// is they within 50 things
+				{
+					local.is_fwd = local.vector_dist * self.forwardvector		
+					local.is_fwd =  local.is_fwd >= 20.0 && local.is_fwd <= 50.0	// is the number thing between 20 and 50. thats like 30 in which the person is in view.
+				
+					if(local.is_fwd)
+					{
+						end local.player
+					}
+				}
+			}
+		}
+	}
+end
+

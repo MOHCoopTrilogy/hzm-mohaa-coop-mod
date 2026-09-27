@@ -1,0 +1,171 @@
+//=========================================================================
+// MP_SPAWNPROTECT.SCR - SPAWN PROTECTION, an MP host toggle (coop_mpSpawnProtect = seconds, 0 = off).
+// A clean-room MP-owned port of the classic MOHAA spawn-protection idea (UberMod V5 global/
+// spawn_protect.scr, orig. Unreal_Demon): for a few seconds after (re)spawn a player takes no damage,
+// so a spawn camper cannot farm them the instant they appear. Protection ends early the moment the
+// player FIRES (you cannot shoot back and stay invulnerable) or when they move far from their spawn.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so NOTHING here
+// can run on a coop map. mp.scr::mp_onSpawn calls ::onSpawn on every MP (re)spawn; it composes with
+// every mode because it sits on the shared spawn edge, AFTER the kit/health give.
+//
+// ISOLATION: calls no coop code (only its own labels; mp.scr's seam is the caller); names no coop
+// cvar, coop_lo token, ui/loadout tree or armory path. Per-player state lives in
+// self.flags["coop_mpSpawnProt*"] (entity keys, not cvars); host tuning is the MP-owned
+// coop_mpSpawnProtect / coop_mpSpawnProtLight cvars, read-only here. Uses only the stock combat
+// builtins nodamage/takedamage/light/lightOff and the native fields fireheld / origin. NEVER
+// giveInventory / changeGameType / a saved coop cvar. The per-life monitor gates on the shared
+// coop_isActive life flag (mp.scr sets it 1 on spawn; a death flips it), so it self-terminates on
+// death and can never leak past a life or into coop.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe (mirrors mp_medkits.scr::alive). If this file parse-kills, ::alive is unreachable,
+//mp.scr's onSpawn call no-ops, and Spawn Protection simply stays off. Returns literal 1.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Host toggle: coop_mpSpawnProtect is the ON/OFF switch (MP-owned, coop_mp*, read-only; the host-rules
+// board drives it 0/1 like DBNO/Medkits). "" (never registered) or "0" -> off. int() into a local
+// BEFORE end (bug-2603, TRAPS T1). Returns 1/0.
+//=========================================================================
+isOn:{
+	local.s = getcvar( "coop_mpSpawnProtect" )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+	if( local.v != 0 ){ local.v = 1 }
+}end local.v
+
+
+//=========================================================================
+// PROTECTION DURATION IN SECONDS: coop_mpSpawnProtTime (MP-owned, read-only). "" -> default 3.
+// Clamped to [1,30]. int() into a local BEFORE end (bug-2603, TRAPS T1).
+//=========================================================================
+protSeconds:{
+	local.s = getcvar( "coop_mpSpawnProtTime" )
+	if( local.s == "" ){ local.s = "3" }
+	local.v = int( local.s )
+	if( local.v < 1 ){ local.v = 3 }
+	if( local.v > 30 ){ local.v = 30 }
+}end local.v
+
+
+//=========================================================================
+// SPAWN EDGE. Start this life's protection if the host enabled it. Idempotent per life via the
+// coop_mpSpawnProtActive flag. Runs the monitor as a thread so the spawn edge is not blocked.
+//=========================================================================
+onSpawn local.p:{
+	if( local.p == NULL ){ end }
+	if( level.coop_mpRun != 1 ){ end }
+
+	//DEFENSIVE (never strand nodamage): clear any leftover nodamage from a previous life BEFORE deciding on this
+	//one, so a monitor that somehow failed to restore can never carry invulnerability across a respawn (the
+	//"nothing dies" failure mode). Harmless when takedamage is already on.
+	local.p takedamage
+
+	local.on = waitthread isOn
+	if( local.on != 1 ){ end }
+	local.secs = waitthread protSeconds
+	if( local.secs <= 0 ){ end }
+	if( local.p == NULL ){ end }
+	if( local.p.isSpectator ){ end }
+
+	//already protected this life? (a second spawn-edge call must not stack)
+	if( local.p.flags["coop_mpSpawnProtActive"] == 1 ){ end }
+	local.p.flags["coop_mpSpawnProtActive"] = 1
+
+	//per-life token so the failsafe only ever restores THIS life's protection, never a later one's.
+	local.tok = level.time
+	local.p.flags["coop_mpSpawnProtTok"] = local.tok
+
+	local.p thread sp_monitor local.secs
+	local.p thread sp_failsafe local.secs local.tok
+}end
+
+
+//=========================================================================
+// PER-LIFE MONITOR (runs on the player). Make invulnerable, glow (optional), then hold until: the
+// duration elapses, the player FIRES (after a short grace so a held-from-last-life trigger does not
+// cancel instantly), the player leaves this life (coop_isActive flips off death), or they disconnect.
+// Always restore takedamage + lightOff on the way out.
+//=========================================================================
+sp_monitor local.secs:{
+	if( self == NULL ){ end }
+
+	self nodamage
+
+	//optional yellow spawn glow so enemies can see the player is protected. Host cvar
+	//coop_mpSpawnProtLight (default on); any "0" disables it.
+	local.lit = 0
+	local.lg = getcvar( "coop_mpSpawnProtLight" )
+	if( local.lg != "0" ){
+		self light 1 1 0 100
+		local.lit = 1
+	}
+
+	self iprint "Spawn protection active - open fire or move out to drop it"
+	println( "^~^~^ MPSPAWNPROT on e" + self.entnum + " secs=" + local.secs )
+
+	local.endTime = ( level.time + local.secs )
+	local.grace = ( level.time + 0.35 )
+
+	//record the spawn origin + the move-out radius (host cvar coop_mpSpawnProtMoveDist, default 256 units).
+	//Leaving that radius drops protection early, so a protected player cannot advance / body-block under
+	//invulnerability (the documented behaviour, previously unimplemented).
+	local.spawnOrig = self.origin
+	local.moveDist = getcvar( "coop_mpSpawnProtMoveDist" )
+	if( local.moveDist == "" ){ local.moveDist = "256" }
+	local.moveDist = int( local.moveDist )
+	if( local.moveDist < 32 ){ local.moveDist = 256 }
+
+	while( self != NULL ){
+		//died / changed life / left team: the shared coop life flag is no longer 1
+		if( self.flags["coop_isActive"] != 1 ){ break }
+		//duration elapsed
+		if( level.time >= local.endTime ){ break }
+		//player opened fire (after the spawn-frame grace): drop protection immediately
+		if( level.time >= local.grace ){
+			if( self.fireheld == 1 ){ break }
+		}
+		//moved out of the spawn radius: drop protection (no advancing/body-blocking under invulnerability)
+		if( vector_length( self.origin - local.spawnOrig ) > local.moveDist ){ break }
+		wait 0.05
+	}
+
+	if( self != NULL ){
+		self takedamage
+		if( local.lit == 1 ){ self lightOff }
+		self.flags["coop_mpSpawnProtActive"] = NIL
+		println( "^~^~^ MPSPAWNPROT off e" + self.entnum )
+	}
+}end
+
+
+//=========================================================================
+// FAILSAFE - the belt to sp_monitor's braces (user 2026-09-18: "make sure spawnprotect doesnt never restore
+// takedamage"). Runs independently on the player: after the MAX protection window + a margin it UNCONDITIONALLY
+// restores takedamage for THIS life, so even if sp_monitor ever died mid-loop and left nodamage set, a player
+// can never be permanently invulnerable. Token-guarded so a newer life that has re-armed protection is left to
+// its own monitor. Idempotent when the monitor already restored (a second takedamage is harmless).
+//=========================================================================
+sp_failsafe local.secs local.tok:{
+	if( self == NULL ){ end }
+	local.w = ( local.secs + 2 )
+	wait local.w
+	if( self == NULL ){ end }
+	//a newer life re-armed protection since -> that life owns the restore; leave it.
+	if( self.flags["coop_mpSpawnProtTok"] != local.tok ){ end }
+	self takedamage
+	self.flags["coop_mpSpawnProtActive"] = NIL
+	println( "^~^~^ MPSPAWNPROT failsafe-off e" + self.entnum )
+}end

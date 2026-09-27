@@ -1,0 +1,778 @@
+//=========================================================================
+// MP_VEHICLES.SCR - the MP VEHICLE / EMPLACEMENT framework (host toggle coop_mpVehicles 0/1). A clean-
+// room MP-owned rebuild of UberMod V5's vehicle system (OwN-3m-All / ViPER: drivable tanks & jeeps,
+// usable nebelwerfers & flak88, anti-tank pickups). MP maps ship no vehicle entities, so the authored
+// per-map placements (harvested from UberMod base_assault/maps/*.scr into docs/tools/
+// vehicle_placements.json) are emitted to coop_mod/mp_vehicle_maps.scr, whose seed thread calls the
+// spawner labels below with the exact coordinates. Available on the 5 SP arena maps (m1l3a / m1l3b /
+// m4l1 / m5l2a / m5l3 - the same force-arena maps as Base Assault / Push).
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST), guarded end to end by level.coop_mpRun, which
+// ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here can run on a coop map.
+// mp.scr::main calls ::onMapInit once, pre-spawn, after the mode init (so any script-spawned team spawns
+// already exist). A no-op unless the host enabled coop_mpVehicles AND the current map has an authored
+// layout.
+//
+// SLICES. Each vehicle type is a spawner label called by the generated map seed:
+//   [1] veh_at            anti-tank pickup (bazooka / panzerschreck crate). Team-aware give.
+//   [2] veh_flak          flak88 emplacement (mannable FixedTurret - native use/aim/fire).
+//   [3] veh_nebelwerfer   nebelwerfer emplacement (mannable FixedTurret).
+//   [4] veh_jeep          drivable jeep (native driver slot + rear MG turret).
+//   [5] veh_tank          drivable tank (native driver + cannon gunner; rocket-only-vulnerable).
+// All five SPAWN-verify on a dedicated boot; the board/drive/fire loops (and the emplacements' native
+// manning) need a human playtest to confirm. RESPAWN-ON-DESTROY is wired + verified (veh_destroyWatch: an
+// AT kill blows the vehicle up, ejects/kills the crew, and re-places it after coop_mpVehRespawn s). PvP
+// CAPTURE is wired (veh_captureTick: an enemy holds [USE] beside an unoccupied team vehicle for
+// coop_mpVehCaptureTime to flip it; own side boards at once; coop_mpVehCapture 0 = open boarding).
+// A live crew HUD is drawn while aboard (bottom-centre: vehicle name + role, a colour-coded health bar,
+// the driver/gunner names, and the exit hint). Vehicle team-kill damage relies on the server's
+// g_teamdamage; crew theatre (an animated seated model) is deferred.
+//
+// WEAPON NATIONALITY (standing user rule: allies get NO non-allied weapons). The AT pickup is TEAM-AWARE:
+// it gives the PICKER their own nationality's launcher - ALLIES get the bazooka (US M9A1), AXIS get the
+// panzerschreck - regardless of the crate's authored side. So an allied player can never receive a German
+// weapon from a crate, and vice versa.
+//
+// ISOLATION: calls only the MP file mp_vehicle_maps.scr (in MP_MANIFEST, clause 10); names no coop cvar,
+// coop_lo token, ui/loadout tree or coop armory/vehicle code (coop's own vehiclehandler.scr /
+// vehicles_thinkers.scr are NEVER called - the native crew helpers will be copied in for the tank slice).
+// Host tuning is the MP-owned coop_mpVeh* cvars, read-only. Per-entity state lives on the spawned
+// entities (entity keys). Uses stock builtins spawn / model / trace / give / ammo / solid / notsolid /
+// hide / show and the native field parm.other.
+//=========================================================================
+
+//Inert entry. mp.scr calls the specific labels below, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//The liveness probe. Returns literal 1; if this file parse-kills, ::alive is unreachable and mp.scr's
+//onMapInit call no-ops, so the vehicle system simply stays off.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Host toggle: coop_mpVehicles (MP-owned, read-only; default OFF - vehicles change the game a lot and are
+// placement-tuned, so they are opt-in). "" / "0" -> off. int() into a local BEFORE end (bug-2603).
+//=========================================================================
+isOn:{
+	local.s = getcvar( "coop_mpVehicles" )
+	if( local.s == "" ){ local.s = "0" }
+	local.v = int( local.s )
+	if( local.v != 0 ){ local.v = 1 }
+}end local.v
+
+
+//=========================================================================
+// One-time tuning. Idempotent (level flag).
+//=========================================================================
+ensureConfig:{
+	if( level.coop_mpVehReady == 1 ){ end }
+	level.coop_mpVehReady = 1
+
+	//AT pickup respawn time (seconds a grabbed launcher-crate waits before it can be taken again).
+	local.r = getcvar( "coop_mpVehAtRespawn" )
+	if( local.r == "" ){ local.r = "20" }
+	level.coop_mpVehAtRespawn = int( local.r )
+	if( level.coop_mpVehAtRespawn < 3 ){ level.coop_mpVehAtRespawn = 20 }
+
+	//rockets handed out per AT pickup.
+	local.a = getcvar( "coop_mpVehAtAmmo" )
+	if( local.a == "" ){ local.a = "3" }
+	level.coop_mpVehAtAmmo = int( local.a )
+	if( level.coop_mpVehAtAmmo < 1 ){ level.coop_mpVehAtAmmo = 3 }
+
+	//seconds a DESTROYED vehicle/emplacement waits before it respawns at its placement.
+	local.rs = getcvar( "coop_mpVehRespawn" )
+	if( local.rs == "" ){ local.rs = "45" }
+	level.coop_mpVehRespawn = int( local.rs )
+	if( level.coop_mpVehRespawn < 5 ){ level.coop_mpVehRespawn = 45 }
+
+	//PvP CAPTURE. A team-owned drivable is boardable at once by its own side; an ENEMY must first hold
+	//[USE] beside the unoccupied vehicle for coop_mpVehCaptureTime seconds to flip it to their team.
+	//coop_mpVehCapture 0 disables it (open boarding - anyone drives anything). Neutral vehicles (jeeps,
+	//no team) are always open.
+	local.cap = getcvar( "coop_mpVehCapture" )
+	if( local.cap == "" ){ local.cap = "1" }
+	level.coop_mpVehCapture = int( local.cap )
+	if( level.coop_mpVehCapture != 0 ){ level.coop_mpVehCapture = 1 }
+
+	local.ct = getcvar( "coop_mpVehCaptureTime" )
+	if( local.ct == "" ){ local.ct = "6" }
+	level.coop_mpVehCaptureTime = int( local.ct )
+	if( level.coop_mpVehCaptureTime < 1 ){ level.coop_mpVehCaptureTime = 6 }
+
+	println( "^~^~^ MPVEH config atRespawn=" + level.coop_mpVehAtRespawn + " atAmmo=" + level.coop_mpVehAtAmmo + " respawn=" + level.coop_mpVehRespawn + " capture=" + level.coop_mpVehCapture + " capTime=" + level.coop_mpVehCaptureTime )
+}end
+
+
+//=========================================================================
+// MAP INIT (from mp.scr::main, pre-spawn). No-op unless the host enabled coop_mpVehicles. Asks the
+// authored map seed to place this map's vehicles/pickups.
+//=========================================================================
+onMapInit:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.on = waitthread isOn
+	if( local.on != 1 ){ end }
+
+	waitthread ensureConfig
+	local.m = getcvar( "mapname" )
+	if( local.m == "" ){ end }
+
+	local.has = waitthread coop_mod/mp_vehicle_maps.scr::seed local.m
+	if( local.has == NIL ){ local.has = 0 }
+	println( "^~^~^ MPVEH onMapInit map=" + local.m + " authored=" + local.has )
+
+	//DEV self-test (coop_mpVehTestKill 1): kill the last-spawned emplacement after 6s to watch the
+	//destroy->respawn path in the log. Off by default; harmless in production.
+	if( getcvar( "coop_mpVehTestKill" ) == "1" ){ thread veh_testKill }
+}end
+
+veh_testKill:{
+	wait 6
+	if( level.coop_mpVehLast != NIL && level.coop_mpVehLast != NULL ){
+		println( "^~^~^ MPVEH TESTKILL firing on the last emplacement" )
+		level.coop_mpVehLast kill
+	}
+}end
+
+
+//=========================================================================
+// [SLICE 1 - LIVE] ANTI-TANK PICKUP. A crate with a launcher model on top; a trigger_use hands the picker
+// their nationality's launcher + rockets, then the launcher model hides and re-appears after a respawn.
+// local.type is the crate's authored side ("bazooka"/"panzerschreck") - a display hint only; the weapon
+// GIVEN is decided by the picker's team so nationality is never crossed.
+//=========================================================================
+veh_at local.origin local.yaw local.type:{
+	if( level.coop_mpRun != 1 ){ end }
+
+	//drop the crate to the floor
+	local.pos = trace ( local.origin + ( 0 0 10 ) ) ( local.origin + ( 0 0 -17123 ) )
+
+	local.box = spawn script_model
+	local.box.origin = local.pos
+	local.box.angles = ( 0 local.yaw 0 )
+	local.box model "models/static/indycrate.tik"
+	local.box solid
+	local.box nodamage
+
+	//the launcher model sitting on the crate (visual). Default to the authored side's model.
+	local.mdl = "models/weapons/bazooka.tik"
+	if( local.type == "panzerschreck" ){ local.mdl = "models/weapons/panzerschreck.tik" }
+
+	local.wep = spawn script_model
+	local.wep.origin = ( local.box.origin + ( 0 0 40 ) )
+	local.wep.angles = ( 0 local.yaw 0 )
+	local.wep model local.mdl
+	local.wep notsolid
+
+	//the pickup trigger, sized around the crate
+	local.trig = spawn trigger_use
+	local.trig.origin = local.box.origin
+	local.trig setsize ( -24 -24 -8 ) ( 24 24 72 )
+	local.trig.coop_wep = local.wep
+
+	local.trig thread veh_atLoop
+	println( "^~^~^ MPVEH at spawned pos=" + local.box.origin + " side=" + local.type )
+}end
+
+
+//The pickup loop (runs on the trigger). Wait for a use, give the picker their team's launcher, hide the
+//launcher model, cool down, restore. Loops for the life of the map.
+veh_atLoop:{
+	while( level.coop_mpRun == 1 ){
+		self waittill trigger
+		if( self == NULL ){ end }
+
+		local.p = parm.other
+		if( local.p == NULL ){ continue }
+		if( local.p.isSpectator ){ continue }
+
+		//TEAM-AWARE give: allies get the bazooka (US), axis get the panzerschreck (German). No crossing.
+		local.give = ""
+		if( local.p.dmteam == "allies" ){ local.give = "models/weapons/bazooka.tik" }
+		if( local.p.dmteam == "axis" ){ local.give = "models/weapons/panzerschreck.tik" }
+		if( local.give == "" ){ continue }
+
+		local.p give local.give
+		local.p ammo "heavy" level.coop_mpVehAtAmmo
+		local.p iprint "You picked up an anti-tank launcher."
+		println( "^~^~^ MPVEH atPickup e" + local.p.entnum + " side=" + local.p.dmteam )
+
+		//cool down: hide the launcher model + stop the trigger, then restore
+		self nottriggerable
+		local.wep = self.coop_wep
+		if( local.wep != NIL && local.wep != NULL ){ local.wep hide }
+
+		wait level.coop_mpVehAtRespawn
+		if( self == NULL ){ end }
+		if( local.wep != NIL && local.wep != NULL ){ local.wep show }
+		self triggerable
+	}
+}end
+
+
+//=========================================================================
+// [SLICE 2 - LIVE] FLAK88 emplacement. A player-MANNED FixedTurret. This uses coop bunker.scr's proven
+// recipe (flak88_manned), NOT UberMod's manual douse/camera/glue port: the mannable models P_flak88.tik /
+// P_nebelwerfer.tik are FixedTurret : VehicleTank whose cannon is spawned into turret slot 0 by the TIKI,
+// and m_bPlayerUsable defaults TRUE - so a player mans the gun and aims/fires it NATIVELY just by pressing
+// [USE] next to it. Nothing script-side is needed to make it work; we only place it and set its aim
+// centre. coop_mpVeh-prefixed targetname so global/turret.scr's literal $flak88 scan never hijacks it.
+//=========================================================================
+veh_flak local.origin local.yaw:{
+	waitthread veh_emplacement "models/statweapons/P_flak88.tik" local.origin local.yaw "flak"
+}end
+
+
+//[SLICE 3 - LIVE] NEBELWERFER emplacement (same mannable-FixedTurret recipe, rocket tubes).
+veh_nebelwerfer local.origin local.yaw:{
+	waitthread veh_emplacement "models/statweapons/P_nebelwerfer.tik" local.origin local.yaw "nebelwerfer"
+}end
+
+
+//Spawn one player-manned emplacement (FixedTurret) at a placement. Traces to the floor, sets the aim
+//centre (startyaw - captured at PLACE time, before .angles is set, so it must be re-stated), makes it
+//solid, and leaves the native use/aim/fire to the engine. Returns nothing; the gun lives on the map.
+veh_emplacement local.model local.origin local.yaw local.kind:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.pos = trace ( local.origin + ( 0 0 10 ) ) ( local.origin + ( 0 0 -17123 ) )
+
+	if( level.coop_mpVehEmplN == NIL ){ level.coop_mpVehEmplN = 0 }
+	level.coop_mpVehEmplN = ( level.coop_mpVehEmplN + 1 )
+	local.tn = ( "coop_mpVehEmpl" + level.coop_mpVehEmplN )
+
+	local.gun = spawn local.model targetname local.tn
+	if( local.gun == NULL ){
+		println( "^~^~^ MPVEH " + local.kind + " FAILED spawn model=" + local.model )
+		end
+	}
+	local.gun.origin = local.pos
+	local.gun.angles = ( 0 local.yaw 0 )
+	local.gun solid
+
+	//rocket-only-vulnerable, like the tanks: small arms cannot wreck the gun, only an AT launcher can.
+	local.gun removeondeath 0
+	local.gun immune bash
+	local.gun immune bullet
+	local.gun immune fast_bullet
+	local.gun immune shotgun
+	local.gun immune crush
+	local.gun immune vehicle
+	local.gun immune explosion
+	local.gun removeimmune rocket
+	local.gun removeimmune falling
+	local.gun takedamage
+	local.gun.health = 500
+	local.gun.coop_mpVehMaxHealth = 500
+	local.gun.coop_mpVehLabel = "88 FLAK"
+	if( local.kind == "nebelwerfer" ){ local.gun.coop_mpVehLabel = "NEBELWERFER" }
+
+	//respawn signature (read by veh_destroyWatch): re-place the same emplacement after it is destroyed.
+	local.gun.coop_mpVehRKind = local.kind
+	local.gun.coop_mpVehRModel = local.model
+	local.gun.coop_mpVehROrigin = local.origin
+	local.gun.coop_mpVehRYaw = local.yaw
+	local.gun thread veh_destroyWatch
+	level.coop_mpVehLast = local.gun
+
+	println( "^~^~^ MPVEH " + local.kind + " spawned pos=" + local.pos + " yaw=" + local.yaw )
+}end
+
+
+//=========================================================================
+// [SLICE 4 - LIVE] DRIVABLE JEEP. spawn DrivableVehicle + a rear .30cal MG in turret slot 0. Driver
+// drives NATIVELY (attachdriverslot 0 - the engine reads the driver's ucmd), a second player mans the MG
+// (attachturretslot 0). Boarding + drive + fire recipe copied from coop's native tank crewing
+// (global/vehicles_thinkers.scr::coop_setDriverForTank / coop_setGunnerForTank) - NOT lifted from
+// UberMod's keyheld pump, which our engine does not need.
+//=========================================================================
+veh_jeep local.origin local.yaw:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.pos = ( local.origin + ( 0 0 16 ) )
+	local.tn = waitthread veh_nextName
+	local.v = spawn DrivableVehicle model "models/vehicles/jeep.tik" targetname local.tn origin local.pos angles ( 0 local.yaw 0 )
+	if( local.v == NULL ){ println( "^~^~^ MPVEH jeep FAILED spawn" ) end }
+	local.v spawnturret 0 "models/vehicles/jeep_30cal.tik"
+	local.v.coop_mpVehRKind = "jeep"
+	local.v.coop_mpVehROrigin = local.origin
+	local.v.coop_mpVehRYaw = local.yaw
+	local.v.health = 300
+	local.v.coop_mpVehMaxHealth = 300
+	local.v.coop_mpVehLabel = "JEEP"
+	local.v thread veh_initDrivable "" "jeep" 0
+	println( "^~^~^ MPVEH jeep spawned pos=" + local.pos + " yaw=" + local.yaw )
+}end
+
+
+//=========================================================================
+// [SLICE 5 - LIVE] DRIVABLE TANK. spawn VehicleTank with the type's model (set AT SPAWN so the TIKI opens
+// the cannon turret slot - a later model swap never re-runs OpenSlotsByModel, coop bunker.scr:617). Driver
+// drives the hull natively; a gunner mans the cannon (turret slot 0). Like UberMod, the tank is IMMUNE to
+// everything but ROCKET and FALLING - so only the anti-tank pickups (veh_at) can kill it, which is the
+// whole point of pairing them. local.model is the tank family; local.team its starting side.
+//=========================================================================
+veh_tank local.origin local.yaw local.model local.team:{
+	if( level.coop_mpRun != 1 ){ end }
+	local.tik = "models/vehicles/panzer_tank.tik"
+	switch( local.model ){
+		case "kingtiger":
+			local.tik = "models/vehicles/kingtank.tik"
+			break
+		case "tiger":
+			local.tik = "models/vehicles/tigertank.tik"
+			break
+		case "panzer_euro":
+			local.tik = "models/vehicles/panzer_tank_europe.tik"
+			break
+	}
+	local.pos = ( local.origin + ( 0 0 16 ) )
+	local.tn = waitthread veh_nextName
+	local.v = spawn VehicleTank model local.tik targetname local.tn origin local.pos angles ( 0 local.yaw 0 )
+	if( local.v == NULL ){ println( "^~^~^ MPVEH tank FAILED spawn model=" + local.tik ) end }
+	local.v.coop_mpVehTankModel = local.model
+	local.v.coop_mpVehRKind = "tank"
+	local.v.coop_mpVehRModel = local.model
+	local.v.coop_mpVehROrigin = local.origin
+	local.v.coop_mpVehRYaw = local.yaw
+	local.v.coop_mpVehRTeam = local.team
+	//per-type health (a few AT rockets to kill). Set before init (init sets takedamage + immunities).
+	local.hp = 800
+	if( local.model == "kingtiger" ){ local.hp = 1100 }
+	if( local.model == "tiger" ){ local.hp = 900 }
+	local.v.health = local.hp
+	local.v.coop_mpVehMaxHealth = local.hp
+	local.v.coop_mpVehLabel = "TANK"
+	local.v thread veh_initDrivable local.team "tank" 1
+	println( "^~^~^ MPVEH tank spawned pos=" + local.pos + " yaw=" + local.yaw + " model=" + local.model + " team=" + local.team )
+}end
+
+
+//a unique coop_mpVeh-prefixed targetname (global/turret.scr's literal $flak88/$mg42/$nebel scan hijacks
+//stock names).
+veh_nextName:{
+	if( level.coop_mpVehN == NIL ){ level.coop_mpVehN = 0 }
+	level.coop_mpVehN = ( level.coop_mpVehN + 1 )
+	local.n = ( "coop_mpVeh" + level.coop_mpVehN )
+}end local.n
+
+
+//=========================================================================
+// Drivable-vehicle init (self is the vehicle). Make it rocket-only-vulnerable (a tank shrugs off small
+// arms; only an AT launcher kills it), keep the entity on death (we swap in a wreck + respawn), lock the
+// gun turret until a gunner mans it, then start the seat-boarding watchers.
+//   local.hasCannon: 1 = the gun is a tank cannon in slot 0; 0 = a jeep MG in slot 0.
+//=========================================================================
+veh_initDrivable local.team local.kind local.hasCannon:{
+	if( self == NULL ){ end }
+	if( local.team != "allies" && local.team != "axis" ){ local.team = "" }
+	self.coop_mpVehTeam = local.team
+	self.coop_mpVehKind = local.kind
+
+	self removeondeath 0
+	self immune bash
+	self immune bullet
+	self immune fast_bullet
+	self immune shotgun
+	self immune crush
+	self immune vehicle
+	self immune explosion
+	self removeimmune rocket
+	self removeimmune falling
+	self takedamage
+
+	//the gun in turret slot 0 (tank cannon or jeep MG). Lock it until a gunner boards.
+	self.coop_mpVehGun = self queryturretslotentity 0
+	if( self.coop_mpVehGun != NIL && self.coop_mpVehGun != NULL ){ self.coop_mpVehGun lock }
+
+	self.coop_mpVehDriver = NULL
+	self.coop_mpVehGunner = NULL
+	self.coop_mpVehStartOrg = self.origin
+	self.coop_mpVehStartAng = self.angles
+
+	self solid
+	self thread veh_driverWatch
+	self thread veh_gunnerWatch
+	self thread veh_destroyWatch
+}end
+
+
+//=========================================================================
+// DESTROY + RESPAWN. Wait for the vehicle/emplacement to be killed (only an AT launcher can - everything
+// else is immune), blow it up (eject + kill any crew, blast nearby players), remove the wreck, and after
+// coop_mpVehRespawn seconds re-place the SAME vehicle at its original spot. self is the vehicle/gun.
+//=========================================================================
+veh_destroyWatch:{
+	if( self == NULL ){ end }
+	self waittill death
+
+	local.kind = self.coop_mpVehRKind
+	local.model = self.coop_mpVehRModel
+	local.org = self.coop_mpVehROrigin
+	local.yaw = self.coop_mpVehRYaw
+	local.team = self.coop_mpVehRTeam
+	local.deathPos = self.origin
+
+	//eject + kill any crew so they do not ride a ghost
+	local.drv = self.coop_mpVehDriver
+	local.gnr = self.coop_mpVehGunner
+	self.coop_mpVehDriver = NULL
+	self.coop_mpVehGunner = NULL
+
+	//explosion fx + blast
+	local.fx = spawn script_model model "models/emitters/explosion_tank.tik"
+	if( local.fx != NULL ){
+		local.fx.origin = ( local.deathPos + ( 0 0 40 ) )
+		local.fx anim start
+		local.fx thread veh_removeAfter 3
+	}
+	radiusdamage ( local.deathPos + ( 0 0 100 ) ) 400 300
+
+	if( local.drv != NIL && local.drv != NULL ){
+		local.drv.coop_mpVehIn = NULL
+		if( isAlive local.drv ){ local.drv kill }
+	}
+	if( local.gnr != NIL && local.gnr != NULL ){
+		local.gnr.coop_mpVehIn = NULL
+		if( isAlive local.gnr ){ local.gnr kill }
+	}
+
+	//remove the wreck
+	if( self != NULL ){
+		self hide
+		self notsolid
+		self remove
+	}
+
+	local.wait = level.coop_mpVehRespawn
+	if( local.wait == NIL || local.wait < 5 ){ local.wait = 45 }
+	wait local.wait
+	if( level.coop_mpRun != 1 ){ end }
+
+	//re-place the same thing
+	println( "^~^~^ MPVEH respawn kind=" + local.kind + " at=" + local.org )
+	switch( local.kind ){
+		case "tank":
+			waitthread veh_tank local.org local.yaw local.model local.team
+			break
+		case "jeep":
+			waitthread veh_jeep local.org local.yaw
+			break
+		case "flak":
+			waitthread veh_flak local.org local.yaw
+			break
+		case "nebelwerfer":
+			waitthread veh_nebelwerfer local.org local.yaw
+			break
+	}
+}end
+
+
+//remove an entity after N seconds. self is the entity.
+veh_removeAfter local.secs:{
+	wait local.secs
+	if( self != NULL ){ self remove }
+}end
+
+
+//=========================================================================
+// DRIVER seat. Watch for a living player holding [USE] within range who is not already in a vehicle; seat
+// them (attachdriverslot 0) so they drive natively; hold them there (hidden/protected inside the hull)
+// until they press [USE] to leave (after a short cooldown), die, or leave their team. self is the vehicle.
+//=========================================================================
+veh_driverWatch:{
+	if( self == NULL ){ end }
+	while( self != NULL && level.coop_mpRun == 1 ){
+		if( self.coop_mpVehDriver == NULL ){
+			//an enemy may be capturing this unoccupied team vehicle
+			waitthread veh_captureTick
+			if( self == NULL ){ end }
+			local.p = waitthread veh_findBoarder 200
+			if( local.p != NULL ){ waitthread veh_driverRide local.p }
+		}
+		wait 0.2
+	}
+}end
+
+
+//=========================================================================
+// CAPTURE. A team-owned, unoccupied drivable is flipped to the enemy's side when an enemy holds [USE]
+// beside it for coop_mpVehCaptureTime seconds. self is the vehicle. No-op if capture is off, the vehicle
+// is neutral, or someone is aboard.
+//=========================================================================
+veh_captureTick:{
+	if( self == NULL ){ end }
+	if( level.coop_mpVehCapture != 1 ){ end }
+	if( self.coop_mpVehTeam == NIL || self.coop_mpVehTeam == "" ){ end }
+	if( self.coop_mpVehDriver != NULL || self.coop_mpVehGunner != NULL ){
+		self.coop_mpVehCapProg = 0
+		end
+	}
+
+	local.enemyTeam = "axis"
+	if( self.coop_mpVehTeam == "axis" ){ local.enemyTeam = "allies" }
+
+	//nearest enemy holding [USE] within range, not already in a vehicle
+	local.cap = NULL
+	local.bestD = 220
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( !( isAlive local.q ) ){ continue }
+		if( local.q.dmteam != local.enemyTeam ){ continue }
+		if( local.q.useheld != 1 ){ continue }
+		if( local.q.coop_mpVehIn != NIL && local.q.coop_mpVehIn != NULL ){ continue }
+		local.d = vector_length( local.q.origin - self.origin )
+		if( local.d > local.bestD ){ continue }
+		local.cap = local.q
+		local.bestD = local.d
+	}
+
+	if( local.cap == NULL ){
+		self.coop_mpVehCapProg = 0
+		end
+	}
+
+	local.prog = self.coop_mpVehCapProg
+	if( local.prog == NIL ){ local.prog = 0 }
+	local.prog = ( local.prog + 0.2 )
+	self.coop_mpVehCapProg = local.prog
+	if( local.prog >= level.coop_mpVehCaptureTime ){
+		self.coop_mpVehTeam = local.enemyTeam
+		self.coop_mpVehCapProg = 0
+		local.tag = "ALLIES"
+		if( local.enemyTeam == "axis" ){ local.tag = "AXIS" }
+		iprintlnbold( local.tag + " captured an enemy vehicle!" )
+		println( "^~^~^ MPVEH captured by=" + local.enemyTeam + " e" + local.cap.entnum )
+	}
+	else{
+		local.ri = int( level.coop_mpVehCaptureTime - local.prog )
+		if( local.ri > 0 && ( int( local.prog ) % 1 ) == 0 ){ local.cap iprint ( "Capturing vehicle... " + local.ri + "s" ) }
+	}
+}end
+
+
+veh_driverRide local.p:{
+	if( self == NULL || local.p == NULL ){ end }
+	self.coop_mpVehDriver = local.p
+	local.p.coop_mpVehIn = self
+	local.exitAt = ( level.time + 2 )
+
+	local.p takeall
+	self attachdriverslot 0 local.p
+	local.p notsolid
+	local.p nodamage
+	local.p hide
+	local.p thread veh_hudLoop self "DRIVER"
+
+	while( self != NULL && local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && !local.p.isSpectator ){
+		if( local.p.useheld == 1 && level.time > local.exitAt ){ break }
+		waitframe
+	}
+
+	waitthread veh_ejectDriver local.p
+}end
+
+
+veh_ejectDriver local.p:{
+	local.exit = waitthread veh_exitPos
+	if( self != NULL ){ self DetachDriverSlot 0 local.exit }
+	if( local.p != NULL ){
+		local.p show
+		local.p solid
+		local.p takedamage
+		local.p tele local.exit
+		local.p.coop_mpVehIn = NULL
+		waitthread veh_hudClear local.p
+	}
+	if( self != NULL ){ self.coop_mpVehDriver = NULL }
+}end
+
+
+//=========================================================================
+// GUNNER seat. Only offered once the vehicle has a driver (a lone player boards as driver first). A second
+// living player holding [USE] near the vehicle mans the gun (attachturretslot 0); they stay VISIBLE and
+// DAMAGEABLE (exposed gun), and dismount on [USE]/death.
+//=========================================================================
+veh_gunnerWatch:{
+	if( self == NULL ){ end }
+	while( self != NULL && level.coop_mpRun == 1 ){
+		if( self.coop_mpVehDriver != NULL && self.coop_mpVehGunner == NULL ){
+			local.p = waitthread veh_findBoarder 200
+			if( local.p != NULL ){ waitthread veh_gunnerRide local.p }
+		}
+		wait 0.2
+	}
+}end
+
+
+veh_gunnerRide local.p:{
+	if( self == NULL || local.p == NULL ){ end }
+	self.coop_mpVehGunner = local.p
+	local.p.coop_mpVehIn = self
+	local.exitAt = ( level.time + 2 )
+
+	local.p takeall
+	local.gun = self.coop_mpVehGun
+	if( local.gun != NIL && local.gun != NULL ){ local.gun unlock }
+	self attachturretslot 0 local.p
+	local.p thread veh_hudLoop self "GUNNER"
+
+	while( self != NULL && local.p != NULL && isAlive local.p && local.p.flags["coop_isActive"] == 1 && !local.p.isSpectator ){
+		if( local.p.useheld == 1 && level.time > local.exitAt ){ break }
+		waitframe
+	}
+
+	local.exit = waitthread veh_exitPos
+	if( local.gun != NIL && local.gun != NULL ){ local.gun lock }
+	if( self != NULL ){ self detachturretslot 0 local.exit }
+	if( local.p != NULL ){
+		local.p tele local.exit
+		local.p.coop_mpVehIn = NULL
+		waitthread veh_hudClear local.p
+	}
+	if( self != NULL ){ self.coop_mpVehGunner = NULL }
+}end
+
+
+//=========================================================================
+// CREW HUD - a live panel at the bottom-centre while a player is aboard: the vehicle name + role, a
+// colour-coded health bar, the crew names, and the exit hint. Runs on the player as a thread; self-clears
+// when they leave the vehicle (coop_mpVehIn no longer this vehicle) or die. ihuddraw slots 45-49 are free
+// in MP (the MP files use 20/27/33-35/138-140/216). local.veh is the vehicle, local.role "DRIVER"/"GUNNER".
+//=========================================================================
+veh_hudLoop local.veh local.role:{
+	if( self == NULL ){ end }
+	local.p = self
+
+	//static frames (drawn once)
+	local.p ihuddraw_virtualsize 45 1
+	local.p ihuddraw_align 45 center bottom
+	local.p ihuddraw_font 45 "verdana-12"
+	local.p ihuddraw_color 45 1 0.9 0.5
+	local.p ihuddraw_rect 45 0 -120 0 0
+	local.p ihuddraw_alpha 45 1
+
+	local.p ihuddraw_virtualsize 46 1
+	local.p ihuddraw_align 46 center bottom
+	local.p ihuddraw_shader 46 "textures/hud/coop_bar_white"
+	local.p ihuddraw_color 46 0.12 0.12 0.12
+	local.p ihuddraw_rect 46 -60 -100 120 8
+	local.p ihuddraw_alpha 46 0.8
+
+	local.p ihuddraw_virtualsize 47 1
+	local.p ihuddraw_align 47 center bottom
+	local.p ihuddraw_shader 47 "textures/hud/coop_bar_white"
+	local.p ihuddraw_rect 47 -60 -100 0 8
+	local.p ihuddraw_alpha 47 0.9
+
+	local.p ihuddraw_virtualsize 48 1
+	local.p ihuddraw_align 48 center bottom
+	local.p ihuddraw_font 48 "verdana-12"
+	local.p ihuddraw_color 48 0.8 0.85 0.9
+	local.p ihuddraw_rect 48 0 -80 0 0
+	local.p ihuddraw_alpha 48 1
+
+	local.p ihuddraw_virtualsize 49 1
+	local.p ihuddraw_align 49 center bottom
+	local.p ihuddraw_font 49 "verdana-12"
+	local.p ihuddraw_color 49 0.7 0.7 0.7
+	local.p ihuddraw_rect 49 0 -60 0 0
+	local.p ihuddraw_string 49 "hold [USE] to leave"
+	local.p ihuddraw_alpha 49 1
+
+	while( self != NULL && self.coop_mpVehIn == local.veh && ( isAlive self ) ){
+		local.label = "VEHICLE"
+		local.max = 1
+		local.cur = 0
+		if( local.veh != NIL && local.veh != NULL ){
+			if( local.veh.coop_mpVehLabel != NIL ){ local.label = local.veh.coop_mpVehLabel }
+			if( local.veh.coop_mpVehMaxHealth != NIL && local.veh.coop_mpVehMaxHealth > 0 ){ local.max = local.veh.coop_mpVehMaxHealth }
+			local.cur = local.veh.health
+			if( local.cur == NIL || local.cur < 0 ){ local.cur = 0 }
+		}
+		self ihuddraw_string 45 ( local.label + "  -  " + local.role )
+
+		local.w = int( ( local.cur * 120 ) / local.max )
+		if( local.w < 0 ){ local.w = 0 }
+		if( local.w > 120 ){ local.w = 120 }
+		self ihuddraw_rect 47 -60 -100 local.w 8
+		if( local.cur > ( local.max / 2 ) ){ self ihuddraw_color 47 0.2 0.85 0.2 }
+		else{ self ihuddraw_color 47 0.9 0.5 0.1 }
+
+		local.dn = "-"
+		local.gn = "-"
+		if( local.veh != NIL && local.veh != NULL ){
+			if( local.veh.coop_mpVehDriver != NIL && local.veh.coop_mpVehDriver != NULL ){ local.dn = local.veh.coop_mpVehDriver.netname }
+			if( local.veh.coop_mpVehGunner != NIL && local.veh.coop_mpVehGunner != NULL ){ local.gn = local.veh.coop_mpVehGunner.netname }
+		}
+		self ihuddraw_string 48 ( "Driver: " + local.dn + "    Gunner: " + local.gn )
+
+		wait 0.25
+	}
+
+	waitthread veh_hudClear self
+}end
+
+veh_hudClear local.p:{
+	if( local.p == NULL ){ end }
+	local.p ihuddraw_alpha 45 0
+	local.p ihuddraw_string 45 ""
+	local.p ihuddraw_alpha 46 0
+	local.p ihuddraw_alpha 47 0
+	local.p ihuddraw_alpha 48 0
+	local.p ihuddraw_string 48 ""
+	local.p ihuddraw_alpha 49 0
+	local.p ihuddraw_string 49 ""
+}end
+
+
+//nearest living, non-spectator player holding [USE] within local.range who is NOT already in a vehicle
+//AND whose side may board this vehicle (its own team, or a neutral vehicle, or capture disabled - an
+//enemy only boards a team vehicle once they have CAPTURED it, which flips its team; see veh_captureTick).
+//self is the vehicle. Returns the player or NULL.
+veh_findBoarder local.range:{
+	local.best = NULL
+	if( self == NULL ){ end local.best }
+	local.bestD = local.range
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( !( isAlive local.q ) ){ continue }
+		if( local.q.useheld != 1 ){ continue }
+		if( local.q.coop_mpVehIn != NIL && local.q.coop_mpVehIn != NULL ){ continue }
+		if( !( waitthread veh_mayBoard local.q ) ){ continue }
+		local.d = vector_length( local.q.origin - self.origin )
+		if( local.d > local.bestD ){ continue }
+		local.best = local.q
+		local.bestD = local.d
+	}
+}end local.best
+
+
+//may this player board this vehicle? Own team / neutral vehicle / capture off -> yes. self is the vehicle.
+//Returns 1/0 in a local before end (bug-2603).
+veh_mayBoard local.q:{
+	local.ok = 1
+	if( self == NULL || local.q == NULL ){ local.ok = 0 }
+	else if( level.coop_mpVehCapture != 1 ){ local.ok = 1 }
+	else if( self.coop_mpVehTeam == NIL || self.coop_mpVehTeam == "" ){ local.ok = 1 }
+	else if( local.q.dmteam != self.coop_mpVehTeam ){ local.ok = 0 }
+}end local.ok
+
+
+//an exit position beside the vehicle, traced to the floor. self is the vehicle.
+veh_exitPos:{
+	local.o = ( 0 0 0 )
+	if( self != NULL ){ local.o = self.origin }
+	local.side = angles_toleft self.angles
+	local.p = ( local.o + ( vector_scale local.side 140 ) + ( 0 0 40 ) )
+	local.g = trace ( local.p + ( 0 0 40 ) ) ( local.p + ( 0 0 -4096 ) )
+	local.p = ( local.g + ( 0 0 40 ) )
+}end local.p

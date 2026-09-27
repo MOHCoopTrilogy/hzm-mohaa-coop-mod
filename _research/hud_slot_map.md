@@ -133,6 +133,35 @@ own** (the player dying, going spectator, the entity you were tracking disappear
 backstop for the one transition that ends all of them lives in
 `player.scr::manageSpectator`, inside the `coop_everActive` block — **add your slot there too.**
 
+## A teardown must STICK — claim on draw, re-send the hide (bug-2904, bug-2906)
+
+Every `ihuddraw_*` write rides ONE snapshot to that client, once: no retransmit, and a client whose
+message buffer is nearly full is skipped. The listen host (loopback) never loses one, so a lost
+one-shot hide only ever strands a **remote** player's element. Since bug-2906 every transient element
+in `coop_mod` follows one contract, implemented by `coop_mod/hudresend.scr` (MP files use the twin
+`coop_mod/mp_hudresend.scr` — the isolation contract forbids MP calling coop helpers):
+
+- **every VISIBLE draw** into the slot first does `waitthread coop_mod/hudresend.scr::claim <player> <first> <last>`
+  (bumps that player's per-slot generation, `flags["coop_hudGen<slot>"]`);
+- **every one-shot hide** is followed by `thread coop_mod/hudresend.scr::resend <player> <first> <last> <mode>`,
+  which re-sends the hidden state at +0.5 / +1.5 / +3 s, **only to slots whose generation has not moved**.
+  Mode 0 = alpha 0 (hides any layer, never zeroes a shader), 1 = alpha 0 + string "", 2 = string "" only
+  (text whose alpha stays up). `resendUnless ... "<flag>"` also stops when `flags[<flag>] == 1`.
+
+**If you draw into a hardened slot without claiming, a neighbour's re-send can blank you for up to
+3 s.** Claiming more slots than you draw is safe (it only cancels re-sends). Hides that sit in a loop
+which keeps re-hiding (idle branches, 0.5 s re-asserts) need no re-send; nor does a teardown followed
+at once by a map change — a remote client resets all 256 slots on every map load
+(`cl_cgame.cpp` `CL_InitCGame` → `CL_InitClientSavedData`).
+
+Collisions the bug-2906 audit found and left for a slot change (not fixed by it):
+**36/37** — dbno.scr's `[DOWN] name` label for downed players #3/#4 lands on every viewer's own
+medkit icon + count (its teardown re-send is deliberately skipped there); **30** — the same label for
+player #2 shares the limp warning's slot (both claim, so neither re-send blanks the other);
+**60-65** — MP Countdown's global `huddraw` clock (`htr/hud.scr`) under the lightning flash (60) and
+the XP gain popup (62-65). Not hardened: `mp_vehicles.scr`'s crew HUD calls `ihuddraw_*` in the
+method form (`local.p ihuddraw_alpha 45 1`), which throws, so it has likely never drawn.
+
 ## Rules
 
 1. **Sweep before you claim.** `python docs\tools\hudslots.py` — do not trust this table alone,
@@ -142,3 +171,4 @@ backstop for the one transition that ends all of them lives in
 4. Reuse a range only if the two are provably never concurrent, and gate it explicitly.
 5. Write the teardown for every exit path, and register the slot in the spectator backstop.
 6. **Update this table when you claim slots** — then re-run the sweep to confirm it agrees.
+7. **Claim on every visible draw, re-send every one-shot hide** (`coop_mod/hudresend.scr`, section above).

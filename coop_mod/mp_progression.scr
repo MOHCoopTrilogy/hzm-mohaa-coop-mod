@@ -1,0 +1,726 @@
+//=========================================================================
+// MP_PROGRESSION.SCR - MP kill attribution -> in-session progression counters (slice 1 of the
+// MP Progression + Service Record feature). SCRIPT ONLY: no engine call, no persistence yet.
+//
+// This is an MP file (coop_mod/mp*.scr is in MP_MANIFEST) and is guarded end to end by
+// level.coop_mpRun, which ONLY coop_mod/mp.scr sets and which a level load wipes - so nothing here
+// can run on a coop map. mp.scr threads ::init once per MP map (from its own run-once main).
+//
+// ISOLATION (clause 10): calls NO coop code. Attribution reads the MP-owned generated map
+// coop_mod/mp_prog_wpnmap.scr (itself an MP file) - NEVER coop's chal_widFromModel, which
+// misattributes and is off-limits. Writes ONLY coop_mp* per-player entity keys (MP-owned,
+// clause 12c: self.flags["coop_mpProg*"]) - never a cvar, never coop_health / coop_lockLoadout /
+// any coop_* state, so nothing here can follow a player into coop. Never giveInventory /
+// changeGameType.
+//
+// HOW A KILL IS OBSERVED: unlike the mode poll (mp.scr uses a getkills delta because it needs only
+// a COUNT), progression needs the ATTACKER, the WEAPON and the VICTIM per kill - which a 0.5s poll
+// cannot recover. So this subscribes to the engine's player_killed delegate
+// (Player::scriptDelegate_kill, player.cpp: 11 args, self=victim). event_subscribe is flagged
+// "unproven in this mod" by the mp.scr header, so this lives in its OWN file and is THREADED from
+// mp.scr: if the subscribe throws (a Script Error skips the statement) progression simply never
+// credits and mp.scr's own deploy/poll path is untouched. The ^~^~^ MPPROG diagnostics below let a
+// single playtest confirm the delegate fires with the right args.
+//
+// SLICE 1 SCOPE: credit team-blind CLASS counters and per-weapon SOURCE counters in memory for the
+// current session. NO persistence (arch A userinfo-signed blob is slice 3), NO unlock UI (slice 5),
+// NO challenges/XP (slice 4). Anti-farm: a per-(attacker,victim) cooldown blocks spawn-farming the
+// same player. Model paths are matched AS RETURNED (MOHAA tik paths are lowercase by convention, as
+// are the generated map keys); a case/format mismatch shows up in the diagnostic for slice 1b.
+//=========================================================================
+
+//Inert entry. mp.scr threads ::init, not main. Kept so an accidental exec is a no-op.
+main:{
+	if( level.coop_mpRun != 1 ){ end }
+	end
+}end
+
+
+//=========================================================================
+// INIT - subscribe to the kill delegate. Called (threaded) once per MP map from mp.scr::main. The
+// delegate registration is reset on every map load (script reload), so re-subscribing each map is
+// correct and cannot stack. Run-once per map anyway (mp.scr::main is run-once on coop_mpRun).
+//=========================================================================
+init:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpProgInit == 1 ){ end }
+	level.coop_mpProgInit = 1
+
+	//farm cooldown: the same attacker killing the same victim again inside this many seconds credits
+	//nothing (spawn-camp / telefrag-loop guard). Host-tunable; MP-owned cvar, read only.
+	level.coop_mpProgFarmCooldown = 8
+	local.cd = getcvar( "coop_mpProgFarmCooldown" )
+	if( local.cd != "" ){ level.coop_mpProgFarmCooldown = int( local.cd ) }
+
+	//[slice 3] the deterministic progression-class order for the carried blob body. buildBody and
+	//ensureLoaded BOTH iterate this, so the field order can never drift between write and read.
+	level.coop_mpProgClasses[0] = "rifle"
+	level.coop_mpProgClasses[1] = "sniper"
+	level.coop_mpProgClasses[2] = "smg"
+	level.coop_mpProgClasses[3] = "mg"
+	level.coop_mpProgClasses[4] = "shotgun"
+	level.coop_mpProgClasses[5] = "rocket"
+	level.coop_mpProgClasses[6] = "pistol"
+	level.coop_mpProgClasses[7] = "nades"
+	//push throttle: don't re-sign+stufftext the blob more than once per this many seconds per player.
+	level.coop_mpProgPushEvery = 3
+
+	//[slice 4] per-class kill count that unlocks that class's non-starter armory weapons. Host-tunable.
+	level.coop_mpProgUnlockKills = 15
+	local.uk = getcvar( "coop_mpProgUnlockKills" )
+	if( local.uk != "" ){ level.coop_mpProgUnlockKills = int( local.uk ) }
+	//kills per MP rank (rank = 1 + floor(total/this)). Cosmetic.
+	level.coop_mpProgKillsPerRank = 25
+
+	//[bug-2770] per-WEAPON MASTERY: kills with a specific gun that unlock its finish variants for THAT gun
+	//(mirrors coop's per-weapon variant gating). Host-tunable. The mastered set is a bitstring persisted in
+	//the v3 progression blob (coop_mpMasterStr), indexed by mp_finish_map.scr::coop_mpFinIdx.
+	level.coop_mpWpnMasterKills = 25
+	local.wm = getcvar( "coop_mpWpnMasterKills" )
+	if( local.wm != "" ){ level.coop_mpWpnMasterKills = int( local.wm ) }
+
+	//[MP CHALLENGES] The additional persisted STAT VECTOR (blob v2). Challenges (coop_mod/mp_challenges.scr)
+	//watch these + the 8 class-kill counts + total. Order is FIXED and APPEND-ONLY: a new stat bumps the
+	//blob version and is read as 0 from an older blob. Stored per player in self.flags["coop_mpS_<stat>"];
+	//written through mp_bump, read through mp_statVal. Mirrors coop's chal stat keys (challenges.scr).
+	level.coop_mpStat[0]  = "headshot"		//hit location 0-2
+	level.coop_mpStat[1]  = "melee"			//MOD_BASH (26)
+	level.coop_mpStat[2]  = "grenade"		//MOD_GRENADE (14)
+	level.coop_mpStat[3]  = "rocketk"		//MOD_ROCKET (16)  (rocketk = rocket-kill feat, distinct from the rocket weapon class)
+	level.coop_mpStat[4]  = "capture"		//objective points/flags captured (koth/ctf)
+	level.coop_mpStat[5]  = "plant"			//bombs/charges planted (snd/demolition/baseassault)
+	level.coop_mpStat[6]  = "defuse"		//charges defused
+	level.coop_mpStat[7]  = "destroy"		//bases/sites destroyed (baseassault/demolition)
+	level.coop_mpStat[8]  = "revive"		//DBNO team revives
+	level.coop_mpStat[9]  = "flagret"		//CTF flags returned
+	level.coop_mpStat[10] = "propsurv"		//Prop Hunt rounds survived as a prop
+	level.coop_mpStat[11] = "propfind"		//Prop Hunt props killed as a hunter
+	level.coop_mpStat[12] = "ggwin"			//Gun Game ladders finished
+	level.coop_mpStat[13] = "rounds"		//rounds/matches finished (participation)
+	level.coop_mpStat[14] = "win_gungame"
+	level.coop_mpStat[15] = "win_koth"
+	level.coop_mpStat[16] = "win_snd"
+	level.coop_mpStat[17] = "win_lms"
+	level.coop_mpStat[18] = "win_freezetag"
+	level.coop_mpStat[19] = "win_push"
+	level.coop_mpStat[20] = "win_ctf"
+	level.coop_mpStat[21] = "win_demolition"
+	level.coop_mpStat[22] = "win_baseassault"
+	level.coop_mpStat[23] = "win_buildabase"
+	level.coop_mpStat[24] = "win_prophunt"
+	level.coop_mpStatN = 25
+	level.coop_mpBlobVer = 2
+	//map the 8 class-kill names so mp_statVal routes them to the v1 coop_mpProgC_ store.
+	for( local.ci = 0; local.ci < 8; local.ci++ ){ level.coop_mpClassStat[level.coop_mpProgClasses[local.ci]] = 1 }
+
+	//event_subscribe is a global ScriptThread builtin; the second arg is a label in THIS file.
+	//A bad label throws "^~^~^ Could not find label" at parse of this statement (visible in the log).
+	event_subscribe "player_killed" "onKill"
+	println( "^~^~^ MPPROG init subscribed player_killed cooldown=" + level.coop_mpProgFarmCooldown )
+
+	//slice 2/3 self-test (gated on the test cvar): proves mp_sign/mp_verify and the split round-trip
+	//deterministically each MP boot in test mode, independent of a human reconnect.
+	if( getcvar( "coop_mpProgCreditBots" ) == "1" ){ thread selftest }
+}end
+
+
+//=========================================================================
+// SLICE 2/3 SELF-TEST. Signs a known body, verifies it (expect PASS), verifies a tampered payload
+// against the good tag (expect FAIL), and round-trips splitFields. All results print ^~^~^ MPPROGTEST.
+//=========================================================================
+selftest:{
+	local.guid = "TESTGUID1234"
+	local.body = "1;7;3;0;2;0;0;2;0;0"
+	local.pay = ( local.body + ";" + local.guid )
+	local.tag = mp_sign local.pay
+	local.good = mp_verify local.pay local.tag
+	local.payT = ( "1;99;3;0;2;0;0;2;0;0;" + local.guid )
+	local.tamper = mp_verify local.payT local.tag
+	local.payW = ( local.body + ";OTHERGUID999" )
+	local.wrongguid = mp_verify local.payW local.tag
+	println( "^~^~^ MPPROGTEST sign tag=" + local.tag + " verifyGood=" + local.good + " (want 1) verifyTamper=" + local.tamper + " verifyWrongGuid=" + local.wrongguid + " (want 0 0)" )
+
+	local.f = waitthread splitFields local.body ";"
+	println( "^~^~^ MPPROGTEST split fields=" + local.f.size + " (want 10) f0=" + local.f[0] + " f1=" + local.f[1] + " f9=" + local.f[9] )
+}end
+
+
+//=========================================================================
+// THE KILL CALLBACK. self = the victim (the player that died). The 11 delegate args, in order:
+//   local.attacker  entity  - who dealt the killing blow (may be world/AI/another player)
+//   local.dmg       float   - damage of the killing blow
+//   local.inflictor entity  - the thing that hit (projectile/grenade for splash, else = attacker)
+//   local.pos       vector  - hit position
+//   local.dir       vector  - hit direction
+//   local.norm      vector  - hit normal
+//   local.knock     int     - knockback
+//   local.dflags    int     - damage flags
+//   local.mod       int     - means of death (bg_public.h meansOfDeath_t; TELEFRAG=4, SUICIDE=1)
+//   local.loc       int     - hit location
+//   local.victim    entity  - the victim again (== self)
+//=========================================================================
+onKill local.attacker local.dmg local.inflictor local.pos local.dir local.norm local.knock local.dflags local.mod local.loc local.victim:{
+	if( level.coop_mpRun != 1 ){ end }
+
+	//self is the victim. Reject the deaths that are not a scored PvP kill.
+	if( local.attacker == NULL ){ end }
+	if( local.attacker == self ){ end }          //suicide / self-inflicted
+	if( local.mod == 4 ){ end }                  //MOD_TELEFRAG - a spawn accident, not a skill kill
+
+	//the attacker must be a live player on a real team. dmteam is "" / NIL on non-players and
+	//"spectator" on spectators; a valid PvP attacker is "allies" or "axis".
+	local.atk = local.attacker.dmteam
+	if( local.atk == NIL || local.atk == "" || local.atk == "spectator" ){ end }
+
+	//team-kill: same team as the victim credits nothing (the victim's team may be NIL if it died
+	//mid-transition - only reject when both teams are known and equal).
+	local.vt = self.dmteam
+	if( local.vt != NIL && local.vt != "" && local.vt == local.atk ){
+		println( "^~^~^ MPPROG teamkill ignored atk=e" + local.attacker.entnum + " vic=e" + self.entnum )
+		end
+	}
+
+	//bots have no carried record to credit (slice 3), but a bot VICTIM is a real kill for a human
+	//attacker. So reject only a BOT ATTACKER here; the victim being a bot is fine. The debug cvar
+	//coop_mpProgCreditBots (default 0) lets a bot-only playtest exercise the full credit path -
+	//production leaves it 0 so bot sessions are never tracked.
+	if( isBot( local.attacker ) == 1 && getcvar( "coop_mpProgCreditBots" ) != "1" ){
+		println( "^~^~^ MPPROG botkill (attacker is bot) ignored atk=e" + local.attacker.entnum )
+		end
+	}
+
+	//anti-farm: same attacker, same victim, inside the cooldown -> no credit.
+	local.now = level.time
+	local.lastVic = local.attacker.flags["coop_mpProgLastVic"]
+	local.lastT = local.attacker.flags["coop_mpProgLastVicT"]
+	if( local.lastVic == self.entnum && local.lastT != NIL && ( local.now - local.lastT ) < level.coop_mpProgFarmCooldown ){
+		println( "^~^~^ MPPROG farm ignored atk=e" + local.attacker.entnum + " vic=e" + self.entnum + " dt=" + ( local.now - local.lastT ) )
+		end
+	}
+	local.attacker.flags["coop_mpProgLastVic"] = self.entnum
+	local.attacker.flags["coop_mpProgLastVicT"] = local.now
+
+	//resolve the weapon model. getactiveweap 0 = the attacker's main-hand weapon entity; .model is
+	//its tik. Splash kills (grenade/rocket) may return a non-weapon model or the wrong weapon (the
+	//attacker switched back) - slice 1 credits only what the map knows and LOGS the rest, so one
+	//playtest tells slice 1b exactly what to add.
+	local.wpn = local.attacker getactiveweap 0
+	local.model = ""
+	if( local.wpn != NULL ){ local.model = local.wpn.model }
+	if( local.model == NIL ){ local.model = "" }
+
+	local.class = ""
+	if( local.model != "" ){ local.class = waitthread coop_mod/mp_prog_wpnmap.scr::classOf local.model }
+
+	//[slice 3] load this attacker's carried progression once per session so the credit adds to their
+	//REAL persisted total (not from 0), credit, then push the updated signed blob back to them.
+	waitthread ensureLoaded local.attacker
+	if( local.attacker == NULL ){ end }
+	waitthread credit local.attacker local.class local.model local.mod
+	if( local.attacker == NULL ){ end }
+
+	//[user 2026-09-17] SHARED PROGRESSION: a credited MP kill also earns coop XP via the sanctioned capped
+	//bridge (xp.scr::xp_award_mp). Runs only for credited kills, so the anti-farm/teamkill/bot guards above
+	//gate the XP too. MP kill = coop_mpXpKill XP (default 10).
+	if( level.coop_mpXpKill == NIL ){ level.coop_mpXpKill = 10 }
+	waitthread coop_mod/xp.scr::xp_award_mp local.attacker level.coop_mpXpKill "kills" "MP Kill"
+	if( local.attacker == NULL ){ end }
+
+	//[MP CHALLENGES] feat stats from the kill's hit location + means-of-death (same classification coop
+	//uses, challenges.scr): headshot = hit location 0-2; melee = MOD_BASH (26); grenade = MOD_GRENADE (14);
+	//rocket = MOD_ROCKET (16). These feed the feat challenges and their finish/cosmetic rewards.
+	if( local.loc != NIL && local.loc >= 0 && local.loc <= 2 ){ waitthread mp_bump local.attacker "headshot" 1 }
+	if( local.mod == 26 ){ waitthread mp_bump local.attacker "melee" 1 }
+	if( local.mod == 14 ){ waitthread mp_bump local.attacker "grenade" 1 }
+	if( local.mod == 16 ){ waitthread mp_bump local.attacker "rocketk" 1 }
+	//[MP CHALLENGES] Prop Hunt: a HUNTER (allies) killing a PROP (axis) is a "find". self is the victim.
+	if( level.coop_mpMode == "prophunt" && local.attacker.dmteam == "allies" && self.dmteam == "axis" ){
+		waitthread mp_bump local.attacker "propfind" 1
+	}
+	if( local.attacker == NULL ){ end }
+
+	waitthread pushBlob local.attacker
+}end
+
+
+//=========================================================================
+// [MP CHALLENGES] The stat writer (the MP analog of coop's chal_bump). Any mode/feat/objective script
+// calls this to add to a persisted stat; mp_challenges.scr derives challenge completion + the unlock set
+// from these. Marks the blob dirty so the next pushBlob carries it. local.amount defaults to 1.
+//=========================================================================
+mp_bump local.p local.stat local.amount:{
+	if( local.p == NULL ){ end }
+	if( local.stat == NIL || local.stat == "" ){ end }
+	if( local.amount == NIL ){ local.amount = 1 }
+	local.key = ( "coop_mpS_" + local.stat )
+	local.v = local.p.flags[local.key]
+	if( local.v == NIL ){ local.v = 0 }
+	local.p.flags[local.key] = ( local.v + local.amount )
+	local.p.flags["coop_mpProgDirty"] = 1
+}end
+
+
+//=========================================================================
+// [MP CHALLENGES] Award a ROUND/MATCH win: every in-play player gets a "rounds" credit; players on the
+// winning side get their mode's win_<mode> stat. Forces a blob flush (bypassing the push throttle) so the
+// credit persists before a mode restarts the map. Called from each mode's win path. local.winside is
+// "allies"/"axis" (a draw/"" awards only rounds); local.mode is level.coop_mpMode.
+//=========================================================================
+mp_awardTeamWin local.winside local.mode:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.mode == NIL || local.mode == "" ){ end }
+	local.wstat = ( "win_" + local.mode )
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( local.q.isSpectator ){ continue }
+		if( local.q.dmteam == "spectator" || local.q.dmteam == "" || local.q.dmteam == NIL ){ continue }
+		waitthread mp_bump local.q "rounds" 1
+		if( local.winside == local.q.dmteam ){ waitthread mp_bump local.q local.wstat 1 }
+		//flush now: the map may restart right after a win, so don't wait for the throttle.
+		local.q.flags["coop_mpProgLastPush"] = NIL
+		waitthread pushBlob local.q
+	}
+	println( "^~^~^ MPPROG award win side=" + local.winside + " mode=" + local.mode )
+}end
+
+
+//=========================================================================
+// [MP CHALLENGES] Award a ROUND win for the elimination/round-based modes (lms/snd/freezetag/demolition/
+// prophunt), which run through coop_mod/mp_rounds.scr. IDENTICAL credit to mp_awardTeamWin (rounds to
+// every participant, win_<mode> to the winning side, forced flush) but keyed on the player's SNAPSHOTTED
+// round team (self.flags["coop_mpRndTeam"], set by mp_rounds.scr::rounds_tick when the round armed) rather
+// than live dmteam. That matters because the no-respawn hold (rounds_enforceAll) forces every dead player
+// to spectator before the round resolves - so a live-dmteam read would credit only the last survivor and
+// silently drop every teammate who died mid-round. local.winside is "allies"/"axis" ("draw"/"" -> rounds
+// only). Called from mp_rounds.scr::rounds_win.
+//=========================================================================
+mp_awardRoundWin local.winside local.mode:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.mode == NIL || local.mode == "" ){ end }
+	local.wstat = ( "win_" + local.mode )
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		local.rt = local.q.flags["coop_mpRndTeam"]
+		if( local.rt != "allies" && local.rt != "axis" ){ continue }
+		waitthread mp_bump local.q "rounds" 1
+		if( local.winside == local.rt ){ waitthread mp_bump local.q local.wstat 1 }
+		//flush now: the map may restart right after a win, so don't wait for the throttle.
+		local.q.flags["coop_mpProgLastPush"] = NIL
+		waitthread pushBlob local.q
+	}
+	println( "^~^~^ MPPROG award roundwin side=" + local.winside + " mode=" + local.mode )
+}end
+
+
+//[MP CHALLENGES] Award an OBJECTIVE stat to one player (plant/defuse/destroy/capture/revive/flagret/
+//propsurv/propfind/ggwin) + flush. A thin wrapper the mode scripts call so they never touch mp_bump/
+//pushBlob directly. No-op outside MP.
+mp_awardObj local.p local.stat local.amount:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( local.p == NULL ){ end }
+	waitthread mp_bump local.p local.stat local.amount
+	//[user 2026-09-17] SHARED PROGRESSION: objective actions (capture/plant/defuse/...) also earn coop XP
+	//via the capped bridge - the user chose objective play + kills as the MP XP sources. Objective =
+	//coop_mpXpObj XP (default 25, valued above a kill). One award per objective event, not per stat point.
+	if( level.coop_mpXpObj == NIL ){ level.coop_mpXpObj = 25 }
+	waitthread coop_mod/xp.scr::xp_award_mp local.p level.coop_mpXpObj "objective" "MP Objective"
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_mpProgLastPush"] = NIL
+	waitthread pushBlob local.p
+}end
+
+
+//[MP CHALLENGES] Unified stat read: "total" -> the grand total; a class name -> the v1 coop_mpProgC_
+//store; anything else -> the coop_mpS_ stat vector. Returns 0 for unset. In a local before end (bug-2603).
+mp_statVal local.p local.stat:{
+	local.v = 0
+	if( local.p == NULL || local.stat == NIL || local.stat == "" ){ end local.v }
+	if( local.stat == "total" ){
+		local.v = local.p.flags["coop_mpProgKills"]
+	} else if( level.coop_mpClassStat[local.stat] == 1 ){
+		local.v = local.p.flags[( "coop_mpProgC_" + local.stat )]
+	} else {
+		local.v = local.p.flags[( "coop_mpS_" + local.stat )]
+	}
+	if( local.v == NIL ){ local.v = 0 }
+}end local.v
+
+
+//=========================================================================
+// Credit one scored kill onto the attacker's in-session counters. All keys are coop_mp* entity
+// keys (MP-owned), flattened to one level (no nested arrays): total kills, per-class count keyed
+// "coop_mpProgC_<class>", per-weapon count keyed "coop_mpProgW_<model>". This is the raw unclamped
+// session tally slice 3 will sign and carry; slice 4/5 read it for challenges and unlocks.
+//=========================================================================
+credit local.p local.class local.model local.mod:{
+	if( local.p == NULL ){ end }
+
+	local.k = local.p.flags["coop_mpProgKills"]
+	if( local.k == NIL ){ local.k = 0 }
+	local.p.flags["coop_mpProgKills"] = ( local.k + 1 )
+
+	if( local.class != NIL && local.class != "" ){
+		local.ckey = ( "coop_mpProgC_" + local.class )
+		local.ck = local.p.flags[local.ckey]
+		if( local.ck == NIL ){ local.ck = 0 }
+		local.p.flags[local.ckey] = ( local.ck + 1 )
+	}
+
+	if( local.model != "" ){
+		local.wkey = ( "coop_mpProgW_" + local.model )
+		local.wk = local.p.flags[local.wkey]
+		if( local.wk == NIL ){ local.wk = 0 }
+		local.wk = ( local.wk + 1 )
+		local.p.flags[local.wkey] = local.wk
+
+		//[bug-2770] PER-WEAPON MASTERY: when this gun crosses the mastery threshold, set its bit in the carried
+		//mastered set so its finish variants unlock for THIS gun (mp_finish_map.scr::resolve gates on it). Only
+		//guns with a variant have an index; others are ungated no-ops. Persisted via the v3 blob (pushBlob).
+		waitthread coop_mod/mp_finish_map.scr::mpfin_init
+		if( local.p == NULL ){ end }
+		local.mi = level.coop_mpFinIdx[local.model]
+		if( local.mi != NIL ){
+			local.thr = level.coop_mpWpnMasterKills
+			if( local.thr == NIL || local.thr <= 0 ){ local.thr = 25 }
+			if( local.wk >= local.thr ){ waitthread setMasterBit local.p local.mi }
+			if( local.p == NULL ){ end }
+		}
+	}
+
+	//mark the carried blob dirty so pushBlob re-signs it.
+	local.p.flags["coop_mpProgDirty"] = 1
+
+	//diagnostic: exactly what a real kill produced. An empty class with a non-empty model means the
+	//map missed it (a projectile/splash model) - the line names the model so slice 1b can map it.
+	println( "^~^~^ MPPROG credit atk=e" + local.p.entnum + " class=" + local.class + " model=" + local.model + " mod=" + local.mod + " total=" + local.p.flags["coop_mpProgKills"] )
+}end
+
+
+//=========================================================================
+// [SLICE 3 - arch A persistence] The carried progression blob. Format (";"-delimited, signed):
+//   body = "1;<total>;<rifle>;<sniper>;<smg>;<mg>;<shotgun>;<rocket>;<pistol>;<nades>"   (v1, 10 fields)
+//   stored userinfo value coop_mpProgBlob = body + ";" + tag,  tag = mp_sign( body + ";" + guid )
+// The guid (cl_guid from userinfo) is signed IN but NOT stored, so a blob cannot be replayed onto a
+// different account. The server holds an authoritative per-guid high-water body in game.coop_mpProgLW*
+// (game.* survives map changes within the server process) to defeat rollback to an older valid blob.
+//=========================================================================
+
+//count for a class key, 0 if unset.
+cnt local.p local.class:{
+	local.v = local.p.flags[( "coop_mpProgC_" + local.class )]
+	if( local.v == NIL ){ local.v = 0 }
+	end local.v
+}end local.v
+
+
+//[bug-2770] Set weapon-mastery bit local.idx in the player's carried mastered set (coop_mpMasterStr), a
+//fixed-length '0'/'1' string indexed by mp_finish_map.scr::coop_mpFinIdx (0..coop_mpFinIdxN-1). Preserves
+//existing bits, pads to the current length, marks the blob dirty so pushBlob persists it. No-op if already set.
+setMasterBit local.p local.idx:{
+	if( local.p == NULL ){ end }
+	local.n = level.coop_mpFinIdxN
+	if( local.n == NIL || local.n <= 0 ){ end }
+	if( local.idx < 0 || local.idx >= local.n ){ end }
+	local.old = local.p.flags["coop_mpMasterStr"]
+	if( local.old == NIL ){ local.old = "" }
+	if( local.idx < local.old.size && local.old[local.idx] == "1" ){ end }
+	local.new = ""
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		local.c = "0"
+		if( local.i < local.old.size && local.old[local.i] == "1" ){ local.c = "1" }
+		if( local.i == local.idx ){ local.c = "1" }
+		local.new = ( local.new + local.c )
+	}
+	local.p.flags["coop_mpMasterStr"] = local.new
+	local.p.flags["coop_mpProgDirty"] = 1
+	println( "^~^~^ MPPROG master e" + local.p.entnum + " idx=" + local.idx + " str=" + local.new )
+}end
+
+
+//Assemble the signed body (without the tag) from the player's current in-memory counters. v3 =
+//"3;<total>;<8 class counts>;<coop_mpStatN stat counts>;<masterStr>" (v2 = same without the trailing master
+//bitstring; v1 = first 10 fields only). Older blobs still load (mask/stats read as empty/0). The master
+//bitstring is ALWAYS the LAST body field, so it is read position-independently of the stat-vector length.
+buildBody local.p:{
+	local.tot = local.p.flags["coop_mpProgKills"]
+	if( local.tot == NIL ){ local.tot = 0 }
+	local.b = ( "3;" + local.tot )
+	for( local.i = 0; local.i < 8; local.i++ ){
+		local.c = level.coop_mpProgClasses[local.i]
+		local.b = ( local.b + ";" + waitthread cnt local.p local.c )
+	}
+	for( local.i = 0; local.i < level.coop_mpStatN; local.i++ ){
+		local.sv = local.p.flags[( "coop_mpS_" + level.coop_mpStat[local.i] )]
+		if( local.sv == NIL ){ local.sv = 0 }
+		local.b = ( local.b + ";" + local.sv )
+	}
+	//[bug-2770] v3: the weapon-mastery bitstring is the LAST body field (empty until the first gun is mastered).
+	local.ms = local.p.flags["coop_mpMasterStr"]
+	if( local.ms == NIL ){ local.ms = "" }
+	local.b = ( local.b + ";" + local.ms )
+	end local.b
+}end local.b
+
+
+//The player's guid from userinfo (cl_guid). "" for bots / no guid.
+guidOf local.p:{
+	if( local.p == NULL ){ end "" }
+	local.u = local.p.userinfo
+	if( local.u == NIL ){ end "" }
+	local.g = info_valueforkey local.u "cl_guid"
+	if( local.g == NIL ){ local.g = "" }
+	end local.g
+}end local.g
+
+
+//Split local.s on the single-char local.delim into a 0-indexed array (MOHAA GSC has no split; scan
+//char by char exactly as main.scr::containsText reads local.source[i] / .size). Always returns at
+//least one field (the whole string when no delimiter is present).
+splitFields local.s local.delim:{
+	local.cur = ""
+	local.idx = 0
+	if( local.s == NIL ){ local.s = "" }
+	local.n = local.s.size
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		local.ch = local.s[local.i]
+		if( local.ch == local.delim ){
+			local.out[local.idx] = local.cur
+			local.idx++
+			local.cur = ""
+		} else {
+			local.cur = ( local.cur + local.ch )
+		}
+	}
+	local.out[local.idx] = local.cur
+}end local.out
+
+
+//[MP CHALLENGES] Is local.needle a substring of local.hay? GSC has no substring builtin, so scan char by
+//char (same style as splitFields). Returns 1/0 in a local before end (bug-2603).
+containsSub local.hay local.needle:{
+	local.found = 0
+	if( local.hay == NIL || local.needle == NIL || local.needle == "" ){ end local.found }
+	local.hn = local.hay.size
+	local.nn = local.needle.size
+	if( local.nn > local.hn ){ end local.found }
+	local.last = ( local.hn - local.nn )
+	for( local.i = 0; local.i <= local.last; local.i++ ){
+		local.match = 1
+		for( local.j = 0; local.j < local.nn; local.j++ ){
+			if( local.hay[( local.i + local.j )] != local.needle[local.j] ){
+				local.match = 0
+				local.j = local.nn
+			}
+		}
+		if( local.match == 1 ){
+			local.found = 1
+			local.i = ( local.last + 1 )
+		}
+	}
+}end local.found
+
+
+//Load a player's carried progression ONCE per session: read + verify the userinfo blob, seed the
+//in-memory counters (so a kill adds to the real total), and reconcile against the server high-water.
+ensureLoaded local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpProgLoaded"] == 1 ){ end }
+	local.p.flags["coop_mpProgLoaded"] = 1
+
+	local.guid = waitthread guidOf local.p
+	local.p.flags["coop_mpProgGuid"] = local.guid
+
+	local.u = local.p.userinfo
+	local.blob = ""
+	if( local.u != NIL ){ local.blob = info_valueforkey local.u "coop_mpProgBlob" }
+	if( local.blob == NIL ){ local.blob = "" }
+
+	//prefer the server high-water for this guid if we have one (authoritative anti-rollback).
+	local.lwBody = ""
+	if( local.guid != "" ){
+		local.lwBody = game.coop_mpProgLW[local.guid]
+		if( local.lwBody == NIL ){ local.lwBody = "" }
+	}
+
+	local.body = ""
+	if( local.blob != "" ){
+		//split off the tag (last field) and verify body+guid against it.
+		local.parts = waitthread splitFields local.blob ";"
+		local.np = local.parts.size
+		if( local.np >= 11 ){
+			//reconstruct body = fields 0..np-2 joined by ";"; tag = last field.
+			local.tag = local.parts[( local.np - 1 )]
+			local.rebuilt = local.parts[0]
+			for( local.i = 1; local.i < ( local.np - 1 ); local.i++ ){
+				local.rebuilt = ( local.rebuilt + ";" + local.parts[local.i] )
+			}
+			local.vpay = ( local.rebuilt + ";" + local.guid )
+			local.ok = mp_verify local.vpay local.tag
+			if( local.ok == 1 ){
+				local.body = local.rebuilt
+				println( "^~^~^ MPPROG load VERIFIED e" + local.p.entnum + " guid=" + local.guid + " body=" + local.body )
+			} else {
+				println( "^~^~^ MPPROG load REJECTED (bad tag) e" + local.p.entnum + " guid=" + local.guid )
+			}
+		}
+	}
+
+	//anti-rollback: if the server high-water total beats the client blob total, use the high-water body.
+	if( local.lwBody != "" ){
+		local.lwTot = waitthread bodyTotal local.lwBody
+		local.clTot = waitthread bodyTotal local.body
+		if( local.lwTot > local.clTot ){
+			println( "^~^~^ MPPROG rollback-guard e" + local.p.entnum + " client=" + local.clTot + " server=" + local.lwTot + " -> using server" )
+			local.body = local.lwBody
+		}
+	}
+
+	//seed the in-memory counters from the chosen body (empty body = a fresh record, all zero).
+	if( local.body != "" ){
+		local.f = waitthread splitFields local.body ";"
+		if( local.f.size >= 10 ){
+			local.p.flags["coop_mpProgKills"] = int( local.f[1] )
+			for( local.i = 0; local.i < 8; local.i++ ){
+				local.p.flags[( "coop_mpProgC_" + level.coop_mpProgClasses[local.i] )] = int( local.f[( local.i + 2 )] )
+			}
+			//[MP CHALLENGES] v2/v3 blobs carry the stat vector after the 10 v1 fields (start index 10).
+			if( local.f[0] == "2" || local.f[0] == "3" ){
+				for( local.i = 0; local.i < level.coop_mpStatN; local.i++ ){
+					local.fi = ( 10 + local.i )
+					if( local.fi < local.f.size ){
+						local.p.flags[( "coop_mpS_" + level.coop_mpStat[local.i] )] = int( local.f[local.fi] )
+					}
+				}
+			}
+			//[bug-2770] v3 also carries the weapon-mastery bitstring as the LAST body field (read
+			//position-independently of the stat-vector length). v1/v2 blobs have none -> mastered set stays empty.
+			if( local.f[0] == "3" ){
+				local.p.flags["coop_mpMasterStr"] = local.f[( local.f.size - 1 )]
+			}
+		}
+	}
+
+	//[slice 4] push the initial unlock + rank state to this player's client (armory padlocks, HUD rank).
+	waitthread applyUnlocks local.p
+}end
+
+
+//Total (field 1) of a body string, 0 for empty/short.
+bodyTotal local.body:{
+	if( local.body == NIL || local.body == "" ){ end 0 }
+	local.f = waitthread splitFields local.body ";"
+	if( local.f.size < 2 ){ end 0 }
+	end int( local.f[1] )
+}end
+
+
+//Re-sign the player's current counters into the carried blob and push it to the client (seta, which
+//is USERINFO|ARCHIVE so it travels + persists), and update the server high-water. Throttled per
+//player. Bots have no client, so the stufftext is a harmless no-op for them.
+pushBlob local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpProgDirty"] != 1 ){ end }
+
+	local.now = level.time
+	local.lastPush = local.p.flags["coop_mpProgLastPush"]
+	if( local.lastPush != NIL && ( local.now - local.lastPush ) < level.coop_mpProgPushEvery ){ end }
+	local.p.flags["coop_mpProgLastPush"] = local.now
+	local.p.flags["coop_mpProgDirty"] = 0
+
+	local.guid = local.p.flags["coop_mpProgGuid"]
+	if( local.guid == NIL ){ local.guid = "" }
+
+	local.body = waitthread buildBody local.p
+	local.spay = ( local.body + ";" + local.guid )
+	local.tag = mp_sign local.spay
+	local.blob = ( local.body + ";" + local.tag )
+
+	//server high-water (authoritative within this server process).
+	if( local.guid != "" ){ game.coop_mpProgLW[local.guid] = local.body }
+
+	//push to the client so it archives + carries the blob. Quoted so the whole value is one token.
+	local.p stufftext ( "seta coop_mpProgBlob \"" + local.blob + "\"" )
+	println( "^~^~^ MPPROG push e" + local.p.entnum + " blob=" + local.blob )
+
+	//[slice 4] recompute unlocks/rank now that a counter changed, pushing only what changed.
+	waitthread applyUnlocks local.p
+}end
+
+
+//=========================================================================
+// [SLICE 4] Derive per-class weapon unlocks and the MP rank from the player's current counters, and
+// push the UI state to their client. A non-starter armory tile is gated by enabledcvar
+// coop_mpUnlockC_<class> (slice 5, gen_mp_armory.py), and the server enforces the same rule in
+// mp_armory.scr, so a client that fakes the cvar still cannot commit a locked pick. Unlock is grant-
+// only within a session (never re-locks mid-life); the persisted counters are the source of truth.
+//=========================================================================
+applyUnlocks local.p:{
+	if( local.p == NULL ){ end }
+
+	//[slice 6] push the total so the connected Service Record panel (ui/coop_mp_record.urc) can show it.
+	local.tot0 = local.p.flags["coop_mpProgKills"]
+	if( local.tot0 == NIL ){ local.tot0 = 0 }
+	local.p stufftext ( "seta coop_mpTotal " + local.tot0 )
+
+	local.thr = level.coop_mpProgUnlockKills
+	for( local.i = 0; local.i < 8; local.i++ ){
+		local.c = level.coop_mpProgClasses[local.i]
+		local.n = waitthread cnt local.p local.c
+		//[slice 6] push this class's count for the Service Record panel (linkcvar coop_mpCnt_<class>).
+		local.p stufftext ( "seta coop_mpCnt_" + local.c + " " + local.n )
+		local.on = 0
+		if( local.n >= local.thr ){ local.on = 1 }
+
+		local.key = ( "coop_mpUnlockC_" + local.c )
+		local.prev = local.p.flags[local.key]
+		if( local.prev == NIL ){ local.prev = 0 }
+		//grant-only: once unlocked this session it stays unlocked even if the threshold is retuned down.
+		if( local.prev == 1 ){ local.on = 1 }
+
+		if( local.on != local.prev ){
+			local.p.flags[local.key] = local.on
+			//push the UI hint cvar so the armory tile un-greys (server still re-validates the commit).
+			local.p stufftext ( "seta " + local.key + " " + local.on )
+			if( local.on == 1 ){
+				local.p iprint ( "Unlocked: " + local.c + " armory (" + local.n + " " + local.c + " kills)" ) 1
+				println( "^~^~^ MPPROG unlock e" + local.p.entnum + " class=" + local.c + " at=" + local.n )
+			}
+		}
+	}
+
+	//rank = 1 + floor(total / killsPerRank).
+	local.tot = local.p.flags["coop_mpProgKills"]
+	if( local.tot == NIL ){ local.tot = 0 }
+	local.rank = ( int( local.tot / level.coop_mpProgKillsPerRank ) + 1 )
+	local.prevRank = local.p.flags["coop_mpRank"]
+	if( local.prevRank == NIL ){ local.prevRank = 0 }
+	if( local.rank != local.prevRank ){
+		local.p.flags["coop_mpRank"] = local.rank
+		local.p stufftext ( "seta coop_mpRank " + local.rank )
+		if( local.rank > local.prevRank && local.prevRank > 0 ){
+			local.p iprint ( "MP Rank " + local.rank + "!" ) 1
+		}
+		println( "^~^~^ MPPROG rank e" + local.p.entnum + " rank=" + local.rank + " total=" + local.tot )
+	}
+
+	//[MP CHALLENGES] push the extra-stat vector to the client so the Service Record shows live progress
+	//(coop_mpS_<stat>). Diff-guarded per stat (coop_mpSpv_<stat> = last pushed). Class counts + total are
+	//already pushed above (coop_mpCnt_<class> / coop_mpTotal).
+	for( local.si = 0; local.si < level.coop_mpStatN; local.si++ ){
+		local.sn = level.coop_mpStat[local.si]
+		local.sv = local.p.flags[( "coop_mpS_" + local.sn )]
+		if( local.sv == NIL ){ local.sv = 0 }
+		local.pk = ( "coop_mpSpv_" + local.sn )
+		local.pv = local.p.flags[local.pk]
+		if( local.pv == NIL || local.sv != local.pv ){
+			local.p.flags[local.pk] = local.sv
+			local.p stufftext ( "seta coop_mpS_" + local.sn + " " + local.sv )
+		}
+	}
+
+	//[MP CHALLENGES] recompute challenge completion + the derived unlock set from the refreshed stats.
+	//MP->MP (both in MP_MANIFEST, isolation clause 10). No-op if the challenge table failed to compile.
+	waitthread coop_mod/mp_challenges.scr::derive local.p
+}end

@@ -1917,6 +1917,33 @@ coop_isProtectedActor local.actor:{
 }end (0)
 
 //=========================================================================
+//[user 2026-09-26, bug-2976] IS THIS MAN BOLTED TO A MOUNTED GUN?
+//"the gunners will get off and run around." MEASURED headless (m4l1, bots as enemies): the map's
+//baked build-mode nest gunner and the vanilla $turret3_gunner both held their MG42 until player
+//fire cracked near them, then coop_suppress_react threw `anim_scripted mp40_standtocrouch_dive`
+//at them. anim_scripted is Actor::EventAnimScript_Scripted -> SetThinkIdle(THINK_ANIM): it
+//REWRITES the idle think, so End_MachineGunner releases the turret on the spot. When the dive
+//ends, FinishedAnimation_Anim -> SetThinkIdle(THINK_IDLE) makes him an ordinary idle/curious man
+//whose ATTACK think is still machinegunner - which has no transition conditions, so he can never
+//fight either. He wanders off unarmed, curious, forever (d=0 -> 483u in 90s on the probe).
+//The monitors were attached because nothing exempted gunners: coop_isProtectedActor answers
+//"is this scenery" (and also decides who can WITNESS a contain in bust.scr, so a gunner must not
+//become protected there), and the monitors' own entry gate reads weapongroup ONCE, at attach -
+//when a baked or vanilla gunner is still holding the MP40 his `gun "MG42"` gives him, because
+//mg42_active mounts him later. A nest placed live in build mode mounts inside the spawn frame,
+//reads "unarmed" at attach, and so was immune - which is why "the one logged nest held its post".
+//This is the one test every pose-writing monitor asks AT THE POINT OF EFFECT (TRAPS: an entry
+//guard cannot protect against state that arrives after entry). Same predicate the personality
+//roll already used inline; it is here so the two cannot drift.
+//=========================================================================
+coop_isMannedGunner local.actor:{
+//=========================================================================
+	if( local.actor == NULL || local.actor == NIL ){ end (0) }
+	if( local.actor.type_idle == "machinegunner" ){ end (1) }
+	if( local.actor.type_attack == "machinegunner" ){ end (1) }
+}end (0)
+
+//=========================================================================
 coop_attach_dynamics local.actor:{
 //=========================================================================
 // [user 2026-08-22, bug-2045] The three AI-dynamics monitors used to be threaded from the
@@ -2019,8 +2046,8 @@ coop_apply_personality local.actor:{
 	//a third of gunners ever kept their gun - and which third was a dice roll, which is why it
 	//looked random and unrelated to where the player was standing.
 	//A man bolted to a fixed weapon has no use for a flank/cover/prone role anyway.
-	if( local.actor.type_idle == "machinegunner" ){ end }
-	if( local.actor.type_attack == "machinegunner" ){ end }
+	//[bug-2976] same test, now shared with the pose-writing monitors (coop_isMannedGunner).
+	if( waitthread coop_isMannedGunner local.actor ){ end }
 
 	//[user 2026-08-10] A4: never roll a personality for an actor another system owns.
 	if( waitthread coop_isProtectedActor local.actor ){
@@ -2201,6 +2228,11 @@ coop_prone_shooter local.actor:{
 		if( getcvar( "coop_aggroDebug" ) == "1" ){
 			println( "^~^~^ PRONESKIP actor=" + local.actor.targetname )
 		}
+		end
+	}
+	//[bug-2976] and never off a mounted gun - anim_scripted below would release his turret
+	if( waitthread coop_isMannedGunner local.actor ){
+		if( level.coop_prbActor == 1 ){ waitthread coop_mod/probe.scr::prb "actor.mghold" local.actor "why=prone" }
 		end
 	}
 	if( getcvar( "coop_aggroDebug" ) == "1" ){
@@ -4731,6 +4763,8 @@ coop_binoc_update_hud local.player:{
 		local.p = $player[local.pi]
 		if( local.p != NULL ){
 			if( level.coop_binoc_owner != NULL && local.p == level.coop_binoc_owner ){
+				//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
+				waitthread coop_mod/hudresend.scr::claim local.p 50 51
 				ihuddraw_shader      local.p 50 "textures/hud/artillery"
 				ihuddraw_rect        local.p 50 5 -82 16 16
 				ihuddraw_align       local.p 50 left bottom
@@ -4760,6 +4794,7 @@ coop_binoc_clear_hud local.player:{
 		if( local.p != NULL ){
 			ihuddraw_alpha local.p 50 0
 			ihuddraw_alpha local.p 51 0
+			thread coop_mod/hudresend.scr::resend local.p 50 51 0
 		}
 		local.pi++
 	}
@@ -4773,6 +4808,7 @@ coop_smoke_hud_show:{
 		local.p = $player[local.pi]
 		if( local.p != NULL ){
 			if( level.coop_smoke_player != NULL && local.p == level.coop_smoke_player ){
+				waitthread coop_mod/hudresend.scr::claim local.p 52 53	//bug-2906
 				ihuddraw_shader      local.p 52 "textures/hud/coop_paradrop_icon"
 				ihuddraw_rect        local.p 52 40 -82 16 16
 				ihuddraw_align       local.p 52 left bottom
@@ -4803,6 +4839,7 @@ coop_smoke_hud_clear:{
 		if( local.p != NULL ){
 			ihuddraw_alpha local.p 52 0
 			ihuddraw_alpha local.p 53 0
+			thread coop_mod/hudresend.scr::resend local.p 52 53 0
 		}
 		local.pi++
 	}
@@ -5158,10 +5195,17 @@ coop_arrival_slide local.actor:{
 			//than the pose. The restore still runs; only the bounce is suppressed, as before.
 			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 			if( local.actor.coop_aiDisabled == 1 ){ end }
+			//[bug-2976] a gunner who ran to his MG and stopped has ARRIVED at it - never slide him off
+			if( waitthread coop_isMannedGunner local.actor ){
+				if( level.coop_prbActor == 1 ){ waitthread coop_mod/probe.scr::prb "actor.mghold" local.actor "why=slide" }
+				end
+			}
 			//travelled, now stopped: slide into the spot
 			local.actor anim_scripted (local.wg + "_diveongrenade")
 			wait 2.1
 			if( local.actor == NULL || !isAlive local.actor ){ end }
+			//[bug-2976] mounted during the slide (mg42_active re-types him): the mount wins, write nothing
+			if( waitthread coop_isMannedGunner local.actor ){ end }
 			local.actor anim "idle"
 			local.actor.position = "crouch"
 			//[user 2026-08-22, bug-2047] RE-CHECK AT THE POINT OF EFFECT, not just on entry.
@@ -5258,6 +5302,13 @@ coop_suppress_react local.actor:{
 		//pinned, an alert scan once the fire lifts (was wrongly hung on the watcher START,
 		//which fires for every actor at boot - 2026-08-19).
 		thread coop_suppress_flavor local.actor
+		//[bug-2976] THE MEASURED CAUSE of "the gunners get off and run around". A man on a mounted
+		//MG42 stays on it under fire (coop_mgStay): no prone, no dive. Tested here, not at entry -
+		//local.wg above was read once at attach, before mg42_active mounted him.
+		if( waitthread coop_isMannedGunner local.actor ){
+			if( level.coop_prbActor == 1 ){ waitthread coop_mod/probe.scr::prb "actor.mghold" local.actor "why=suppress" }
+			continue
+		}
 		//long-range rifleman: go prone and shoot back through the proven poser
 		if( local.wg == "rifle" && local.actor.enemy != NULL && local.actor.enemy != NIL ){
 			if( vector_length( local.actor.enemy.origin - local.actor.origin ) > 800 ){
@@ -5269,6 +5320,8 @@ coop_suppress_react local.actor:{
 		local.actor anim_scripted (local.wg + "_standtocrouch_dive")
 		wait 1.0
 		if( local.actor == NULL || !isAlive local.actor ){ end }
+		//[bug-2976] mounted during the dive (mg42_active re-types him): the mount wins, write nothing
+		if( waitthread coop_isMannedGunner local.actor ){ continue }
 		local.actor anim "idle"
 		local.actor.position = "crouch"
 		//[user 2026-08-21, bug-2024] never bounce a surrendered man back to live AI
@@ -5357,6 +5410,12 @@ coop_squad_surrender local.actor:{
 			if( local.near == 1 ){ continue }
 			if( (randomint 100) >= (int(getcvar "coop_aiSurrenderChance") + 0) ){ end }
 			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
+			//[bug-2976] the last man on a mounted MG42 fights on it - anim_scripted scientist_surrender
+			//would release the turret exactly as the suppression dive did
+			if( waitthread coop_isMannedGunner local.actor ){
+				if( level.coop_prbActor == 1 ){ waitthread coop_mod/probe.scr::prb "actor.mghold" local.actor "why=surrender" }
+				end
+			}
 			//[bug-2037] nor an actor the MAP disabled - that is a scripted scene, not a combatant
 			if( local.actor.coop_aiDisabled == 1 ){ end }
 			local.actor.flags["coop_surrendered"] = 1

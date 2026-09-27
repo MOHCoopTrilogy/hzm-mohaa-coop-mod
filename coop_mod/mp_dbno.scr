@@ -84,6 +84,11 @@ isOn:{
 onSpawn local.p:{
 	if( local.p == NULL ){ end }
 
+	//[user 2026-09-21] PLAYERS ONLY - bots must NEVER go DBNO. The 9999 absorption pool would make a bot
+	//effectively invulnerable (it takes the DOWN state instead of dying), so bots would never die and combat
+	//would stall. Real players only; a bot spawner falls straight through to normal lethal damage.
+	if( isBot( local.p ) == 1 ){ end }
+
 	//safety-net: a player who died while downed must never respawn with the bleed-out view latched.
 	local.p stufftext "set coop_dbnoView 0"
 
@@ -237,6 +242,10 @@ mp_dbno_bleedout local.p:{
 			ihuddraw_string local.p 27 ""
 			ihuddraw_alpha  local.p 216 0
 			ihuddraw_string local.p 216 ""
+			//[2026-09-25, bug-2906] re-send the overlay + countdown clear: nothing re-clears 20/27 on the
+			//next spawn, so a lost one kept a black screen until the next down (coop_mod/mp_hudresend.scr)
+			thread coop_mod/mp_hudresend.scr::resendUnless local.p 20 20 0 "coop_mpDbnoActive"
+			thread coop_mod/mp_hudresend.scr::resendUnless local.p 27 27 0 "coop_mpDbnoActive"
 			println ( "^~^~^ MPDBNO death_killedWhileDown e" + local.p.entnum )
 			end
 		}
@@ -267,6 +276,8 @@ mp_dbno_die local.p local.cause:{
 	ihuddraw_string local.p 27 ""
 	ihuddraw_alpha  local.p 216 0
 	ihuddraw_string local.p 216 ""
+	thread coop_mod/mp_hudresend.scr::resendUnless local.p 20 20 0 "coop_mpDbnoActive"	//bug-2906
+	thread coop_mod/mp_hudresend.scr::resendUnless local.p 27 27 0 "coop_mpDbnoActive"
 
 	println ( "^~^~^ MPDBNO death_" + local.cause + " e" + local.p.entnum )
 	local.p damage $world 15000 $world (0 0 0) (0 0 0) (0 0 0) 0 9 0 0
@@ -283,6 +294,9 @@ mp_dbno_present local.p:{
 	if( local.p == NULL ){ end }
 	local.timer = local.p.flags["coop_mpDbnoTimer"]
 
+	//[2026-09-25, bug-2906] claim on show, so a late re-send of the last down's clear cannot land here
+	waitthread coop_mod/mp_hudresend.scr::claim local.p 20 20
+	waitthread coop_mod/mp_hudresend.scr::claim local.p 27 27
 	//black bleed-out overlay
 	ihuddraw_shader      local.p 20 "textures/mohmenu/black.tga"
 	ihuddraw_virtualsize local.p 20 1
@@ -340,6 +354,8 @@ mp_dbno_present local.p:{
 		ihuddraw_alpha  local.p 20 0
 		ihuddraw_alpha  local.p 27 0
 		ihuddraw_string local.p 27 ""
+		thread coop_mod/mp_hudresend.scr::resendUnless local.p 20 20 0 "coop_mpDbnoActive"	//bug-2906
+		thread coop_mod/mp_hudresend.scr::resendUnless local.p 27 27 0 "coop_mpDbnoActive"
 	}
 }end
 
@@ -440,6 +456,7 @@ mp_dbno_teamrevive local.downed:{
 		if( local.best != NULL ){
 			if( local.shown != 1 ){
 				local.shown = 1
+				waitthread coop_mod/mp_hudresend.scr::claim local.downed 138 140	//bug-2906
 				ihuddraw_string local.downed 138 "You are being revived"
 				ihuddraw_alpha  local.downed 138 1
 				ihuddraw_alpha  local.downed 139 0.8
@@ -473,6 +490,7 @@ mp_dbno_teamrevive local.downed:{
 				ihuddraw_string local.downed 138 ""
 				ihuddraw_alpha  local.downed 139 0
 				ihuddraw_alpha  local.downed 140 0
+				thread coop_mod/mp_hudresend.scr::resend local.downed 138 140 0	//bug-2906
 			}
 			if( local.downed != NULL ){ local.downed.flags["coop_mpDbnoHealing"] = NIL }
 			local.progress = 0
@@ -486,6 +504,7 @@ mp_dbno_teamrevive local.downed:{
 		ihuddraw_string local.downed 138 ""
 		ihuddraw_alpha  local.downed 139 0
 		ihuddraw_alpha  local.downed 140 0
+		thread coop_mod/mp_hudresend.scr::resend local.downed 138 140 0	//bug-2906
 		local.downed.flags["coop_mpDbnoHealing"] = NIL
 	}
 }end
@@ -547,6 +566,9 @@ mp_dbno_revive local.p:{
 	ihuddraw_string local.p 138 ""
 	ihuddraw_alpha  local.p 139 0
 	ihuddraw_alpha  local.p 140 0
+	thread coop_mod/mp_hudresend.scr::resendUnless local.p 20 20 0 "coop_mpDbnoActive"	//bug-2906
+	thread coop_mod/mp_hudresend.scr::resendUnless local.p 27 27 0 "coop_mpDbnoActive"
+	thread coop_mod/mp_hudresend.scr::resend local.p 138 140 0
 
 	local.p iprint "You are back on your feet!" 1
 	println ( "^~^~^ MPDBNO getup_revive e" + local.p.entnum + " pool=" + local.pool )
@@ -567,6 +589,7 @@ mp_dbno_banner local.p:{
 	while( local.i <= $player.size ){
 		local.o = $player[local.i]
 		if( local.o != NULL && local.o.entnum != local.p.entnum && isAlive local.o && local.o.dmteam == local.team ){
+			waitthread coop_mod/mp_hudresend.scr::claim local.o 216 216	//bug-2906
 			ihuddraw_virtualsize local.o 216 1
 			ihuddraw_align       local.o 216 center top
 			ihuddraw_font        local.o 216 "verdana-12"
@@ -594,6 +617,8 @@ mp_dbno_bannerClear:{
 		if( local.o != NULL ){
 			ihuddraw_alpha  local.o 216 0
 			ihuddraw_string local.o 216 ""
+			//bug-2906: threaded, so the latch below still drops at once and a new banner gets its clear
+			thread coop_mod/mp_hudresend.scr::resend local.o 216 216 1
 		}
 		local.i++
 	}

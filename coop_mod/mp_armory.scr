@@ -81,6 +81,18 @@ onTeamFlip local.p:{
 	local.p.flags["coop_mp_K3"] = NIL
 	local.p.flags["coop_mp_deploy"] = NIL
 
+	//[bug-2767] DISARM the userinfo DEPLOY flag for this fresh life, so a "1" left over from last life's DONE
+	//(if the consume-clear was dropped) cannot instant-deploy the player before they get to pick. Stamp the
+	//hold-start time; tickPlayer ignores the userinfo flag for the first ~0.6s so this clear has time to land.
+	local.sideF = waitthread sideOf local.p
+	local.p stufftext ( "seta coop_mp" + local.sideF + "_K6 0\n" )
+	//[user 2026-09-21] HOST: clear the shared server-side cvar DIRECTLY too. open.cfg no longer clears K6 on
+	//re-open (it was eating just-pressed DONEs), so this per-life clear is now the authoritative one for the
+	//host - and a direct setcvar has zero propagation lag, unlike the stufftext above, so no stale K6=1 from
+	//last life can leak past the holdSince guard on the listen host.
+	if( local.p.entnum == 0 && getcvar( "dedicated" ) == "0" ){ setcvar ( "coop_mp" + local.sideF + "_K6" ) "0" }
+	local.p.flags["coop_mp_holdSince"] = level.time
+
 	local.bot = isBot( local.p )
 	if( local.bot == 1 ){
 		local.p.flags["coop_mp_hold"] = 0
@@ -89,7 +101,7 @@ onTeamFlip local.p:{
 
 	local.p.flags["coop_mp_hold"] = 1
 	local.p.flags["coop_mp_cause"] = "idle"
-	local.p.flags["coop_mp_deadline"] = ( level.time + 25 )
+	local.p.flags["coop_mp_deadline"] = ( level.time + 8 )
 }end
 
 
@@ -107,18 +119,62 @@ tickPlayer local.p:{
 
 	if( local.p.flags["coop_mp_hold"] != 1 ){ end }
 
-	//activity re-arms the idle timer
-	if( local.had == 1 ){
-		local.p.flags["coop_mp_deadline"] = ( level.time + 25 )
+	//[bug-2767] DEPLOY via the USERINFO flag (coop_mp<side>_k6), the reliable path. The DONE button setas it
+	//to 1; the name-bus ,q<side>d marker it also appends is lost to truncation when the name is full (bug-2759)
+	//and the host name cannot be cleaned, so this userinfo read is what actually lets a player spawn. Ignore it
+	//for the first ~0.6s of the hold so a not-yet-cleared stale 1 from last life (onTeamFlip's disarm) cannot
+	//instant-deploy. On the edge, set the same coop_mp_deploy flag the name-bus path sets and consume (clear) it.
+	local.hs = local.p.flags["coop_mp_holdSince"]
+	if( local.hs != NIL && ( level.time - local.hs ) > 0.3 ){
+		local.sideG = waitthread sideOf local.p
+		local.go = info_valueforkey local.p.userinfo ( "coop_mp" + local.sideG + "_k6" )
+		//[bug-2808] LISTEN-HOST DONE FIX. THE ACTUAL ROOT CAUSE of "hit Done 5 times": on a listen server the
+		//HOST's userinfo (where K6 lives) reaches the server LATE, so most DONE presses were invisible to this
+		//poll (the log showed one k6seen for five presses). The host client shares the server PROCESS, so its
+		//K6 cvar is directly readable here with getcvar - instant, no userinfo round-trip. Do that for the
+		//listen host only (entnum 0 on a non-dedicated server); a REMOTE client's cvar is not in the server's
+		//cvar space, so it must keep the userinfo path.
+		if( local.go != "1" && local.p.entnum == 0 && getcvar( "dedicated" ) == "0" ){
+			local.go = getcvar( "coop_mp" + local.sideG + "_K6" )
+		}
+		//[user 2026-09-21] per-tick DEPLOY-PATH TRACE (set coop_mpDeployDebug 1 to enable). Prints, every 0.5s
+		//poll while a player holds in the armory, the hold state and BOTH deploy reads (userinfo k6 + the host's
+		//direct getcvar K6), so a playtest log shows exactly whether a DONE press was seen and by which path -
+		//rather than inferring it from the single k6seen edge line. Off by default (empty getcvar != "1").
+		if( getcvar( "coop_mpDeployDebug" ) == "1" ){
+			local.uiK6 = info_valueforkey local.p.userinfo ( "coop_mp" + local.sideG + "_k6" )
+			local.cvK6 = ""
+			if( local.p.entnum == 0 && getcvar( "dedicated" ) == "0" ){ local.cvK6 = getcvar( "coop_mp" + local.sideG + "_K6" ) }
+			local.hld = local.p.flags["coop_mp_hold"]
+			local.held = ( level.time - local.hs )
+			println( "^~^~^ MPHOLD e" + local.p.entnum + " side=" + local.sideG + " hold=" + local.hld + " held=" + local.held + " uiK6=" + local.uiK6 + " cvK6=" + local.cvK6 + " go=" + local.go )
+		}
+		if( local.go == "1" ){
+			local.p.flags["coop_mp_deploy"] = 1
+			local.p stufftext ( "seta coop_mp" + local.sideG + "_K6 0\n" )
+			//host: clear the shared server-side cvar directly too, so a lagged userinfo can't re-trigger.
+			if( local.p.entnum == 0 && getcvar( "dedicated" ) == "0" ){ setcvar ( "coop_mp" + local.sideG + "_K6" ) "0" }
+			println( "^~^~^ MPDEPLOY k6seen e" + local.p.entnum + " side=" + local.sideG )
+		}
 	}
 
-	//explicit DEPLOY marker
+	//EXPLICIT DEPLOY (the DONE button). This is THE intended trigger - you take all the time you need in
+	//the armory and spawn the instant you hit DONE. It is now reliable: readMarkers resets the client name
+	//to a clean base each tick, so the appended DONE marker (,q<side>d) can no longer be truncated off a
+	//name that had silently accumulated markers (the old "spam Done" bug). No auto-deploy races you.
 	if( local.p.flags["coop_mp_deploy"] == 1 ){
 		waitthread deploy local.p "done"
 		end
 	}
 
-	//idle timeout
+	//[user 2026-09-18] NO auto-deploy by default. The armory must give unlimited time; DONE is the only
+	//trigger. A host MAY set coop_mpArmoryIdleSecs > 0 (seconds of inactivity) as a safety to free an AFK
+	//spectator slot on a busy server; default 0 = disabled, so nothing ever deploys you before you ask.
+	local.idle = int( getcvar( "coop_mpArmoryIdleSecs" ) )
+	if( local.idle <= 0 ){ end }
+	if( local.had == 1 ){
+		local.p.flags["coop_mp_deadline"] = ( level.time + local.idle )
+	}
 	local.dl = local.p.flags["coop_mp_deadline"]
 	if( local.dl != NIL && level.time > local.dl ){
 		waitthread deploy local.p "idle"
@@ -138,11 +194,23 @@ readMarkers local.p:{
 	local.n = local.name.size
 	if( local.n < 4 ){ end 0 }
 
+	//[bug-2767] process each DISTINCT name once. If the host name cannot be cleaned (the set-name reset does
+	//not take on a listen host), the same stale markers would be re-parsed and re-logged every 0.5s tick -
+	//the MPTOK console spam the user saw. Deploy no longer rides the name bus (it is a userinfo flag now), so
+	//skipping an unchanged name is safe; a fresh pick changes the name and is processed on the next tick.
+	if( local.name == local.p.flags["coop_mp_nameSeen"] ){ end 0 }
+
 	local.found = 0
+	local.firstMarker = 0 - 1
 	local.i = 0
 	while( local.i < ( local.n - 1 ) ){
-		if( local.name[local.i] == "," && local.name[local.i + 1] == "q" ){
+		//[bug-2759b] a ",q" is only a marker when the NEXT char is a real side letter (a/x). Without this a
+		//player whose name legitimately contains ",q" (e.g. "Jack,quimby", "Sgt,quik") had everything from that
+		//point stripped and was permanently renamed to the prefix. Requiring the side letter makes a false match
+		//impossible for any real marker (which is always ,qa.. or ,qx..).
+		if( local.name[local.i] == "," && local.name[local.i + 1] == "q" && ( local.i + 2 ) < local.n && ( local.name[local.i + 2] == "a" || local.name[local.i + 2] == "x" ) ){
 			local.found = 1
+			if( local.firstMarker < 0 ){ local.firstMarker = local.i }
 			local.side = ""
 			if( ( local.i + 2 ) < local.n ){ local.side = local.name[local.i + 2] }
 			local.field = ""
@@ -167,12 +235,54 @@ readMarkers local.p:{
 		}
 	}
 
-	if( local.found == 1 ){
-		local.clean = waitthread coop_mod/player.scr::playerCleanName local.name
-		if( local.p != NULL && local.clean != NIL && local.clean != "" && local.clean != local.name ){
-			local.p stufftext ( "set name " + local.clean )
+	//[user 2026-09-18] RESET THE CLIENT NAME to the base name (everything before the first ,q) so the
+	//appended armory markers cannot ACCUMULATE on the client. The old path used playerCleanName, which only
+	//strips coop's " ," (space-comma) markers - NOT the MP ",q" markers - so it returned the name unchanged,
+	//the reset never fired, and every armory click grew the client name until it hit the length cap and
+	//TRUNCATED the tail. The last-appended marker (DONE, ,q<side>d) fell off the end, which is exactly why
+	//players had to "spam Done and re-equip several times". Quoted set (player names may contain spaces).
+	//[bug-2759] ALWAYS reset the client name to its clean base whenever ANY marker is present, and REMEMBER
+	//that base. Old guard (firstMarker > 0) skipped the reset when the name STARTED with a marker or the base
+	//was empty, so stale/cross-side markers (e.g. a leftover ,qad after switching to axis) ACCUMULATED and
+	//pushed the newest marker - the DONE ,q<side>d - past the 32-char name cap, where it truncated. That is
+	//THE axis-can't-spawn root cause (deploy marker lost -> coop_mp_deploy never set -> no giveKit -> armory
+	//re-opens). Now: capture the base while marker-free; when markers appear, strip to the base every tick and
+	//fall back to the remembered base (or "Soldier") if the whole name was markers, so the name can never grow.
+	if( local.found == 0 ){
+		if( local.name != "" ){ local.p.flags["coop_mpBaseName"] = local.name }
+	} else {
+		local.clean = ""
+		local.k = 0
+		while( local.k < local.firstMarker ){
+			local.clean = ( local.clean + local.name[local.k] )
+			local.k++
+		}
+		//trim one trailing space that 'append name' inserted ahead of the first marker
+		local.cn = local.clean.size
+		if( local.cn > 0 && local.clean[local.cn - 1] == " " ){
+			local.trim = ""
+			local.k = 0
+			while( local.k < ( local.cn - 1 ) ){
+				local.trim = ( local.trim + local.clean[local.k] )
+				local.k++
+			}
+			local.clean = local.trim
+		}
+		if( local.clean == "" ){
+			//name was all-markers (or truncated to nothing) - restore the remembered base so we never strand
+			//a bare/marker-only name (which the old code left alone, letting markers pile up forever).
+			local.clean = local.p.flags["coop_mpBaseName"]
+			if( local.clean == NIL || local.clean == "" ){ local.clean = "Soldier" }
+		} else {
+			local.p.flags["coop_mpBaseName"] = local.clean
+		}
+		if( local.p != NULL ){
+			local.p stufftext ( "set name \"" + local.clean + "\"\n" )
 		}
 	}
+	//[bug-2767] remember the name we just processed so an unchanged name (reset didn't take, or no markers) is
+	//skipped next tick - no re-parse, no MPTOK spam. A real pick changes the name and re-arms processing.
+	if( local.p != NULL ){ local.p.flags["coop_mp_nameSeen"] = local.name }
 }end local.found
 
 
@@ -217,7 +327,7 @@ applyMarker local.p local.side local.field local.data:{
 		end
 	}
 	if( local.field == "h" ){
-		local.rh = waitthread coop_mod/mp_cosmetics.scr::helmGet local.data
+		local.rh = waitthread coop_mod/mp_cosmetics.scr::helmGet local.side local.data   // [bug-2761] helmGet is side-split (side,id); the missing side made every name-bus helmet pick resolve to "" (dropped)
 		if( local.rh != NIL ){
 			local.p.flags["coop_mp_HELM"] = local.rh["tik"]
 			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "h" + local.data + " helm=" + local.rh["tik"] )
@@ -253,7 +363,7 @@ applyMarker local.p local.side local.field local.data:{
 			case 7: local.fn = "camo_desert"; break
 		}
 		if( local.fn == "" ){ end }
-		local.fu = waitthread coop_mod/mp_challenges.scr::isUnlocked local.p ( "fin:" + local.fn )
+		local.fu = waitthread coop_mod/mp_challenges.scr::finUnlocked local.p local.fn   // [bug-2765] challenge OR career-kill fallback
 		if( local.fu != 1 ){
 			println( "^~^~^ MPTOK e" + local.p.entnum + " ,q" + local.side + "f" + local.data + " deny locked finish" )
 			end
@@ -327,20 +437,54 @@ deploy local.p local.cause:{
 	local.p.flags["coop_mp_deploy"] = NIL
 	local.p.flags["coop_mp_cause"] = local.cause
 
+	//[bug-2767 vet-F2] CONSUME the userinfo deploy flag on EVERY deploy path (name-bus or userinfo), so an
+	//archived coop_mp<side>_K6 == 1 can never survive to auto-deploy the next life. Cleared client-side in
+	//open.cfg too (belt+braces against the propagation lag onTeamFlip's clear has on a remote client).
+	local.sideD = waitthread sideOf local.p
+	if( local.p == NULL ){ end }
+	local.p stufftext ( "seta coop_mp" + local.sideD + "_K6 0\n" )
+
+	//[bug-2784] SEED the SAVED kit from userinfo BEFORE resolving the primary, so hitting DONE deploys your
+	//saved loadout even with NO fresh pick this life. Without this, resolvePrimary read the kit flags that
+	//manageSetup reset to NIL at armory entry - so DONE alone could not resolve a class and you could not spawn
+	//until you re-picked a weapon (which seeded K1 via the name-bus). giveKit re-seeds at the spawn edge too;
+	//this makes the deploy-time primarydmweapon class resolve from your saved default.
+	waitthread seedKitFromUserinfo local.p
+	if( local.p == NULL ){ end }
+
 	local.res = waitthread resolvePrimary local.p
 	local.cls = local.res[1]
 
 	println( "^~^~^ MPDEPLOY e" + local.p.entnum + " cause=" + local.cause + " class=" + local.cls )
-	local.p primarydmweapon local.cls
 
-	//if he is still a spectator a moment later the class was refused (a ban that slipped past the
-	//degrade); "auto" picks a random ALLOWED class and self-deploys, so it can never be refused.
-	wait 1
-	if( local.p == NULL ){ end }
-	if( local.p.dmteam == "spectator" ){ end }
-	if( level.gametype != 2 ){ end }
-	if( local.p.isSpectator ){
-		local.p primarydmweapon "auto"
+	//[bug-2789/2804] RETRY the spawn. The FIRST primarydmweapon right after join_team is frequently IGNORED
+	//(the client is not yet in a spawnable state), which dropped the player back to SPECTATOR and forced a
+	//SECOND (and sometimes third) DONE. [user 2026-09-21] The old loop gave up after 6 tries / ~3s and set
+	//coop_mp_hold=0, stranding a client that needed longer to become spawnable - so the player had to reopen
+	//the armory and hit DONE again. Now it is PERSISTENT: keep re-issuing over ~10s, escalate to "auto" (a
+	//random ALLOWED class that self-deploys and can never be refused) after just 2 tries, and STOP the instant
+	//the player is alive - so ONE DONE reliably spawns you. Only a genuine spectator/gametype/disconnect ends it.
+	local.tries = 0
+	while( local.tries < 20 ){
+		if( local.p == NULL ){ end }
+		if( local.p.dmteam == "spectator" ){ end }   // genuine spectator choice - do not force-spawn
+		if( level.gametype != 2 ){ end }
+		if( local.p.isSpectator == 0 ){ end }         // spawned OK - done
+		//[user 2026-09-21] per-try TRACE (set coop_mpDeployDebug 1). Shows whether the FIRST DONE reached deploy
+		//and how many primarydmweapon tries it took to actually leave spectate - so a "had to hit Done twice"
+		//report resolves to either "first press was never seen" (no MPDEPLOY at all) or "seen but slow to spawn".
+		if( getcvar( "coop_mpDeployDebug" ) == "1" ){
+			println( "^~^~^ MPDEPLOYTRY e" + local.p.entnum + " try=" + local.tries + " spec=" + local.p.isSpectator + " cls=" + local.cls )
+		}
+		if( local.tries < 2 ){ local.p primarydmweapon local.cls }
+		else{ local.p primarydmweapon "auto" }
+		local.tries = ( local.tries + 1 )
+		wait 0.5
+	}
+	//if we fell out of the loop still un-spawned, say so (the client never became spawnable in 10s) - a rare
+	//tail the user can report with this line, rather than silently stranding them.
+	if( local.p != NULL && local.p.isSpectator != 0 ){
+		println( "^~^~^ MPDEPLOY GAVEUP e" + local.p.entnum + " still spectator after 20 tries cause=" + local.cause )
 	}
 }end
 
@@ -359,12 +503,34 @@ giveKit local.p:{
 	if( local.bot == 1 ){
 		local.cause = "bot"
 		local.cls = waitthread botRollClass
+		//[user 2026-09-18] per-server BOT weapon lock (host cvar coop_mpBotWeapon). Empty = today's random
+		//botRollClass. A class name ("rifle" = bolt-action, "sniper", "smg"...) forces that class; the special
+		//value "riflesniper" alternates bolt-action rifle and sniper so a marksman server (the Stalingrad
+		//Rifle-Only server) fields a bolt/sniper bot mix instead of random SMGs/MGs. Humans are unaffected
+		//(their loadout comes from the armory preset); this only rewrites the bot's rolled class.
+		local.bw = getcvar( "coop_mpBotWeapon" )
+		if( local.bw != "" ){
+			if( local.bw == "riflesniper" ){
+				local.cls = "rifle"
+				if( level.coop_mpBotWpnAlt == 1 ){ local.cls = "sniper"; level.coop_mpBotWpnAlt = 0 }
+				else{ level.coop_mpBotWpnAlt = 1 }
+			}
+			else{ local.cls = local.bw }
+		}
 		local.pid = waitthread starterFor local.side local.cls
 		local.sid = waitthread starterFor local.side "pistol"
 		local.gid = waitthread starterFor local.side "nades"
 	} else {
 		local.cause = local.p.flags["coop_mp_cause"]
 		if( local.cause == NIL ){ local.cause = "done" }
+		//[bug-2767 / kit persistence] fill any kit slot the name-bus did not set this life from the carried
+		//USERINFO kit (the reliable, truncation-proof source the armory + defaults screen both seta). Fresh
+		//in-match picks still win; this only supplies empties (defaults-screen picks, cross-server memory, or
+		//a marker that truncated off a full name). Legality is still enforced below by rosterGet/resolvePrimary.
+		waitthread seedKitFromUserinfo local.p
+		if( local.p == NULL ){ end }
+		waitthread seedFinishFromUserinfo local.p   // [bug-2775] persist the picked weapon finish across sessions
+		if( local.p == NULL ){ end }
 		local.res = waitthread resolvePrimary local.p
 		local.pid = local.res[0]
 		local.sid = local.p.flags["coop_mp_K2"]
@@ -379,6 +545,11 @@ giveKit local.p:{
 
 	local.pgive = ""
 	if( local.rp != NIL && local.rp["give"] != NIL ){ local.pgive = local.rp["give"] }
+	//[user 2026-09-18] BOLT-ONLY server (coop_mpBoltOnly 1): degrade any semi-auto / semi-auto-scoped primary
+	//to the side's bolt-action equivalent. The rifle/sniper dmclasses still contain the Garand, Carbine, SVT,
+	//G43 and the scoped Garand / G43 sniper - all self-loading - so a class-level (dmflags) gate cannot exclude
+	//them; this per-weapon degrade at the single give chokepoint does, for humans AND bots.
+	if( getcvar( "coop_mpBoltOnly" ) == "1" && local.pgive != "" ){ local.pgive = waitthread boltize local.pgive }
 	local.sgive = ""
 	if( local.rs != NIL && local.rs["give"] != NIL ){ local.sgive = local.rs["give"] }
 	local.ggive = ""
@@ -576,6 +747,79 @@ firstAllowedClass:{
 
 //resolve the player's committed primary to a legal (mpid, dmclass). Degrades a dmflags-banned primary
 //to the free starter of the first allowed class. Returns [ mpid, dmclass ].
+//[bug-2767 / kit persistence] Seed the committed kit flags (coop_mp_K1..K3) from the player's USERINFO
+//(coop_mp<side>_k1..k3) when the name-bus did not set them this life. The armory setas the kit to these
+//userinfo cvars on every pick AND on the disconnected DEFAULTS screen, but nothing read them back - so
+//defaults / cross-server kit memory never applied, and a name-bus weapon marker truncated off a full name
+//(bug-2759) silently fell back to the class starter. This is the same reliable carry cosmetics already use
+//(mp_cosmetics.scr::apply). Only EMPTY flags are filled, so a fresh in-match pick still wins.
+seedKitFromUserinfo local.p:{
+	if( local.p == NULL ){ end }
+	local.u = local.p.userinfo
+	if( local.u == NIL ){ end }
+	local.side = waitthread sideOf local.p
+	waitthread seedOneKit local.p local.side local.u "coop_mp_K1" "p" ( "coop_mp" + local.side + "_k1" )
+	if( local.p == NULL ){ end }
+	waitthread seedOneKit local.p local.side local.u "coop_mp_K2" "s" ( "coop_mp" + local.side + "_k2" )
+	if( local.p == NULL ){ end }
+	waitthread seedOneKit local.p local.side local.u "coop_mp_K3" "g" ( "coop_mp" + local.side + "_k3" )
+}end
+
+
+//[bug-2767 vet-F1] Seed ONE kit slot from userinfo, validated EXACTLY as the name-bus path (applyMarker):
+//roster hit, give non-empty, slot-legal, and starter-OR-challenge-unlocked. Without this a defaults-screen
+//pick of a locked weapon, or a console-edited off-slot id, would spawn ungated (resolvePrimary only checks
+//classBanned, never isUnlocked; giveKit reads K2/K3 raw). Only an EMPTY flag is filled, so a fresh in-match
+//pick still wins; an illegal/locked id is refused and left empty -> giveKit falls back to the class starter.
+seedOneKit local.p local.side local.u local.flagKey local.wantSlot local.uiKey:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags[local.flagKey] != NIL && local.p.flags[local.flagKey] != "" ){ end }
+	local.id = info_valueforkey local.u local.uiKey
+	if( local.id == NIL || local.id == "" ){ end }
+	local.r = waitthread rosterGet local.side local.id
+	if( local.r == NIL ){ end }
+	if( local.r["give"] == NIL || local.r["give"] == "" ){ end }
+	if( local.r["slot"] != local.wantSlot ){ end }
+	if( local.r["starter"] != 1 ){
+		local.tok = ( "wt:" + local.r["class"] + ":" + local.r["tier"] )
+		local.un = waitthread coop_mod/mp_challenges.scr::isUnlocked local.p local.tok
+		if( local.p == NULL ){ end }
+		if( local.un != 1 ){ end }
+	}
+	local.p.flags[local.flagKey] = local.id
+}end
+
+
+//[bug-2775] Seed the picked weapon FINISH from the carried userinfo (coop_mp<side>_k5 = the finish index)
+//when the name-bus did not set it this life, so a finish choice persists across sessions/servers like the
+//kit and cosmetics. Server-authoritative: finUnlocked still gates it, so a carried/edited finish the player
+//has not earned is refused (coop_mpFinSel left empty -> base weapon). Only fills an empty selection.
+seedFinishFromUserinfo local.p:{
+	if( local.p == NULL ){ end }
+	if( local.p.flags["coop_mpFinSel"] != NIL && local.p.flags["coop_mpFinSel"] != "" ){ end }
+	local.u = local.p.userinfo
+	if( local.u == NIL ){ end }
+	local.side = waitthread sideOf local.p
+	local.fi = int( info_valueforkey local.u ( "coop_mp" + local.side + "_k5" ) )
+	if( local.fi <= 0 ){ end }
+	local.fn = ""
+	switch( local.fi ){
+		case 1: local.fn = "gold"; break
+		case 2: local.fn = "chrome"; break
+		case 3: local.fn = "blued"; break
+		case 4: local.fn = "bloody"; break
+		case 5: local.fn = "camo_woodland"; break
+		case 6: local.fn = "camo_winter"; break
+		case 7: local.fn = "camo_desert"; break
+	}
+	if( local.fn == "" ){ end }
+	local.fu = waitthread coop_mod/mp_challenges.scr::finUnlocked local.p local.fn
+	if( local.p == NULL ){ end }
+	if( local.fu != 1 ){ end }
+	local.p.flags["coop_mpFinSel"] = local.fn
+}end
+
+
 resolvePrimary local.p:{
 	local.out[0] = ""
 	local.out[1] = "rifle"
@@ -600,6 +844,24 @@ resolvePrimary local.p:{
 }end local.out
 
 //a bot's primary class: a random one of the side's ALLOWED primary classes (F4 - random free-tier gun).
+//[user 2026-09-18] Map every self-loading rifle/sniper to the side's bolt-action equivalent. Bolt weapons
+//(Kar98, Gewehr 98, Springfield, Enfield, Mosin, Carcano, Arisaka + their bolt snipers) pass through
+//unchanged. Used by giveKit when coop_mpBoltOnly is 1. Weapon tiks verified against mpa_roster / mpx_roster.
+boltize local.give:{
+	local.out = local.give
+	//allied self-loading rifles -> Springfield M1903 (bolt)
+	if( local.give == "models/weapons/m1_garand.tik" ){ local.out = "models/weapons/springfield_unscoped.tik" }
+	if( local.give == "models/weapons/carbine.tik" ){ local.out = "models/weapons/springfield_unscoped.tik" }
+	if( local.give == "models/weapons/svt_rifle.tik" ){ local.out = "models/weapons/springfield_unscoped.tik" }
+	if( local.give == "models/weapons/garand_silenced.tik" ){ local.out = "models/weapons/springfield_unscoped.tik" }
+	//allied self-loading scoped -> Springfield Sniper (bolt)
+	if( local.give == "models/weapons/garand_scoped.tik" ){ local.out = "models/weapons/springfield.tik" }
+	//axis self-loading rifle -> KAR98K (bolt)
+	if( local.give == "models/weapons/g43.tik" ){ local.out = "models/weapons/kar98.tik" }
+	//axis self-loading scoped -> KAR98K Sniper (bolt)
+	if( local.give == "models/weapons/g43sniper.tik" ){ local.out = "models/weapons/kar98sniper.tik" }
+}end local.out
+
 botRollClass:{
 	local.all[0] = "rifle"
 	local.all[1] = "sniper"
@@ -619,6 +881,21 @@ botRollClass:{
 	if( local.cnt > 0 ){
 		local.pick = int( randomint( local.cnt ) )
 		local.res = local.ok[local.pick]
+	}
+	//[bug-2795] ROCKET (the "heavy" class) is RARE. A uniform roll gave bots rockets ~1-in-6 - way too often.
+	//If the roll lands on heavy, re-roll to a NON-heavy allowed class 85% of the time, so bots field rockets
+	//only occasionally (like real players) instead of constantly.
+	if( local.res == "heavy" ){
+		if( int( randomint( 100 ) ) >= 15 ){
+			local.cnt2 = 0
+			for( local.i = 0; local.i < local.cnt; local.i++ ){
+				if( local.ok[local.i] != "heavy" ){
+					local.ok2[local.cnt2] = local.ok[local.i]
+					local.cnt2++
+				}
+			}
+			if( local.cnt2 > 0 ){ local.res = local.ok2[ int( randomint( local.cnt2 ) ) ] }
+		}
 	}
 }end local.res
 

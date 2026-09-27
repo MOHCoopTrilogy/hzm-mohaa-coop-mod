@@ -1,0 +1,183 @@
+//=========================================================================
+// MP_AMBIENCE.SCR - environmental ambience for the campaign maps in MULTIPLAYER.
+//
+// WHY THIS EXISTS: the MP arena load runs these campaign maps SCRIPT-LESS, so the vanilla ambient
+// loopsounds the map script starts ($radio1 loopsound m1l2b_radio1, $engine loopsound
+// armoredtrain_rolling, ...) never fire and the maps are silent. The ambience already EXISTS - the
+// emitter entities are baked in the .bsp and are present in the arena too - it just was never started.
+// This MP-owned file REPLAYS the vanilla ambient emitters per map so MP hears what single-player does.
+// (user 2026-09-18: "base it off the vanilla single player map ambience, it should all already exist,
+// we just need it working in multiplayer".)
+//
+// The per-map emitter lists were harvested from the maps' own scripts (maps/<map>.scr loopsound lines)
+// and from global/ambience.scr's per-map coord tables. Maps whose environmental bed is scene-driven and
+// does not survive the arena load (m3l3/m4l1/m5l1b) also get a light wind bed along the corridor.
+//
+// ISOLATION: MP file (coop_mod/mp*.scr). Entity + sound work only: direct loopsound on BSP entities and
+// spawned loopsound emitters. Calls no coop code, names no coop cvar / coop_lo / loadout token; the
+// sound aliases are stock MOHAA aliases, not coop tokens. Guarded on level.coop_mpRun (set only by
+// coop_mod/mp.scr; a level load wipes it), so nothing here can run on a coop map. Reaches coop_mod/
+// mp_push.scr (MP->MP) only for the optional corridor-centre lookup used by the wind bed.
+//=========================================================================
+
+//canary (TRAPS T1): if this file parse-kills, ::alive is unreachable and the caller no-ops.
+alive:{
+	end 1
+}end
+
+
+//=========================================================================
+// Start the current MP map's ambience. Called once per map load (idempotent via level flag).
+//=========================================================================
+start:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpAmbienceOn == 1 ){ end }
+	level.coop_mpAmbienceOn = 1
+
+	local.m = getcvar( "mapname" )
+
+	if( local.m == "m1l2b" ){
+		if( $radio1 != NULL ){ $radio1 loopsound m1l2b_radio1 }
+		if( $radio2 != NULL ){ $radio2 loopsound m1l2b_radio2 }
+	}
+	else if( local.m == "m2l1" ){
+		if( $radio1_sound != NULL ){ $radio1_sound loopsound coop_amb_machine }
+		if( $radio2_sound != NULL ){ $radio2_sound loopsound coop_amb_machine }
+		if( $radio3_sound != NULL ){ $radio3_sound loopsound coop_amb_machine }
+		waitthread emit ( 791 3193 448 ) coop_amb_machine
+	}
+	else if( local.m == "m3l3" ){
+		if( $scene0_destroyed_flak88 != NULL ){ $scene0_destroyed_flak88 loopsound coop_amb_fire }
+		waitthread bedWind
+	}
+	else if( local.m == "m4l1" ){
+		waitthread bedWind
+	}
+	else if( local.m == "m4l2" ){
+		if( $radio1 != NULL ){ $radio1 loopsound coop_amb_machine }
+		if( $radio2 != NULL ){ $radio2 loopsound coop_amb_machine }
+		if( $radio3 != NULL ){ $radio3 loopsound coop_amb_machine }
+		if( $smoke01 != NULL ){ $smoke01 loopsound coop_amb_fire }
+		if( $smoke02 != NULL ){ $smoke02 loopsound coop_amb_fire }
+		if( $engine != NULL ){ $engine loopsound armoredtrain_rolling }
+		local.eh = $electrichum
+		if( local.eh != NULL ){
+			for( local.i = 1; local.i <= local.eh.size; local.i++ ){
+				if( local.eh[local.i] != NULL ){ local.eh[local.i] loopsound coop_amb_machine }
+			}
+		}
+	}
+	else if( local.m == "m5l1a" ){
+		if( $fire != NULL ){ $fire loopsound coop_amb_fire }
+		waitthread emit ( 1065 -849 11 ) coop_amb_fire
+	}
+	else if( local.m == "m5l1b" ){
+		waitthread bedWind
+	}
+	else {
+		//[2026-09-20] BSP-derived Push maps (Tier-1 + Tier-2): their SP ambience is harvested into the
+		//generated mp_ambience_bsp.scr (global/ambience.scr coord beds + filtered map loopsounds, else a
+		//corridor wind bed). MP->MP (both in MP_MANIFEST).
+		waitthread coop_mod/mp_ambience_bsp.scr::startBsp local.m
+	}
+
+	thread reassertLoop	//[bug-2748] keep the ambient bed alive across client S_StopAllSounds (respawn/re-reg)
+	println( "^~^~^ MPAMB started " + local.m )
+}end
+
+
+//=========================================================================
+// Spawn a stationary loopsound emitter at a world point (mirrors global/ambience.scr::sound).
+//=========================================================================
+emit local.origin local.alias:{
+	local.e = spawn script_model model "fx/dummy.tik"
+	local.e.origin = local.origin
+	local.e notsolid
+	local.e loopsound local.alias
+	//[2026-09-20 bug-2748] TRACK for the re-assert loop: a client that does an S_StopAllSounds (respawn /
+	//sound re-registration) drops the looping ambience and only MUSIC comes back. reassertLoop re-issues
+	//loopsound on these tracked emitters so the bed returns on the next snapshot.
+	if( level.coop_mpAmbN == NIL ){ level.coop_mpAmbN = 0 }
+	local.n = ( level.coop_mpAmbN + 1 )
+	level.coop_mpAmbEnt[local.n] = local.e
+	level.coop_mpAmbAlias[local.n] = local.alias
+	level.coop_mpAmbN = local.n
+}end
+
+
+//=========================================================================
+// A LEVELWIDE ambient bed (position-independent, heard everywhere) - the MP analog of the SP maps'
+// `$player loopsound <alias>` beds (barn interiors, etc.). Anchored on a player so the loop is never
+// stuck at world origin; the "levelwide" token makes distance irrelevant.
+//=========================================================================
+emitLevelwide local.alias:{
+	if( local.alias == NIL || local.alias == "" ){ end }
+	if( level.coop_mpAmbLW == NULL || level.coop_mpAmbLW == NIL ){
+		level.coop_mpAmbLW = spawn script_model model "fx/dummy.tik"
+	}
+	//[bug-2794] GUARD: the emitter model can come back none/NIL (spawned at prespawn, or fx/dummy.tik not
+	//loaded on a stock dm map). Never call notsolid/.origin/loopsound on none - that threw the 'loopsound
+	//applied to NIL' / 'cannot cast none to listener' script errors. Bail; the deferred start retries later.
+	if( level.coop_mpAmbLW == NULL || level.coop_mpAmbLW == NIL ){ end }
+	level.coop_mpAmbLW notsolid
+	//use $player.size (NOT $player[1] != NULL) - at prespawn $player[1] is 'none', not NULL, so the old
+	//guard passed and the .origin access cast none to a listener.
+	if( $player != NULL && $player.size >= 1 && $player[1] != NULL ){ level.coop_mpAmbLW.origin = $player[1].origin }
+	level.coop_mpAmbLW loopsound local.alias 1 "levelwide"
+	level.coop_mpAmbLWalias = local.alias	//[bug-2748] remembered so reassertLoop can re-issue it
+}end
+
+
+//=========================================================================
+// [bug-2748] RE-ASSERT LOOP. Every ~12s re-issue loopsound on every tracked ambient emitter, so a client
+// whose local sound state got cleared (S_StopAllSounds on respawn / a mid-match sound re-registration -
+// which restarts MUSIC but not script loopsounds) gets the ambient bed back on the next snapshot. Idempotent:
+// loopsound sets a persistent entity state, so re-issuing the same alias never stacks or restarts audibly.
+// One loop per map load, guarded on coop_mpRun (a level load wipes it and the tracked-emitter arrays).
+//=========================================================================
+reassertLoop:{
+	if( level.coop_mpRun != 1 ){ end }
+	if( level.coop_mpAmbReassertOn == 1 ){ end }
+	level.coop_mpAmbReassertOn = 1
+	while( level.coop_mpRun == 1 ){
+		wait 12
+		if( level.coop_mpAmbN != NIL ){
+			for( local.i = 1; local.i <= level.coop_mpAmbN; local.i++ ){
+				if( level.coop_mpAmbEnt[local.i] != NULL ){
+					level.coop_mpAmbEnt[local.i] loopsound level.coop_mpAmbAlias[local.i]
+				}
+			}
+		}
+		if( level.coop_mpAmbLW != NULL && level.coop_mpAmbLWalias != NIL ){
+			if( $player != NULL && $player[1] != NULL ){ level.coop_mpAmbLW.origin = $player[1].origin }
+			level.coop_mpAmbLW loopsound level.coop_mpAmbLWalias 1 "levelwide"
+		}
+	}
+}end
+
+
+//=========================================================================
+// A light wind bed for maps whose environmental ambience is scene/BSP-driven and does not survive the
+// arena load (m3l3/m4l1/m5l1b). Placed at the two ends of the Push corridor when zones exist; a no-op
+// on non-Push modes (no corridor to anchor to). coop_amb_wind is a stock ambient wind alias used across
+// the campaign in global/ambience.scr.
+//=========================================================================
+bedWind:{
+	//[user 2026-09-21] ALWAYS lay a LEVELWIDE wind bed first. m5l1b (old town) was dead silent because the
+	//push branch below emitted wind ONLY at the two corridor ENDS and returned - and coop_amb_wind attenuates
+	//to nothing within ~1600 units (its winning alias mindist/maxdist), so a player standing anywhere but an
+	//end heard neither emitter. A levelwide loop is distance-independent and plays to everyone (proven on
+	//maps/m2l2b.scr:828), so the map is never silent regardless of where the corridor is. NOTE: coop_amb_wind
+	//is defined TWICE (ubersound/coop_audio.scr:11 min160/max1600 vs ubersound/ubersound.scr:5714 min3000/
+	//max6000) - a latent T6/T12 collision - but "levelwide" makes the distance moot, so it plays either way.
+	waitthread emitLevelwide coop_amb_wind
+	//PUSH corridor present: ALSO anchor a positional wind bed at each end for spatial variation (the original
+	//behaviour, now additive to the guaranteed levelwide bed rather than a silent replacement for it).
+	if( level.coop_mpPushReadyBL == 1 && level.coop_mpPushZN != NIL && level.coop_mpPushZN >= 2 ){
+		local.n = level.coop_mpPushZN
+		local.a = waitthread coop_mod/mp_push.scr::push_boxCenter level.coop_mpPushZAmin[1] level.coop_mpPushZAmax[1]
+		local.b = waitthread coop_mod/mp_push.scr::push_boxCenter level.coop_mpPushZAmin[local.n] level.coop_mpPushZAmax[local.n]
+		waitthread emit local.a coop_amb_wind
+		waitthread emit local.b coop_amb_wind
+	}
+}end

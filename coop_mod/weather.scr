@@ -23,6 +23,11 @@
 coop_weather_init:{
 	if( int( getcvar "coop_dynWeather" ) != 1 ){ end }
 	level.coop_rainSndEnt = NULL
+	//[2026-09-26, bug-2963] DUST STORM: register the veil models and clear a stale forced storm HERE, in the
+	//first frame - before the waitTillPrespawn below. A model registered mid-game hitches every client (the
+	//bug-2710/2796 class). The theme is not known yet (the map sets it after main.scr::main), so the boot keys
+	//on the nine sand map names; it ends at once on Omaha, and in MP unless mp_weather.scr allowed dust (level.coop_dustMp).
+	waitthread coop_mod/duststorm.scr::coop_dust_boot
 
 	// HZM coop - DEFER until the map's own main has set level.coop_weatherTheme. This thread is started from
 	// inside main.scr::main, which runs BEFORE the map script's main reaches its 'level.coop_weatherTheme = ...'
@@ -30,15 +35,39 @@ coop_weather_init:{
 	// got NIL -> coop_weather_theme returned "none" -> weather silently never started on ANY map even with
 	// coop_dynWeather 1. waitTillPrespawn is a 0.5s coop wait (well after the theme is set) and still long
 	// before 'level waittill spawn', which is when global/weather.scr wants to be exec'd.
-	waitthread coop_mod/replace.scr::waitTillPrespawn
+	//[bug-2968] The MP entry (mp_weather.scr) never routes through the coop shims: it set the theme BEFORE
+	//threading this, and in any MP gametype waitTillPrespawn is a bare 0.5s wait - so wait that here instead.
+	if( level.coop_mpRun == 1 ){
+		wait 0.5
+	} else {
+		waitthread coop_mod/replace.scr::waitTillPrespawn
+	}
 	local.theme = waitthread coop_weather_theme
 	if( local.theme == "none" ){ end }
+
+	// RUN-ONCE (bug-2731 follow-up): coop_weather_init is threaded from BOTH main.scr::main (the coop-native
+	// path) AND mp_weather.scr::mp_weather_init (the MP bridge). On a coop-integrated CAMPAIGN map forced into
+	// an MP arena (m2l1 etc.) NEITHER coop_arenaMap nor coop_buildmap is set, so the coop-native theme gate
+	// does not stand down - both paths resolve the same theme and BOTH ran a full native renderer + random
+	// driver + thunder thread (verified headless: two "WEATHER coop=snow started" blocks on m2l1 Push). Guard
+	// AFTER the theme resolve so a "none" resolver never consumes the latch; check-and-set are adjacent with no
+	// yield between them, so the first caller to reach here wins and the second bails. Idempotent for pure coop
+	// (only main.scr threads it there, so this is a no-op).
+	if( level.coop_weatherStarted == 1 ){ end }
+	level.coop_weatherStarted = 1
 
 	// seed the SP precip LOOK for this theme; the native weather.scr then drives density + slant on top
 	if( local.theme == "snow" ){
 		waitthread coop_weather_snowLook
 	} else if( local.theme == "sand" ){
 		waitthread coop_weather_sandLook
+		//[2026-09-26, bug-2973] a DEFAULT-ON dust map (duststorm.scr coop_dust_defaultOn - e1l1; never in MP) is a
+		//constant full storm, so its streaks are held at full too, through the same map-authored hold the lines
+		//below already honour (bug-1375). A map's own coop_weatherHold still wins; coop_dust 0 leaves it random.
+		local.dustOn = waitthread coop_mod/duststorm.scr::coop_dust_defaultOn level.coop_mapname
+		if( local.dustOn == 1 && getcvar( "coop_dust" ) != "0" && ( level.coop_weatherHold == NIL || level.coop_weatherHold == "" ) ){
+			level.coop_weatherHold = 3
+		}
 	} else {
 		waitthread coop_weather_rainLook
 	}
@@ -102,7 +131,12 @@ coop_weather_init:{
 	println "^~^~^ WXSEED post-exec rain_density="
 	if( level.rain_density != NIL ){ println level.rain_density }
 	if( local.theme == "sand" ){
+		level.coop_dustWindScale = 1.0		//[bug-2963] seeded before its reader: the storm pulls it to 0.5 at full
 		thread coop_weather_sound "coop_amb_wind"	//[user 07-16] sandstorm = driving wind bed tracking intensity
+		//[2026-09-26, bug-2963] the DUST STORM ROLL-IN (coop_mod/duststorm.scr): a full storm (pattern 3) now
+		//closes the fog and fades a per-player sand sheet + strong wind in; a medium one (2) is a haze.
+		//Started here, after the pattern is seeded and the native renderer is up, because it reads both.
+		thread coop_mod/duststorm.scr::coop_dust_start
 	}
 	println( "^~^~^ WEATHER coop=" + local.theme + " (native SP, fluid random)" )
 }end
@@ -289,6 +323,15 @@ coop_weather_sound local.alias:{
 	//the volume; when it is missing we synthesise it from the pattern. A rain bed that goes silent
 	//because a retail variable did not populate is a worse failure than one that is slightly loud.
 	while( 1 ){
+		//[MP, bug-2731 follow-up] Re-ensure the emitter each tick. In an MP arena the ent can be absent
+		//(never spawned, or freed on a mode/round reset), and loopsound/stoploopsound on a NULL listener
+		//throws a Script Error every 1.5s - which is what spammed the console on MP rain maps. Respawn if
+		//gone, and GUARD every sound call so a NULL ent is a quiet no-op instead of an error.
+		if( level.coop_rainSndEnt == NULL ){
+			level.coop_rainSndEnt = spawn script_model
+			level.coop_rainSndEnt model "fx/dummy.tik"
+			level.coop_rainSndEnt notsolid
+		}
 		local.pat = level.weatherpattern
 		if( local.pat == NIL ){ local.pat = 1 }
 		local.rd = level.raindensity
@@ -300,14 +343,20 @@ coop_weather_sound local.alias:{
 		//silences it - not a density reading that never got driven.
 		if( local.pat >= 1 && local.dfrac < 0.25 ){ local.dfrac = 0.25 }
 
-		if( local.pat < 1 ){
-			level.coop_rainSndEnt stoploopsound
-		} else {
-			local.vol = 0.4 + local.dfrac * local.maxvol	// HZM coop - higher floor so even light rain is clearly audible (was 0.1 = near-silent)
-			if( local.vol > 1 ){ local.vol = 1 }
-			// keep the levelwide emitter on a player so the loop is never stuck far away at world origin
-			if( $player != NULL && $player[1] != NULL ){ level.coop_rainSndEnt.origin = $player[1].origin }
-			level.coop_rainSndEnt loopsound local.alias local.vol "levelwide"
+		if( level.coop_rainSndEnt != NULL ){
+			if( local.pat < 1 ){
+				level.coop_rainSndEnt stoploopsound
+			} else {
+				local.vol = 0.4 + local.dfrac * local.maxvol	// HZM coop - higher floor so even light rain is clearly audible (was 0.1 = near-silent)
+				if( local.vol > 1 ){ local.vol = 1 }
+				//[2026-09-26, bug-2963] during a dust storm the storm's own wind (coop_snd_wind_strong, on each
+				//player's sheet) leads: the map-wide sand bed drops to 50% at full strength. Seeded to 1.0 in
+				//coop_weather_init before this thread starts; duststorm.scr drives it.
+				if( local.alias == "coop_amb_wind" && level.coop_dustWindScale != NIL ){ local.vol = local.vol * level.coop_dustWindScale }
+				// keep the levelwide emitter on a player so the loop is never stuck far away at world origin
+				if( $player != NULL && $player[1] != NULL ){ level.coop_rainSndEnt.origin = $player[1].origin }
+				level.coop_rainSndEnt loopsound local.alias local.vol "levelwide"
+			}
 		}
 		wait 1.5
 	}
@@ -333,12 +382,23 @@ coop_weather_flash:{
 	waitthread coop_weather_flash_set   local.slot 0.12
 	wait 0.07
 	waitthread coop_weather_flash_set   local.slot 0
+	//[2026-09-25, bug-2906] re-send that final 0: it is one snapshot, and a remote client that loses it
+	//keeps a pale sky tint until the next strike. The next strike's setup claims the slot first, so a
+	//late copy cannot cut a new flash short (coop_mod/hudresend.scr, TRAPS T8).
+	local.i = 1
+	while( local.i <= $player.size ){
+		if( $player[local.i] != NULL ){
+			thread coop_mod/hudresend.scr::resend $player[local.i] local.slot local.slot 0
+		}
+		local.i++
+	}
 }end
 
 coop_weather_flash_setup local.slot:{
 	local.i = 1
 	while( local.i <= $player.size ){
 		if( $player[local.i] != NULL ){
+			waitthread coop_mod/hudresend.scr::claim $player[local.i] local.slot local.slot
 			// top-weighted SKY gradient over the upper ~2/3 of the screen, so it reads as the sky flashing.
 			ihuddraw_shader $player[local.i] local.slot "textures/coop_skyflash.tga"
 			ihuddraw_virtualsize $player[local.i] local.slot 1
