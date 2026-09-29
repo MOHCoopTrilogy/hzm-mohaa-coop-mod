@@ -548,7 +548,8 @@ coop_officer_spawn local.pos:{
 	if( level.coop_officer_anchor_ang != NIL ){
 		local.officer.angles = ( 0 level.coop_officer_anchor_ang 0 )
 	}
-	local.officer.health = 1200	// [209] -20% HP (was 1500)
+	local.officer.health = waitthread coop_officer_maxHp	//[user 2026-09-29] live-player scaled (was a flat 1200: 'unkillable' solo)
+	thread coop_officer_hpScaler local.officer
 	local.officer.flags["coop_actorStopPainHandler"] = 1
 	local.officer.accuracy = 70	// [209] softened (was 85)
 	local.officer.sight = 2400	// [209] shorter vision range
@@ -814,7 +815,7 @@ coop_officer_canteen local.officer:{
 	wait 2
 	if( isAlive local.officer && level.coop_officer_alive == 1 ){
 		local.newhp = local.officer.health + 100
-		if( local.newhp > 1500 ){ local.newhp = 1500 }
+		if( local.newhp > level.coop_officerMaxHp ){ local.newhp = level.coop_officerMaxHp }
 		local.officer.health = local.newhp
 		local.officer gore_reset 100	// HZM coop - gore tier 1: canteen sip washes some blood off
 	}
@@ -1091,18 +1092,18 @@ coop_officer_medkit_retreat local.officer:{
 	//shoots back and can still be killed throughout; the completed-heal hard-set below is
 	//unchanged and still only runs if he survives the entire minute.
 	local.heal_ticks = 0
-	local.heal_per = (1200 - local.officer.health) / 60
+	local.heal_per = (level.coop_officerMaxHp - local.officer.health) / 60
 	if( local.heal_per < 1 ){ local.heal_per = 1 }
 	while( isAlive local.officer && local.heal_ticks < 60 ){
 		local.new_hp = local.officer.health + local.heal_per
-		if( local.new_hp > 1200 ){ local.new_hp = 1200 }
+		if( local.new_hp > level.coop_officerMaxHp ){ local.new_hp = level.coop_officerMaxHp }
 		local.officer.health = local.new_hp
 		wait 1
 		local.heal_ticks++
 	}
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
 
-	local.officer.health = 1200	// [209] -20% HP (was 1500)
+	local.officer.health = level.coop_officerMaxHp	//[user 2026-09-29] live-player scaled max (was 1200)
 	local.officer gore_reset	// HZM coop - gore tier 1: full heal = clean uniform + stop dripping
 	// [318] spend one unit of the lifetime heal budget. Counted HERE, on a COMPLETED full heal, so a
 	// retreat that the players interrupt (they killed him on the way) never costs him a charge.
@@ -5472,6 +5473,35 @@ coop_squad_surrender local.actor:{
 				wait 0.5
 			}
 			end
+		}
+	}
+}end
+
+//=========================================================================
+//[user 2026-09-29] OFFICER HP BY LIVE PLAYERS. Players reported the High Ranking Officer as unkillable:
+//he had a flat 1200 HP (and canteen sips up to 1500) whatever the squad size. Max HP now follows the
+//LIVE player count (coop_activePlayerCount: spectators and noclip devs never count): 1=500 2=700 3=900 4+=1100.
+//Sets level.coop_officerMaxHp and returns it; every heal caps at it.
+//=========================================================================
+coop_officer_maxHp:{
+	local.pc = waitthread coop_mod/main.scr::coop_activePlayerCount
+	if( local.pc < 1 ){ local.pc = 1 }
+	local.hp = 300 + ( 200 * local.pc )
+	if( local.hp > 1100 ){ local.hp = 1100 }
+	level.coop_officerMaxHp = local.hp
+}end local.hp
+
+//re-checks every 2s while he lives: a join, leave or switch to spectator rescales his CURRENT hp in proportion
+coop_officer_hpScaler local.officer:{
+	while( local.officer != NULL && isAlive local.officer ){
+		wait 2
+		if( local.officer == NULL || !isAlive local.officer ){ end }
+		local.old = level.coop_officerMaxHp
+		local.new = waitthread coop_officer_maxHp
+		if( local.old != NIL && local.old > 0 && local.new != local.old ){
+			local.hp = int( local.officer.health * local.new / local.old )
+			if( local.hp < 1 ){ local.hp = 1 }
+			local.officer.health = local.hp
 		}
 	}
 }end
