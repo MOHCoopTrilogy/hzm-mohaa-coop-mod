@@ -142,6 +142,16 @@ level waittill prespawn
 	level.coop_sceneActorNames[1] = "intro_papers"
 	level.coop_sceneActorNames[2] = "intro_papers2"
 	level.coop_sceneActorNames[3] = "intro_bazooka"
+	//[user 2026-09-28, bug-3188] "one african trooper at the beginning near the front entrance
+	//has excessive health and only seems to die when he gets killed by the explosive barrels".
+	//The two $barrel_guy afrika privates are `nodamage` BY DESIGN (vanilla, main below): they
+	//stand inside a DAMAGE trigger (bsp model *5, spawnflags 128) that wraps them and the two gas
+	//barrels, so any round aimed at them hits the trigger first, runs ::barrel, and that sets
+	//health 5 + takedamage and blows the barrels. Their only death path is that box. In coop the
+	//personality roll (cover/flank rewrite type_attack, aggr adds 1024u of leash, prone) walks
+	//them out of it, and outside it they are bulletproof forever. Keep them scenery like the
+	//checkpoint cast; barrel_guy below also drops nodamage if anything else ever moves one out.
+	level.coop_sceneActorNames[4] = "barrel_guy"
 	level.flags[checkdoor] = 0
 	level.flags[ridecomplete] = 0
 	level.flags[lantern] = 0 
@@ -2337,8 +2347,23 @@ friendliesalive:{
 //=========================================================================
 barrel_guy:{
 //=========================================================================
+	//[bug-3188] INVARIANT: nodamage only while the barrel trigger can still reach him. The box is
+	//bsp model *5 at (-3803 -476 430), extents x -121..120 y -91..91 z -64..64, i.e. world
+	//x -3924..-3683 y -567..-385 z 366..494, shrunk 16u in x/y so his whole body is inside.
+	//Outside it a bullet reaches him without crossing the trigger, so vanilla's nodamage makes
+	//him immortal. Drop it (takedamage, no kill, no move): he is then an ordinary soldier, and
+	//::barrel still sets health 5 on him if the barrels go up later.
+	local.mortal = 0
 	while (isalive self)
 	{
+		if( local.mortal == 0 ){
+			local.o = self.origin
+			if( local.o[0] < -3908 || local.o[0] > -3699 || local.o[1] < -551 || local.o[1] > -401 || local.o[2] < 350 || local.o[2] > 420 ){
+				self takedamage
+				local.mortal = 1
+				println( "^~^~^ BARRELGUY left the barrel trigger at " + local.o + " - takedamage restored" )
+			}
+		}
 		self exec global/crouch.scr
 		wait 2
 	}
@@ -2353,12 +2378,26 @@ barrel:{
 //	if (((parm.other.targetname == "friendly") || (parm.other == $player)) && ((sighttrace ($player.origin + (0 0 50)) ($barrel[1].origin + (0 0 50)) 1) || (sighttrace ($player.origin + (0 0 50)) ($barrel[2].origin + (0 0 50)) 1)))
 	//chrissstrahl - make this right, and also work in mp
 	if ((parm.other.targetname == "friendly") || (parm.other.targetname == "player")){
-		if(	(exec coop_mod/replace.scr::playerCansee $barrel_guy[1] local.see) ||	//chrissstrahl - make coop compatible
-			(exec coop_mod/replace.scr::playerCansee $barrel_guy[2] local.see) ||	//chrissstrahl - make coop compatible
-			(exec coop_mod/replace.scr::playerCansee $barrel[1] local.see) ||		//chrissstrahl - make coop compatible
-			(exec coop_mod/replace.scr::playerCansee $barrel[2] local.see)			//chrissstrahl - make coop compatible
-		
-		){
+		//[bug-3188] was four fixed calls on $barrel_guy[1] [2] and $barrel[1] [2]. Vanilla could
+		//index them blind because both guys only ever died together, here. Now that a guy who
+		//wanders out of the box can be shot dead on his own, the array can shrink, and an index
+		//past its end throws and skips this test, so the barrels would never go up. Scan what exists.
+		//No `if( $barrel_guy )` wrapper: a targetname with no entities left throws in a boolean
+		//context (scriptvm.cpp:1872), while .size reads 1 and [1] reads NULL, which the guard takes.
+		local.seen = 0
+		for( local.i = 1; local.i <= $barrel_guy.size; local.i++ ){
+			local.e = $barrel_guy[local.i]
+			if( local.seen == 0 && local.e != NULL && local.e != NIL ){
+				if( exec coop_mod/replace.scr::playerCansee local.e local.see ){ local.seen = 1 }	//chrissstrahl - make coop compatible
+			}
+		}
+		for( local.i = 1; local.i <= $barrel.size; local.i++ ){
+			local.e = $barrel[local.i]
+			if( local.seen == 0 && local.e != NULL && local.e != NIL ){
+				if( exec coop_mod/replace.scr::playerCansee local.e local.see ){ local.seen = 1 }	//chrissstrahl - make coop compatible
+			}
+		}
+		if( local.seen == 1 ){
 			self delete
 			local.num = 0
 			

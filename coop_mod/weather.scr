@@ -107,6 +107,7 @@ coop_weather_init:{
 	// are fluid), and for rain fires thunder + lightning whose frequency auto-scales with intensity. It
 	// self-syncs via its own "level waittill spawn", so exec'ing here (pre-spawn) is the right moment.
 	exec global/weather.scr
+	if( getcvar( "coop_ltTestPoll" ) == "1" ){ thread coop_lt_testWatch }	//[2026-09-27] lightning A/B only (see coop_lt_testWatch)
 
 	// FLUID RANDOM storms (default): random-walk the intensity up/down so light rain builds into
 	// thunderstorms / light snow into blizzards and eases back, unpredictably. coop_weatherPin "cycle" (native
@@ -121,6 +122,9 @@ coop_weather_init:{
 
 	if( local.theme == "rain" ){
 		thread coop_weather_sound "coop_rain_ext"	// rain ambience (snow is silent for now)
+		//[2026-09-28] STORM DARKNESS (coop_mod/stormlight.scr): each rain storm a kind, the sky and light follow it.
+		//After the native exec above, because the director reads level.weatherpattern. Off unless coop_stormLight.
+		thread coop_mod/stormlight.scr::coop_storm_start
 	}
 
 	// second half of the WXSEED probe: what the NATIVE script left behind once it had run. If
@@ -271,7 +275,15 @@ coop_weather_randomDriver:{
 	level.weatherpattern = local.cur
 	while( 1 ){
 		local.r = randomfloat( 1 )
-		if( local.r < 0.38 ){				// HZM coop - build 38% / ease 47% / hold 15% = slight DOWNWARD bias so
+		//[2026-09-28] STORM DARKNESS (coop_mod/stormlight.scr, only while it runs): the storm's kind shapes the walk -
+		//a LIGHT storm never builds past 2 (no downpour), a DARK one builds sooner (0.55) until it reaches 3. A storm
+		//that reads dark is also the wetter one. Moderate, and every map with the feature off: today's 0.38.
+		local.pb = 0.38
+		if( level.coop_stormOn == 1 ){
+			if( level.coop_stormKind == "light" && local.cur >= 2 ){ local.pb = 0 }
+			if( level.coop_stormKind == "dark" && local.cur < 3 ){ local.pb = 0.55 }
+		}
+		if( local.r < local.pb ){				// HZM coop - build 38% / ease 47% / hold 15% = slight DOWNWARD bias so
 			local.cur = local.cur + 1		// storms clear more readily and dry spells come around more often (per
 		} else {						// user "more dry spells"). Was 45/40/15 (upward-biased = leaned stormy).
 			if( local.r < 0.85 ){
@@ -281,6 +293,11 @@ coop_weather_randomDriver:{
 		}
 		if( local.cur < 0 ){ local.cur = 0 }
 		if( local.cur > 3 ){ local.cur = 3 }
+		//[2026-09-28] STORM DARKNESS: CLOUDS BEFORE RAIN. Leaving a dry spell, the storm's kind is picked and its
+		//clouds start rolling in 15-25 s before the rain pattern rises (stormlight.scr coop_storm_preroll).
+		if( local.cur > 0 && level.weatherpattern == 0 && level.coop_stormOn == 1 ){
+			waitthread coop_mod/stormlight.scr::coop_storm_preroll
+		}
 		level.weatherpattern = local.cur
 
 		if( local.cur == 0 ){
@@ -369,6 +386,12 @@ coop_weather_sound local.alias:{
 // coop_dynWeatherLightning 0 = skip the flash (thunder sound only). Flicker: bright -> dim -> bright -> decay.
 coop_weather_flash:{
 	if( getcvar "coop_dynWeatherLightning" == "0" ){ end }
+	//[2026-09-27 lightning QUICK FIX] coop_ltQuick 1: no screen-space sheet at all. It covered the top of the
+	//screen for every player wherever they stood - indoors, under a roof, looking at the floor - which is the
+	//user's 'lightning flashes on my screen inside buildings'. The fog lift (coop_lt_quickFog) is a configstring,
+	//so every client already gets it; this overlay was never needed to reach remote players.
+	local.lt = waitthread coop_lt_level
+	if( local.lt >= 1 ){ end }
 	local.slot = 60
 	waitthread coop_weather_flash_setup local.slot
 	waitthread coop_weather_flash_set   local.slot 0.75
@@ -391,6 +414,136 @@ coop_weather_flash:{
 			thread coop_mod/hudresend.scr::resend $player[local.i] local.slot local.slot 0
 		}
 		local.i++
+	}
+}end
+
+//=========================================================================
+// LIGHTNING QUICK FIX [2026-09-27] (docs/proposals/lightning_2026-09-27/diagnosis.md, plan.md section 1).
+// Called by global/weather.scr flash (local.on 1) / unflash (0) when coop_ltQuick is "1" (coop/MP only).
+// A flash LIFTS the fog colour a fraction k toward a cool white (0.86 0.90 1.0) instead of stamping (0.9 0.9 0.9).
+// On these maps the sky on screen IS the fog colour, so this is the whole sky-and-far-field pulse.
+// PHOTOSENSITIVITY (vet V4): k is capped so the fog colour's luminance rises by at most 0.07, and to 0.08 on a bright
+// fog (bloom knee, below). Through the gl2 grade and bloom that keeps the sky's relative-luminance step at or under
+// ~0.07 on every rain map's fog (m3l2 .63 through t1l1 .02, lookdev/out/quickfix_fog_table.json) - below WCAG
+// 2.3.1's 0.1, so no pattern of pulses counts as flashing.
+// HEADLIGHTS (vet V7): a fog under the cgame 'dark' threshold (luminance 0.3, cg_view.c) is never lifted past 0.29,
+// so beams and flares do not blink off on every pulse.
+//   coop_ltQuickLift  0.4 = requested k (0..1, 0 = no lift); the caps above always apply
+//   coop_dynWeatherLightning 0 = no visual flash here either
+// These are SERVER cvars: on a listen server they are the host's choice; a remote player cannot opt out here
+// (plan.md: the per-player setting is v1's cg_hzmLightningMode).
+// unflash restores level.farplane_color, which coop_mod/fogmode.scr keeps equal to a loaded fog profile (bug-1345).
+coop_lt_quickFog local.on:{
+	if( local.on != 1 ){
+		if( level.farplane_color != NIL ){ $world farplane_color level.farplane_color }
+		//a legacy flash (r_fastsky 1) caught by a mid-strike toggle of coop_ltQuick: clear it, and only then
+		if( level.coop_ltLegacySky == 1 ){
+			setcvar "r_fastsky" "0"
+			level.coop_ltLegacySky = 0
+		}
+		end
+	}
+	if( getcvar( "coop_dynWeatherLightning" ) == "0" ){ end }
+	local.c = level.farplane_color
+	if( local.c == NIL ){ end }
+	local.k = 0.4
+	local.v = getcvar( "coop_ltQuickLift" )
+	if( local.v != "" ){ local.k = float( local.v ) }
+	if( local.k <= 0 ){ end }
+	if( local.k > 1 ){ local.k = 1 }
+	local.lf = 0.299 * local.c[0] + 0.587 * local.c[1] + 0.114 * local.c[2]
+	local.span = 0.8994 - local.lf
+	if( local.span <= 0.01 ){ end }
+	local.kmax = 0.07 / local.span
+	if( local.kmax < local.k ){ local.k = local.kmax }
+	if( local.lf < 0.3 ){
+		local.kdark = ( 0.29 - local.lf ) / local.span
+		if( local.kdark < local.k ){ local.k = local.kdark }
+	}
+	//BLOOM KNEE: the shipped bloom ramps in over 0.52-0.72 on the brightest channel (r_ppBloomThreshold 0.62, knee
+	//0.1), so a bright fog (m3l2 .63, m4l0, m5l3, t3l2) sits right in it and a small lift turns the whole sky's bloom
+	//on - three times the step. Brightest channel over 0.40: k at most 0.08 (modelled worst sky step 0.069).
+	local.mx = local.c[0]
+	if( local.c[1] > local.mx ){ local.mx = local.c[1] }
+	if( local.c[2] > local.mx ){ local.mx = local.c[2] }
+	if( local.mx > 0.40 && local.k > 0.08 ){ local.k = 0.08 }
+	if( local.k <= 0 ){ end }
+	local.r = local.c[0] + local.k * ( 0.86 - local.c[0] )
+	local.g = local.c[1] + local.k * ( 0.90 - local.c[1] )
+	local.b = local.c[2] + local.k * ( 1.0 - local.c[2] )
+	$world farplane_color ( local.r local.g local.b )
+}end
+
+//=========================================================================
+// LIGHTNING LEVEL [2026-09-27] - the ONE place that decides how a strike is shown (plan.md section 10):
+//   0 = today (retail fog stamp + r_fastsky + the slot-60 sheet)           SP always; coop/MP while nothing is set
+//   1 = quick fix (no sheet, capped fog pulse)                              coop_ltQuick 1
+//   2 = realistic (strike published for the lightning cgame + the quick-fix pulses as the fallback for clients that
+//       cannot render it; they hide them)                                   coop_ltMode 2
+// Server cvars, read per strike, never archived. Flipping the DEFAULT later is a change here only.
+coop_lt_level:{
+	if( level.gametype == NIL || level.gametype == 0 ){ end 0 }
+	//[default flip] realistic is the default: an EMPTY coop_ltMode means 2. "0" forces today, "1" the quick fix.
+	local.m = getcvar( "coop_ltMode" )
+	if( local.m == "2" || local.m == "" ){ end 2 }
+	if( local.m == "1" || getcvar( "coop_ltQuick" ) == "1" ){ end 1 }
+	end 0
+}end 0
+
+//=========================================================================
+// REALISTIC LIGHTNING v1 [2026-09-27] (docs/proposals/lightning_2026-09-27/plan.md 2.2). Called by global/weather.scr
+// singlethunder under coop_ltMode 2. Picks ONE strike and hands it to game.dll through coop_ltStrike, which validates
+// it and publishes it on configstring 28 for every client (fgame/g_main.cpp G_HzmLtPublish):
+//   kind   70% intra-cloud 'i' (sheet lightning, no bolt), 30% cloud-to-ground 'c'
+//   yaw    a storm cell that drifts 4 degrees a strike, strikes scattered 35 degrees either side of it
+//   dist   1500-12000 m, as likely at every distance ACROSS THE AREA (max of two uniforms: p ~ d), user decision D4
+//   n      strokes: 1-4 ('c') or broad pulses 1-3 ('i'); the client expands them from the seed
+coop_lt_strike:{
+	if( level.coop_ltCell == NIL ){ level.coop_ltCell = randomfloat( 360 ) }
+	level.coop_ltCell = level.coop_ltCell + randomfloat( 8 ) - 4
+	local.yaw = level.coop_ltCell + randomfloat( 70 ) - 35
+	local.kind = "i"
+	if( randomfloat( 1 ) < 0.3 ){ local.kind = "c" }
+	local.u = randomfloat( 1 )
+	local.u2 = randomfloat( 1 )
+	if( local.u2 > local.u ){ local.u = local.u2 }
+	local.dist = int( 1500 + 10500 * local.u )
+	//TEST ONLY (coop_lt_testWatch below): a forced kind / yaw / distance for the next strike, then forgotten
+	if( level.coop_ltTestKind != NIL ){
+		local.kind = level.coop_ltTestKind
+		level.coop_ltTestKind = NIL
+		local.v = getcvar( "coop_ltTestYaw" )
+		if( local.v != "" ){ local.yaw = float( local.v ) }
+		local.v = getcvar( "coop_ltTestDist" )
+		if( local.v != "" ){ local.dist = int( local.v ) }
+	}
+	if( local.kind == "c" ){
+		local.n = randomint( 4 ) + 1
+	} else {
+		local.n = randomint( 3 ) + 1
+	}
+	local.seed = randomint( 999999 ) + 1
+	local.s = local.kind + " " + int( local.yaw ) + " " + local.dist + " " + local.n + " " + local.seed
+	setcvar "coop_ltStrike" local.s
+}end
+
+//=========================================================================
+// LIGHTNING TEST HOOK [2026-09-27] (docs/proposals/lightning_2026-09-27/ab/lt_ab.py, the in-engine A/B). Started by
+// coop_weather_init ONLY when coop_ltTestPoll is "1" when the map loads - never in a normal session. It switches the
+// natural strikes off (level.thunder 0) so every strike in a capture is a requested one, then polls coop_ltTest every
+// 0.1 s: "c" or "i" (a forced kind, with coop_ltTestYaw / coop_ltTestDist) or "1" (a random strike) starts one strike
+// through the normal path (global/weather.scr singlethunder, the level selector, the latch) and clears the cvar.
+coop_lt_testWatch:{
+	while( 1 ){
+		level.thunder = 0
+		local.t = getcvar( "coop_ltTest" )
+		if( local.t != "" ){
+			setcvar "coop_ltTest" ""
+			if( local.t == "c" || local.t == "i" ){ level.coop_ltTestKind = local.t }
+			println( "^~^~^ LTTEST strike requested kind=" + local.t )
+			thread global/weather.scr::singlethunder
+		}
+		wait 0.1
 	}
 }end
 

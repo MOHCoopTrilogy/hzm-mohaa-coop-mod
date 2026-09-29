@@ -121,6 +121,80 @@ init:{
 	//slice 2/3 self-test (gated on the test cvar): proves mp_sign/mp_verify and the split round-trip
 	//deterministically each MP boot in test mode, independent of a human reconnect.
 	if( getcvar( "coop_mpProgCreditBots" ) == "1" ){ thread selftest }
+	if( getcvar( "coop_mpStPromo" ) == "1" ){ thread stPromo }	//[2026-09-27, bug-3076] promotion capture, dev harness only
+}end
+
+
+//=========================================================================
+// [2026-09-27, bug-3076] PROMOTION CAPTURE - the MP half of coop_selftest_xp.scr's "promo" mode. Dev
+// harness only (coop_mpStPromo 1, seeded nowhere). A REAL promotion through the MP bridge on the first
+// connected player - xp_award_mp, so the rank-up popup + ceremony run exactly as after an MP kill - then
+// the end-of-round card for the same round (xp_mp_roundcard).
+// coop_mpStShots <prefix> takes engine screenshots named <prefix>_<phase>. The XP it pays stays on the
+// test profile: MP may not write coop XP down (isolation clauses 4/8), so the harness restores the
+// private home's save files instead. Markers: ^~^~^ MPSTPROMO ...
+//=========================================================================
+stPromoShot local.p local.name:{
+	local.pre = getcvar( "coop_mpStShots" )
+	if( local.pre == "" || local.p == NULL ){ end }
+	local.p stufftext ( "screenshot " + local.pre + "_" + local.name )
+	println( "^~^~^ MPSTPROMO shot=" + local.pre + "_" + local.name + " t=" + level.time )
+}end
+
+stPromo:{
+	local.p = NULL
+	local.t = 0
+	while( local.p == NULL && local.t < 180 ){
+		if( $player != NULL && $player.size >= 1 ){ local.p = $player[1] }
+		if( local.p == NULL ){
+			wait 1
+			local.t++
+		}
+	}
+	if( local.p == NULL ){ println "^~^~^ MPSTPROMO abort=no_player"; end }
+	wait 5
+	//the smallest award loads the shared identity; then pay exactly what lands 'over' XP past the next rank
+	waitthread coop_mod/xp.scr::xp_award_mp local.p 1 "kills" "Probe"
+	wait 1
+	if( local.p == NULL ){ end }
+	local.total = local.p.flags["coop_xp_total"]
+	local.rank = local.p.flags["coop_xp_rank"]
+	if( local.total == NIL || local.rank == NIL ){ println "^~^~^ MPSTPROMO abort=no_identity"; end }
+	if( local.rank >= 21 ){ println "^~^~^ MPSTPROMO abort=top_rank"; end }
+	local.thr = level.coop_xp_rankXP[local.rank + 1]
+	local.over = 2
+	local.need = ( local.thr + local.over - local.total )
+	local.sc = level.coop_xp_scale
+	if( local.sc == NIL || local.sc <= 0 ){ local.sc = 1 }
+	local.amt = local.need
+	if( local.sc != 1 ){ local.amt = ( int( local.need / local.sc ) + 1 ) }
+	println( "^~^~^ MPSTPROMO phase=hud rank=" + local.rank + " total=" + local.total + " thr=" + local.thr + " amt=" + local.amt )
+	local.p stufftext ( "seta coop_hudPoke " + level.time )	//a real promotion follows a kill = firing wakes the HUD fade
+	wait 0.5
+	thread coop_mod/xp.scr::xp_award_mp local.p local.amt "kills" "Promotion probe"
+	wait 0.3
+	waitthread stPromoShot local.p "hud_t03"
+	wait 0.7
+	local.p stufftext ( "seta coop_hudPoke " + level.time )
+	waitthread stPromoShot local.p "hud_t10"
+	wait 1
+	waitthread stPromoShot local.p "hud_t20"
+	println( "^~^~^ MPSTPROMO hud total=" + local.p.flags["coop_xp_total"] + " rank=" + local.p.flags["coop_xp_rank"] )
+	wait 7
+
+	if( local.p == NULL ){ end }
+	println "^~^~^ MPSTPROMO phase=mpcard"
+	thread coop_mod/xp.scr::xp_mp_roundcard "PROMOTION PROBE"
+	wait 1
+	waitthread stPromoShot local.p "mpcard_t10"
+	wait 2
+	waitthread stPromoShot local.p "mpcard_t30"
+	wait 4
+
+	//(no MP Service Record step here: an open menu pauses a one-client listen server, so a script `wait` after
+	//pushmenu never elapses. The harness opens that menu over rcon instead.)
+	if( local.p == NULL ){ end }
+	println( "^~^~^ MPSTPROMO done total=" + local.p.flags["coop_xp_total"] + " rank=" + local.p.flags["coop_xp_rank"] )
 }end
 
 

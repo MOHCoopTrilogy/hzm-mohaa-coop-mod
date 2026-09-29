@@ -17,6 +17,8 @@
 //    "chalA"   -> CHALPERSIST map-A phase (bump + save a counter)
 //    "chalB"   -> CHALPERSIST map-B phase (read-back + double mission-complete)
 //    "join"    -> XPJOIN late-join identity poll
+//    "promo"   -> ST_XP_PROMO: a REAL promotion on the host, replayed on
+//                 every rank bar, with engine screenshots (bug-3076)
 //
 // Markers are prefixed ST_XP_ and greppable ("^~^~^ ST_XP_...").
 // The existing coop_selftest.scr::xptest_run (bug-1065 NIL/NULL guard,
@@ -116,6 +118,7 @@ st_xp_run:{
 	if( local.mode == "chalA" ){ waitthread st_xp_chalpersist_A; end }
 	if( local.mode == "chalB" ){ waitthread st_xp_chalpersist_B; end }
 	if( local.mode == "join" ){ waitthread st_xp_join; end }
+	if( local.mode == "promo" ){ waitthread st_xp_promo; end }	//[2026-09-27, bug-3076] promotion-moment capture
 
 	// default battery - self-contained, needs live players
 	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 90
@@ -693,4 +696,174 @@ st_xp_join:{
 	wait 2
 	local.totalAfter = waitthread st_xp_total local.jp
 	println( "^~^~^ ST_XP_XPJOIN id=" + local.id + " totalBefore=" + local.totalBefore + " totalAfter=" + local.totalAfter + " rank=" + local.rank )
+}end
+
+
+//====================================================================
+// PROMO [2026-09-27, bug-3076] - the REAL promotion moment, captured by the engine's own
+// screenshot command. The "giant gold square on promotion" was "fixed" five times by
+// arithmetic and never once looked at in the moment it happens, because that moment needs a
+// promotion. This makes one on demand:
+//   A  the host is put a few XP under the next rank and paid a REAL xp_award across the
+//      threshold, so xp_hud_popup + xp_promo_ceremony run exactly as after a kill;
+//   B  the same promotion replayed on the end-of-mission debrief card (xp_summary_card);
+//   C  the Service Record menu, with the host mid-bracket (the harness opens the MP record
+//      in the same window, so its rank bar has something to show);
+//   E  every flag and cvar the probe touched is put back.
+// The MP end-of-round card is MP-owned: its half of this probe lives in the MP progression file (stPromo).
+// cvars (dev harness only; none is seeded anywhere, so this never runs for a player):
+//   coop_st_xp 1 + coop_st_xp_mode promo    run it
+//   coop_st_xp_shots <prefix>               take screenshots named <prefix>_<phase> (optional)
+//   coop_st_xp_promoRank <r>                promote r -> r+1 (default 0, Pvt -> Pfc)
+//   coop_st_xp_promoOver <n>                XP past the threshold after the award (default 2)
+// Markers: ^~^~^ ST_XP_PROMO ...
+//====================================================================
+st_xp_promo_shot local.p local.name:{
+	local.pre = getcvar( "coop_st_xp_shots" )
+	if( local.pre == "" || local.p == NULL ){ end }
+	local.p stufftext ( "screenshot " + local.pre + "_" + local.name )
+	println( "^~^~^ ST_XP_PROMO shot=" + local.pre + "_" + local.name + " t=" + level.time )
+}end
+
+// a real promotion comes from a kill, and firing wakes the HUD fade (slots below 100 fade when
+// calm, cg_drawtools.cpp CG_UpdateHudFade); a probe standing still must wake it itself
+st_xp_promo_wake local.p:{
+	if( local.p == NULL ){ end }
+	local.p stufftext ( "seta coop_hudPoke " + level.time )
+}end
+
+st_xp_promo_clear local.p local.first local.last:{
+	local.s = local.first
+	while( local.s <= local.last && local.p != NULL ){
+		ihuddraw_alpha  local.p local.s 0
+		ihuddraw_string local.p local.s ""
+		local.s++
+	}
+}end
+
+st_xp_promo:{
+	local.p = waitthread coop_mod/coop_selftest.scr::selftest_findPlayer 240	// a harness join can take a while
+	if( local.p == NULL ){ println "^~^~^ ST_XP_PROMO abort=no_host"; end }
+	if( level.coop_xp_enabled != 1 ){ println "^~^~^ ST_XP_PROMO abort=xp_off"; end }
+	if( local.p.flags["coop_xp_id"] == NIL ){ waitthread coop_mod/xp.scr::xp_identify local.p }
+	if( local.p == NULL || local.p.flags["coop_xp_total"] == NIL ){ println "^~^~^ ST_XP_PROMO abort=no_identity"; end }
+	wait 3		// let the spawn-time HUD settle (and any identify popup finish)
+
+	// snapshot, for E
+	local.sTotal = local.p.flags["coop_xp_total"]
+	local.sRank  = local.p.flags["coop_xp_rank"]
+	local.sMark  = local.p.flags["coop_xp_barMark"]
+	local.sR0    = local.p.flags["coop_xp_rankmapstart"]
+	local.sMap   = local.p.flags["coop_xp_map"]
+	local.sKills = local.p.flags["coop_xp_b_kills"]
+	local.sUnl   = local.p.flags["coop_chal_unlocks"]
+
+	local.r = 0
+	local.rc = getcvar( "coop_st_xp_promoRank" )
+	if( local.rc != "" ){ local.r = int( local.rc ) }
+	if( local.r < 0 || local.r >= level.coop_xp_rankMax ){ local.r = 0 }
+	local.thr = level.coop_xp_rankXP[local.r + 1]
+	local.over = 2
+	local.oc = getcvar( "coop_st_xp_promoOver" )
+	if( local.oc != "" ){ local.over = int( local.oc ) }
+	if( local.over < 0 ){ local.over = 0 }
+
+	// xp_award scales the amount; pick the pre-award total so the POST-award total is thr + over
+	local.amt = 10
+	local.gain = int( local.amt * level.coop_xp_scale )
+	if( local.gain <= local.over ){ println( "^~^~^ ST_XP_PROMO abort=gain_too_small gain=" + local.gain + " over=" + local.over ); end }
+	local.pre = local.thr + local.over - local.gain
+
+	//---------------- A: in-mission promotion (the moment the user reported) ----------------
+	local.p.flags["coop_xp_total"]    = local.pre
+	local.p.flags["coop_xp_rank"]     = local.r
+	local.p.flags["coop_xp_barMark"]  = int( local.pre / 100 )	// the award crosses a 100-XP mark = the popup shows, as in play
+	local.p.flags["coop_xp_popupOn"]  = NIL
+	local.p.flags["coop_xp_ceremony"] = NIL
+	level.coop_xp_summaryActive = 0
+	println( "^~^~^ ST_XP_PROMO phase=hud rank=" + local.r + " thr=" + local.thr + " pre=" + local.pre + " gain=" + local.gain + " over=" + local.over )
+	waitthread st_xp_promo_wake local.p
+	wait 0.5
+	thread coop_mod/xp.scr::xp_award local.p local.amt "kills" "Promotion probe"
+	wait 0.3
+	waitthread st_xp_promo_shot local.p "hud_t03"
+	wait 0.7
+	waitthread st_xp_promo_wake local.p
+	waitthread st_xp_promo_shot local.p "hud_t10"
+	wait 1
+	waitthread st_xp_promo_shot local.p "hud_t20"
+	println( "^~^~^ ST_XP_PROMO hud total=" + local.p.flags["coop_xp_total"] + " rank=" + local.p.flags["coop_xp_rank"] )
+	wait 6		// popup (3 s) + ceremony (about 3 s) + their re-sent teardowns
+
+	//---------------- B: the same promotion on the debrief card ----------------
+	// the card fills (total - coop_xp_map) -> total from the rank at map start: 150 XP back puts
+	// the start in the old bracket, so it fills, crosses (the reset), then enters the new bracket
+	// 'over' XP deep - the sequence a mission-end promotion plays
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_xp_rankmapstart"] = local.r
+	local.p.flags["coop_xp_map"] = 150
+	local.p.flags["coop_xp_cardOn"] = NIL
+	level.coop_xp_summaryActive = 1
+	println( "^~^~^ ST_XP_PROMO phase=card" )
+	waitthread st_xp_promo_wake local.p
+	thread coop_mod/xp.scr::xp_summary_card local.p
+	wait 1.5
+	waitthread st_xp_promo_shot local.p "card_t15"
+	wait 2.5
+	waitthread st_xp_promo_wake local.p
+	waitthread st_xp_promo_shot local.p "card_t40"
+	wait 1.5
+	waitthread st_xp_promo_shot local.p "card_t55"
+	wait 2.5
+	waitthread st_xp_promo_wake local.p
+	waitthread st_xp_promo_shot local.p "card_t80"
+	wait 3
+	waitthread st_xp_promo_wake local.p
+	waitthread st_xp_promo_shot local.p "card_t110"
+	wait 1
+	level.coop_xp_summaryActive = 0		// xp_card_unlocks clears 127-134 itself on this
+	wait 1.5
+	waitthread st_xp_promo_clear local.p 62 73
+	if( local.p != NULL ){ local.p.flags["coop_xp_cardOn"] = NIL }
+	wait 1
+
+	//---------------- C: the Service Record menus, host mid-bracket ----------------
+	// (the MP end-of-round card and the MP record menu are MP-owned - isolation clause 7 keeps their
+	// names out of coop files - so the MP card has its own probe in the MP progression file, and the MP
+	// record menu is opened by the HARNESS here: it waits for this marker, pushes the menu, shoots,
+	// then sets coop_st_xp_menusDone 1)
+	if( local.p == NULL ){ end }
+	local.fl = level.coop_xp_rankXP[local.r + 1]
+	local.cl = level.coop_xp_rankXP[local.r + 2]
+	if( local.cl == NIL ){ local.cl = local.fl + 1000 }
+	local.p.flags["coop_xp_total"] = local.fl + int( ( local.cl - local.fl ) * 0.6 )
+	waitthread coop_mod/xp.scr::xp_push_own_cvars local.p
+	wait 1
+	local.p stufftext "pushmenu coop_sr"
+	wait 2
+	waitthread st_xp_promo_shot local.p "menu_sr"
+	wait 1
+	local.p stufftext "popmenu 0"		// popmenu takes a required arg; bare "popmenu" is a no-op (cl_ui.cpp UI_PopMenu_f)
+	wait 1
+	setcvar "coop_st_xp_menusDone" "0"
+	println( "^~^~^ ST_XP_PROMO phase=menus total=" + local.p.flags["coop_xp_total"] )
+	local.t = 0
+	while( local.t < 120 && getcvar( "coop_st_xp_menusDone" ) != "1" ){
+		wait 0.5
+		local.t++
+	}
+
+	//---------------- E: restore ----------------
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_xp_total"]        = local.sTotal
+	local.p.flags["coop_xp_rank"]         = local.sRank
+	local.p.flags["coop_xp_barMark"]      = local.sMark
+	local.p.flags["coop_xp_rankmapstart"] = local.sR0
+	local.p.flags["coop_xp_map"]          = local.sMap
+	local.p.flags["coop_xp_b_kills"]      = local.sKills
+	local.p.flags["coop_chal_unlocks"]    = local.sUnl
+	setcvar ( "coop_xp_" + local.p.flags["coop_xp_id"] ) ( "" + local.sTotal )
+	waitthread coop_mod/xp.scr::xp_push_own_cvars local.p
+	waitthread coop_mod/xp.scr::xp_flush
+	println( "^~^~^ ST_XP_PROMO done total=" + local.p.flags["coop_xp_total"] + " rank=" + local.p.flags["coop_xp_rank"] )
 }end

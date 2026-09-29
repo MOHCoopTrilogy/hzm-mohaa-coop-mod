@@ -337,6 +337,30 @@ singlethunder:
 	// live rain intensity (raindensity < 0.5 = basically dry). Coop only (gametype != 0); SP is untouched.
 	if( level.gametype != 0 && ( level.raindensity == NIL || level.raindensity < 0.5 ) ){ end }
 
+	//[2026-09-27 lightning QUICK FIX, docs/proposals/lightning_2026-09-27/diagnosis.md] coop_ltQuick 1 is a LIVE A/B
+	//(read per strike, never archived, unset = today's look; coop and MP only, SP untouched). ONE strike at a time:
+	//m5l1a/m5l1b exec this file themselves AND through coop_mod/weather.scr, so two thunder loops overlap their
+	//flash patterns (more than 3 flashes a second is the photosensitivity limit). The latch is cleared at the end.
+	//The latch expires after 12 s (TRAPS T20: a strike thread killed mid-pattern must not switch lightning off for
+	//the rest of the map). level.gametype is tested for NIL first: a direct call (maps/e3l4/Outro.scr) may come
+	//before global/weather.scr main set it, and NIL != 0 is true.
+	local.lt = waitthread coop_mod/weather.scr::coop_lt_level
+	if( local.lt >= 1 ){
+		if( level.coop_ltBusy == 1 && level.coop_ltBusyT != NIL && level.time - level.coop_ltBusyT < 12 ){ end }
+		level.coop_ltBusy = 1
+		level.coop_ltBusyT = level.time
+	}
+
+	//[2026-09-27 REALISTIC LIGHTNING v1, docs/proposals/lightning_2026-09-27/plan.md 2 + 10] level 2: publish ONE strike
+	//(kind, direction, distance, strokes, seed); every client with the lightning cgame renders it and plays its own
+	//thunder by distance. The quick-fix pulses below STILL run: they are the FALLBACK for a client that cannot render the
+	//strike (an old cgame, or gl1) - a capable client hides them (cgame CG_HzmLt_FogFilter). They start 0.1 s after the
+	//strike so the strike configstring always reaches a client before the first pulse.
+	if( local.lt == 2 ){
+		waitthread coop_mod/weather.scr::coop_lt_strike
+		wait 0.1
+	}
+
 	// HZM coop - drive the per-client ihuddraw sky-flash. The native flash below uses r_fastsky/farplane,
 	// which is host-only for remote coop clients; this makes EVERY player see the lightning. One envelope
 	// per strike, fired just before the thunder that follows.
@@ -398,7 +422,18 @@ singlethunder:
 		wait ( randomfloat( 1.5 ) )
 		local.ti = 1
 		while( local.ti <= $player.size ){
-			if( $player[local.ti] != NULL ){ $player[local.ti] playsound thunder }
+			//[2026-09-27 lightning] at level 2 a player whose cgame plays the strike's thunder itself (userinfo cg_hzmLt 1)
+			//is skipped, so it is never heard twice from its own entity
+			if( $player[local.ti] != NULL ){
+				local.cap = ""
+				if( local.lt == 2 ){
+					local.pp = $player[local.ti]
+					local.cap = info_valueforkey local.pp.userinfo "cg_hzmLt"
+				}
+				if( local.cap != "1" ){
+					$player[local.ti] playsound thunder
+				}
+			}
 			local.ti++
 		}
 	} else if (game.medic == NIL){
@@ -407,6 +442,7 @@ singlethunder:
 			$player playsound thunder
 		}
 	}
+	level.coop_ltBusy = 0	//[2026-09-27 lightning quick fix] release the one-strike latch above (a no-op when it was never set)
 
 end
 
@@ -432,8 +468,18 @@ thunder:
 end
 
 flash:
+//[2026-09-27 lightning QUICK FIX] coop_ltQuick 1 (coop/MP only): no r_fastsky - it is host-only (remote players never
+//saw it), it is CVAR_ARCHIVE on gl2 so a strike cut short strands it (bug-2190), and on a fully fogged sky it adds
+//nothing. And a PROPORTIONAL fog lift instead of the flat 0.9 grey that whitened the whole sky and every fogged
+//distance - the band across the middle of the screen. Helper: coop_mod/weather.scr::coop_lt_quickFog.
+local.lt = waitthread coop_mod/weather.scr::coop_lt_level
+if( local.lt >= 1 ){
+	waitthread coop_mod/weather.scr::coop_lt_quickFog 1
+} else {
  setcvar "r_fastsky" "1"
+level.coop_ltLegacySky = 1	//[2026-09-27] lets the quick-fix unflash clear a legacy flash caught by a mid-strike toggle
 $world farplane_color (0.9 0.9 0.9)
+}
 
 for (local.i=1;local.i<level.weatherFs+1;local.i++)
 level.weatherF[local.i] show
@@ -441,8 +487,14 @@ level.weatherF[local.i] show
 end
 
 unflash:
+local.lt = waitthread coop_mod/weather.scr::coop_lt_level
+if( local.lt >= 1 ){
+	waitthread coop_mod/weather.scr::coop_lt_quickFog 0
+} else {
  setcvar "r_fastsky" "0"
+level.coop_ltLegacySky = 0
 $world farplane_color level.farplane_color
+}
 
 for (local.i=1;local.i<level.weatherFs+1;local.i++)
 level.weatherF[local.i] hide

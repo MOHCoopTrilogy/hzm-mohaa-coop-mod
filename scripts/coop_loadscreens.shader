@@ -39,3 +39,29 @@ hzmLoadMedal
 		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
 	}
 }
+
+// HZM coop [user 2026-09-27] LOADING HINT ARROWS - ui/loadingbar.txt hzm_loadhint_prev/next. Shown only while the exe
+// publishes ui_loadHintNavOn 1 (client/cl_ui.cpp UI_LoadHints_*), which also parks them beside the hint text every
+// frame. Art: docs/tools/gen_loadscreen_medal.py --arrows (32x64 RGBA, uncompressed, bottom-up). Mipped like the medal.
+hzmLoadHintPrev
+{
+	nopicmip
+	cull none
+	force32bit
+	surfaceparm nolightmap
+	{
+		clampMap ui/hzm_loadscreen/hint_prev.tga
+		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+	}
+}
+hzmLoadHintNext
+{
+	nopicmip
+	cull none
+	force32bit
+	surfaceparm nolightmap
+	{
+		clampMap ui/hzm_loadscreen/hint_next.tga
+		blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
+	}
+}

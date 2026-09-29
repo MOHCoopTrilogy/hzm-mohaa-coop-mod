@@ -1,0 +1,359 @@
+//=========================================================================
+// HZM coop - STORM DARKNESS  [user 2026-09-28] (docs/proposals/storm_darkness_2026-09-28/plan.md section 1)
+// "as a part of dynamic weather can we have dark clouds roll through during storms sometimes (sometimes a light
+// storm sometimes a dark cloud storm) ideally the map darkens respectively to make it realistic"
+//
+// THE SERVER HALF. Every rain storm gets a KIND when it starts - light / moderate / dark (weighted random) - and
+// kind x rain pattern (+ an occasional passing dark cell) is the storm darkness D, 0 clear .. 1 darkest. D is sent to
+// every player as KEYFRAMES (from, to, duration, elapsed); every client evaluates the same smooth curve every frame
+// and darkens its own view (cgame/cg_hzmstorm.c: fog colour, grade, sun shadows, sky; hzm_storm.h has the limits).
+// No fog DISTANCE change (AI sight, Actor::FixAIParameters), no fog configstring write (the fog keeper, the fog
+// zones, the dust storm and the lightning fog pulses are untouched).
+//
+//   coop_stormLight ""/1/0  = master. "" = the shipped default (coop_storm_on: OFF until the user has seen the
+//                             GIFs). Read at map start; "0" live = the storm ramps back to clear.
+//   coop_stormKind          = force the kind: light / moderate / dark ("" = weighted random)
+//   coop_stormWLight/WMod/WDark = the mix, default 45 / 30 / 25 (0 allowed)
+//   coop_stormCells ""/0    = passing dark cells (default on)
+//   coop_stormNow ""/0..1   = TEST: force D (reset at every map start); coop_stormNowDur = its ramp, s ("0" = 0.05)
+// Rain theme only (started from weather.scr's rain branch). Never on Omaha (m3l1a m3l1b e3l1 e3l2 obj_team3).
+// MP: runs where mp_weather.scr started the rain renderer; calls nothing in replace.scr / main.scr (bug-2968), and
+// bots get no keyframes (they render nothing).
+// Markers (developer 1): ^~^~^ STORM start / off / kind / key / cell / preroll / clear.
+//=========================================================================
+
+//canary (TRAPS T1)
+alive:{
+	end 1
+}end
+
+//=========================================================================
+// The shipped default. FLIP HERE after the user's go (plan.md section 7): end 1 for an empty coop_stormLight.
+coop_storm_on:{
+	local.s = getcvar( "coop_stormLight" )
+	if( local.s == "1" ){ end 1 }
+	if( local.s == "0" ){ end 0 }
+}end 0
+
+//=========================================================================
+// The map's base name: coop's, else the engine's minus any "dm/" "obj/" "lib/" folder (an MP arena runs no coop
+// main, so level.coop_mapname is unset there).
+coop_storm_mapName:{
+	local.m = level.coop_mapname
+	if( local.m == NIL || local.m == "" ){ local.m = getcvar( "mapname" ) }
+	if( local.m == NIL ){ local.m = "" }
+	local.out = ""
+	local.i = 0
+	while( local.i < local.m.size ){
+		local.c = local.m[local.i]
+		if( local.c == "/" ){
+			local.out = ""
+		} else {
+			local.out = local.out + local.c
+		}
+		local.i++
+	}
+}end local.out
+
+coop_storm_omaha local.m:{
+	if( local.m == "m3l1a" || local.m == "m3l1b" || local.m == "e3l1" || local.m == "e3l2" || local.m == "obj_team3" ){ end 1 }
+}end 0
+
+//=========================================================================
+// START - threaded from coop_mod/weather.scr::coop_weather_init, rain theme, after the native weather is exec'd.
+coop_storm_start:{
+	if( level.coop_stormStarted == 1 ){ end }
+	level.coop_stormStarted = 1
+	level.coop_stormOn = 0
+	local.m = waitthread coop_storm_mapName
+	level.coop_stormMap = local.m
+
+	// a forced test value never carries into the next map (the coop_dustNow pattern)
+	local.f = getcvar( "coop_stormNow" )
+	if( local.f != "" ){
+		println( "^~^~^ STORM warning: coop_stormNow was " + local.f + " at map start - cleared" )
+		setcvar "coop_stormNow" ""
+	}
+
+	local.on = waitthread coop_storm_on
+	if( local.on != 1 ){
+		println( "^~^~^ STORM off reason=switch map=" + local.m )
+		end
+	}
+	local.om = waitthread coop_storm_omaha local.m
+	if( local.om == 1 ){
+		println( "^~^~^ STORM off reason=omaha map=" + local.m )
+		end
+	}
+	// MP: only where the MP side allowed it (mp_weather.scr sets level.coop_stormMp from its own host toggle, default
+	// OFF - a PvP arena where one player's settings make the storm brighter is a fairness question, vet F13)
+	if( level.coop_mpRun == 1 && level.coop_stormMp != 1 ){
+		println( "^~^~^ STORM off reason=mp map=" + local.m )
+		end
+	}
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){
+		println( "^~^~^ STORM off reason=maptest map=" + local.m )
+		end
+	}
+
+	// seeded before anything reads them (TRAPS T17)
+	level.coop_stormTok = randomint( 90000 ) + 10000
+	level.coop_stormSeq = 0
+	level.coop_stormFrom = 0
+	level.coop_stormTo = 0
+	level.coop_stormT0 = level.time
+	level.coop_stormDur = 0.05
+	level.coop_stormKind = ""
+	level.coop_stormPre = 0
+	level.coop_stormCell = 0
+	level.coop_stormCellEnd = 0
+	level.coop_stormCellNext = level.time + 60 + randomfloat( 120 )
+	level.coop_stormKeyCell = 0
+	level.coop_stormOn = 1
+	println( "^~^~^ STORM start map=" + local.m )
+	thread coop_storm_director
+	thread coop_storm_publish
+}end
+
+//=========================================================================
+// The curve's value now (the same C2 smootherstep every client evaluates, hzm_storm.h HZM_StormSmootherstep).
+coop_storm_value:{
+	local.d = level.coop_stormDur
+	if( local.d < 0.05 ){ local.d = 0.05 }
+	local.t = ( level.time - level.coop_stormT0 ) / local.d
+	if( local.t <= 0 ){ end level.coop_stormFrom }
+	if( local.t >= 1 ){ end level.coop_stormTo }
+	local.k = local.t * local.t * local.t * ( local.t * ( local.t * 6 - 15 ) + 10 )
+	local.v = level.coop_stormFrom + ( level.coop_stormTo - level.coop_stormFrom ) * local.k
+}end local.v
+
+//=========================================================================
+// A new keyframe from the curve's value NOW to local.to over local.dur seconds.
+coop_storm_key local.to local.dur local.why:{
+	local.v = waitthread coop_storm_value
+	level.coop_stormFrom = local.v
+	level.coop_stormTo = local.to
+	level.coop_stormT0 = level.time
+	level.coop_stormDur = local.dur
+	level.coop_stormSeq = level.coop_stormSeq + 1
+	local.a = int( local.v * 1000 )
+	local.b = int( local.to * 1000 )
+	local.c = int( local.dur * 1000 )
+	local.k = level.coop_stormKind
+	println( "^~^~^ STORM key seq=" + level.coop_stormSeq + " kind=" + local.k + " from=" + local.a + " to=" + local.b + " dur=" + local.c + " why=" + local.why )
+}end
+
+//=========================================================================
+// A host weight: "" = the default, else a float >= 0 (0 removes that kind).
+coop_storm_weight local.name local.def:{
+	local.v = getcvar local.name
+	if( local.v == "" ){ end local.def }
+	local.v = float( local.v )
+	if( local.v < 0 ){ local.v = 0 }
+}end local.v
+
+coop_storm_pickKind:{
+	local.f = getcvar( "coop_stormKind" )
+	if( local.f == "light" || local.f == "moderate" || local.f == "dark" ){
+		level.coop_stormKind = local.f
+	} else {
+		local.wl = waitthread coop_storm_weight "coop_stormWLight" 45
+		local.wm = waitthread coop_storm_weight "coop_stormWMod" 30
+		local.wd = waitthread coop_storm_weight "coop_stormWDark" 25
+		local.sum = local.wl + local.wm + local.wd
+		if( local.sum <= 0 ){
+			level.coop_stormKind = "moderate"
+		} else {
+			local.r = randomfloat( local.sum )
+			if( local.r < local.wl ){
+				level.coop_stormKind = "light"
+			} else if( local.r < local.wl + local.wm ){
+				level.coop_stormKind = "moderate"
+			} else {
+				level.coop_stormKind = "dark"
+			}
+		}
+	}
+	println( "^~^~^ STORM kind=" + level.coop_stormKind + " map=" + level.coop_stormMap )
+}end
+
+// the kind's peak darkness (plan.md: light 0.35, moderate 0.65, dark 1.0)
+coop_storm_peak:{
+	if( level.coop_stormKind == "light" ){ end 0.35 }
+	if( level.coop_stormKind == "dark" ){ end 1.0 }
+}end 0.65
+
+//=========================================================================
+// CLOUDS BEFORE RAIN - called by weather.scr's random driver when a dry spell ends, BEFORE it raises the pattern:
+// picks the kind and holds the director at "pattern 1" for 15-25 s while the rain waits.
+coop_storm_preroll:{
+	if( level.coop_stormOn != 1 ){ end }
+	// a NEW storm always rolls a new kind (the last one's may linger while its clouds are still clearing, vet F22)
+	waitthread coop_storm_pickKind
+	level.coop_stormPre = 1
+	local.w = 15 + randomfloat( 10 )
+	local.ws = int( local.w )
+	println( "^~^~^ STORM preroll kind=" + level.coop_stormKind + " rain in " + local.ws + " s" )
+	wait local.w
+	level.coop_stormPre = 0
+}end
+
+//=========================================================================
+// PASSING CELLS: while the pattern is 2+, a darker cell now and then (a dark cloud can roll through a light storm).
+coop_storm_cellTick local.p:{
+	if( getcvar( "coop_stormCells" ) == "0" ){
+		level.coop_stormCell = 0
+		end
+	}
+	if( local.p < 2 ){
+		if( level.coop_stormCell > 0 ){
+			println( "^~^~^ STORM cell cancelled (pattern " + local.p + ")" )
+			level.coop_stormCell = 0
+		}
+		if( level.coop_stormCellNext < level.time + 30 ){ level.coop_stormCellNext = level.time + 30 + randomfloat( 60 ) }
+		end
+	}
+	if( level.coop_stormCell > 0 ){
+		if( level.time >= level.coop_stormCellEnd ){
+			level.coop_stormCell = 0
+			level.coop_stormCellNext = level.time + 60 + randomfloat( 120 )
+			println( "^~^~^ STORM cell end" )
+		}
+		end
+	}
+	if( level.time >= level.coop_stormCellNext ){
+		local.b = 0.25 + randomfloat( 0.15 )
+		if( level.coop_stormKind == "light" ){ local.b = local.b + 0.05 }
+		level.coop_stormCell = local.b
+		level.coop_stormCellEnd = level.time + 40 + randomfloat( 50 )
+		local.bi = int( local.b * 1000 )
+		println( "^~^~^ STORM cell boost=" + local.bi )
+	}
+}end
+
+//=========================================================================
+// THE DIRECTOR: every 0.5 s, target = peak(kind) x scale(pattern) + cell; a keyframe when it moves > 0.02.
+coop_storm_director:{
+	local.first = 1
+	while( level.coop_stormOn == 1 ){
+		local.p = level.weatherpattern
+		if( local.p == NIL ){ local.p = 0 }
+		local.p = int( local.p )
+		if( level.coop_stormPre == 1 && local.p < 1 ){ local.p = 1 }
+
+		// the kind: picked at the first rain (holds, pins and the native cycle) unless the driver's preroll did
+		if( local.p > 0 && level.coop_stormKind == "" ){ waitthread coop_storm_pickKind }
+
+		waitthread coop_storm_cellTick local.p
+
+		local.peak = waitthread coop_storm_peak
+		local.sc = 0
+		if( local.p == 1 ){ local.sc = 0.45 }
+		if( local.p == 2 ){ local.sc = 0.8 }
+		if( local.p >= 3 ){ local.sc = 1.0 }
+		local.tgt = local.peak * local.sc
+		if( local.sc > 0 ){ local.tgt = local.tgt + level.coop_stormCell }
+
+		// the live master: "0" rolls the storm back to clear
+		local.on = waitthread coop_storm_on
+		if( local.on != 1 ){ local.tgt = 0 }
+
+		// TEST: a forced value
+		local.forced = 0
+		local.nv = getcvar( "coop_stormNow" )
+		if( local.nv != "" ){
+			local.tgt = float( local.nv )
+			local.forced = 1
+		}
+		if( local.tgt < 0 ){ local.tgt = 0 }
+		if( local.tgt > 1 ){ local.tgt = 1 }
+
+		local.diff = local.tgt - level.coop_stormTo
+		local.nd = 0 - local.diff
+		local.band = 0.02
+		if( local.forced == 1 ){ local.band = 0.004 }
+		if( local.diff > local.band || local.nd > local.band ){
+			local.cell = 0
+			if( level.coop_stormCell != level.coop_stormKeyCell ){ local.cell = 1 }
+			level.coop_stormKeyCell = level.coop_stormCell
+			if( local.diff > 0 ){
+				local.dur = 30 + randomfloat( 20 )
+				if( local.cell == 1 ){ local.dur = 20 + randomfloat( 12 ) }
+			} else {
+				local.dur = 45 + randomfloat( 30 )
+				if( local.cell == 1 ){ local.dur = 35 + randomfloat( 20 ) }
+			}
+			local.why = "pattern"
+			if( local.cell == 1 ){ local.why = "cell" }
+			if( level.coop_stormPre == 1 ){ local.why = "preroll" }
+			if( local.forced == 1 ){
+				local.why = "forced"
+				local.dur = 30
+				local.fd = getcvar( "coop_stormNowDur" )
+				if( local.fd != "" ){ local.dur = float( local.fd ) }
+				if( local.dur < 0.05 ){ local.dur = 0.05 }
+			}
+			// the map starts where it is: already raining at load = already dark, no roll-in under the player
+			if( local.first == 1 ){
+				local.dur = 0.05
+				local.why = "mapstart"
+			}
+			waitthread coop_storm_key local.tgt local.dur local.why
+		}
+		local.first = 0
+
+		// the storm is over and the sky clear: forget the kind, so the next storm rolls a new one
+		if( local.p == 0 && level.coop_stormKind != "" && level.coop_stormTo < 0.001 ){
+			local.v = waitthread coop_storm_value
+			if( local.v < 0.001 ){
+				println( "^~^~^ STORM clear kind=" + level.coop_stormKind )
+				level.coop_stormKind = ""
+			}
+		}
+		wait 0.5
+	}
+}end
+
+//=========================================================================
+// THE TRANSPORT: the current keyframe to every player (not MP bots) when it changes - checked EVERY FRAME, so a joining
+// player has it within a frame or two of its first snapshot (vet F7: no clear-then-dark pop at spawn) - and to everyone
+// every 3 s (a cgame reload). Integers only: "1 <tok> <seq> <from x1000> <to x1000> <durMs> <elapsedMs>". `set coop_*` is always
+// allowed by the client's command filter; unquoted, one statement per stufftext (TRAPS T8).
+coop_storm_publish:{
+	local.lastAll = 0 - 99
+	while( level.coop_stormOn == 1 ){
+		local.all = 0
+		if( level.time - local.lastAll >= 3 ){
+			local.all = 1
+			local.lastAll = level.time
+		}
+		local.el = level.time - level.coop_stormT0
+		if( local.el > level.coop_stormDur ){ local.el = level.coop_stormDur }
+		if( local.el < 0 ){ local.el = 0 }
+		local.a = int( level.coop_stormFrom * 1000 )
+		local.b = int( level.coop_stormTo * 1000 )
+		local.d = int( level.coop_stormDur * 1000 )
+		local.e = int( local.el * 1000 )
+		local.pl = "1 " + level.coop_stormTok + " " + level.coop_stormSeq + " " + local.a + " " + local.b + " " + local.d + " " + local.e
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.pp = $player[local.i]
+			if( local.pp != NULL ){
+				local.skip = 0
+				if( level.coop_mpRun == 1 ){
+					local.bot = isBot( local.pp )
+					if( local.bot == 1 ){ local.skip = 1 }
+				}
+				if( local.skip == 0 ){
+					if( local.all == 1 || local.pp.flags["coop_stormSeq"] != level.coop_stormSeq ){
+						local.pp.flags["coop_stormSeq"] = level.coop_stormSeq
+						local.pp stufftext ( "set coop_storm " + local.pl )
+					}
+				}
+			}
+			local.i++
+		}
+		waitframe
+	}
+}end

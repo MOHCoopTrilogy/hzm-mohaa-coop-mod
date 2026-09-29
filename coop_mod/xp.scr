@@ -461,6 +461,27 @@ xp_push_own_cvars local.player:{
 	local.player stufftext ( "seta coop_xp_next " + local.next )
 	local.player stufftext ( "seta coop_xp_prestige " + local.pres )
 
+	//[2026-09-27, bug-3076] the MP Service Record's rank bar (ui/coop_mp_record.urc rankBarFill,
+	//linkcvartoshader "coop_xp_barMark", bug-2790) had never drawn: its generator says the cvar is
+	//"pushed by xp.scr", but nothing ever set it - the only coop_xp_barMark here is a per-player FLAG
+	//(the 100-XP popup mark in xp_award), a different namespace. Push the in-rank progress as the
+	//0..10 bucket of the coop_bf bar art, the rule chal_ui_export uses; only when the bucket moves,
+	//because this label runs after every award and the reliable-command budget is finite.
+	local.bf = 10
+	if( local.rank < level.coop_xp_rankMax ){
+		local.bfl = level.coop_xp_rankXP[local.rank]
+		local.bfc = level.coop_xp_rankXP[local.rank + 1]
+		if( local.bfc > local.bfl ){ local.bf = int( 10 * ( local.total - local.bfl ) / ( local.bfc - local.bfl ) ) }
+	} else if( level.coop_xp_prestigeStep > 0 ){
+		local.bf = int( 10 * ( level.coop_xp_prestigeStep - local.next ) / level.coop_xp_prestigeStep )
+	}
+	if( local.bf < 0 ){ local.bf = 0 }
+	if( local.bf > 10 ){ local.bf = 10 }
+	if( local.player.flags["coop_xp_bfSent"] != local.bf ){
+		local.player.flags["coop_xp_bfSent"] = local.bf
+		local.player stufftext ( "seta coop_xp_barMark textures/hud/coop_bf" + local.bf )
+	}
+
 	//[user 2026-09-17] SCOREBOARD FEED: publish this player's rank into a per-slot SERVER cvar so the engine
 	//scoreboard (dm_manager.cpp reads coop_sbRank<clientnum>, exactly like tow_allied_obj*) can show the
 	//shared rank in the Rank column. For a PLAYER entity, entnum IS the client number (clients occupy
@@ -771,8 +792,15 @@ xp_mp_roundcard local.headline:{
 				ihuddraw_virtualsize local.p 166 1
 				ihuddraw_align       local.p 166 left top
 				ihuddraw_shader      local.p 166 "textures/hud/xpbar/xpbar_fill"
+				//[2026-09-27, bug-3076] a width-0 quad is drawn at the texture's NATIVE size (the giant
+				//gold square): a round that just promoted leaves w at 0. Hide it instead of sending 0.
+				local.fillA = 1
+				if( local.w < 1 ){
+					local.w = 1
+					local.fillA = 0
+				}
 				ihuddraw_rect        local.p 166 228 238 local.w 6
-				ihuddraw_alpha       local.p 166 1
+				ihuddraw_alpha       local.p 166 local.fillA
 
 				//PROMOTED banner (only if the round crossed a rank boundary)
 				if( local.rank > local.rank0 ){
@@ -1609,14 +1637,21 @@ xp_hud_popup local.player:{
 	// (xpbar_fill/xpbar_shine are 128 tall with gold only on rows 28..99, transparent
 	// elsewhere) and the fill is drawn with the IDENTICAL rect as the plate - so whatever
 	// the scaler does it does to both, and the gold physically cannot leave the channel.
-	ihuddraw_rect        local.player 63 253 30 0 12
-	ihuddraw_alpha       local.player 63 1
+	//[2026-09-27, bug-3076] THE ACTUAL CAUSE of the recurring "giant gold square on promotion":
+	//a huddraw quad with WIDTH 0 is not invisible. Both renderers' Draw_StretchPic (gl1 and gl2
+	//tr_draw.c: "if (w <= 0) { w = image->width; h = image->height; }") substitute the texture's
+	//NATIVE PIXEL SIZE - xpbar_fill 64x128 (gold 64x72 px), xpbar_shine 256x128 - at any
+	//resolution. A promotion restarts the bar in the new bracket with XP barely over the
+	//threshold, so the fill width rounds to 0 for most or all of the popup. So: NEVER send a
+	//fill width below 1 - hide the layer with alpha instead (local.fillOn below).
+	ihuddraw_rect        local.player 63 253 30 1 12
+	ihuddraw_alpha       local.player 63 0
 
 	ihuddraw_virtualsize local.player 64 1
 	ihuddraw_align       local.player 64 left top
 	ihuddraw_shader      local.player 64 "textures/hud/xpbar/xpbar_shine"
-	ihuddraw_rect        local.player 64 253 30 0 12
-	ihuddraw_alpha       local.player 64 0.85
+	ihuddraw_rect        local.player 64 253 30 1 12
+	ihuddraw_alpha       local.player 64 0
 
 	ihuddraw_virtualsize local.player 65 1
 	ihuddraw_align       local.player 65 left top
@@ -1652,6 +1687,7 @@ xp_hud_popup local.player:{
 	local.shownW = -1
 	local.shownGain = -1
 	local.glowA = 0
+	local.fillOn = 0	//[bug-3076] fill+shine (63/64) start hidden; shown only once their width is >= 1
 
 	while( local.player != NULL && level.time < local.player.flags["coop_xp_popupUntil"] && level.coop_xp_summaryActive != 1 ){
 		local.total = local.player.flags["coop_xp_total"]
@@ -1690,8 +1726,23 @@ xp_hud_popup local.player:{
 		//collapse 134/120 to 1 if the expression associated right, and that is not worth assuming.
 		local.w = int( local.w * 1.11667 )
 		if( local.w > 134 ){ local.w = 134 }	// the fill rect is now the PLATE rect (134 wide)
-		ihuddraw_rect local.player 63 253 30 local.w 12
-		ihuddraw_rect local.player 64 253 30 local.w 12
+		//[bug-3076] width 0 = the renderer draws the texture at NATIVE size (the giant gold square
+		//every promotion showed). Hide below 1 instead; re-show (rect first, then alpha) when it grows.
+		if( local.w < 1 ){
+			if( local.fillOn != 0 ){
+				ihuddraw_alpha local.player 63 0
+				ihuddraw_alpha local.player 64 0
+				local.fillOn = 0
+			}
+		} else {
+			ihuddraw_rect local.player 63 253 30 local.w 12
+			ihuddraw_rect local.player 64 253 30 local.w 12
+			if( local.fillOn != 1 ){
+				ihuddraw_alpha local.player 63 1
+				ihuddraw_alpha local.player 64 0.85
+				local.fillOn = 1
+			}
+		}
 		// head glint rides the fill edge (x = 263 + w - 4, precomputed: parse rules)
 		local.hx = local.w + 249	// glint rides the fill edge, rebased to the plate origin
 		// [user 07-18 bug-805] cap the glint at the groove right edge: at full bar (w 120) it sat at
@@ -1731,7 +1782,10 @@ xp_hud_popup local.player:{
 		local.f = local.a * 0.1
 		local.s = 62
 		while( local.s <= 69 ){
-			ihuddraw_alpha local.player local.s local.f
+			//[bug-3076] a hidden fill stays hidden: fading it back up would re-show its last (stale) width
+			if( local.fillOn == 1 || ( local.s != 63 && local.s != 64 ) ){
+				ihuddraw_alpha local.player local.s local.f
+			}
 			local.s++
 		}
 		local.a--
@@ -1945,8 +1999,11 @@ xp_summary_card local.p:{
 	ihuddraw_align       local.p 65 left top
 	ihuddraw_shader      local.p 65 "textures/hud/xpbar/xpbar_fill"
 	ihuddraw_color       local.p 65 1 1 1
-	ihuddraw_rect        local.p 65 228 238 0 6
-	ihuddraw_alpha       local.p 65 1
+	//[2026-09-27, bug-3076] never width 0: the renderer draws a width-0 quad at the texture's
+	//NATIVE size (the giant gold square at every promotion). Start hidden; local.fillA tracks it.
+	ihuddraw_rect        local.p 65 228 238 1 6
+	ihuddraw_alpha       local.p 65 0
+	local.fillA = 0
 
 	// category totals reveal in parallel, clicks synced under the fill
 	thread xp_card_categories local.p
@@ -1971,7 +2028,7 @@ xp_summary_card local.p:{
 		// a retiring gain-popup fade would otherwise stick (invisible/dimmed bar) for the whole fill
 		ihuddraw_alpha local.p 63 1
 		ihuddraw_alpha local.p 64 0.92
-		ihuddraw_alpha local.p 65 1
+		ihuddraw_alpha local.p 65 local.fillA		//[bug-3076] re-assert the fill's CURRENT state (hidden while its width is 0)
 
 		local.steps = 70		// [user 07-08] slower fill so you can actually read it (was 40 @ waitframe = ~1s)
 		local.s = 0
@@ -1981,7 +2038,19 @@ xp_summary_card local.p:{
 			local.w = int( 194 * (local.v - local.floor) / (local.ceil - local.floor) )	// [user 07-18] 184->194: match the base-plate groove (was under-reaching the channel)
 			if( local.w < 0 ){ local.w = 0 }
 			if( local.w > 194 ){ local.w = 194 }
-			ihuddraw_rect local.p 65 228 238 local.w 6
+			//[bug-3076] hide below width 1 instead of sending 0 (= native-size draw)
+			if( local.w < 1 ){
+				if( local.fillA != 0 ){
+					ihuddraw_alpha local.p 65 0
+					local.fillA = 0
+				}
+			} else {
+				ihuddraw_rect local.p 65 228 238 local.w 6
+				if( local.fillA != 1 ){
+					ihuddraw_alpha local.p 65 1
+					local.fillA = 1
+				}
+			}
 			local.s++
 			wait 0.035
 		}
@@ -2003,7 +2072,10 @@ xp_summary_card local.p:{
 			thread xp_ping_unduck local.p
 			ihuddraw_alpha  local.p 70 0.95
 			ihuddraw_shader local.p 71 ( "textures/hud/coop_rank_" + local.rn )
-			ihuddraw_rect   local.p 65 228 238 0 6
+			//[bug-3076] the bar reset: this line WAS "ihuddraw_rect 65 228 238 0 6", which drew the
+			//gold fill at its native 64x128 px for the whole 0.8 s - the square, on every promotion
+			ihuddraw_alpha  local.p 65 0
+			local.fillA = 0
 			wait 0.8
 			ihuddraw_alpha  local.p 70 0.45
 		} else {

@@ -18,8 +18,9 @@
 //   * Spawn groups relocate with F (push_applySpawns): allies groups 1..F, axis groups 1..(N-F). Reach the
 //     axis end (F>=N) and allies WIN the round (broke through to the enemy spawn); reach the allies end (F<=1)
 //     and axis win; else the side on the enemy half wins at coop_mpPushTime. A round win bumps the series,
-//     first to coop_mpPushToWin (default 2 = best-of-3) wins the match. Sides SWAP every round IN PLACE
-//     (push_roundReset: flip attack ends, recentre F, restart clock) - NO map reload, team membership kept.
+//     first to coop_mpPushToWin (default 2 = best-of-3) wins the match. Each round turns over IN PLACE
+//     (push_roundReset: recentre F, restart clock) - NO map reload, team membership kept, and NO side swap:
+//     [bug-2745] each team keeps its own home end and spawn class for the whole match.
 //
 // SPAWN RELOCATION uses the ENGINE's own enablespawn/disablespawn (PlayerStart::m_bForbidSpawns, honoured by
 // DM_Team::GetRandomSpawnpointWithMetric, dm_manager.cpp) - only the CURRENT frontline group of each team is
@@ -30,7 +31,7 @@
 //
 // COMPASS marker: PER-TEAM via the HZM engine setters set_objective_pos_allies/axis (+ level.force_team_
 // objective 1) - allies' arrow points at the FIXED enemy end they are pushing to, axis' at theirs, so the
-// arrow leads toward the goal instead of riding the moving front. Swaps with the side flip. Spectators fall
+// arrow leads toward the goal instead of riding the moving front (fixed per team - the side flip is off, bug-2745). Spectators fall
 // back to the global set_objective_pos (kept on the live front). Stock round compass arrow, no cgame ship.
 //
 // FALLBACK: on a map with NO authored zone data (coop_mpPushZN < 1 - e.g. an mohdm arena map), Push keeps the
@@ -66,14 +67,15 @@ ensureConfig:{
 	level.coop_mpPushTime = int( local.tm )
 	if( level.coop_mpPushTime < 30 ){ level.coop_mpPushTime = 600 }
 
-	//series target: host cvar coop_mpPushToWin, default 2 (best-of-3 = first to two round wins). Sides SWAP
-	//every round in place (no map reload), so the series score stays keyed to the team, not the side.
+	//series target: host cvar coop_mpPushToWin, default 2 (best-of-3 = first to two round wins). Rounds turn
+	//over in place (no map reload, no side swap - bug-2745), so the series score stays keyed to the team.
 	local.ptw = getcvar( "coop_mpPushToWin" )
 	if( local.ptw == "" ){ local.ptw = "2" }
 	level.coop_mpPushToWin = int( local.ptw )
 	if( level.coop_mpPushToWin < 1 ){ level.coop_mpPushToWin = 2 }
 
-	//[user 2026-09-18] SIDE SWAP. coop_mpPushFlip flips which END each team attacks. flip 0: allies attack the
+	//[user 2026-09-18] SIDE SWAP - DISABLED since bug-2745 (flip stays 0; see push_roundReset). Kept for the record:
+	//coop_mpPushFlip flips which END each team attacks. flip 0: allies attack the
 	//high end (zone N), axis attack zone 1 (the authored orientation). flip 1: reversed. Toggled each round by
 	//push_roundReset so both teams play both sides of the map without a map reload. Team membership never
 	//changes (that would bench live players to spectator - player.cpp Join_DM_Team), so the scoreboard and
@@ -1202,6 +1204,21 @@ push_hud local.left:{
 	if( local.aW < 0 ){ local.aW = 0 }
 	if( local.aW > local.barW ){ local.aW = local.barW }
 	local.xW = ( local.barW - local.aW )
+	//[2026-09-27, bug-3076] a width-0 huddraw quad is drawn at the texture's NATIVE size (xpbar_fill:
+	//a 64x128 px block), and F=1 (every round start) makes aW 0, F=N makes xW 0. Never send 0: send
+	//width 1 and hide that half with alpha. The seam position still uses the true aW.
+	local.aRW = local.aW
+	local.aA = 1
+	if( local.aRW < 1 ){
+		local.aRW = 1
+		local.aA = 0
+	}
+	local.xRW = local.xW
+	local.xA = 1
+	if( local.xRW < 1 ){
+		local.xRW = 1
+		local.xA = 0
+	}
 
 	if( local.left < 0 ){ local.left = 0 }
 	local.mins = int( local.left / 60 )
@@ -1229,17 +1246,17 @@ push_hud local.left:{
 			ihuddraw_virtualsize local.p 151 1
 			ihuddraw_align       local.p 151 left top
 			ihuddraw_shader      local.p 151 "textures/hud/xpbar/xpbar_fill"
-			ihuddraw_rect        local.p 151 local.barX local.barY local.aW 6
+			ihuddraw_rect        local.p 151 local.barX local.barY local.aRW 6
 			ihuddraw_color       local.p 151 0.40 0.78 0.34
-			ihuddraw_alpha       local.p 151 1
+			ihuddraw_alpha       local.p 151 local.aA
 
 			//axis-held (red) from the front seam to the right edge.
 			ihuddraw_virtualsize local.p 152 1
 			ihuddraw_align       local.p 152 left top
 			ihuddraw_shader      local.p 152 "textures/hud/xpbar/xpbar_fill"
-			ihuddraw_rect        local.p 152 ( local.barX + local.aW ) local.barY local.xW 6
+			ihuddraw_rect        local.p 152 ( local.barX + local.aW ) local.barY local.xRW 6
 			ihuddraw_color       local.p 152 0.85 0.30 0.24
-			ihuddraw_alpha       local.p 152 1
+			ihuddraw_alpha       local.p 152 local.xA
 
 			//"PUSH" label, left of the bar.
 			ihuddraw_virtualsize local.p 153 1
@@ -1332,7 +1349,7 @@ push_win local.side local.reason:{
 
 		//[user 2026-09-18] SERVER MAP ROTATION. On a rotation server (coop_mpPushRotate 1) a completed MATCH
 		//advances to the next Push map; a full reload is correct here (the match is over, not a round). Re-arm
-		//the arena gate first. Default off, so normal listen play just keeps swapping sides on the same map.
+		//the arena gate first. Default off, so normal listen play just keeps playing rounds on the same map.
 		if( getcvar( "coop_mpPushRotate" ) == "1" ){
 			local.next = waitthread push_nextMap
 			if( local.next != "" ){
@@ -1347,16 +1364,16 @@ push_win local.side local.reason:{
 				end
 			}
 		}
-		iprintlnbold( "New series - sides swap." )
+		iprintlnbold( "New series - the front resets to the middle." )
 	}
 	else{
-		iprintlnbold( "Sides swap - next round starting..." )
+		iprintlnbold( "Next round starting - the front resets to the middle..." )
 	}
 
-	//[user 2026-09-18] SWAP SIDES WITHOUT A MAP RELOAD. The old path did stuffsrv "map <same>" every round; the
-	//user wants the round to turn over in place. push_roundReset flips the attack ends, recentres the front and
-	//restarts the clock. Team membership is untouched, so no one is benched to spectator and the series score
-	//stays coherent; players simply respawn on their new side.
+	//[user 2026-09-18] NEXT ROUND WITHOUT A MAP RELOAD. The old path did stuffsrv "map <same>" every round; the
+	//user wants the round to turn over in place. push_roundReset recentres the front and restarts the clock
+	//(no side swap since bug-2745). Team membership is untouched, so no one is benched to spectator and the
+	//series score stays coherent; players respawn at their own end.
 	//[bug-2751] MP end-of-round card fills the between-rounds pause (replaces the bare wait 5).
 	local.roundHead = ( local.tag + " WIN THE ROUND" )
 	waitthread coop_mod/xp.scr::xp_mp_roundcard local.roundHead
@@ -1431,10 +1448,9 @@ push_nextMap:{
 
 
 //=========================================================================
-// In-place round turnover: flip which end each team attacks, recentre the front, restart the round clock, and
-// re-publish spawns + compass/bot goals for the new orientation. No map reload - the manager loop (push_loop)
-// is still running and resumes ticking as soon as coop_mpPushEnding clears here. Players keep their team and
-// re-sort to the swapped side on their next respawn.
+// In-place round turnover: recentre the front, restart the round clock, and re-publish spawns + compass/bot
+// goals (the side flip is disabled - bug-2745 below). No map reload - the manager loop (push_loop) is still
+// running and resumes ticking as soon as coop_mpPushEnding clears here. Players keep their team and home end.
 //=========================================================================
 push_roundReset:{
 	if( level.coop_mpRun != 1 ){ end }
