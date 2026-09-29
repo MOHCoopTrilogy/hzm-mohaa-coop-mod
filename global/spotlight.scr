@@ -277,35 +277,52 @@ spotowner:{
 	self exec global/disable_ai.scr
 	self.fastcheck = 0
 	local.shooting = 0
-//	self.gun bulletspread 100 100
+//	local.gun bulletspread 100 100
 	self.on_target = 0
 	self.visible = 1
 
 
+	//[bug-3194, bug-2548] THE GUN IS THE SPOTTER'S TURRET, NOT self.gun. Retail kept the MG42's targetname in a
+	//script variable named `gun` and let the string resolve to the entity. OpenMOHAA's Actor has an engine `gun`
+	//property (EV_Actor_GetGun, actor.cpp:84) that shadows it and returns the WEAPON NAME, so every self.gun
+	//here reached a NULL listener: 6 Script Errors per spotlight per map load (m1l2a, e2l2, t2l2, m4l2, m4l3) and a
+	//gunner that never fired. spotwatch already hands the actor its TurretGun through the engine's own
+	//`turret` property (EV_Actor_SetTurret resolves the targetname -> m_pTurret), so read it back from there.
+	local.gun = self.turret
+	if( local.gun == NULL ){
+		if( self.target != NIL && self.target != "" ){ local.gun = $(self.target) }
+	}
+	if( local.gun == NULL ){
+		println( "^~^~^ SPOTGUN none spotter=" + self.entnum )
+		end
+	}
+	println( "^~^~^ SPOTGUN ok spotter=" + self.entnum + " gun=" + local.gun.entnum )
+
 	local.ent2 = spawn script_origin
-	local.org = angles_toforward (self.gun.angles)
-	local.org = (local.org * 150) + (self.gun.origin)
+	local.org = angles_toforward (local.gun.angles)
+	local.org = (local.org * 150) + (local.gun.origin)
 	local.ent2.origin = local.org
 
 	while (self.parent.checkdeath != 1){
 		wait (randomint(level.spotrespondtime) + 1.5)
+		if( local.gun == NULL ){ end }
 		if ((level.spotplayer[self.parent.set] == 1) && (self.parent.on_target == 1)){
 			//[200] chrissstrahl - don't fire if there is no target
 			if(level.spottarget != NULL){
 				//[200] chrissstrahl - fixed level.spottarget
 println "::spotowner targeting 1: level.spottarget"
-				self.gun setAimTarget level.spottarget
-				self.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
-				self.gun startFiring
+				local.gun setAimTarget level.spottarget
+				local.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
+				local.gun startFiring
 				local.shooting = 1
 			}
 		}
 		else if (local.shooting == 1){
 			if (( level.spotplayer[self.parent.set] != 1 ) || (self.parent.on_target != 1)){
 				wait 4
-				self.gun clearAimTarget
-				self.gun stopFiring
-				self.gun setAimTarget local.ent2
+				local.gun clearAimTarget
+				local.gun stopFiring
+				local.gun setAimTarget local.ent2
 println "::spotowner clearaimtarget 1"
 				local.shooting = 0
 			}
@@ -316,22 +333,23 @@ println "::spotowner clearaimtarget 1"
 	self.on_target_time = 0
 	while (1){
 		wait (randomint(level.spotrespondtime) + 1.5)
+		if( local.gun == NULL ){ end }
 
 		if (self.visible == 1){
 			//[200] chrissstrahl - fixed level.spottarget
 			if (level.spottarget != NULL && self cansee level.spottarget){
 println "::spotowner targeting 2: level.spottarget"
-				self.gun setAimTarget level.spottarget
-				self.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
-				self.gun startFiring
+				local.gun setAimTarget level.spottarget
+				local.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
+				local.gun startFiring
 				local.shooting = 1
 			}
 			else if (local.shooting == 1){
 				if ( level.spotplayer[self.parent.set] != 1 ){	
 					wait 5
-					self.gun clearAimTarget
-					self.gun stopFiring
-					self.gun setAimTarget local.ent2
+					local.gun clearAimTarget
+					local.gun stopFiring
+					local.gun setAimTarget local.ent2
 println "::spotowner clearaimtarget 2"
 					local.shooting = 0
 				}
@@ -339,8 +357,8 @@ println "::spotowner clearaimtarget 2"
 		}
 		else{
 println "::spotowner clearaimtarget 2 b"
-			self.gun clearAimTarget
-			self.gun stopFiring
+			local.gun clearAimTarget
+			local.gun stopFiring
 		}
 
 	}
@@ -349,10 +367,17 @@ println "::spotowner clearaimtarget 2 b"
 //============================================================================
 spotowner_death:{
 //============================================================================
+	//[bug-3194] same receiver as spotowner, resolved before the death while the actor is still whole
+	local.gun = self.turret
+	if( local.gun == NULL ){
+		if( self.target != NIL && self.target != "" ){ local.gun = $(self.target) }
+	}
 	self waittill death
 
-	self.gun clearAimTarget
-	self.gun stopFiring
+	if( local.gun != NULL ){
+		local.gun clearAimTarget
+		local.gun stopFiring
+	}
 	self.parent.spotterdeath = 1
 
 	for (local.i=1;local.i<level.spotlights+1;local.i++){
@@ -506,7 +531,7 @@ spotwatch:{
 
 			if (self.on_target_time < 1){
 				self.on_target = 0
-				self.spotter.gun stopFiring
+				if( self.spotter != NIL && self.spotter != NULL ){ if( self.spotter.turret != NULL ){ self.spotter.turret stopFiring } }	//[bug-3194]
 			}
 		}
 
@@ -725,7 +750,7 @@ aimspot:{
 			}
 			else{
 				self.on_target = 0
-				self.spotter.gun stopFiring
+				if( self.spotter != NIL && self.spotter != NULL ){ if( self.spotter.turret != NULL ){ self.spotter.turret stopFiring } }	//[bug-3194]
 			}
 		}
 	}
