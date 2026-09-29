@@ -10,8 +10,8 @@
 // No fog DISTANCE change (AI sight, Actor::FixAIParameters), no fog configstring write (the fog keeper, the fog
 // zones, the dust storm and the lightning fog pulses are untouched).
 //
-//   coop_stormLight ""/1/0  = master. "" = the shipped default (coop_storm_on: OFF until the user has seen the
-//                             GIFs). Read at map start; "0" live = the storm ramps back to clear.
+//   coop_stormLight ""/1/0  = master. "" = the shipped default (coop_storm_on: ON since v1.10.4, user 2026-09-28
+//                             "keep the darkness"). Read at map start; "0" live = the storm ramps back to clear.
 //   coop_stormKind          = force the kind: light / moderate / dark ("" = weighted random)
 //   coop_stormWLight/WMod/WDark = the mix, default 45 / 30 / 25 (0 allowed)
 //   coop_stormCells ""/0    = passing dark cells (default on)
@@ -28,12 +28,13 @@ alive:{
 }end
 
 //=========================================================================
-// The shipped default. FLIP HERE after the user's go (plan.md section 7): end 1 for an empty coop_stormLight.
+// The shipped default: ON for an empty coop_stormLight (v1.10.4, user 2026-09-28 "keep the darkness", plan.md
+// section 7). MP arenas stay off unless the host sets coop_mpStorm 1 (mp_weather.scr, default off).
 coop_storm_on:{
 	local.s = getcvar( "coop_stormLight" )
 	if( local.s == "1" ){ end 1 }
 	if( local.s == "0" ){ end 0 }
-}end 0
+}end 1
 
 //=========================================================================
 // The map's base name: coop's, else the engine's minus any "dm/" "obj/" "lib/" folder (an MP arena runs no coop
@@ -110,6 +111,11 @@ coop_storm_start:{
 	level.coop_stormCellEnd = 0
 	level.coop_stormCellNext = level.time + 60 + randomfloat( 120 )
 	level.coop_stormKeyCell = 0
+	level.coop_stormClass = ""
+	level.coop_stormRampK = 1
+	level.coop_stormHold = 0
+	level.coop_stormEnd = 0
+	level.coop_stormLastHold = 0
 	level.coop_stormOn = 1
 	println( "^~^~^ STORM start map=" + local.m )
 	thread coop_storm_director
@@ -191,6 +197,7 @@ coop_storm_preroll:{
 	if( level.coop_stormOn != 1 ){ end }
 	// a NEW storm always rolls a new kind (the last one's may linger while its clouds are still clearing, vet F22)
 	waitthread coop_storm_pickKind
+	waitthread coop_storm_pickHold 20
 	level.coop_stormPre = 1
 	local.w = 15 + randomfloat( 10 )
 	local.ws = int( local.w )
@@ -226,11 +233,86 @@ coop_storm_cellTick local.p:{
 		local.b = 0.25 + randomfloat( 0.15 )
 		if( level.coop_stormKind == "light" ){ local.b = local.b + 0.05 }
 		level.coop_stormCell = local.b
-		level.coop_stormCellEnd = level.time + 40 + randomfloat( 50 )
+		local.cr = randomfloat( 1 )
+		local.cl = 40 + randomfloat( 50 )
+		if( local.cr < 0.3 ){ local.cl = 20 + randomfloat( 20 ) }
+		if( local.cr >= 0.8 ){ local.cl = 90 + randomfloat( 110 ) }
+		level.coop_stormCellEnd = level.time + local.cl
 		local.bi = int( local.b * 1000 )
 		println( "^~^~^ STORM cell boost=" + local.bi )
 	}
 }end
+
+//=========================================================================
+// VARIABLE STORM LENGTH [user 2026-09-28]. A storm's CLASS and HOLD (seconds from the rain starting to the walk turning
+// for home): squall 45-100 s (25 %), medium 150-400 s (55 %), long 480-900 s (20 %); x coop_stormHoldScale ("" = 1,
+// clamped 0.25..3); never past coop_stormHoldMax ("" = 1200). local.lead = seconds before the rain starts (the preroll).
+coop_storm_pickHold local.lead:{
+	local.r = randomfloat( 1 )
+	if( local.r < 0.25 ){
+		level.coop_stormClass = "squall"
+		local.h = 45 + randomfloat( 55 )
+		level.coop_stormRampK = 0.7
+	} else if( local.r < 0.8 ){
+		level.coop_stormClass = "medium"
+		local.h = 150 + randomfloat( 250 )
+		level.coop_stormRampK = 1
+	} else {
+		level.coop_stormClass = "long"
+		local.h = 480 + randomfloat( 420 )
+		level.coop_stormRampK = 1.25
+	}
+	local.k = 1
+	local.v = getcvar( "coop_stormHoldScale" )
+	if( local.v != "" ){ local.k = float( local.v ) }
+	if( local.k < 0.25 ){ local.k = 0.25 }
+	if( local.k > 3 ){ local.k = 3 }
+	local.h = local.h * local.k
+	local.mx = 1200
+	local.v = getcvar( "coop_stormHoldMax" )
+	if( local.v != "" ){ local.mx = float( local.v ) }
+	if( local.mx < 30 ){ local.mx = 30 }
+	if( local.h > local.mx ){ local.h = local.mx }
+	level.coop_stormHold = local.h
+	level.coop_stormLastHold = local.h
+	level.coop_stormEnd = level.time + local.lead + local.h
+	local.hs = int( local.h )
+	println( "^~^~^ STORM length class=" + level.coop_stormClass + " hold=" + local.hs + " s" )
+}end
+
+// random-driver hooks (weather.scr coop_weather_randomDriver), only while the storm system runs:
+// the build chance - none once the storm's hold is over (it walks home)
+coop_storm_holdPb local.cur local.pb:{
+	if( level.coop_stormEnd > 0 && level.time >= level.coop_stormEnd ){ end 0 }
+}end local.pb
+
+// the pattern floor - the rain does not stop before the hold is over
+coop_storm_holdFloor local.cur:{
+	if( local.cur < 1 && level.coop_stormEnd > 0 && level.time < level.coop_stormEnd ){ end 1 }
+}end local.cur
+
+// the step wait - a squall steps quickly, and a storm past its hold walks home in 12-25 s steps
+coop_storm_stepWait local.w:{
+	if( level.coop_stormEnd > 0 && level.time >= level.coop_stormEnd ){
+		local.w = 12 + randomfloat( 13 )
+		end local.w
+	}
+	if( level.coop_stormClass == "squall" ){
+		local.w = 10 + randomfloat( 10 )
+		end local.w
+	}
+	local.left = level.coop_stormEnd - level.time
+	if( level.coop_stormEnd > 0 && local.left > 0 && local.w > local.left ){
+		local.w = local.left + 1
+	}
+}end local.w
+
+// the respite - the dry spell after a storm is at least max(90 s, 0.35 x its hold)
+coop_storm_respite local.dmin:{
+	local.r = 0.35 * level.coop_stormLastHold
+	if( local.r < 90 ){ local.r = 90 }
+	if( local.dmin < local.r ){ end local.r }
+}end local.dmin
 
 //=========================================================================
 // THE DIRECTOR: every 0.5 s, target = peak(kind) x scale(pattern) + cell; a keyframe when it moves > 0.02.
@@ -243,7 +325,10 @@ coop_storm_director:{
 		if( level.coop_stormPre == 1 && local.p < 1 ){ local.p = 1 }
 
 		// the kind: picked at the first rain (holds, pins and the native cycle) unless the driver's preroll did
-		if( local.p > 0 && level.coop_stormKind == "" ){ waitthread coop_storm_pickKind }
+		if( local.p > 0 && level.coop_stormKind == "" ){
+			waitthread coop_storm_pickKind
+			waitthread coop_storm_pickHold 0
+		}
 
 		waitthread coop_storm_cellTick local.p
 
@@ -270,6 +355,11 @@ coop_storm_director:{
 		if( local.tgt > 1 ){ local.tgt = 1 }
 
 		local.diff = local.tgt - level.coop_stormTo
+		//a FORCED (test) value is measured against the curve NOW: a ramp already heading to it must still snap
+		if( local.forced == 1 ){
+			local.cv = waitthread coop_storm_value
+			local.diff = local.tgt - local.cv
+		}
 		local.nd = 0 - local.diff
 		local.band = 0.02
 		if( local.forced == 1 ){ local.band = 0.004 }
@@ -284,6 +374,8 @@ coop_storm_director:{
 				local.dur = 45 + randomfloat( 30 )
 				if( local.cell == 1 ){ local.dur = 35 + randomfloat( 20 ) }
 			}
+			local.dur = local.dur * level.coop_stormRampK
+			if( local.dur < 20 ){ local.dur = 20 }
 			local.why = "pattern"
 			if( local.cell == 1 ){ local.why = "cell" }
 			if( level.coop_stormPre == 1 ){ local.why = "preroll" }
@@ -307,8 +399,11 @@ coop_storm_director:{
 		if( local.p == 0 && level.coop_stormKind != "" && level.coop_stormTo < 0.001 ){
 			local.v = waitthread coop_storm_value
 			if( local.v < 0.001 ){
-				println( "^~^~^ STORM clear kind=" + level.coop_stormKind )
+				println( "^~^~^ STORM clear kind=" + level.coop_stormKind + " class=" + level.coop_stormClass )
 				level.coop_stormKind = ""
+				level.coop_stormClass = ""
+				level.coop_stormEnd = 0
+				level.coop_stormRampK = 1
 			}
 		}
 		wait 0.5
