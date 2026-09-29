@@ -157,7 +157,14 @@ loadout_setBody local.player local.slot local.data local.quiet:{
 	//m2l2a stealth start would hand weapons to a squad the map has deliberately left unarmed.
 	if(local.quiet == 1){ end }
 
-	local.player iprint ("Armory: " + local.r["name"] + " equipped")
+	//[user 2026-09-28, bug-3208] no per-slot toast inside the JOIN window. The listen host's seed
+	//(loadout_hostSeed) and a remote client's join resend both RE-DELIVER picks that were chosen earlier,
+	//and four "X equipped" lines on every map load read as "it gave me my loadout again". The commit and
+	//the debounced regive below still run - only the sentence is dropped. A deliberate armory click after
+	//the join window (loadout_resend clears coop_loJoinResend) toasts exactly as before.
+	if(local.player.flags["coop_loJoinResend"] == NIL){
+		local.player iprint ("Armory: " + local.r["name"] + " equipped")
+	}
 
 	//[310] the first spawn usually happens BEFORE the join-time resend delivers the picks
 	//(m1l1 spawn at +10s vs resend at +5..10s) - re-issue the kit once the pick burst
@@ -266,6 +273,30 @@ loadout_regiveWatch local.player:{
 		end
 	}
 	local.player.flags["coop_loRegiveQueued"] = NIL
+	//[user 2026-09-28, bug-3208] SPECTATORS ARE NOT GIVEN A KIT. isAlive is TRUE for a spectator, so a
+	//host still in the team menu when the join window closed was handed the whole kit AS A SPECTATOR
+	//("Picked Up" x4, live log 09-28 14:51:05 on m3l1a) and given it again at the real team spawn two
+	//minutes later. The team spawn reads this same rebuilt picks list, so nothing is lost by stopping.
+	if(local.player.dmteam == "spectator"){ end }
+	//[user 2026-09-28, bug-3208] IDEMPOTENT APPLY - "in coop you are given your loadout several times ...
+	//it actually lags when it happens, a few seconds after spawn". The join burst (loadout_hostSeed, the
+	//resend volleys) arms this watch even when the picks it commits are exactly the kit the spawn ALREADY
+	//issued, so every map load gave the listen host the kit at spawn and again ~24s later (live log 09-28:
+	//KITSPAWN 12:46:29 then 12:46:53 + "Armory: your loadout has been applied"; 13:15:29 then 13:15:53).
+	//Each re-issue is a takeall, four pickup spawns, two g_gametype flips and a weapon re-raise (the
+	//EF_UNARMED blank of bug-2066), mid-fight. spawnInventory stamps coop_loGivenSig with the picks list
+	//it issued; when the rebuilt list is unchanged AND every gun in it is still carried there is nothing
+	//to apply. A pick that CHANGED the list (new gun, finish variant) still regives, and so does a kit that
+	//went missing (a stealth strip, a revive that dropped a gun) - loadout_kitHeld checks the inventory.
+	local.sig = waitthread loadout_kitSig local.player
+	if(local.player == NULL){ end }
+	if(local.sig != "" && local.sig == local.player.flags["coop_loGivenSig"]){
+		if(waitthread loadout_kitHeld local.player){
+			println ( "^~^~^ LOADOUT regive skip player=" + local.player.netname + " (identical kit already held)" )
+			end
+		}
+	}
+	if(local.player == NULL){ end }
 	//[user 2026-08-18] the 120s mid-mission gate is GONE: it blocked every deliberate armory
 	//pick past two minutes while protecting nothing - no map ever set the documented opt-out
 	//(coop_loadoutLocked), which is the real mechanism for scripted-kit/stealth maps and which
@@ -282,6 +313,76 @@ loadout_regiveWatch local.player:{
 	local.player thread coop_mod/main.scr::itemGetAll
 	local.player iprint "Armory: your loadout has been applied"
 }end
+
+//=========================================================================
+//[user 2026-09-28, bug-3208] The picks list as one string ("tik|tik|..."), NIL-safe. MUST stay
+// byte-identical to the inline stamp in itemhandler.scr::spawnInventory (coop_loGivenSig), which is
+// written inline there only to avoid adding a suspension point inside the shared-`group` give.
+//=========================================================================
+loadout_kitSig local.player:{
+//=========================================================================
+	local.s = ""
+	if(local.player == NULL){ end local.s }
+	local.lw = local.player.flags["coop_loWeapons"]
+	if(local.lw == NIL){ end local.s }
+	for(local.i = 1; local.i <= local.lw.size; local.i++){
+		if(local.lw[local.i] != NIL){ local.s = local.s + local.lw[local.i] + "|" }
+	}
+}end local.s
+
+//=========================================================================
+//[user 2026-09-28, bug-3208] 1 when every PRIMARY and SIDEARM of the picks list is in the inventory.
+// Same class filter and the same inventory read (coop_hasitem, Sentient::FindItem - it never touches
+// the hands) as itemhandler.scr::coop_backfillPrimaries. Grenades are not checked: a thrown grenade must
+// not turn an idempotent re-commit into a full re-issue (the regive is not a resupply).
+//=========================================================================
+loadout_kitHeld local.player:{
+//=========================================================================
+	if(local.player == NULL){ end 0 }
+	local.lw = local.player.flags["coop_loWeapons"]
+	if(local.lw == NIL){ end 0 }
+	for(local.i = 1; local.i <= local.lw.size; local.i++){
+		local.w = local.lw[local.i]
+		if(local.w != NIL){
+			if(waitthread coop_mod/itemhandler.scr::notStartGrenade local.w){
+				local.c = waitthread coop_mod/itemhandler.scr::getAmmoType local.w
+				local.chk = 0
+				if(waitthread coop_mod/itemhandler.scr::coop_isPrimaryClass local.c){ local.chk = 1 }
+				if(local.c == "pistol"){ local.chk = 1 }
+				if(local.chk == 1){
+					if(local.player == NULL){ end 0 }
+					local.have = local.player coop_hasitem local.w
+					if(local.have != 1){ end 0 }
+				}
+			}
+		}
+	}
+}end 1
+
+//=========================================================================
+//[user 2026-09-28, bug-3208] The digits after local.tag in an archived bus recipe, e.g.
+// ("append name ,sn37", ",sn") -> "37". "" when the tag is absent (an unset cvar, the cleared "0").
+//=========================================================================
+loadout_tokNum local.s local.tag:{
+//=========================================================================
+	local.out = ""
+	if(local.s == NIL || local.s == ""){ end local.out }
+	local.n = local.s.size
+	local.m = local.tag.size
+	local.last = local.n - local.m
+	for(local.i = 0; local.i <= local.last; local.i++){
+		local.hit = 1
+		for(local.j = 0; local.j < local.m; local.j++){
+			local.k = local.i + local.j
+			if(local.s[local.k] != local.tag[local.j]){ local.hit = 0 }
+		}
+		if(local.hit == 1){
+			local.out = ""
+			local.from = local.i + local.m
+			for(local.k = local.from; local.k < local.n; local.k++){ local.out = local.out + local.s[local.k] }
+		}
+	}
+}end local.out
 
 //=========================================================================
 // Per-join pick re-request (launched from player.scr next to detectCoop so
@@ -431,6 +532,51 @@ if(level.cMTE_coop_loadoutpick){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		local.id = getcvar ("coop_lo" + local.s)
 		if(local.id != NIL && local.id != ""){
 			waitthread loadout_set local.player local.s local.id
+		}
+	}
+	//[user 2026-09-28, bug-3208] HOST COSMETICS, SAME RECIPE AS THE PICKS ABOVE. The armory skin and
+	//helmet reached the host only through loadout_resend's ,sn/,hn tokens at ~t+20s - AFTER the first team
+	//spawn - so the host spawned in the old look and was re-modelled mid-fight with a RUNTIME model load
+	//(live log 09-28 13:15:48: "cache models/coop_helmets/coop_std_us_helmet_29th_net.tik" + "Skin:",
+	//five seconds before the redundant kit). The archived recipes coop_loASkin / coop_loAHelm ("append
+	//name ,sn37") are server-readable on a listen server exactly like coop_lo1..4. Record them as the flags
+	//the SPAWN reads (player.scr skin re-force, helmet_apply hook) so the first team spawn wears them and
+	//the later tokens change nothing. Flags only - no live model is touched here - behind the same gates
+	//the token path runs. Skipped when the unlock record is not loaded: the tokens then apply as before.
+	if(local.player == NULL){ end }
+	if(local.player.flags["coop_chal_loaded"] != 1){ end }
+	local.tok = getcvar "coop_loASkin"
+	local.num = waitthread loadout_tokNum local.tok ",sn"
+	if(local.num != ""){
+		local.si = int( local.num )
+		waitthread coop_mod/helmet.scr::armory_skin_build
+		if(local.player == NULL){ end }
+		if(local.si >= 1 && local.si <= level.coop_armorySkins.size){
+			local.skn = level.coop_armorySkins[local.si]
+			if(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player ("models/player/" + local.skn + ".tik")){
+				if(local.player != NULL){
+					local.player.flags["coop_armorySkin"] = local.skn
+					local.player.flags["coop_armorySkinIdx"] = local.si
+				}
+			}
+		}
+	}
+	if(local.player == NULL){ end }
+	local.tok = getcvar "coop_loAHelm"
+	local.num = waitthread loadout_tokNum local.tok ",hn"
+	if(local.num != ""){
+		local.hi = int( local.num )
+		waitthread coop_mod/helmet.scr::helmet_initList
+		if(local.player == NULL){ end }
+		//bug-2085: 30/31/32 are the hidden full-skeleton hats - armory_helmet_set maps them to Standard Issue
+		if(local.hi == 30 || local.hi == 31 || local.hi == 32){ local.hi = 1 }
+		if(local.hi >= 1 && local.hi <= level.coop_helmetCount){
+			if(waitthread coop_mod/helmet.scr::cosmetic_isUnlocked local.player level.coop_helmetTik[local.hi]){
+				if(local.player != NULL){
+					local.player.flags["coop_helmetIdx"] = local.hi
+					local.player.flags["coop_helmetTouched"] = 1
+				}
+			}
 		}
 	}
 }end
