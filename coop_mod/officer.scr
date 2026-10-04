@@ -702,7 +702,7 @@ coop_spawn_bodyguard local.pos local.idx:{
 	local.guard.coop_xpClass = "guard"	// [302] HZM XP - kill-class bonus tag
 	local.guard.origin = local.gnd
 	local.guard droptofloor
-	local.guard.health = 640	// [209] -20% HP (was 800)
+	local.guard.health = 420	//[user 2026-09-29] was 640 (reported as unkillable); live-rescaled by coop_reinf_liveScale
 	local.guard.flags["coop_actorStopPainHandler"] = 1
 	local.guard.accuracy = 60	// [209] softened (was 70)
 	local.guard.sight = 2200	// [209] shorter vision range
@@ -779,8 +779,12 @@ coop_officer_brain local.officer:{
 				// (coop_officerMaxHeals, def 2). At the cap he simply stops retreating and keeps
 				// fighting - he is NOT made passive, and the canteen sip below is still available
 				// (itself capped at 3), so the fall-through degrades gracefully instead of stranding him.
+				//[user 2026-09-29] thresholds are FRACTIONS of his live-scaled max (were absolute 480/600, tuned
+				//for 1200 HP: a solo officer spawns at 500, so he was always "hurt" and drank at spawn)
+				local.mx = level.coop_officerMaxHp
+				if( local.mx == NIL || local.mx <= 0 ){ local.mx = 500 }
 				local.wantheal = 0
-				if( local.officer.health < 480 && local.unseen >= 8 && local.retreat_rolled == 0 ){ local.wantheal = 1 }
+				if( local.officer.health < (local.mx * 0.4) && local.unseen >= 8 && local.retreat_rolled == 0 ){ local.wantheal = 1 }
 				if( local.wantheal == 1 ){
 					if( (exec coop_mod/officer.scr::coop_officer_healsLeft) == 0 ){
 						local.wantheal = 0
@@ -793,7 +797,7 @@ coop_officer_brain local.officer:{
 					thread coop_officer_medkit_retreat local.officer
 				} else {
 					// Canteen sip: guaranteed once per unseen episode when under 50% HP, small heal, max 3
-					if( local.unseen >= 6 && local.canteen_armed == 1 && level.coop_officer_canteens < 3 && local.officer.health < 600 ){
+					if( local.unseen >= 6 && local.canteen_armed == 1 && level.coop_officer_canteens < 3 && local.officer.health < (local.mx * 0.5) ){
 						local.canteen_armed = 0
 						thread coop_officer_canteen local.officer
 					}
@@ -814,7 +818,7 @@ coop_officer_canteen local.officer:{
 	iprintlnbold "The Officer is drinking from his canteen to recover!"
 	wait 2
 	if( isAlive local.officer && level.coop_officer_alive == 1 ){
-		local.newhp = local.officer.health + 100
+		local.newhp = local.officer.health + int( level.coop_officerMaxHp / 12 )	//[user 2026-09-29] was a flat +100 (1/12 of the old 1200 max)
 		if( local.newhp > level.coop_officerMaxHp ){ local.newhp = level.coop_officerMaxHp }
 		local.officer.health = local.newhp
 		local.officer gore_reset 100	// HZM coop - gore tier 1: canteen sip washes some blood off
@@ -882,7 +886,9 @@ coop_officer_retreat_monitor local.officer:{
 	while( isAlive local.officer ){
 		local.officer waittill damage
 		if( local.officer != NULL ){
-			if( local.officer.health < 100 ){
+			local.rmx = level.coop_officerMaxHp
+			if( local.rmx == NIL || local.rmx <= 0 ){ local.rmx = 500 }
+			if( local.officer.health < (local.rmx * 0.08) ){	//[user 2026-09-29] was an absolute 100 (1/12 of the old 1200 max)
 				if( level.coop_radio != NIL && level.coop_radio != NULL ){
 					local.officer.enableEnemy = 0
 					local.officer runto level.coop_radio.origin
@@ -1151,9 +1157,13 @@ coop_officer_reinforcements local.officer:{
 
 	// STATE: IDLE - poll until officer has spotted a player
 	if(level.cMTE_coop_officer){ iprintlnbold "REINF STATE: idle - waiting for first contact" }
+	//[user 2026-09-29] CONTACT = he SEES a player, or he has been HURT. Was also `enemy != NULL`, which is
+	//true from his first frame: coop_officer_spawn runs replace.scr::attackplayer -> Actor::ForceAttackPlayer,
+	//which confirms the player as his enemy with no line of sight, so "first contact" fired at spawn.
 	while( isAlive local.officer && level.coop_officer_alive == 1 ){
-		if( local.officer.enemy != NULL ){ break }
 		if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
+		local.imx = level.coop_officerMaxHp
+		if( local.imx != NIL && local.imx > 0 && local.officer.health < (local.imx * 0.97) ){ break }
 		wait 0.5
 	}
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
@@ -1165,9 +1175,9 @@ coop_officer_reinforcements local.officer:{
 	// retreat-to-radio runs). POOR HEALTH (30%) = auto-call the BATTALION once + fall back to HEAL.
 	// While he is busy (retreating/healing) NO threshold fires, and nothing re-fires until a FULL heal
 	// re-arms them (coop_officer_threshold_reset, set at the end of coop_officer_medkit_retreat).
-	local.thresh75   = 1125
-	local.thresh50   = 750
-	local.thresh_poor = 450
+	//[user 2026-09-29] FRACTIONS of his live-scaled max, recomputed every tick below (were absolute
+	//1125/750/450, tuned for 1500 HP: a solo officer spawns at 500, under the 75% AND 50% marks, so both
+	//radio calls fired at once with no sighting and one more hit tripped poor health).
 	local.t75_done   = 0
 	local.t50_done   = 0
 	local.poor_done  = 0
@@ -1191,6 +1201,11 @@ coop_officer_reinforcements local.officer:{
 			continue
 		}
 		local.hp = local.officer.health
+		local.mx = level.coop_officerMaxHp
+		if( local.mx == NIL || local.mx <= 0 ){ local.mx = 500 }
+		local.thresh75    = local.mx * 0.75
+		local.thresh50    = local.mx * 0.5
+		local.thresh_poor = local.mx * 0.3
 		local.fired = 0
 		// POOR HEALTH preempts everything: battalion + heal, then quiet until fully healed.
 		if( local.fired == 0 && local.poor_done == 0 && local.hp <= local.thresh_poor ){
@@ -1742,6 +1757,11 @@ coop_reinf_scale local.actor:{
 	local.bp = int( local.bp )
 	if( local.bp < 1 ){ local.bp = 2 }
 	local.extra = local.pc - local.bp
+	//[user 2026-09-29] remember the unscaled HP (base) and the max actually applied (scaled), and keep it
+	//matched to the LIVE squad (spectators excluded) - see coop_reinf_liveScale
+	local.actor.flags["coop_baseHp"] = local.actor.health
+	local.actor.flags["coop_scaledHp"] = local.actor.health
+	thread coop_reinf_liveScale local.actor
 	if( local.extra == 0 ){ end }
 	local.hpct = getcvar "coop_officerHealthPct"
 	if( local.hpct == "" ){ local.hpct = 35 }
@@ -1753,6 +1773,7 @@ coop_reinf_scale local.actor:{
 		if( local.hp < 25 ){ local.hp = 25 }
 		if( local.hp > 690 ){ local.hp = 690 }
 		local.actor.health = local.hp
+		local.actor.flags["coop_scaledHp"] = local.hp
 	}
 	local.apct = getcvar "coop_officerAccPct"
 	if( local.apct == "" ){ local.apct = 15 }
@@ -2783,6 +2804,7 @@ coop_spawn_mg_team local.pos:{
 	local.mg.flags["coop_actorStopPainHandler"] = 1
 	local.mg.accuracy = 80
 	local.mg.enableEnemy = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.mg	//[user 2026-09-29] gunner was never player-count scaled or live-rescaled (and had no void guard)
 	local.mg type_idle "machinegunner"
 	local.mg type_attack "machinegunner"
 	local.mg type_disguise "machinegunner"
@@ -2807,6 +2829,7 @@ coop_spawn_mg_team local.pos:{
 	local.spot.leash = 2048
 	local.spot.enableEnemy = 1
 	local.spot gun "mp40"
+	exec coop_mod/officer.scr::coop_reinf_scale local.spot	//[user 2026-09-29] same as the gunner
 	local.spot exec coop_mod/replace.scr::attackplayer
 	local.spot rendereffects "+coopboss"
 	thread coop_wave_hunt local.spot
@@ -5432,7 +5455,10 @@ coop_squad_surrender local.actor:{
 			//EF_AXIS is still set" - he is still team german until converted, so without the
 			//override he would get the swastika. cgame clears the icon itself on EF_DEAD, which
 			//is exactly "stays until they die".
-			local.actor rendereffects "+coopboss +lightstyledynamiclight"
+			//[user 2026-09-29] ONE flag per call: Entity::RenderEffects reads a single token, so the old
+			//"+coopboss +lightstyledynamiclight" printed "Unknown token" and applied neither
+			local.actor rendereffects "+coopboss"
+			local.actor rendereffects "+lightstyledynamiclight"
 			local.actor.enableEnemy = 0
 			//[bug-1958] remember his real gun BEFORE the holster - holstering can leave
 			//binoculars as the active item, so a later unholster restores the WRONG thing;
@@ -5503,5 +5529,68 @@ coop_officer_hpScaler local.officer:{
 			if( local.hp < 1 ){ local.hp = 1 }
 			local.officer.health = local.hp
 		}
+	}
+}end
+
+//=========================================================================
+//[user 2026-09-29] LIVE RESCALE for officer-wave actors (bodyguards, reinforcements, gunners). Their HP was sized
+//once at spawn; a squad that shrank (a player left or went to spectator) kept fighting the bigger number. Every 2s
+//this recomputes the target from the unscaled base (coop_baseHp) and the ACTIVE count (spectators and noclip devs
+//excluded; downed or dead-and-respawning players still count so HP does not bounce with every death), capped at
+//coop_maxPlayerScalar like coop_reinf_pc, and rescales the actor's REAL hp in proportion. The real hp is a
+//different field per health system, and writing the wrong one is how the first draft of this went wrong:
+//  * coop_actorStopPainHandler actors (bodyguard, infantry, battalion, MG/AT teams): engine .health
+//  * pain-handler actors (elite, grenadier, sniper, dogs): flags["coop_actorActualHealth"] - their engine
+//    .health is the coop_aiBuffer (aihandler::initialisePainVars); writing it trips actorPainHandler's
+//    "health changed elsewhere" detach on the next hit and drops the coop scaling entirely.
+//  * pain-init not run yet (it lands a frame after spawn): skip the tick, coop_scaledHp unchanged.
+//coop_scaledHp is the max currently applied (set by coop_reinf_scale), the denominator of the proportion.
+//=========================================================================
+coop_reinf_liveScale local.actor:{
+	wait 1
+	while( local.actor != NULL && isAlive local.actor ){
+		if( getcvar "coop_officerScale" == "0" ){ end }
+		local.base = local.actor.flags["coop_baseHp"]
+		local.max = local.actor.flags["coop_scaledHp"]
+		if( local.base == NIL || local.max == NIL ){ end }
+		if( local.base <= 0 || local.max <= 0 ){ end }
+		local.pc = waitthread coop_mod/main.scr::coop_activePlayerCount
+		if( local.actor == NULL ){ end }
+		if( !isAlive local.actor ){ end }
+		if( local.pc < 1 ){ local.pc = 1 }
+		local.cap = level.coop_maxPlayerScalar
+		if( local.cap == NIL || local.cap < 1 ){ local.cap = 4 }
+		if( local.pc > local.cap ){ local.pc = local.cap }
+		local.bp = getcvar "coop_officerBasePc"
+		if( local.bp == "" ){ local.bp = 2 }
+		local.bp = int( local.bp )
+		if( local.bp < 1 ){ local.bp = 2 }
+		local.hpct = getcvar "coop_officerHealthPct"
+		if( local.hpct == "" ){ local.hpct = 35 }
+		local.hpct = int( local.hpct )
+		if( local.hpct <= 0 ){ local.hpct = 35 }
+		local.target = int( local.base + ((local.base * local.hpct * (local.pc - local.bp)) / 100) )
+		if( local.target < 25 ){ local.target = 25 }
+		if( local.target > 690 ){ local.target = 690 }
+		if( local.target != local.max ){
+			if( local.actor.flags["coop_actorStopPainHandler"] == 1 ){
+				local.hp = int( local.actor.health * local.target / local.max )
+				if( local.hp < 1 ){ local.hp = 1 }
+				local.actor.health = local.hp
+				local.actor.flags["coop_scaledHp"] = local.target
+			} else if( local.actor.flags["coop_actorHandledPain"] == 1 ){
+				local.real = local.actor.flags["coop_actorActualHealth"]
+				if( local.real != NIL ){
+					if( local.real > 0 ){
+						local.hp = int( local.real * local.target / local.max )
+						if( local.hp < 1 ){ local.hp = 1 }
+						local.actor.flags["coop_actorActualHealth"] = local.hp
+						local.actor.flags["coop_woundedMaxHp"] = local.target
+						local.actor.flags["coop_scaledHp"] = local.target
+					}
+				}
+			}
+		}
+		wait 2
 	}
 }end
