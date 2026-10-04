@@ -367,7 +367,9 @@ coop_spawnReplica local.model local.gun local.acc local.health local.origin loca
 	local.r.angles = local.angles
 	local.r.health = local.health
 	if( local.acc != NIL ){ local.r.accuracy = local.acc }
-	if( local.gun != NIL ){ local.r gun local.gun }
+	//[bug-3306] the parent's gun comes from the weapon GETTER ("stg 44", "g 43", "walther p38") - not a
+	//`case weapon` key, so `gun` rebuilt the clone with no body. Arm without the rebuild.
+	if( local.gun != NIL ){ local.r waitthread coop_actorArm local.gun }
 	local.r.leash = 4096
 	local.r.enableEnemy = 1
 	local.r german
@@ -1787,6 +1789,30 @@ if(level.cMTE_coop_aihandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; print
 end
 
 //=========================================================================
+//[user 2026-10-04, bug-3306] ARM AN ACTOR WITHOUT REBUILDING HIS BODY.
+//"invisible enemies where you can only see their head and arms" - the body is not hidden, it was
+//never built. `gun X` / `.weapon = X` (Actor::EventGiveWeapon) stores X as the model's LOADOUT KEY
+//and rebuilds the composite tiki as "weapon|X|headmodel|..|headskin|..|<tik>". 1562 of 1806 AI
+//tiks build their tunic/pants/gear ONLY inside `case weapon "<name>"` blocks, the head and hands
+//OUTSIDE them, and a key that matches no case value (case-insensitive, no default) compiles NO
+//body: head and hands float. Keys the mod was handing out that match nothing: every tik path
+//(variant roll, G43 roll, surrender re-arm), getter names ("stg 44", "g 43", "walther p38"), and
+//"shotgun" (no AI tik has that case) on officer reinforcements - "stg44"/"panzerschrek" too on
+//Afrika models. Recipe is retail's own (global/mg42_active.scr:225 `weapon_internal <tik>`):
+//run global/weapon.scr - name normalising, variant->base map, weapon_internal, the Smithy
+//store tail - but skip EventGiveWeapon, so the body built from the spawn/TIKI-init key stays.
+//Cost: gear may not match the gun (rifle pouches with an MP40). Regression check:
+//docs/tools/audit_actor_surfaces.py (WEAPONKEY section).
+//=========================================================================
+coop_actorArm local.name:{
+//=========================================================================
+	if( self == NULL || self == NIL ){ end }
+	if( local.name == NIL || local.name == "" ){ end }
+	if( !(isAlive self) ){ end }
+	self waitthread global/weapon.scr::start local.name
+}end
+
+//=========================================================================
 //[user 2026-08-18] AI weapon-variant randomizer. coop_aiVariantChance = percent chance per
 //actor (0 disables). The host map is keyed by the EXACT tik name field (string-keyed arrays
 //are case-SENSITIVE, bug-1916) - values verified against the shipped tiks. The swap is the
@@ -1872,7 +1898,7 @@ coop_variantRoll:{
 	local.g43 = int(getcvar "coop_aiG43Chance") + 0
 	if( local.g43 > 0 && self.team == "german" && local.nm == "Mauser KAR 98K" ){
 		if( (randomint 100) < local.g43 ){
-			self.weapon = "models/weapons/g43.tik"
+			self waitthread coop_actorArm "models/weapons/g43.tik"	//[bug-3306] not .weapon= : a tik-path key builds no body
 			wait 0.1
 			if( self == NULL || !(isAlive self) ){ end }
 			self unholster
@@ -1883,7 +1909,7 @@ coop_variantRoll:{
 			//read-back guard. Same guard here: empty read -> log + restore the Kar98.
 			if( self.weapon == NIL || self.weapon == "" ){
 				println ( "^~^~^ VARIANTGIVE FAIL g43 (was Mauser KAR 98K)" )
-				self.weapon = "models/weapons/kar98.tik"
+				self waitthread coop_actorArm "models/weapons/kar98.tik"
 				self unholster
 			} else {
 				//bug-1959: only a SUCCESSFUL give makes him a G43-carrier - the failed-give path
@@ -1917,12 +1943,12 @@ coop_variantRoll:{
 	if( local.tik == NIL || local.tik == "" ){ end }
 	if( self == NULL || self == NIL ){ end }
 	if( !(isAlive self) ){ end }
-	self.weapon = local.tik
+	self waitthread coop_actorArm local.tik	//[bug-3306] keeps the body (see coop_actorArm)
 	self unholster
 	wait 0.1
 	if( self != NULL && isAlive self && (self.weapon == NIL || self.weapon == "") ){
 		println ( "^~^~^ VARIANTGIVE FAIL " + local.tik )
-		self.weapon = local.give	//bug-1957 fallback: re-arm with the base gun rather than leave him empty-handed
+		self waitthread coop_actorArm local.give	//bug-1957 fallback: re-arm with the base gun rather than leave him empty-handed
 		self unholster
 	}
 	thread coop_mod/aibehav.scr::behav_bump "variant"
