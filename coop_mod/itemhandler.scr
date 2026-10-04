@@ -716,6 +716,15 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	group.player = self
 	group.thread["managePlayerInventory"] = local
 	group.player.flags["coop_loRegiveQueued"] = NIL	//[user 2026-08-18] a full (re)spawn give supersedes any queued revive re-kick
+	//[user 2026-10-04, bug-3305] first give after a TRUE death: the kit alone. Whatever else the player
+	//held was dropped at the body (coop_deathDropPickups), so neither the retain set nor the picks
+	//carry-over may hand it back - that would be the duplicate. One-shot; read before any early exit.
+	group.coop_kitOnly = 0
+	if( group.player.flags["coop_diedKitOnly"] == 1 ){
+		group.player.flags["coop_diedKitOnly"] = NIL
+		group.coop_kitOnly = 1
+	}
+	group.player.flags["coop_deathDropDone"] = NIL	//alive again: the next death may drop
 
 	//set some default flags for unused weapon offset calcs
 	group.player.flags["coop_spawnEventTime"] 	= level.time
@@ -831,6 +840,7 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
 		local.useDefault = game.true
 	}
+	if( group.coop_kitOnly == 1 ){ local.useDefault = game.true }	//bug-3305 death respawn: kit only
 	//[user 2026-08-08] The stealth start does NOT belong here. It was written as a takeall in this
 	//branch, which strips ITEMS as well as weapons and so wiped the uniform (bug-1604). e1l3 already
 	//solves this properly with level.coop_noWeapon - checked at every grant site in this file
@@ -1762,7 +1772,8 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	//command on it is a script error - see the waitthread note below).
 	group.coop_kitEntN = 0
 	if (local.default){
-		if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
+		//[bug-3305] no carry-over after a true death - the extras were dropped at the body
+		if( group.player.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 && group.coop_kitOnly != 1 ){
 			local.src = group.player.flags["coop_inventoryWeapons"]
 			group.loCarry[1] = NIL
 			local.ci = 0
@@ -3555,10 +3566,10 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 //=========================================================================
 coop_ammoSnapshotLoop:{
 //=========================================================================
-	if( getcvar( "coop_exactAmmo" ) == "0" ){
-		self.flags["coop_ammoSnapshotRunning"] = NIL
-		end
-	}
+	//[user 2026-10-04, bug-3305] the loop no longer ends when coop_exactAmmo is 0: it also keeps the
+	//held-weapon snapshot the death drop reads (coop_deathDropPickups). Only the ammo part is gated.
+	local.exact = 1
+	if( getcvar( "coop_exactAmmo" ) == "0" ){ local.exact = 0 }
 
 	local.types[1] = "pistol"
 	local.types[2] = "rifle"
@@ -3573,7 +3584,20 @@ coop_ammoSnapshotLoop:{
 	while( self ){
 		//only snapshot while upright and holding their own kit; while dead
 		//(health<=0) or downed (dbno_pistol) the pools are not representative
+		//[user 2026-10-04, bug-3305] ROOT CAUSE of "lose weapon when you respawn" (every map, every
+		//respawn): health > 0 is NOT "alive and armed". A dead team player DEATH-SPECTATES until the
+		//respawn - Player::Spectator() sets health = max_health and FreeInventory()s - so this loop
+		//kept running through the whole death wait and saved ZERO for every pool. coop_ammoRestore
+		//then wrote those zeros over the fresh kit 0.5s after the respawn: kit in hand, 0 rounds in
+		//every gun and no grenades (measured: saved 0/0/0 at every respawn, live pools 0 at +1s).
+		//The v1.10.6 arm watch hid it by accident - it re-gave the whole kit 2.5s later with default
+		//ammo on every spawn, because it read the setter-only `.weapon` (always NIL). Snapshot only a
+		//deployed, coop-active, non-spectating player; the last upright values survive the death wait.
+		local.up = 0
 		if( self.health > 0 && self.flags["coop_dbno_active"] != 1 && self.flags["coop_ammoRestorePending"] != 1 ){	//[user 07-19] bug-913: pending gate - a revive/respawn hands out DEFAULT ammo, and a snapshot tick in that window would clobber the down-moment values before coop_ammoRestore applies them
+			if( self.isSpectator != 1 && self.dmteam != "spectator" && self.flags["coop_isActive"] == 1 ){ local.up = 1 }
+		}
+		if( local.up == 1 && local.exact == 1 ){
 			local.i = 1
 			while( local.i <= 9 ){
 				local.type = local.types[local.i]
@@ -3590,7 +3614,217 @@ coop_ammoSnapshotLoop:{
 			self.flags["coop_coverSaved"]   = self.flags["coop_cover_placements"]
 			self.flags["coop_ammoSaved_valid"] = 1
 		}
+		//[bug-3305] what the player is holding, for the death drop + the revive registry. LAST in the
+		//tick on purpose: a waitthread returns on a later scheduler pass (bug-1204), and a suspension
+		//between the gate above and the ammo writes let a revive's takeall land in between - the
+		//snapshot then saved zeros (measured on the first cut of this fix).
+		if( local.up == 1 ){
+			waitthread coop_heldSnapshot self 0 1
+		}
+		//[bug-3305] death-drop fallback. The drop is normally armed by player.scr::manageDead, but that
+		//runs off the torso statemap's KILLED entry, and some deaths never reach it (measured: every
+		//death on t2l1 and e2l1 in the headless runs - no playerdeath, no coop_respawning). Seeing the
+		//player dead (not downed, not yet death-spectating) with a live snapshot is enough; the latch in
+		//coop_deathDropPickups makes the two triggers one drop.
+		if( self.health <= 0 && self.flags["coop_dbno_active"] != 1 && self.isSpectator != 1 && self.flags["coop_heldWeapons"] != NIL && self.flags["coop_deathDropDone"] != 1 ){
+			thread coop_deathDropPickups self
+		}
 		wait 0.5
+	}
+}end
+
+//=========================================================================
+// [user 2026-10-04, bug-3305] DEATH DROP. User spec: on respawn the player ALWAYS gets their own kit
+// (armory picks, or the map default kit when they have none); weapons they picked up that are NOT in
+// that kit drop on death as world pickups - retrievable, never lost, never duplicated.
+// coop_heldSnapshot records the Weapon models a player holds (live inventory, not the coop registry:
+// a pickup the itemhandler failed to register is still a real gun in the hand). The snapshot loop
+// above calls it every 0.5s while the player is deployed; playerDeathEvent calls it once more at the
+// moment of death (keepIfEmpty 1: the engine's dmdeathdrop FreeInventory()s 0.1s after Killed, and an
+// empty read there must not erase the last good snapshot).
+//=========================================================================
+coop_heldSnapshot local.p local.keepIfEmpty local.register:{
+//=========================================================================
+	if( local.p == NULL || local.p == NIL ){ end }
+	if( local.keepIfEmpty == 1 && local.p.flags["coop_deathDropDone"] == 1 ){ end }	//this death already dropped
+	local.inv = local.p.inventory
+	local.n = 0
+	local.out[1] = NIL
+	if( local.inv != NIL ){
+		for( local.i = 1; local.i <= local.inv.size; local.i++ ){
+			local.e = local.inv[local.i]
+			if( local.e != NULL && local.e != NIL ){
+				if( local.e.classname == "Weapon" ){
+					local.m = local.e.model
+					if( local.m != NIL && local.m != "" ){
+						local.n++
+						local.out[local.n] = local.m
+					}
+				}
+			}
+		}
+	}
+	if( local.n == 0 && local.keepIfEmpty == 1 ){ end }
+	if( local.n == 0 ){
+		local.p.flags["coop_heldWeapons"] = NIL
+	}else{
+		local.p.flags["coop_heldWeapons"] = local.out
+	}
+	if( local.register != 1 ){ end }
+	//[bug-3305] REGISTRY RECONCILE. Every DBNO/medkit revive re-gives coop_inventoryWeapons after its
+	//takeall, but a gun the itemhandler pickup path failed to register ("*ERROR*: Weapon ... cannot be
+	//picked up" while the engine did hand it over - measured with an mp40 taken at the feet) is in the
+	//hand and NOT in the registry, so the revive silently deleted it. Append any held gun the registry
+	//lacks (appended directly: addWeaponToInventory's one-per-ammo-class rule would evict a kit gun).
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.m = local.out[local.i]
+		if( !(waitthread playerHasWeapon local.p local.m) ){
+			local.mv = waitthread makeWeaponStringValid local.m
+			if( !(waitthread playerHasWeapon local.p local.mv) ){
+				if( !(waitthread coop_deathDropExcluded local.mv) ){
+					local.wi = local.p.flags["coop_inventoryWeapons"].size + 1
+					if( local.wi < 1 ){ local.wi = 1 }	//bug-909: an empty array's .size is -1
+					local.p.flags["coop_inventoryWeapons"][local.wi] = local.mv
+					println ( "^~^~^ HELDREG e" + local.p.entnum + " " + local.mv )
+				}
+			}
+		}
+	}
+}end
+
+//[bug-3305] the kit a DEATH respawn hands out (managePlayerInventory with coop_diedKitOnly): the map's
+//forced weapons, else the armory picks (coop_loWeapons = the finish-resolved tiks, sidearm and grenade
+//slot included), else the map default kit - plus mission items and the map's additive silenced pistol.
+//Normalised with makeWeaponStringValid so it compares against an entity .model.
+//=========================================================================
+coop_respawnKit local.p:{
+//=========================================================================
+	local.src[1] = NIL
+	local.n = 0
+	if( level.coop_playerPrimaryWeapon || level.coop_playerSecondaryWeapon ){
+		if( level.coop_playerPrimaryWeapon ){
+			local.n++
+			local.src[local.n] = level.coop_playerPrimaryWeapon
+		}
+		if( level.coop_playerSecondaryWeapon ){
+			local.n++
+			local.src[local.n] = level.coop_playerSecondaryWeapon
+		}
+	}else if( local.p.flags["coop_loWeapons"].size > 0 && level.coop_loadoutLocked != 1 ){
+		local.a = local.p.flags["coop_loWeapons"]
+		for( local.i = 1; local.i <= local.a.size; local.i++ ){
+			if( local.a[local.i] != NIL ){
+				local.n++
+				local.src[local.n] = local.a[local.i]
+			}
+		}
+		for( local.s = 1; local.s <= 4; local.s++ ){
+			local.g = local.p.flags["coop_loSlot" + local.s]
+			if( local.g != NIL && local.g != "" ){
+				local.n++
+				local.src[local.n] = local.g
+			}
+		}
+	}else{
+		for( local.i = 1; local.i <= level.coop_weaponLoadout.size; local.i++ ){
+			if( level.coop_weaponLoadout[local.i] != NIL ){
+				local.n++
+				local.src[local.n] = level.coop_weaponLoadout[local.i]
+			}
+		}
+	}
+	for( local.i = 1; local.i <= level.coop_missionItems.size; local.i++ ){
+		if( level.coop_missionItems[local.i] != NIL ){
+			local.n++
+			local.src[local.n] = level.coop_missionItems[local.i]
+		}
+	}
+	if( level.coop_silencedOnSpawn == 1 || level.coop_silencedDrawn == 1 ){
+		local.n++
+		local.src[local.n] = "models/weapons/silencedpistol.tik"
+	}
+	//map-issued gear (replace.scr::item -> level.coop_playerItem1-6) that main.scr::itemGetAll re-gives
+	//on EVERY spawn - e.g. t2l1's "all players ready Thompson". Measured: without these it dropped at
+	//the body AND came back with the respawn, one more Thompson on the ground per death.
+	local.pi[1] = level.coop_playerItem1
+	local.pi[2] = level.coop_playerItem2
+	local.pi[3] = level.coop_playerItem3
+	local.pi[4] = level.coop_playerItem4
+	local.pi[5] = level.coop_playerItem5
+	local.pi[6] = level.coop_playerItem6
+	for( local.i = 1; local.i <= 6; local.i++ ){
+		if( local.pi[local.i] != NIL && local.pi[local.i] != "" ){
+			local.n++
+			local.src[local.n] = local.pi[local.i]
+		}
+	}
+	local.out[1] = NIL
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.out[local.i] = waitthread makeWeaponStringValid local.src[local.i]
+	}
+}end local.out
+
+//[bug-3305] never dropped: grenades (start tiks and thrown kinds), items (binoculars, papers), the
+//mine detector and placeable mines - all re-issued by their own systems, or not a gun at all.
+//=========================================================================
+coop_deathDropExcluded local.m:{
+//=========================================================================
+	if( !(waitthread notStartGrenade local.m) ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "models/items/" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "grenade" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "granate" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "bomba" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "smoke" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "binoc" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "paper" ){ end 1 }
+	if( waitthread coop_mod/main.scr::containsText local.m "mine" ){ end 1 }
+}end 0
+
+//[bug-3305] called once per TRUE death (player.scr::manageDead, the branch that arms the respawn - a
+//DBNO bleed-out reaches it too). Drops every held weapon that the respawn kit will not give back, at
+//the body, as a permanent pickup (coop_itemRespawnTime -1: no timed expiry like an engine drop, and no
+//world respawn once taken). Kit weapons are never dropped - the respawn re-issues them - so nothing is
+//duplicated; the snapshot is consumed so a second call cannot drop it twice. coop_diedKitOnly tells the
+//next managePlayerInventory to hand out the kit alone (no retain set, no carry-over merge).
+//=========================================================================
+coop_deathDropPickups local.player:{
+//=========================================================================
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( local.player.flags["coop_deathDropDone"] == 1 ){ end }	//one drop per death (manageDead + the snapshot-loop fallback)
+	local.player.flags["coop_deathDropDone"] = 1
+	local.held = local.player.flags["coop_heldWeapons"]
+	local.player.flags["coop_heldWeapons"] = NIL
+	local.player.flags["coop_diedKitOnly"] = 1
+	if( level.gametype == 0 ){ end }
+	if( local.held == NIL ){ end }
+	local.org = local.player.origin
+	local.kit = waitthread coop_respawnKit local.player
+	local.done[1] = NIL
+	local.d = 0
+	for( local.i = 1; local.i <= local.held.size; local.i++ ){
+		if( local.held[local.i] != NIL ){
+			local.mv = waitthread makeWeaponStringValid local.held[local.i]
+			local.skip = waitthread coop_deathDropExcluded local.mv
+			for( local.k = 1; local.k <= local.kit.size; local.k++ ){
+				if( local.kit[local.k] == local.mv ){ local.skip = 1 }
+			}
+			for( local.k = 1; local.k <= local.d; local.k++ ){
+				if( local.done[local.k] == local.mv ){ local.skip = 1 }
+			}
+			if( local.skip == 0 ){
+				local.d++
+				local.done[local.d] = local.mv
+				local.ox = ( local.d * 14 ) - 14
+				local.yaw = local.d * 70
+				local.w = spawn local.mv
+				local.w.flags["coop_itemRespawnTime"] = 0 - 1
+				local.w.flags["coop_deathDrop"] = 1
+				local.w set_respawn 0
+				local.w.origin = local.org + ( local.ox 0 24 )
+				local.w.angles = ( 0 local.yaw 0 )
+				println ( "^~^~^ DEATHDROP e" + local.player.entnum + " " + local.mv + " at " + local.w.origin )
+			}
+		}
 	}
 }end
 

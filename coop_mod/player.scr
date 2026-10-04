@@ -1496,7 +1496,8 @@ preventSpawnStuck local.player:{
 }end
 
 //[user 2026-09-29] RESPAWN ARM WATCH - players reported respawning with no weapon, on every map.
-//Safety net only (root cause still open): 2.5s after a spawn, if the player is alive, playing, allowed
+//Root cause found and fixed 2026-10-04 (bug-3305: the exact-ammo snapshot saved zeros during the death
+//spectate, itemhandler.scr::coop_ammoSnapshotLoop). Kept as a real net. 2.5s after a spawn, if the player is alive, playing, allowed
 //weapons, not down, not glued to a ride and not on a briefing map, but holds no weapon at all, run the
 //normal spawn inventory give once more. One shot per spawn; never runs where weapons are withheld on purpose.
 //=========================================================================
@@ -1508,8 +1509,15 @@ coop_respawnArmWatch local.player:{
 	if( level.coop_noWeapon || level.coop_playerGlue ){ end }
 	if( local.player.flags["coop_dbno_active"] == 1 ){ end }
 	if( level.coop_mapname[0] == "b" && level.coop_mapname[1] == "r" ){ end }
-	local.w = local.player.weapon
-	if( local.w != NIL && local.w != "" ){ end }
+	//[user 2026-10-04, bug-3305] a disguised player is SUPPOSED to have empty hands (giveWeaponLoadout
+	//deactivates the weapon); a re-give there only restarts the holster dance.
+	if( local.player.has_disguise ){ end }
+	//[bug-3305] `.weapon` on a Player is the setter-only EV_Sentient_GiveWeapon (no getter - see the
+	//probe.scr wp= note), so it ALWAYS read NIL and this net re-ran the whole spawn give on EVERY spawn:
+	//a second takeall 2.5s in, ammo back to the map default (the exact-ammo restore undone), any gun
+	//picked up in those 2.5s stripped. Ask the engine for the weapon actually in hand.
+	local.w = local.player getactiveweap 0
+	if( local.w != NULL && local.w != NIL ){ end }
 	println("^~^~^ RESPAWNARM regive for player " + local.player.entnum)
 	local.player waitthread coop_mod/itemhandler.scr::managePlayerInventory
 }end
@@ -1724,6 +1732,9 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 		local.player.flags["coop_justSpawnedDone"] = NIL
 		local.player.flags["coop_respawning"] = TRUE
 		local.player.fnum = -100
+		//[user 2026-10-04, bug-3305] picked-up weapons that are not in the kit drop here at the body;
+		//the respawn gives the kit alone (coop_diedKitOnly). A DBNO bleed-out reaches this branch too.
+		thread coop_mod/itemhandler.scr::coop_deathDropPickups local.player
 		
 		local.player unglue
 		local.player physics_on
