@@ -128,6 +128,10 @@ coop_paradrop_main local.smoke_pos:{
 	level.coop_paradrop_squad[4] = NIL
 	level.coop_paradrop_squad[5] = NIL
 
+	//[user 2026-10-04] SQUAD BRAIN (coop_mod/parasquad.scr). Each stick is its own squad, so a
+	//second drop gets a second brain instead of orphaning the first squad's members.
+	local.sid = waitthread coop_mod/parasquad.scr::newSquad level.coop_smoke_player
+
 	local.i = 1
 	while( local.i <= 5 ){
 		// Offset each drop along the flight path + small lateral spread
@@ -137,10 +141,11 @@ coop_paradrop_main local.smoke_pos:{
 		local.drop_pos[0] = local.drop_pos[0] + local.lat_off
 		local.drop_pos[1] = local.drop_pos[1] + ((randomint 180) - 90)
 		local.drop_pos[2] = local.chute_start_z
-		thread coop_paradrop_actor local.drop_pos local.i local.base_z
+		thread coop_paradrop_actor local.drop_pos local.i local.base_z local.sid
 		wait 1.5
 		local.i++
 	}
+	thread coop_mod/parasquad.scr::brain local.sid
 
 	// Monitor squad survival
 	wait 12
@@ -187,7 +192,7 @@ coop_paradrop_cleanup_marker local.marker:{
 
 // Descend parachute with actor visually riding it, spawn live actor on landing.
 // wtype: 1=BAR, 2=Thompson, 3=Garand/Rifle, 4=Sniper, 5=Medic
-coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
+coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid:{
 	// Land at the smoke's ground level. The drop_pos is ~1100 units up in the air, so
 	// tracing down from there (coop_find_ground only goes 512u) hits rooftops and the
 	// troopers got stuck in the sky. Use the known ground Z; the live actor droptofloors.
@@ -334,29 +339,19 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z:{
 	//"hold at your leash instead of charging" branch (actor_turret.cpp) is GERMAN-ONLY, so an
 	//American actor beyond max distance always transitions to TURRET_CHARGE - with leash 4096 set
 	//just above.
-	//coop_apply_personality is the highest-leverage fix that needs no engine change: it has NO team
-	//gate (officer.scr - only a NULL/alive check and its own once-latch), and it issues
-	//type_attack "cover", which is the single thing that stops the perpetual charge. It rolls
-	//~40% cover / ~25% flank / ~12% prone.
-	//NOTE it also overwrites .leash with its role value, deliberately overriding the 4096 above -
-	//that tighter leash is the point. Squad movement still works because coop_paradrop_follow /
-	//coop_paradrop_combatant drive explicit runto, which leash does not restrict.
-	thread coop_mod/officer.scr::coop_apply_personality local.actor
+	//[user 2026-10-04] The 08-02 fix borrowed the GERMAN personality roll (coop_apply_personality)
+	//for the cover type_attack. That roll is random and team-agnostic, and its prone role was the
+	//invisible strafing gun of bug-3309. parasquad.scr::member now gives every trooper one
+	//deterministic setup (type_attack cover, leash/mindist/maxdist, spacing, own prone/crouch
+	//stance via anim/attack.scr, no native grenades) and latches coop_personality_set so no
+	//global pass re-rolls him. The squad brain (parasquad.scr::brain) replaces the old per-actor
+	//follow / combatant runto loops: formation, bounding, cover, grenades, room clearing, .30 cal.
+	local.actor waitthread coop_mod/parasquad.scr::member local.wtype local.sid
 
-	// Special medic behavior
+	// Special medic behavior (its own loop: tend patients, otherwise advance with the squad)
 	if( local.wtype == 5 ){
 		thread coop_paradrop_medic local.actor
-	} else {
-		// HZM coop - COMBAT troopers (wtype 1-4) ADVANCE with the squad + fight en route, instead of standing
-		// idle where they landed (they used to only engage enemies that happened to wander into view).
-		thread coop_paradrop_combatant local.actor
 	}
-
-	// Follow nearest player. The medic (wtype 5) runs its OWN combined loop in
-	// coop_paradrop_medic: it tends patients when there are any, and otherwise advances toward
-	// the squad exactly like coop_paradrop_follow -- so it skips the generic follow here to
-	// avoid two threads issuing competing runto commands to the same actor.
-	if( local.wtype != 5 ){ thread coop_paradrop_follow local.actor }
 	if( local.wtype == 1 || local.wtype == 3 ){
 		thread coop_paradrop_voice_loop local.actor
 	}
@@ -371,63 +366,6 @@ coop_chute_sync_vis local.chute local.vis:{
 		local.p[2] = local.p[2] - 70
 		local.vis.origin = local.p
 		wait 0.05
-	}
-}end
-
-
-// Periodically move toward the nearest living player.
-coop_paradrop_follow local.actor:{
-	// Brief settle so the AI initialises on the nav after touchdown, then advance toward
-	// the squad/fight IMMEDIATELY instead of standing idle for the first few seconds.
-	wait 1
-	while( local.actor != NULL && isAlive local.actor ){
-		if( local.actor == NULL || !isAlive local.actor ){ end }
-
-		local.np = NIL
-		local.nd = 9999
-		local.pi = 1
-		while( local.pi <= $player.size ){
-			local.pp = $player[local.pi]
-			if( local.pp != NULL && local.pp.health > 0 ){
-				local.d = vector_length(local.actor.origin - local.pp.origin)
-				if( local.d < local.nd ){
-					local.nd = local.d
-					local.np = local.pp
-				}
-			}
-			local.pi++
-		}
-		if( local.np != NIL && local.nd > 400 && local.nd < 2000 ){
-			local.actor.movedoneradius = 256
-			local.actor runto local.np.origin
-		}
-		//[209] HZM coop - engage officer reinforcements: wave actors are hard-locked onto
-		//players (attackplayer re-issued by their hunt loops) and never shoot AI, so the
-		//paratroopers' damage-driven enemy notice never fires on either side. Hand the
-		//trooper the nearest LIVING, VISIBLE wave actor from the level roster (registered
-		//in officer.scr hunt threads) via the new engine command attackentity.
-		if( local.actor.enemy == NULL && level.coop_wave_count != NIL ){
-			local.best = NULL
-			local.bd = 2000
-			local.wi = 1
-			while( local.wi <= level.coop_wave_count ){
-				local.w = level.coop_wave_actors[local.wi]
-				if( local.w != NULL && isAlive local.w ){
-					local.d = vector_length( local.w.origin - local.actor.origin )
-					if( local.d < local.bd ){
-						if( local.actor cansee local.w ){
-							local.bd = local.d
-							local.best = local.w
-						}
-					}
-				}
-				local.wi++
-			}
-			if( local.best != NULL ){
-				local.actor attackentity local.best
-			}
-		}
-		wait 3
 	}
 }end
 
@@ -455,6 +393,8 @@ coop_paradrop_landing_check local.actor:{
 			local.pi++
 		}
 		if( local.np == NIL ){ wait 4; continue }
+		//[user 2026-10-04] never yank a trooper the squad brain is driving (a mounted .30 cal gunner has physics_off)
+		if( local.actor.coop_psqMounted == 1 || local.actor.coop_psqBusy == 1 ){ local.stuck = 0; wait 4; continue }
 
 		// "stuck/off-map" = far from the players, NOT currently fighting (a trooper holding to shoot
 		// is fine where it is), and NOT getting meaningfully closer over time (the follow loop only
@@ -725,35 +665,6 @@ coop_paradrop_medic local.actor:{
 		}
 		}
 		}
-	}
-}end
-
-
-// HZM coop - COMBAT paratrooper (wtype 1-4) behaviour: advance with the squad toward the nearest player and
-// fight along the way, instead of standing idle where they landed. Periodically runto the nearest living player
-// when they've fallen >512u behind; enableEnemy=1 means they break off to shoot any germans they spot en route.
-// This is what makes them actually reach + engage the enemy (they used to just sit at the drop zone).
-coop_paradrop_combatant local.actor:{
-	wait 1
-	while( local.actor != NULL && isAlive local.actor ){
-		local.np = NIL
-		local.nd = 99999
-		local.i = 1
-		while( local.i <= $player.size ){
-			local.pp = $player[local.i]
-			if( local.pp != NULL && local.pp.health > 0 ){
-				local.d = vector_length( local.actor.origin - local.pp.origin )
-				if( local.d < local.nd ){ local.nd = local.d; local.np = local.pp }
-			}
-			local.i++
-		}
-		// Only chase the player when well behind - close enough, hold position and let enableEnemy drive the
-		// fight so they don't ignore a target right in front of them to sprint to the player.
-		if( local.np != NIL && local.nd > 512 ){
-			local.actor.movedoneradius = 256
-			local.actor runto local.np.origin
-		}
-		wait 3
 	}
 }end
 

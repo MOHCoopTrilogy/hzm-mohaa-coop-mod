@@ -1,0 +1,1008 @@
+//====================================================================
+// parasquad.scr - HZM coop PARATROOPER SQUAD BRAIN (2026-10-04)
+//====================================================================
+// [user 2026-10-04] "I do need those allied paratroopers to be able to have squad brain, take
+// cover, work together, prone, throw grenades, clear rooms etc. To make them smart but without
+// them damaging themselves or friendlies." + one trooper sets up a mounted .30 cal.
+//
+// One brain per stick (paradrop.scr::coop_paradrop_main -> newSquad + brain). Members 1-4 are
+// driven here; member 5 (medic) keeps its own tend/advance loop and only counts for safety.
+//   FOLLOW   no contact for 8s: wedge behind the anchor (the trooper who threw the smoke, else the
+//            nearest player), the two fire teams (1+3 / 2+4) moving on alternate ticks = bounding.
+//   CONTACT  engine combat (type_attack cover, own prone/crouch legs in anim/attack.scr) plus:
+//            - COVER: a man with a clear line to his enemy and nothing in front of him at waist
+//              height moves (crouched) to the nearest spot with a low obstacle between him and the
+//              enemy that he can still shoot over;
+//            - BOUND: a man left > 900u behind the anchor moves up while the other fire team
+//              suppresses (suppresschance 100 for the move);
+//            - GRENADES: scripted throw (calcgrenadetoss + the retail throw anim), never the
+//              engine's own decision (ammo_grenade stays 0 otherwise);
+//            - ROOM CLEARING: an enemy under a roof and walled in -> two men stack outside the
+//              wall line, frag in when it is safe, then enter while the rest cover.
+//   .30 CAL  member 1 carries an M1919; when the squad has held one spot for 6s he sets it up at
+//            the best low-cover spot facing the threat and mans it as a real TurretGun
+//            (actor machinegunner think, mg42_active.scr recipe); packs up when the squad moves on.
+//
+// FRIENDLY-FIRE SAFETY (the hard requirement):
+//   * Sentient::ArmorDamage drops damage whose attacker is a SAME-TEAM sentient (sentient.cpp,
+//     "same-team damage is filtered in ALL gametypes"), so a trooper's bullets, grenades and his
+//     manned turret's bullets (owner = the gunner) can never hurt a player or another trooper.
+//   * Two holes remain and are closed here: (1) attacker == self is NOT filtered - his own
+//     grenade can hurt him; (2) a grenade whose thrower is gone (corpse removed) explodes with no
+//     owner and hurts everyone. So every throw needs the target >= 450u from the thrower and from
+//     every player, >= 400u from every allied actor, re-checked just before release, and the
+//     thrower is immune to grenades until his own has gone off.
+//   * Nothing here spawns a weapon entity that is not owned by the trooper using it (bug-3309:
+//     the strafing gun was not a Sentient, so the filter never applied). No radiusdamage.
+//   * The .30 cal never sets up with a player in front of the muzzle.
+// Debug lines (^~^~^ PSQ ...) print only with coop_paraDebug 1.
+// Traces: traced <a> <b> 1023 (0 0 0) (0 0 0) 1 = ignore no entity, CONTENTS_SOLID only - a body
+// (trooper, player, enemy) or a clip brush is never mistaken for cover.
+//====================================================================
+
+newSquad local.caller:{
+	if( level.coop_psqN == NIL ){ level.coop_psqN = 0 }
+	level.coop_psqN++
+	local.sid = level.coop_psqN
+	level.coop_psqCaller[local.sid] = local.caller
+	level.coop_psqHolding[local.sid] = 0
+	level.coop_psqT0[local.sid] = level.time
+	level.coop_psqM[local.sid][1] = NIL		// the array exists before anyone lands
+}end local.sid
+
+
+dbg local.s:{
+	if( getcvar( "coop_paraDebug" ) == "1" ){ println( "^~^~^ PSQ t=" + level.time + " " + local.s ) }
+}end
+
+
+// last notable squad action (read by debug/test tooling: who did what, when)
+ev local.name local.a:{
+	level.coop_psqEv = local.name
+	level.coop_psqEvActor = local.a
+	level.coop_psqEvT = level.time
+}end
+
+
+// self = the landed, activated trooper. One deterministic setup instead of the german
+// personality roll (bug-3309), latched so no global pass re-rolls him.
+member local.k local.sid:{
+	if( self == NULL ){ end }
+	self.flags["coop_personality_set"] = 1
+	self.flags["coop_role"] = "para"
+	self.coop_psqSid = local.sid
+	self.coop_psqK = local.k
+	self.coop_psqBusy = 0
+	self.coop_psqMounted = 0
+	self.coop_psqNadeT = 0
+	self type_attack "cover"
+	self.leash = 640
+	self.mindist = 256
+	self.maxdist = 1300
+	self.interval = 128			// spacing the engine keeps from squadmates while moving
+	self.nosurprise = 1
+	self.ammo_grenade = 0			// no engine-decided throws - only the checked scripted ones below
+	self.suppresschance = 40
+	self.coop_paraProne = 25		// anim/attack.scr: own prone leg at long range
+	self.coop_paraCrouch = 45		// own crouch leg (raised while he holds a low-cover spot)
+	self.coop_paraBrain = 1			// set LAST: attack.scr reads the two values above once this is 1
+	if( local.sid != NIL ){
+		level.coop_psqM[local.sid][local.k] = self
+		if( local.k == 1 ){ thread gunner self local.sid }
+	}
+}end
+
+
+// The squad's anchor: the trooper-caller if he is alive and playing, else the nearest player.
+anchor local.sid:{
+	local.c = level.coop_psqCaller[local.sid]
+	if( local.c != NIL && local.c != NULL ){
+		if( isAlive local.c && local.c.health > 0 && local.c.dmteam != "spectator" ){ end local.c }
+	}
+	local.cen = waitthread centroid local.sid
+	local.best = NIL
+	local.bd = 999999
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || !isAlive local.p || local.p.dmteam == "spectator" ){ continue }
+		if( local.cen == NIL ){ local.best = local.p; break }
+		local.d = vector_length( local.p.origin - local.cen )
+		if( local.d < local.bd ){ local.bd = local.d; local.best = local.p }
+	}
+}end local.best
+
+
+centroid local.sid:{
+	local.n = 0
+	local.sum = ( 0 0 0 )
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( local.a == NIL || local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.sum = local.sum + local.a.origin
+		local.n++
+	}
+	if( local.n == 0 ){ end NIL }
+	local.r = vector_scale local.sum ( 1.0 / local.n )
+}end local.r
+
+
+// usable = landed, alive, not busy with a scripted move/throw/clear, not on the gun
+usable local.a:{
+	if( local.a == NIL || local.a == NULL ){ end 0 }
+	if( !isAlive local.a ){ end 0 }
+	if( local.a.coop_psqBusy == 1 || local.a.coop_psqMounted == 1 ){ end 0 }
+}end 1
+
+
+flatDist local.a local.b:{
+	local.v = local.a - local.b
+	local.v[2] = 0
+	local.r = vector_length local.v
+}end local.r
+
+
+//====================================================================
+brain local.sid:{
+	wait 8					// the stick is still under canopy
+	local.lastContact = 0 - 100
+	local.lastNade = 0 - 100
+	local.lastClear = 0 - 100
+	local.holdRef = NIL
+	local.holdSince = level.time
+	local.phase = 0
+	local.boundTeam = 1
+	local.boundTick = 0
+	local.cc = 0
+	local.wave = 0
+	local.clrTick = 0
+	waitthread dbg ( "brain start sid=" + local.sid )
+	while( 1 ){
+		wait 1
+		// ---- roster ----
+		local.alive = 0
+		for( local.k = 1; local.k <= 5; local.k++ ){
+			local.a = level.coop_psqM[local.sid][local.k]
+			if( local.a != NIL && local.a != NULL ){
+				if( isAlive local.a ){ local.alive++ }
+			}
+		}
+		if( local.alive == 0 && ( level.time - level.coop_psqT0[local.sid] ) > 45 ){
+			waitthread dbg ( "brain end sid=" + local.sid )
+			end
+		}
+		if( local.alive == 0 ){ continue }
+
+		// ---- anchor + facing ----
+		local.anc = waitthread anchor local.sid
+		if( level.coop_paraHoldPos != NIL ){
+			local.apos = level.coop_paraHoldPos
+			local.ayaw = 0
+			if( level.coop_paraHoldYaw != NIL ){ local.ayaw = level.coop_paraHoldYaw }
+		} else {
+			if( local.anc == NIL ){ continue }
+			local.apos = local.anc.origin
+			local.v = local.anc.velocity
+			local.v[2] = 0
+			local.vl = vector_length local.v
+			if( local.vl > 60 ){
+				local.va = vector_toangles local.v
+				local.ayaw = local.va[1]
+			} else {
+				local.ayaw = local.anc.viewangles[1]
+			}
+		}
+		level.coop_psqApos[local.sid] = local.apos
+		level.coop_psqAyaw[local.sid] = local.ayaw
+
+		// ---- holding? (anchor within 160u of one spot for 6s) ----
+		if( local.holdRef == NIL ){ local.holdRef = local.apos; local.holdSince = level.time }
+		local.hd = waitthread flatDist local.apos local.holdRef
+		if( local.hd > 160 ){
+			local.holdRef = local.apos
+			local.holdSince = level.time
+		}
+		if( ( level.time - local.holdSince ) >= 6 ){ level.coop_psqHolding[local.sid] = 1 } else { level.coop_psqHolding[local.sid] = 0 }
+
+		// ---- contact + nearest known threat ----
+		local.thr = NIL
+		local.td = 999999
+		for( local.k = 1; local.k <= 5; local.k++ ){
+			local.a = level.coop_psqM[local.sid][local.k]
+			if( local.a == NIL || local.a == NULL ){ continue }
+			if( !isAlive local.a ){ continue }
+			local.e = local.a.enemy
+			if( local.e == NIL || local.e == NULL ){ continue }
+			if( !isAlive local.e ){ continue }
+			local.lastContact = level.time
+			local.d = vector_length( local.e.origin - local.apos )
+			if( local.d < local.td ){ local.td = local.d; local.thr = local.e.origin }
+		}
+		level.coop_psqThreat[local.sid] = local.thr
+		local.inContact = 0
+		if( ( level.time - local.lastContact ) < 8 ){ local.inContact = 1 }
+
+		if( local.phase == 1 ){ local.phase = 0 } else { local.phase = 1 }
+		local.boundTick++
+		if( local.boundTick >= 3 ){
+			local.boundTick = 0
+			if( local.boundTeam == 1 ){ local.boundTeam = 0 } else { local.boundTeam = 1 }
+		}
+		local.cc++
+		if( local.cc > 4 ){ local.cc = 1 }
+
+		// ---- per member ----
+		for( local.k = 1; local.k <= 4; local.k++ ){
+			local.a = level.coop_psqM[local.sid][local.k]
+			if( !( waitthread usable local.a ) ){ continue }
+			local.team = 0
+			if( local.k == 1 || local.k == 3 ){ local.team = 1 }
+			local.da = waitthread flatDist local.a.origin local.apos
+
+			if( local.inContact == 0 ){
+				// FOLLOW: fire teams leapfrog on alternate ticks; a straggler always moves
+				local.a.coop_paraCrouch = 45
+				local.a resetleash
+				if( local.da > 240 ){
+					if( local.team == local.phase || local.da > 700 ){
+						local.slot = waitthread slotPos local.a local.k local.apos local.ayaw
+						if( local.slot != NIL ){
+							local.ds = waitthread flatDist local.a.origin local.slot
+							if( local.ds > 120 ){
+								local.a.movedoneradius = 64
+								local.a runto local.slot
+							}
+						}
+					}
+				}
+			} else {
+				if( local.da > 900 && local.team == local.boundTeam ){
+					// BOUND: this team moves up, the other one covers it
+					local.slot = waitthread slotPos local.a local.k local.apos local.ayaw
+					if( local.slot != NIL ){
+						thread overwatch local.sid local.team 3
+						thread moveTo local.a local.slot 3.0 0 "bound"
+					}
+				} else if( local.k == local.cc ){
+					thread coverCheck local.a
+				}
+			}
+		}
+
+		// ---- officer-wave targets (they hunt players only and never notice AI on their own) ----
+		local.wave++
+		if( local.wave >= 3 && level.coop_wave_count != NIL ){
+			local.wave = 0
+			for( local.k = 1; local.k <= 4; local.k++ ){
+				local.a = level.coop_psqM[local.sid][local.k]
+				if( !( waitthread usable local.a ) ){ continue }
+				if( local.a.enemy != NULL ){ continue }
+				local.best = NULL
+				local.bd = 2000
+				for( local.wi = 1; local.wi <= level.coop_wave_count; local.wi++ ){
+					local.w = level.coop_wave_actors[local.wi]
+					if( local.w == NIL || local.w == NULL ){ continue }
+					if( !isAlive local.w ){ continue }
+					local.d = vector_length( local.w.origin - local.a.origin )
+					if( local.d < local.bd ){
+						if( local.a cansee local.w ){ local.bd = local.d; local.best = local.w }
+					}
+				}
+				if( local.best != NULL ){ local.a attackentity local.best }
+			}
+		}
+
+		// ---- grenades (one per squad per 9s) ----
+		if( local.inContact == 1 && ( level.time - local.lastNade ) >= 9 ){
+			if( waitthread tryGrenade local.sid ){ local.lastNade = level.time }
+		}
+		// ---- room clearing (one per squad per 30s) ----
+		local.clrTick++
+		if( local.clrTick >= 3 && local.inContact == 1 && ( level.time - local.lastClear ) >= 30 ){
+			local.clrTick = 0
+			if( waitthread tryClear local.sid local.apos ){ local.lastClear = level.time }
+		}
+	}
+}end
+
+
+// wedge slot behind the anchor, grounded and reachable, or NIL
+slotPos local.a local.k local.apos local.ayaw:{
+	local.back = 170
+	local.side = 150
+	if( local.k >= 3 ){ local.back = 320; local.side = 240 }
+	if( local.k == 1 || local.k == 3 ){ local.side = 0 - local.side }
+	local.fwd = angles_toforward ( 0 local.ayaw 0 )
+	local.rgt = angles_toforward ( 0 ( local.ayaw - 90 ) 0 )
+	local.p = local.apos - ( vector_scale local.fwd local.back ) + ( vector_scale local.rgt local.side )
+	// NOTE: never `canmoveto` here - it is a leash/mindist/interval test against the actor's HOME, not a
+	// path test, so it refused nearly every slot in the 2026-10-04 run. runto paths; a dead-end order
+	// simply stalls and the next tick re-plans.
+	local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.p + ( 0 0 48 ) )
+	if( local.g != NIL ){ end local.g }
+	// half-size wedge
+	local.p = local.apos - ( vector_scale local.fwd ( local.back * 0.5 ) ) + ( vector_scale local.rgt ( local.side * 0.5 ) )
+	local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.p + ( 0 0 48 ) )
+	if( local.g != NIL ){ end local.g }
+}end NIL
+
+
+// scripted move with the enemy think off so the order is obeyed (aimaneuver.scr pattern);
+// the enemy think ALWAYS comes back on before this returns
+moveTo local.a local.pos local.tmo local.crouch local.why:{
+	if( local.a == NIL || local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	local.a.coop_psqBusy = 1
+	local.a.enableEnemy = 0
+	local.a.movedoneradius = 40
+	if( local.crouch == 1 ){ local.a crouchto local.pos } else { local.a runto local.pos }
+	local.t = 0
+	while( local.t < local.tmo ){
+		wait 0.25
+		local.t = local.t + 0.25
+		if( local.a == NULL ){ end }
+		if( !isAlive local.a ){ end }
+		if( vector_length( local.a.origin - local.pos ) < 56 ){ break }
+		if( local.t >= 0.75 ){
+			local.v = local.a.velocity
+			if( ( local.v[0] * local.v[0] ) + ( local.v[1] * local.v[1] ) < 100 ){ break }
+		}
+	}
+	local.a.enableEnemy = 1
+	local.a forceactivate
+	local.a resetleash
+	local.a.coop_psqBusy = 0
+	waitthread dbg ( "move k=" + local.a.coop_psqK + " why=" + local.why + " left=" + ( vector_length( local.a.origin - local.pos ) ) )
+}end
+
+
+// the fire team NOT moving lays down suppressing fire for the move
+overwatch local.sid local.movingTeam local.secs:{
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( local.a == NIL || local.a == NULL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.team = 0
+		if( local.k == 1 || local.k == 3 ){ local.team = 1 }
+		if( local.team != local.movingTeam ){ local.a.suppresschance = 100 }
+	}
+	waitthread dbg ( "overwatch movingTeam=" + local.movingTeam )
+	wait local.secs
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( local.a != NIL && local.a != NULL ){
+			if( isAlive local.a ){ local.a.suppresschance = 40 }
+		}
+	}
+}end
+
+
+//====================================================================
+// COVER
+//====================================================================
+coverCheck local.a:{
+	if( !( waitthread usable local.a ) ){ end }
+	local.e = local.a.enemy
+	if( local.e == NIL || local.e == NULL ){ end }
+	if( !isAlive local.e ){ end }
+	if( local.a.position == "prone" ){ end }	// prone is already a small target
+	local.eye = local.e.origin + ( 0 0 56 )
+	if( waitthread lowCoverAt local.a.origin local.eye ){
+		local.a.coop_paraCrouch = 65
+		end
+	}
+	if( !( local.a cansee local.e ) ){ end }	// no line to him either: hidden enough
+	local.spot = waitthread findCover local.a local.e
+	if( local.spot == NIL ){ end }
+	local.a.coop_paraCrouch = 65
+	waitthread ev "cover" local.a
+	waitthread dbg ( "cover k=" + local.a.coop_psqK + " from=" + local.a.origin + " to=" + local.spot )
+	waitthread moveTo local.a local.spot 2.5 1 "cover"
+}end
+
+
+// a low obstacle between a spot and the target: blocked at waist height within 72u, clear at 60
+lowCoverAt local.g local.eye:{
+	local.p = local.g + ( 0 0 28 )
+	local.dir = vector_normalize ( local.eye - local.p )
+	local.tr = traced local.p ( local.p + ( vector_scale local.dir 72 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["fraction"] >= 1.0 ){ end 0 }
+	local.q = local.g + ( 0 0 60 )
+	local.dir = vector_normalize ( local.eye - local.q )
+	local.tr = traced local.q ( local.q + ( vector_scale local.dir 120 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["fraction"] < 1.0 ){ end 0 }
+}end 1
+
+
+findCover local.a local.e:{
+	local.eye = local.e.origin + ( 0 0 56 )
+	local.de = waitthread flatDist local.a.origin local.e.origin
+	local.va = vector_toangles ( local.e.origin - local.a.origin )
+	local.yaw0 = local.va[1]
+	local.best = NIL
+	local.bs = 999999
+	for( local.r = 112; local.r <= 240; local.r = local.r + 128 ){
+		for( local.j = 0; local.j < 10; local.j++ ){
+			local.off = local.j * 36
+			local.c = local.a.origin + ( vector_scale ( angles_toforward ( 0 ( local.yaw0 + local.off ) 0 ) ) local.r )
+			local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+			if( local.g == NIL ){ continue }
+			// never advance more than 64u toward him to get there
+			local.dg = waitthread flatDist local.g local.e.origin
+			if( local.dg < ( local.de - 64 ) ){ continue }
+			if( !( waitthread lowCoverAt local.g local.eye ) ){ continue }
+			if( waitthread crowded local.g local.a 80 ){ continue }
+			local.s = vector_length( local.g - local.a.origin )
+			if( local.s < local.bs ){ local.bs = local.s; local.best = local.g }
+		}
+		if( local.best != NIL ){ break }
+	}
+}end local.best
+
+
+// another trooper (or a player) already within r of the spot
+crowded local.g local.self local.r:{
+	if( local.self == NIL || local.self == NULL ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			if( vector_length( local.p.origin - local.g ) < local.r ){ end 1 }
+		}
+	}
+	local.sid = local.self.coop_psqSid
+	if( local.sid == NIL ){ end 0 }
+	for( local.k = 1; local.k <= 5; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( local.a == NIL || local.a == NULL || local.a == local.self ){ continue }
+		if( vector_length( local.a.origin - local.g ) < local.r ){ end 1 }
+	}
+}end 0
+
+
+//====================================================================
+// GRENADES
+//====================================================================
+// target point safe from friendlies? (thrower 450, players 450, any allied actor 400)
+nadeSafe local.t local.thrower local.selfMin:{
+	if( local.selfMin == NIL ){ local.selfMin = 450 }
+	if( vector_length( local.t - local.thrower.origin ) < local.selfMin ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( vector_length( local.p.origin - local.t ) < 450 ){ end 0 }
+	}
+	if( level.coop_psqN != NIL ){
+		for( local.s = 1; local.s <= level.coop_psqN; local.s++ ){
+			for( local.k = 1; local.k <= 5; local.k++ ){
+				local.a = level.coop_psqM[local.s][local.k]
+				if( local.a == NIL || local.a == NULL ){ continue }
+				if( vector_length( local.a.origin - local.t ) < 400 ){ end 0 }
+			}
+		}
+	}
+	local.arr = level.coop_actorArray["american"]
+	if( local.arr != NIL ){
+		for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+			local.a = local.arr[local.i]
+			if( local.a == NIL || local.a == NULL ){ continue }
+			if( vector_length( local.a.origin - local.t ) < 400 ){ end 0 }
+		}
+	}
+}end 1
+
+
+tryGrenade local.sid:{
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( !( waitthread usable local.a ) ){ continue }
+		if( ( level.time - local.a.coop_psqNadeT ) < 20 ){ continue }
+		local.e = local.a.enemy
+		if( local.e == NIL || local.e == NULL ){ continue }
+		if( !isAlive local.e ){ continue }
+		local.d = vector_length( local.e.origin - local.a.origin )
+		if( local.d < 450 || local.d > 1000 ){ continue }
+		// worth a grenade: he is behind cover, or not alone
+		local.worth = 0
+		if( !( local.a cansee local.e ) ){ local.worth = 1 }
+		if( local.worth == 0 ){
+			local.en = waitthread enemiesNear local.e.origin 260
+			if( local.en >= 2 ){ local.worth = 1 }
+		}
+		if( local.worth == 0 ){ continue }
+		if( !( waitthread nadeSafe local.e.origin local.a 450 ) ){ continue }
+		thread throwNade local.a local.e.origin "fight"
+		end 1
+	}
+}end 0
+
+
+enemiesNear local.pos local.r:{
+	local.n = 0
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end 0 }
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.g = local.arr[local.i]
+		if( local.g == NIL || local.g == NULL ){ continue }
+		if( !isAlive local.g ){ continue }
+		if( vector_length( local.g.origin - local.pos ) < local.r ){ local.n++ }
+	}
+}end local.n
+
+
+// returns 1 if a grenade left his hand
+throwNade local.a local.t local.why:{
+	if( !( waitthread usable local.a ) ){ end 0 }
+	local.a.coop_psqBusy = 1
+	local.a.coop_psqNadeT = level.time
+	local.a.enableEnemy = 0
+	local.look = spawn script_origin
+	local.look.origin = local.t
+	local.a turnto local.look
+	wait 0.4
+	local.look remove
+	local.ok = 0
+	if( local.a != NULL && isAlive local.a ){
+		local.selfMin = 450
+		if( local.why == "room" ){ local.selfMin = 300 }	// frag radius 256 (m2fgrenade_base.txt); he is immune and behind the wall
+		if( waitthread nadeSafe local.t local.a local.selfMin ){		// re-check: people move
+			local.a.ammo_grenade = 1
+			local.gs = local.a calcgrenadetoss local.t
+			if( local.gs != NIL && local.gs != "" ){
+				local.a immune grenade			// attacker == self is the one hit the engine does not filter
+				if( local.gs == "anim/grenadetoss.scr" ){
+					local.a anim_scripted grenade_toss
+				} else {
+					local.a anim_scripted grenade_throw
+				}
+				local.ok = 1
+				waitthread ev "nade" local.a
+				waitthread dbg ( "nade k=" + local.a.coop_psqK + " why=" + local.why + " dist=" + ( vector_length( local.t - local.a.origin ) ) + " mode=" + local.gs )
+				wait 1.5
+			} else {
+				waitthread dbg ( "nade k=" + local.a.coop_psqK + " why=" + local.why + " nopath" )
+			}
+		}
+	}
+	if( local.a == NULL ){ end local.ok }
+	if( !isAlive local.a ){ end local.ok }
+	local.a.ammo_grenade = 0
+	if( local.ok == 1 ){ local.a anim "idle" }	// end the scripted clip the proven way (medic recipe)
+	local.a.enableEnemy = 0
+	local.a.enableEnemy = 1
+	local.a forceactivate
+	local.a.coop_psqBusy = 0
+	if( local.ok == 1 ){ thread nadeImmuneOff local.a }
+}end local.ok
+
+
+nadeImmuneOff local.a:{
+	wait 5			// fuse + margin
+	if( local.a != NULL ){ local.a removeimmune grenade }
+}end
+
+
+//====================================================================
+// ROOM CLEARING
+//====================================================================
+// under a roof and walled in on at least 3 sides
+indoors local.pos:{
+	local.h = local.pos + ( 0 0 64 )
+	local.tr = traced local.h ( local.h + ( 0 0 448 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["fraction"] >= 1.0 ){ end 0 }
+	local.w = 0
+	for( local.j = 0; local.j < 4; local.j++ ){
+		local.d = angles_toforward ( 0 ( local.j * 90 ) 0 )
+		local.p = local.pos + ( 0 0 48 )
+		local.tr = traced local.p ( local.p + ( vector_scale local.d 448 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] < 1.0 ){ local.w++ }
+	}
+	if( local.w >= 3 ){ end 1 }
+}end 0
+
+
+tryClear local.sid local.apos:{
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end 0 }
+	// an indoor enemy near the squad, with no player already inside with him
+	local.tgt = NIL
+	local.bd = 1100
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.g = local.arr[local.i]
+		if( local.g == NIL || local.g == NULL ){ continue }
+		if( !isAlive local.g ){ continue }
+		local.d = vector_length( local.g.origin - local.apos )
+		if( local.d >= local.bd ){ continue }
+		if( !( waitthread indoors local.g.origin ) ){ continue }
+		local.near = 0
+		for( local.p = 1; local.p <= $player.size; local.p++ ){
+			if( $player[local.p] != NULL ){
+				if( vector_length( $player[local.p].origin - local.g.origin ) < 300 ){ local.near = 1 }
+			}
+		}
+		if( local.near == 1 ){ continue }
+		local.bd = local.d
+		local.tgt = local.g
+	}
+	if( local.tgt == NIL ){ end 0 }
+	// entry pair: Thompson and Garand first, then the others (the gunner last)
+	local.ord[1] = 2
+	local.ord[2] = 3
+	local.ord[3] = 4
+	local.ord[4] = 1
+	local.m1 = NIL
+	local.m2 = NIL
+	for( local.i = 1; local.i <= 4; local.i++ ){
+		local.a = level.coop_psqM[local.sid][local.ord[local.i]]
+		if( !( waitthread usable local.a ) ){ continue }
+		if( vector_length( local.a.origin - local.tgt.origin ) > 1500 ){ continue }
+		if( local.m1 == NIL ){ local.m1 = local.a } else if( local.m2 == NIL ){ local.m2 = local.a }
+	}
+	if( local.m1 == NIL ){ end 0 }
+	// stack point: walk out from him toward the stack until the sky opens (the wall/door line),
+	// then 80u further, on the ground
+	local.cen = local.m1.origin
+	if( local.m2 != NIL ){ local.cen = vector_scale ( local.m1.origin + local.m2.origin ) 0.5 }
+	local.dir = local.cen - local.tgt.origin
+	local.dir[2] = 0
+	local.dir = vector_normalize local.dir
+	local.stack = NIL
+	for( local.s = 64; local.s <= 640; local.s = local.s + 48 ){
+		local.p = local.tgt.origin + ( vector_scale local.dir local.s )
+		local.h = local.p + ( 0 0 64 )
+		local.tr = traced local.h ( local.h + ( 0 0 448 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] >= 1.0 ){
+			local.stack = waitthread coop_mod/officer.scr::coop_find_ground ( local.p + ( vector_scale local.dir 80 ) + ( 0 0 48 ) )
+			break
+		}
+	}
+	if( local.stack == NIL ){ end 0 }
+	thread clearRoom local.sid local.tgt local.stack local.dir local.m1 local.m2
+}end 1
+
+
+clearRoom local.sid local.tgt local.stack local.dir local.m1 local.m2:{
+	local.va = vector_toangles local.dir
+	local.rgt = angles_toforward ( 0 ( local.va[1] - 90 ) 0 )
+	local.s1 = local.stack
+	local.s2 = local.stack + ( vector_scale local.dir 64 ) + ( vector_scale local.rgt 24 )
+	waitthread dbg ( "clear stack tgt=" + local.tgt.entnum + " at=" + local.tgt.origin + " stack=" + local.stack )
+	waitthread ev "clear" local.m1
+	// 1. STACK (both men, enemy think off so they do not peel away)
+	if( local.m2 != NIL ){ thread moveTo local.m2 local.s2 8.0 0 "stack" }
+	waitthread moveTo local.m1 local.s1 8.0 0 "stack"
+	if( local.tgt == NULL ){ waitthread dbg "clear done result=gone_before_entry"; end }
+	if( !isAlive local.tgt ){ waitthread dbg "clear done result=dead_before_entry"; end }
+	if( local.m1 == NULL ){ end }
+	if( !isAlive local.m1 ){ end }
+	wait 1
+	// 2. FRAG IN (only when safe; a failed toss path just means no grenade)
+	local.thrown = 0
+	if( waitthread nadeSafe local.tgt.origin local.m1 300 ){
+		local.thrown = waitthread throwNade local.m1 local.tgt.origin "room"
+	}
+	if( local.thrown == 1 ){ wait 2.5 }
+	if( local.tgt == NULL ){ waitthread dbg ( "clear done result=frag_killed thrown=" + local.thrown ); end }
+	if( !isAlive local.tgt ){ waitthread dbg ( "clear done result=frag_killed thrown=" + local.thrown ); end }
+	// 3. ENTER - run in, open up as soon as they see him
+	waitthread dbg ( "clear enter thrown=" + local.thrown )
+	thread enter local.m1 local.tgt
+	if( local.m2 != NIL ){ wait 0.6; thread enter local.m2 local.tgt }
+	local.t = 0
+	while( local.t < 15 ){
+		wait 0.5
+		local.t = local.t + 0.5
+		if( local.tgt == NULL ){ break }
+		if( !isAlive local.tgt ){ break }
+	}
+	if( local.tgt == NULL ){ waitthread dbg "clear done result=cleared"; end }
+	if( !isAlive local.tgt ){ waitthread dbg "clear done result=cleared"; end }
+	waitthread dbg "clear done result=timeout"
+}end
+
+
+enter local.a local.tgt:{
+	if( !( waitthread usable local.a ) ){ end }
+	local.a.coop_psqBusy = 1
+	local.a.enableEnemy = 0
+	local.a.movedoneradius = 64
+	local.a runto local.tgt.origin
+	local.t = 0
+	while( local.t < 6 ){
+		wait 0.25
+		local.t = local.t + 0.25
+		if( local.a == NULL ){ end }
+		if( !isAlive local.a ){ end }
+		if( local.tgt == NULL ){ break }
+		if( !isAlive local.tgt ){ break }
+		local.d = vector_length( local.a.origin - local.tgt.origin )
+		if( local.d < 160 ){ break }
+		if( local.d < 500 ){
+			if( local.a cansee local.tgt ){ break }
+		}
+	}
+	local.a.enableEnemy = 1
+	if( local.tgt != NULL ){
+		if( isAlive local.tgt ){ local.a attackentity local.tgt }
+	}
+	local.a forceactivate
+	local.a resetleash
+	local.a.coop_psqBusy = 0
+}end
+
+
+//====================================================================
+// .30 CAL (member 1)
+//====================================================================
+gunner local.a local.sid:{
+	wait 1
+	if( local.a == NULL ){ end }
+	// carried: the M1919 on his back (the imported .30 cal's own holster tag + offsets)
+	local.prop = spawn script_model
+	local.prop model "models/weapons/30calportable.tik"
+	local.prop notsolid
+	local.prop attach local.a "Bip01 Spine2" 1 ( 8 -7.75 6.5 )
+	local.prop.angles = ( 0 185 -25 )
+	local.a.coop_psqProp = local.prop
+	local.a.coop_psqMgFails = 0
+	local.gun = NIL
+	local.crate = NIL
+	local.cool = 0
+	while( local.a != NULL ){
+		if( !isAlive local.a ){ break }
+		wait 1
+		if( local.a == NULL ){ break }
+		if( local.a.coop_psqMounted != 1 ){
+			if( level.coop_psqHolding[local.sid] == 1 && local.a.coop_psqBusy != 1 && level.time >= local.cool ){
+				// low cover first; after two empty searches (~25s held in the open) he sets up in the open
+				local.open = 0
+				if( local.a.coop_psqMgFails >= 2 ){ local.open = 1 }
+				if( waitthread findMgSpot local.a local.sid local.open ){
+					local.a.coop_psqMgFails = 0
+					waitthread mgSetup local.a
+					if( local.a == NULL ){ break }
+					local.gun = local.a.coop_psqGun
+					local.crate = local.a.coop_psqCrate
+					if( local.a.coop_psqMounted != 1 ){ local.cool = level.time + 15 }
+				} else {
+					local.a.coop_psqMgFails++
+					local.cool = level.time + 12
+				}
+			}
+		} else {
+			local.apos = level.coop_psqApos[local.sid]
+			local.far = 0
+			if( local.gun == NIL || local.gun == NULL ){ local.far = 1 }
+			if( local.far == 0 && level.coop_psqHolding[local.sid] != 1 ){
+				if( vector_length( local.apos - local.gun.origin ) > 560 ){ local.far = 1 }
+			}
+			if( local.far == 1 ){
+				waitthread mgPackup local.a
+				local.cool = level.time + 6
+			}
+		}
+	}
+	// he is gone: the carried gun goes with him; a deployed one stays for a player for a while
+	if( local.prop != NULL ){ local.prop remove }
+	if( local.gun != NIL && local.gun != NULL ){
+		wait 120
+		if( local.gun != NULL ){ local.gun remove }
+		if( local.crate != NIL && local.crate != NULL ){ local.crate remove }
+	}
+}end
+
+
+// a spot for the gun: low cover in front (wall, sandbags, sill) he can fire over, facing the
+// threat, a clear field of fire, room behind for the gunner, and no player in front of the muzzle
+findMgSpot local.a local.sid local.allowOpen:{
+	local.n_g = 0; local.n_c = 0; local.n_f = 0; local.n_s = 0; local.n_m = 0; local.n_x = 0
+	local.apos = level.coop_psqApos[local.sid]
+	local.thr = level.coop_psqThreat[local.sid]
+	if( local.thr != NIL ){
+		local.va = vector_toangles ( local.thr - local.apos )
+		local.yaw0 = local.va[1]
+	} else {
+		local.yaw0 = level.coop_psqAyaw[local.sid]
+	}
+	local.offs[1] = 0
+	local.offs[2] = 25
+	local.offs[3] = 0 - 25
+	local.offs[4] = 50
+	local.offs[5] = 0 - 50
+	local.offs[6] = 75
+	local.offs[7] = 0 - 75
+	local.best = 999999
+	local.found = 0
+	for( local.r = 96; local.r <= 480; local.r = local.r + 128 ){
+		for( local.j = 1; local.j <= 7; local.j++ ){
+			local.yaw = local.yaw0 + local.offs[local.j]
+			local.c = local.apos + ( vector_scale ( angles_toforward ( 0 local.yaw 0 ) ) local.r )
+			local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+			if( local.g == NIL ){ continue }
+			local.fyaw = local.yaw0
+			if( local.thr != NIL ){
+				local.va = vector_toangles ( local.thr - local.g )
+				local.fyaw = local.va[1]
+			}
+			local.dir = angles_toforward ( 0 local.fyaw 0 )
+			local.n_g++
+			// obstacle in front at waist height
+			local.p = local.g + ( 0 0 20 )
+			local.tr = traced local.p ( local.p + ( vector_scale local.dir 72 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			local.top = 0
+			local.dw = 0
+			if( local.tr["fraction"] < 1.0 ){
+				local.dw = local.tr["fraction"] * 72
+				// its top: first clear height
+				if( local.dw >= 20 ){
+					for( local.z = 28; local.z <= 60; local.z = local.z + 8 ){
+						local.q = local.g + ( 0 0 local.z )
+						local.tr = traced local.q ( local.q + ( vector_scale local.dir ( local.dw + 24 ) ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+						if( local.tr["fraction"] >= 1.0 ){ local.top = local.z; break }
+					}
+				}
+			}
+			if( local.top == 0 ){
+				// no low cover here: only acceptable as an open emplacement, and only when open is allowed
+				// and the ground ahead is clear (a wall too high to fire over is not an open spot either)
+				if( local.allowOpen != 1 || local.dw > 0 ){ continue }
+				local.dw = 30
+				local.h = 40
+			} else {
+				local.n_c++
+				local.h = local.top + 12
+				if( local.h < 40 ){ local.h = 40 }
+				if( local.h > 66 ){ local.h = 66 }
+			}
+			// field of fire over it: centre and +-20 degrees mostly open for 300u
+			local.ff = 0
+			for( local.s = 0; local.s < 3; local.s++ ){
+				local.sy = local.fyaw + ( ( local.s - 1 ) * 20 )
+				local.q = local.g + ( 0 0 local.h )
+				local.tr = traced local.q ( local.q + ( vector_scale ( angles_toforward ( 0 local.sy 0 ) ) 400 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+				if( local.tr["fraction"] >= 0.75 ){ local.ff++ }
+			}
+			if( local.ff < 2 ){ continue }
+			local.n_f++
+			local.gunpos = local.g + ( vector_scale local.dir ( local.dw - 14 ) )
+			local.gunpos[2] = local.g[2] + local.h
+			local.stand = local.g - ( vector_scale local.dir 30 )
+			local.sg = waitthread coop_mod/officer.scr::coop_find_ground ( local.stand + ( 0 0 48 ) )
+			if( local.sg == NIL ){ continue }
+			local.n_s++
+			local.n_m++
+			if( waitthread crowded local.sg local.a 72 ){ continue }
+			if( waitthread playerInFront local.gunpos local.dir ){ continue }
+			local.n_x++
+			local.ao = local.offs[local.j]
+			if( local.ao < 0 ){ local.ao = 0 - local.ao }
+			local.score = local.r + ( local.ao * 2 )
+			if( local.top == 0 ){ local.score = local.score + 1000 }	// cover always beats open
+			if( local.score < local.best ){
+				local.best = local.score
+				local.found = 1
+				local.a.coop_psqMgGun = local.gunpos
+				local.a.coop_psqMgStand = local.sg
+				local.a.coop_psqMgYaw = local.fyaw
+				local.a.coop_psqMgTop = local.top
+			}
+		}
+		if( local.found == 1 ){ break }
+	}
+	if( local.found != 1 ){
+		waitthread dbg ( "mg nospot open=" + local.allowOpen + " ground=" + local.n_g + " cover=" + local.n_c + " fire=" + local.n_f + " stand=" + local.n_s + " path=" + local.n_m + " ok=" + local.n_x )
+	}
+}end local.found
+
+
+playerInFront local.pos local.dir:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.v = local.p.origin - local.pos
+		local.v[2] = 0
+		local.along = vector_dot local.v local.dir
+		if( local.along <= 0 || local.along > 1500 ){ continue }
+		local.lat = vector_length( local.v - ( vector_scale local.dir local.along ) )
+		if( local.lat < 128 ){ end 1 }
+	}
+}end 0
+
+
+mgSetup local.a:{
+	waitthread moveTo local.a local.a.coop_psqMgStand 8.0 0 "mg"
+	if( local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	if( vector_length( local.a.origin - local.a.coop_psqMgStand ) > 96 ){
+		waitthread dbg "mg setup abort=not_reached"
+		end
+	}
+	if( waitthread playerInFront local.a.coop_psqMgGun ( angles_toforward ( 0 local.a.coop_psqMgYaw 0 ) ) ){
+		waitthread dbg "mg setup abort=player_in_front"
+		end
+	}
+	local.a.coop_psqBusy = 1
+	local.a.enableEnemy = 0
+	local.look = spawn script_origin
+	local.look.origin = local.a.coop_psqMgGun
+	local.a turnto local.look
+	if( local.a.coop_psqProp != NIL && local.a.coop_psqProp != NULL ){ local.a.coop_psqProp hide }
+	// ammo can at his side, then the gun on the cover
+	local.rgt = angles_toforward ( 0 ( local.a.coop_psqMgYaw - 90 ) 0 )
+	local.crate = spawn script_model
+	local.crate model "models/static/30cal_crate.tik"
+	local.crate notsolid
+	local.cg = waitthread coop_mod/officer.scr::coop_find_ground ( local.a.coop_psqMgStand + ( vector_scale local.rgt 26 ) + ( 0 0 32 ) )
+	if( local.cg == NIL ){ local.cg = local.a.coop_psqMgStand }
+	local.crate.origin = local.cg
+	local.crate.angles = ( 0 local.a.coop_psqMgYaw 0 )
+	wait 1.2
+	local.look remove
+	if( local.a == NULL ){ local.crate remove; end }
+	if( !isAlive local.a ){ local.crate remove; end }
+	local.gun = spawn "models/statweapons/30cal.tik"
+	if( local.gun == NIL || local.gun == NULL ){
+		local.crate remove
+		if( local.a.coop_psqProp != NIL && local.a.coop_psqProp != NULL ){ local.a.coop_psqProp show }
+		local.a.enableEnemy = 1
+		local.a forceactivate
+		local.a.coop_psqBusy = 0
+		waitthread dbg "mg setup abort=no_gun"
+		end
+	}
+	local.gun.origin = local.a.coop_psqMgGun
+	local.gun.angles = ( 0 local.a.coop_psqMgYaw 0 )
+	local.gun startyaw local.a.coop_psqMgYaw	// m_fStartYaw is captured at spawn, before .angles (bunker.scr)
+	local.gun targettype "auto"
+	local.gun burstFireSettings 1.2 3.0 0.8 2.2
+	local.gun aibulletspread 300 300
+	local.gun maxYawOffset 60
+	local.a.coop_psqGun = local.gun
+	local.a.coop_psqCrate = local.crate
+	// mount (global/mg42_active.scr gunner recipe); remember his own thinks for the pack-up
+	local.a.coop_psqT1 = local.a.type_idle
+	local.a.coop_psqT2 = local.a.type_attack
+	local.a.coop_psqT3 = local.a.type_disguise
+	local.a.coop_psqT4 = local.a.type_grenade
+	local.a turret local.gun
+	local.a type_idle "machinegunner"
+	local.a type_attack "machinegunner"
+	local.a type_disguise "machinegunner"
+	local.a type_grenade "machinegunner"
+	local.a physics_off
+	local.a.enableEnemy = 1
+	local.a forceactivate
+	local.a.coop_psqMounted = 1
+	local.a.coop_psqBusy = 0
+	waitthread ev "mg" local.a
+	waitthread dbg ( "mg setup k=1 gun=" + local.gun.origin + " yaw=" + local.a.coop_psqMgYaw + " coverTop=" + local.a.coop_psqMgTop + " stand=" + local.a.coop_psqMgStand )
+}end
+
+
+mgPackup local.a:{
+	if( local.a == NULL ){ end }
+	local.a.coop_psqBusy = 1
+	local.a type_idle local.a.coop_psqT1
+	local.a type_attack local.a.coop_psqT2
+	local.a type_disguise local.a.coop_psqT3
+	local.a type_grenade local.a.coop_psqT4
+	local.a physics_on
+	local.a.coop_psqMounted = 0
+	local.a.enableEnemy = 0
+	wait 1.2		// packing up
+	if( local.a.coop_psqGun != NIL && local.a.coop_psqGun != NULL ){ local.a.coop_psqGun remove }
+	if( local.a.coop_psqCrate != NIL && local.a.coop_psqCrate != NULL ){ local.a.coop_psqCrate remove }
+	local.a.coop_psqGun = NIL
+	local.a.coop_psqCrate = NIL
+	if( local.a == NULL ){ end }
+	if( local.a.coop_psqProp != NIL && local.a.coop_psqProp != NULL ){ local.a.coop_psqProp show }
+	if( isAlive local.a ){
+		local.a unholster
+		local.a.enableEnemy = 1
+		local.a forceactivate
+		local.a resetleash
+	}
+	local.a.coop_psqBusy = 0
+	waitthread dbg "mg packup k=1"
+}end
