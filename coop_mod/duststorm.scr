@@ -4,9 +4,21 @@
 // breakthrough campaign where it really does obscure vision?" + "with respective sound".
 //
 // On the sand-theme maps (weather.scr sand branch) a full sand storm now ROLLS IN: over ~20 s the fog
-// closes to a tan (night: dark) wall, then each player's retail-style sand sheet + blowing sand fades in
+// closes to a tan (night: moonlit grey-tan) wall, then each player's retail-style sand sheet + blowing sand fades in
 // over their own view, and a strong wind swells. It holds at least 45 s, then rolls out over ~25 s (sheet
 // and wind leave first) back to EXACTLY the map's fog. A medium storm (pattern 2) is a light haze.
+//
+// [user 2026-09-28] "full dust storms should happen more often" + night storms should read as a sandstorm, not
+// near-black (docs/proposals/duststorm_2026-09-28/plan.md, vet.md):
+//   FREQUENCY - each sand storm is a KIND, rolled as the weather walk leaves a dry spell (coop_dust_walkBias, called
+//     from weather.scr's walk): FULL (coop_dustFull, AUTO 0.7) builds straight to a full storm and holds ~2-3 min;
+//     HAZE never passes the medium haze. No full storm within coop_dustFullCool (300 s) of the last one. Sand maps hold
+//     half-length dry spells (coop_dustDry, AUTO 0.5). No full wall in a map's first 150 s (the intro). Modelled
+//     (sim/sim_final.py): a 15-min mission sees a full storm ~3 times in 4 (was ~1 in 4), ~15% of the time in one
+//     (was ~4%), each ~2-2.5 min at full. coop_maptest != 0 / coop_dust 0: the walk is left exactly as it was.
+//   NIGHT - moonlit dust (coop_dust_nightLook): a grey-tan wall at about the moonlit scene's brightness, floor 0.12 /
+//     ceiling 0.26 luminance (headlights and lamp flares keep burning through it); a moonlit sheet (original frames,
+//     textures/coop_dust/moonveil*) and moonlit blowing sand in coop_dustveil_night.tik.
 //
 //   coop_dust 1/0        = master (seta in coop_defaults.cfg). 0 = storms only draw the streaks again.
 //   coop_dustNow ""/1/0  = TEST override: 1 forces a full storm now, 0 forces it off, "" follows the
@@ -154,21 +166,39 @@ coop_dust_profile local.m:{
 		level.coop_dustG    = 0.47
 		level.coop_dustB    = 0.33
 	} else if( local.m == "e1l4" ){
-		level.coop_dustR     = 0.12
-		level.coop_dustG     = 0.10
-		level.coop_dustB     = 0.08
-		level.coop_dustNight = 1
+		waitthread coop_dust_nightLook 0.153 0.136 0.119 0.8
 	} else if( local.m == "m1l1" || local.m == "m1l2a" || local.m == "m1l2b" ){
-		level.coop_dustR     = 0.09
-		level.coop_dustG     = 0.085
-		level.coop_dustB     = 0.075
-		level.coop_dustNight = 1
+		waitthread coop_dust_nightLook 0.174 0.148 0.126 0.8
 	} else if( local.m == "m1l3a" || local.m == "m1l3b" ){
-		level.coop_dustR     = 0.10
-		level.coop_dustG     = 0.09
-		level.coop_dustB     = 0.08
-		level.coop_dustNight = 1
+		waitthread coop_dust_nightLook 0.153 0.134 0.113 0.8
 	}
+}end
+
+//=========================================================================
+// NIGHT STORMS [2026-09-28] (docs/proposals/duststorm_2026-09-28/plan.md section 2). A dust storm at night is MOONLIT
+// DUST, not a black wall: the dust scatters the moonlight, so the wall takes the colour of tan dust under that map's
+// moon - a low-saturation grey-tan - at about the brightness of the moonlit sky it hides, above the moonlit ground.
+// The values are chosen ON SCREEN, then inverted through the tone stage + the map's own grade (coop_mod/cfg/mapgrade.cfg
+// - the m1*/e1l4 night grades cool the image, temp -0.12/-0.07, so the raw colour must lean warm to land grey-tan;
+// docs/proposals/duststorm_2026-09-28/sim/night_colour.py, checked on 5 m1l1 captures to +-1.4 levels):
+//   m1l1 group: on screen ~43 40 36 (clear sky there 20-40, ground 24-34; the old .09 .085 .075 showed 15 16 13 - black)
+//   colour r g b = the storm fog (raw farplane_color); alpha = the veil's peak (coop_dustveil_night.tik).
+// Two rails, enforced here so a later tweak cannot break them:
+//   VISIBILITY FLOOR - the wall's raw luminance never below 0.12 (~34 on screen on m1l1): enemies read as dark shapes.
+//   CEILING - never above 0.26: stays under the headlight 'dark' gate (cg_view.c cg_hzmHeadlightsDarkFog 0.3), so beams,
+//             lamp glows and flares keep burning through the dust, and it is never brighter than a moonlit scene.
+//=========================================================================
+coop_dust_nightLook local.r local.g local.b local.alpha:{
+//=========================================================================
+	level.coop_dustNight = 1
+	local.l = ( 0.299 * local.r ) + ( 0.587 * local.g ) + ( 0.114 * local.b )
+	local.k = 1.0
+	if( local.l < 0.12 ){ local.k = 0.12 / local.l }
+	if( local.l > 0.26 ){ local.k = 0.26 / local.l }
+	level.coop_dustR = local.r * local.k
+	level.coop_dustG = local.g * local.k
+	level.coop_dustB = local.b * local.k
+	level.coop_dustAlphaMax = local.alpha
 }end
 
 //=========================================================================
@@ -191,6 +221,16 @@ coop_dust_start:{
 	level.coop_dustRising    = 1
 	level.coop_dustOwnsFog   = 0
 	level.coop_dustWindScale = 1.0
+	//[2026-09-28 dust frequency] the storm-kind state weather.scr's walk hooks read - seeded BEFORE the flag that
+	//lets them run (TRAPS T17: assign a level var before anything reads it). A default-on map holds its storm and
+	//runs no random walk, so its flag stays off.
+	level.coop_dustKind = "none"
+	level.coop_dustNext = "none"
+	level.coop_dustPeaked = 0
+	level.coop_dustFullEnd = 0 - 100000
+	level.coop_dustOpenAt = level.time + 150.0
+	level.coop_dustWalk = 0
+	if( level.coop_dustDefaultOn != 1 ){ level.coop_dustWalk = 1 }
 	level.coop_dustSheet["x"] = 0		// the per-entnum arrays, created before anything indexes them
 	level.coop_dustAlpha["x"] = 0
 	level.coop_dustRetry["x"] = 0
@@ -202,7 +242,7 @@ coop_dust_start:{
 	level.coop_dustIndoor["x"] = 0
 	local.mp = 0		// level.coop_mpRun is unset in coop, and "str" + none throws (TRAPS "Script Error")
 	if( level.coop_mpRun == 1 ){ local.mp = 1 }
-	println( "^~^~^ DUST armed map=" + local.m + " far=" + level.coop_dustFar + " night=" + level.coop_dustNight + " defaulton=" + level.coop_dustDefaultOn + " mp=" + local.mp )
+	println( "^~^~^ DUST armed map=" + local.m + " far=" + level.coop_dustFar + " night=" + level.coop_dustNight + " defaulton=" + level.coop_dustDefaultOn + " mp=" + local.mp + " walk=" + level.coop_dustWalk )
 
 	thread coop_dust_sheets
 
@@ -302,9 +342,108 @@ coop_dust_autoTarget:{
 	if( local.mt != "" && local.mt != "0" ){ end 0.0 }
 	if( level.weatherpattern == NIL ){ end 0.0 }
 	local.p = int( level.weatherpattern )
+	//[2026-09-28 dust frequency] the storm's KIND (coop_dust_walkBias) decides what the walk means: a FULL storm is a
+	//full storm from pattern 2 up, a HAZE is a haze. With no kind yet (the walk's first step at map start runs before
+	//this driver is armed) the old mapping stands: 3 = full, 2 = haze.
+	//OPENING GRACE (vet.md 2): no full wall in a map's first 150 s - the walk's first step can build at once, which put
+	//a quarter of missions into a full storm during their intro. The streaks still build; the wall follows after.
+	if( level.coop_dustKind == "full" ){
+		if( local.p >= 2 && level.time >= level.coop_dustOpenAt ){ end 1.0 }
+		end 0.0
+	}
 	if( local.p >= 3 ){ end 1.0 }
 	if( local.p == 2 ){ end 0.4 }
 }end 0.0
+
+//=========================================================================
+// STORM FREQUENCY [2026-09-28] (docs/proposals/duststorm_2026-09-28/plan.md). Two hooks in weather.scr's random walk
+// call these on a sand map once this driver is armed (level.coop_dustWalk == 1, set in coop_dust_start). Rain and snow
+// maps never set it, so their walk is untouched.
+//
+// coop_dust_walkBias - the walk's BUILD chance for this step (weather.scr: build if r < pb, ease if r < 0.85, else hold).
+//   At a dry step (cur 0) it rolls the kind the NEXT storm will be; the moment the walk leaves the dry spell that kind
+//   is fixed for the whole storm:
+//     FULL (coop_dustFull, AUTO 0.7): builds 85% / holds 15% / never eases until it reaches 3, so it always arrives as a
+//          full storm; once it has peaked it eases more readily (build 0.30 instead of 0.38) so it does not sit for
+//          ever. Pattern 2 and up is the full storm (coop_dust_autoTarget).
+//     HAZE: never builds past 2 - the medium storm, a light haze.
+//   Not two full storms in a row: within coop_dustFullCool (300 s) of the end of the last full storm the next one is a
+//   haze. coop_dust 0 or coop_maptest != 0: the walk is left exactly as it was (pb unchanged, no kind).
+//=========================================================================
+coop_dust_walkBias local.cur local.pb:{
+//=========================================================================
+	if( getcvar( "coop_dust" ) == "0" ){
+		level.coop_dustKind = "none"
+		end local.pb
+	}
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){
+		level.coop_dustKind = "none"
+		end local.pb
+	}
+	if( local.cur <= 0 ){
+		// a dry step: this is what the storm will be IF the walk builds now (leaving a dry spell stays at the walk's 38%)
+		level.coop_dustNext = waitthread coop_dust_rollKind
+		end local.pb
+	}
+	if( level.coop_dustKind != "full" && level.coop_dustKind != "haze" ){
+		// the walk has just left a dry spell: fix this storm's kind
+		local.k = level.coop_dustNext
+		if( local.k != "full" && local.k != "haze" ){ local.k = waitthread coop_dust_rollKind }
+		level.coop_dustKind = local.k
+		level.coop_dustPeaked = 0
+		println( "^~^~^ DUST kind=" + local.k + " map=" + level.coop_dustMap + " at=" + level.time )
+	}
+	if( level.coop_dustKind == "full" ){
+		if( local.cur >= 3 ){ level.coop_dustPeaked = 1 }
+		if( level.coop_dustPeaked != 1 ){ end 0.85 }
+		end 0.30
+	}
+	if( local.cur >= 2 ){ end 0.0 }
+}end local.pb
+
+//=========================================================================
+// The walk has just cleared to 0 and is about to hold a dry spell: sand maps hold it for coop_dustDry x the usual
+// (AUTO 0.5: 90-210 s against the shipped 180-420 s), and a full storm's end is noted for the cooldown.
+//=========================================================================
+coop_dust_dryScale:{
+//=========================================================================
+	if( level.coop_dustKind == "full" ){ level.coop_dustFullEnd = level.time }
+	level.coop_dustKind = "none"
+	if( getcvar( "coop_dust" ) == "0" ){ end 1.0 }
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){ end 1.0 }
+	local.d = waitthread coop_dust_cvarAuto "coop_dustDry" 0.5
+	if( local.d < 0.1 ){ local.d = 0.1 }
+	if( local.d > 1 ){ local.d = 1.0 }
+}end local.d
+
+//=========================================================================
+// full or haze, for the next storm: full with chance coop_dustFull, unless the last full storm ended < cooldown ago
+//=========================================================================
+coop_dust_rollKind:{
+//=========================================================================
+	local.k = "haze"
+	local.pf = waitthread coop_dust_cvarAuto "coop_dustFull" 0.7
+	if( local.pf > 1 ){ local.pf = 1.0 }
+	local.cool = waitthread coop_dust_cvarAuto "coop_dustFullCool" 300.0
+	local.since = level.time - level.coop_dustFullEnd		// seeded -100000 in coop_dust_start
+	if( local.since < local.cool ){ end local.k }
+	local.r = randomfloat( 1 )
+	if( local.r < local.pf ){ local.k = "full" }
+}end local.k
+
+//=========================================================================
+// A host tuning cvar: "" (unset) or any negative value = AUTO (local.def); else its float value. Seeded -1 in
+// coop_defaults.cfg, so a later change of the AUTO value here still reaches every saved config (TRAPS T7).
+//=========================================================================
+coop_dust_cvarAuto local.name local.def:{
+//=========================================================================
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ end local.def }
+	local.v = float( local.s )
+	if( local.v < 0 ){ end local.def }
+}end local.v
 
 //=========================================================================
 // A storm starts: record where the fog is, take ownership BEFORE the first write.
