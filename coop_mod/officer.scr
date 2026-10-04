@@ -561,7 +561,10 @@ coop_officer_spawn local.pos:{
 	//G_GetEntity(0) ONLY (Actor::EventAttackPlayer) and throws "player doesn't exist" when slot 0 is empty - a
 	//headless boot, or a dedicated server whose first client left - and the actor is then handed no enemy at all.
 	//With client 0 present the shim issues the same attackplayer, so a listen game behaves exactly as before.
-	local.officer exec coop_mod/replace.scr::attackplayer
+	//[user 2026-10-04] NOT forced at spawn any more: attackplayer -> Actor::ForceAttackPlayer hands him the player
+	//with no line of sight ("he spots you when he spawns, without a visual"). He is released to attack only on
+	//real contact - see coop_officer_contact; guard_radio issues the attackplayer once that latches.
+	level.coop_officer_contact = 0
 	local.officer.nosurprise = 1
 	local.officer.nolongpain = 1
 	local.officer german
@@ -722,6 +725,14 @@ coop_spawn_bodyguard local.pos local.idx:{
 		local.guard runto level.coop_radio.origin
 		local.guard waittill movedone
 	}
+	//[user 2026-10-04] held until the officer has real contact: a force-attacking guard would share the player
+	//with him (squad enemy sharing) and make the officer "aware" with no visual. The guard's own sight/hearing
+	//still works while he waits (enableEnemy 1), so a guard who sees a player fights normally.
+	while( local.guard != NULL && isAlive local.guard && level.coop_officer_alive == 1 && level.coop_officer_contact != 1 ){
+		if( local.guard.enemy != NULL ){ level.coop_officer_contact = 1 }
+		wait 1
+	}
+	if( local.guard == NULL || !isAlive local.guard ){ end }
 	local.guard exec coop_mod/replace.scr::attackplayer
 }end
 
@@ -735,7 +746,7 @@ coop_officer_guard_radio local.officer:{
 				// keepalive: prevent the 60s think-window freeze and idle-stuck behaviour, and keep him engaging
 				local.officer forceactivate
 				local.officer.enableEnemy = 1
-				local.officer exec coop_mod/replace.scr::attackplayer
+				if( waitthread coop_officer_contact local.officer ){ local.officer exec coop_mod/replace.scr::attackplayer }	//[user 2026-10-04] only after real contact
 				if( level.coop_radio != NIL && level.coop_radio != NULL ){
 					local.gdist = vector_length( local.officer.origin - level.coop_radio.origin )
 					if( local.gdist > 700 ){
@@ -745,7 +756,7 @@ coop_officer_guard_radio local.officer:{
 						local.officer runto level.coop_radio.origin
 						local.officer waittill movedone
 						local.officer.enableEnemy = 1
-						local.officer exec coop_mod/replace.scr::attackplayer
+						if( waitthread coop_officer_contact local.officer ){ local.officer exec coop_mod/replace.scr::attackplayer }	//[user 2026-10-04] only after real contact
 						level.coop_officer_busy = 0
 					}
 				}
@@ -1161,9 +1172,7 @@ coop_officer_reinforcements local.officer:{
 	//true from his first frame: coop_officer_spawn runs replace.scr::attackplayer -> Actor::ForceAttackPlayer,
 	//which confirms the player as his enemy with no line of sight, so "first contact" fired at spawn.
 	while( isAlive local.officer && level.coop_officer_alive == 1 ){
-		if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ break }
-		local.imx = level.coop_officerMaxHp
-		if( local.imx != NIL && local.imx > 0 && local.officer.health < (local.imx * 0.97) ){ break }
+		if( waitthread coop_officer_contact local.officer ){ break }
 		wait 0.5
 	}
 	if( !isAlive local.officer || level.coop_officer_alive != 1 ){ end }
@@ -5594,3 +5603,29 @@ coop_reinf_liveScale local.actor:{
 		wait 2
 	}
 }end
+
+//=========================================================================
+//[user 2026-10-04] FIRST CONTACT for the officer group, latched in level.coop_officer_contact. True once he SEES a
+//player, has been HURT, a level ALARM has gone off (same flags as coop_officer_wait_goloud), or the engine's own
+//perception gave him an enemy - sight or gunfire he heard (sound awareness), i.e. a nearby fight. That last test is
+//only honest because nothing forces attackplayer on him or his guards before contact any more.
+//=========================================================================
+coop_officer_contact local.officer:{
+	if( level.coop_officer_contact == 1 ){ end 1 }
+	if( local.officer == NULL || local.officer == NIL ){ end 0 }
+	if( !isAlive local.officer ){ end 0 }
+	local.c = 0
+	if( local.officer.enemy != NULL ){ local.c = 1 }
+	if( level.alarm != NIL && level.alarm == 1 ){ local.c = 1 }
+	if( level.alarmSounded != NIL && level.alarmSounded == 1 ){ local.c = 1 }
+	if( level.alarmactive != NIL && level.alarmactive == 1 ){ local.c = 1 }
+	local.mx = level.coop_officerMaxHp
+	if( local.mx != NIL && local.mx > 0 && local.officer.health < (local.mx * 0.97) ){ local.c = 1 }
+	if( local.c == 0 ){
+		if( exec coop_mod/replace.scr::player_anyCanBeSeen local.officer 3000 ){ local.c = 1 }
+	}
+	if( local.c == 1 ){
+		level.coop_officer_contact = 1
+		println "^~^~^ OFFICER CONTACT"
+	}
+}end local.c
