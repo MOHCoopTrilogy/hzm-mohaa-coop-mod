@@ -1,0 +1,407 @@
+//=========================================================================
+// coop_mod/atsupply.scr - ANTI-TANK SUPPLY POINTS
+//=========================================================================
+//[user 2026-10-04] "anytime there is a vehicle destroy objective or scripted scene we have either a
+//panzerfaust with a box of ammo or bazooka with box of ammo spawn nearby (preferably near cover and
+//will infinitely supply)". Plus: the launcher ITSELF must respawn so several players can each take one,
+//and a player who dies or drops his gets another.
+//
+//RECIPE (copied, not invented):
+//  - the pickups: maps/M3L3.scr::coop_replaceBazookaPickup - spawn the real weapon tik and real
+//    items/item_heavy_ammobox.tik shells as plain world items (both tiks exec coop_mod/itemhandler.scr);
+//  - the respawn: main.scr::coop_launcherRespawnSweep (bug-1337) - the ENGINE's own DM item respawn,
+//    `set_respawn 1` + `set_respawn_time`, so a pickup never deletes the world item: it hides and re-shows,
+//    and it is the SAME entity every time - a spot can never hold two launchers. Measured (e2l1, a bot):
+//    a take hands the player his own copy and the launcher is at once available to the next player (coop's
+//    pickup goes through itemhandler's gametype-0 triggereffect, whose "already carrying" branch re-shows a
+//    respawnable item immediately); shells hide on pickup and are back after the 10s delay. Without
+//    set_respawn the "already carrying" touch REMOVES the launcher for good - that was bug-1337's soft-lock.
+//  - itemhandler's own script respawn is switched OFF on these items (coop_itemRespawnTime -1): it spawns a
+//    NEW entity, and two mechanisms on one pickup is how a spot ends up with two launchers.
+//Death drops (bug-3305) are separate DROPPED_ITEM entities, never respawnable, so a dead player's launcher
+//on the ground is never multiplied by this: the spot only ever re-shows its own entity.
+//
+//coop_atSupply = 1 marks the launcher so the bug-1337 sweep (which runs once at +3s with a 30s delay)
+//leaves the 10s delay set here alone.
+//
+//Placements are fixed positions, chosen from an in-engine probe (coop_atsupply_probe 1) that ground-traced
+//candidates around the place the players fight from and kept only ones with a floor, a clear volume and
+//solid cover between the spot and the vehicle. They are re-verified on every load (coop_atSupply_place):
+//a position that has no floor or sits in solid is skipped and logged, never placed.
+//
+//Coop only. Not run in the multiplayer framework on campaign maps (level.coop_mpRun), nor in SP.
+//=========================================================================
+
+//=========================================================================
+init:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if !(waitthread coop_mod/main.scr::inCoopMode){ end }
+	if( level.coop_mpRun == 1 ){ end }
+	waitthread coop_mod/main.scr::waitForMainScript
+	//items are world entities: let the map's own spawn/prespawn settle first
+	wait 1
+	if( level.coop_mpRun == 1 ){ end }
+
+	if( getcvar( "coop_atsupply_probe" ) == "1" ){
+		thread probe_run
+		end
+	}
+
+	level.coop_atSupplyN = 0
+	if( getcvar( "coop_atsupply_test" ) == "1" ){ level.coop_atSupplyTest = 1 }
+	switch( level.script ){
+		//BT t1l1 - "Destroy Tank With AA Gun": the end tank (4500 hp) is killable by any non-bullet damage and
+		//EndTankDestroyed completes the objective on death (gags/t1l1_end.scr:832). Spot: by the aagun3 pit.
+		case "maps/t1l1.scr":
+			waitthread coop_atSupply_place ( -2922 -3028 -6702 ) 60 "bazooka" "t1l1_aagun3"
+			break
+		//BT t1l3 - "Destroy the Tiger Tank with the Flak Cannon": the Tiger takes damage after tankpath3 and
+		//gags/t1l3_tank.scr::tankdeathcheck sets level.tankdestroyed on ANY death. Spot: behind the flak position.
+		case "maps/t1l3.scr":
+			waitthread coop_atSupply_place ( -1245 2849 0 ) 100 "bazooka" "t1l3_flak"
+			break
+		//SH e2l1 - "Destroy the Italian Rail Tank" (AB-41): immune only to bullet/bash, objective completes on
+		//$AB41 waittill death (e2l1.scr AB41 thread). Spot: by aagun4, the vanilla tool for it.
+		case "maps/e2l1.scr":
+			waitthread coop_atSupply_place ( 3731 -3121 22 ) 180 "bazooka" "e2l1_aagun4"
+			break
+		//AA m5l3 - "Destroy the enemy King Tiger" + tank waves on the bridge: the objective counts any
+		//death (tankattack: waittill death -> curvehicles--). Spot: below the sniper/artillery vantage ($obj5).
+		case "maps/m5l3.scr":
+			waitthread coop_atSupply_place ( 864 1736 880 ) 0 "bazooka" "m5l3_vantage"
+			break
+		//BT t3l1 - seven panzers (vehicles_thinkers::enemy_tank_think) that hunt the players through the
+		//city; vanilla only supplies sticky bombs, and MakeImmune deliberately leaves rocket/explosion open.
+		//One spot on the approach to each tank trigger (panzer1, panzer2, panzer3, panzer4 + the static/5-7 cluster).
+		case "maps/t3l1.scr":
+			waitthread coop_atSupply_place ( 5511 -1756 -44 ) 120 "bazooka" "t3l1_panzer1"
+			waitthread coop_atSupply_place ( 3392 -4384 24 ) 135 "bazooka" "t3l1_panzer2"
+			waitthread coop_atSupply_place ( 536 -4878 20 ) 270 "bazooka" "t3l1_panzer3"
+			waitthread coop_atSupply_place ( -1956 -3105 0 ) 200 "bazooka" "t3l1_panzer4to7"
+			break
+	}
+	if( level.coop_atSupplyN > 0 ){
+		println( "^~^~^ ATSUPPLY placed " + level.coop_atSupplyN + " supply point(s) on " + level.script )
+	}
+	if( getcvar( "coop_atsupply_test" ) == "1" ){
+		thread test_run
+	}
+	if( getcvar( "coop_atsupply_viewpoll" ) == "1" ){
+		thread view_poll
+	}
+}end
+
+//=========================================================================
+//Model for a supply weapon key. Allied maps get the bazooka, British the PIAT, German-uniform missions the
+//panzerschreck (the panzerfaust has no model in this game - OPEN.md "Panzerfaust REMOVED", armory id 73).
+//=========================================================================
+coop_atSupply_model local.kind:{
+	if( local.kind == "piat" ){ end "models/weapons/Uk_W_Piat.tik" }
+	if( local.kind == "panzerschreck" ){ end "models/weapons/panzerschreck.tik" }
+	end "models/weapons/bazooka.tik"
+}end
+
+//=========================================================================
+//Floor + clear-volume check for one spot. Returns the floor position, or NIL when the spot has no floor
+//within reach or the item volume above the floor is not empty.
+//=========================================================================
+coop_atSupply_ground local.pos:{
+	local.gp = exec coop_mod/officer.scr::coop_find_ground ( local.pos + ( 0 0 32 ) )
+	if( local.gp == NIL ){ end NIL }
+	local.tr = traced ( local.gp + ( 0 0 2 ) ) ( local.gp + ( 0 0 56 ) ) 0 ( -20 -20 0 ) ( 20 20 16 )
+	if( local.tr["startSolid"] == 1 ){ end NIL }
+	if( local.tr["allSolid"] == 1 ){ end NIL }
+	if( local.tr["fraction"] < 1.0 ){ end NIL }
+	end local.gp
+}end
+
+//=========================================================================
+//One supply point: the launcher plus three heavy shells beside it, each an itemhandler world item with a
+//short respawn. local.yaw is the direction the shells are laid out in (along the cover).
+//=========================================================================
+coop_atSupply_place local.pos local.yaw local.kind local.tag:{
+	local.gp = waitthread coop_atSupply_ground local.pos
+	if( local.gp == NIL ){
+		println( "^~^~^ ATSUPPLY skip tag=" + local.tag + " pos=" + local.pos + " reason=no_floor_or_solid" )
+		end
+	}
+	local.model = waitthread coop_atSupply_model local.kind
+
+	local.w = spawn local.model
+	local.w.flags["coop_atSupply"] = 1
+	local.w.flags["coop_itemRespawnTime"] = -1
+	local.w thread coop_atSupply_arm
+	local.w angles ( 0 local.yaw 90 )
+	local.w origin ( local.gp + ( 0 0 6 ) )
+	local.w targetname ( "coop_atsupply_" + local.tag )
+
+	local.fwd = angles_toforward ( 0 local.yaw 0 )
+	local.right = angles_toleft ( 0 local.yaw 0 )
+	local.lft = ( 0 0 0 ) - local.right
+	local.back = ( 0 0 0 ) - local.fwd
+	//shell slots: a short row on the left of the launcher, then the right, then behind it - first three with a floor win
+	local.off[1] = ( local.right * 40 )
+	local.off[2] = ( local.right * 52 ) + ( local.fwd * 12 )
+	local.off[3] = ( local.right * 52 ) - ( local.fwd * 12 )
+	local.off[4] = ( local.lft * 40 )
+	local.off[5] = ( local.lft * 52 ) + ( local.fwd * 12 )
+	local.off[6] = ( local.lft * 52 ) - ( local.fwd * 12 )
+	local.off[7] = ( local.back * 36 )
+	local.off[8] = ( local.back * 36 ) + ( local.right * 14 )
+	local.off[9] = ( local.back * 36 ) - ( local.right * 14 )
+	local.placed = 0
+	for( local.i = 1; local.i <= 9; local.i++ ){
+		if( local.placed >= 3 ){ break }
+		local.sg = waitthread coop_atSupply_ground ( local.gp + local.off[local.i] )
+		if( local.sg == NIL ){ continue }
+		local.dz = local.sg[2] - local.gp[2]
+		if( local.dz > 24 || local.dz < -24 ){ continue }
+		local.b = spawn "models/items/item_heavy_ammobox.tik"
+		local.b.flags["coop_atSupply"] = 1
+		local.b.flags["coop_itemRespawnTime"] = -1
+		local.b thread coop_atSupply_arm
+		if( level.coop_atSupplyTest == 1 ){ local.b thread test_watch ( "s" + ( level.coop_atSupplyN + 1 ) ) }
+		local.b angles ( 90 ( local.yaw + 180 ) 0 )
+		local.b origin ( local.sg + ( 0 0 2 ) )
+		local.b targetname ( "coop_atsupplyammo_" + local.tag )
+		local.placed++
+	}
+	level.coop_atSupplyN++
+	if( level.coop_atSupplyTest == 1 ){ local.w thread test_watch ( "w" + level.coop_atSupplyN ) }
+	level.coop_atSupplyPos[level.coop_atSupplyN] = local.w.origin
+	level.coop_atSupplyModel[level.coop_atSupplyN] = local.model
+	level.coop_atSupplyTag[level.coop_atSupplyN] = local.tag
+	println( "^~^~^ ATSUPPLY ok tag=" + local.tag + " weapon=" + local.model + " at=" + local.w.origin + " floor=" + local.gp + " shells=" + local.placed )
+}end
+
+//=========================================================================
+//Arm the engine respawn AFTER itemhandler.scr::initialiseItem has run on the item: initialiseItem sets
+//`set_respawn 0` on every world item, and it runs after the spawn returns, so a set_respawn made right
+//after `spawn` is silently undone (measured: the launcher and shells were removed on pickup, not hidden).
+//The bug-1337 sweep works for the same reason - it runs at +3s.
+//=========================================================================
+coop_atSupply_arm:{
+	wait 1
+	if( self == NULL ){ end }
+	self set_respawn 1
+	self set_respawn_time 10
+}end
+
+//=========================================================================
+//PROBE (coop_atsupply_probe 1, dev only): ground-trace a ring of candidates around each anchor and print the
+//ones with a floor, a clear volume and cover from the threat. Used once to choose the fixed spots above.
+//=========================================================================
+probe_run:{
+	switch( level.script ){
+		case "maps/t1l1.scr":
+			waitthread probe_anchor ( -2826 -2862 -6460 ) ( -1159 746 -6700 ) "t1l1"
+			break
+		case "maps/t1l3.scr":
+			waitthread probe_anchor ( -1245 3233 60 ) ( -1436 3724 80 ) "t1l3"
+			break
+		case "maps/e2l1.scr":
+			waitthread probe_anchor ( 3539 -3121 80 ) ( 103 -4187 60 ) "e2l1"
+			break
+		case "maps/m5l3.scr":
+			waitthread probe_anchor ( 288 1736 960 ) ( 3196 5992 250 ) "m5l3"
+			break
+		case "maps/t3l1.scr":
+			waitthread probe_anchor ( 5927 -1996 200 ) ( 4262 862 0 ) "t3l1_p1"
+			waitthread probe_anchor ( 3392 -4480 200 ) ( 1868 -3038 80 ) "t3l1_p2"
+			waitthread probe_anchor ( 440 -5044 200 ) ( 394 -6996 80 ) "t3l1_p3"
+			waitthread probe_anchor ( -1668 -3604 200 ) ( -3010 -3840 80 ) "t3l1_p4"
+			waitthread probe_anchor ( -1668 -3604 200 ) ( -1667 -2154 60 ) "t3l1_p67"
+			break
+	}
+	println "^~^~^ ATSUPPLY_PROBE done"
+}end
+
+probe_anchor local.p local.t local.tag:{
+	local.g0 = exec coop_mod/officer.scr::coop_find_ground local.p
+	if( local.g0 == NIL ){ local.g0 = "none" }
+	println( "^~^~^ ATSUPPLY_PROBE anchor tag=" + local.tag + " p=" + local.p + " ground=" + local.g0 )
+	for( local.r = 96; local.r <= 640; local.r = local.r + 96 ){
+		for( local.a = 0; local.a < 360; local.a = local.a + 30 ){
+			local.c = local.p + ( ( angles_toforward ( 0 local.a 0 ) ) * local.r )
+			local.gp = waitthread coop_atSupply_ground local.c
+			if( local.gp == NIL ){ continue }
+			local.vis = sighttrace ( local.gp + ( 0 0 40 ) ) local.t 1
+			local.dir = local.t - local.gp
+			local.dir[2] = 0
+			local.dir = vector_normalize local.dir
+			local.wt = traced ( local.gp + ( 0 0 32 ) ) ( local.gp + ( 0 0 32 ) + ( local.dir * 128 ) )
+			local.wall = 0
+			if( local.wt["fraction"] < 1.0 ){ local.wall = 1 }
+			println( "^~^~^ ATSUPPLY_PROBE cand tag=" + local.tag + " r=" + local.r + " a=" + local.a + " at=" + local.gp + " seesThreat=" + local.vis + " wall=" + local.wall )
+		}
+		waitframe
+	}
+}end
+
+//=========================================================================
+//TEST (coop_atsupply_test 1, dev only). Every supply item counts its own engine pickup notifies; an active
+//player (a bot under coop_st_autodeploy works) is walked over supply point 1 and the test proves
+//  1. the launcher is taken, and a stripped player can take another (again after the delay),
+//  2. the spot still holds exactly ONE launcher entity and its three shells (no clones, no stacking),
+//  3. with rockets spent, shells are taken and come back (the box refills).
+//=========================================================================
+test_watch local.key:{
+	level.coop_atSupplyPick[local.key] = 0
+	while( self != NULL ){
+		self waittill pickup
+		level.coop_atSupplyPick[local.key]++
+		println( "^~^~^ ATSUPPLY_TEST pickup key=" + local.key + " n=" + level.coop_atSupplyPick[local.key] + " t=" + level.time )
+	}
+}end
+
+test_count local.model local.pos:{
+	local.n = 0
+	local.max = int( getcvar( "maxentities" ) )
+	for( local.i = 0; local.i < local.max; local.i++ ){
+		local.e = getentbyentnum local.i
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.model != local.model ){ continue }
+		if( local.e.owner != NULL && local.e.owner != NIL ){ continue }
+		if( vector_length ( local.e.origin - local.pos ) > 96 ){ continue }
+		local.n++
+	}
+	end local.n
+}end
+
+test_touch local.p local.pos:{
+	local.p.origin = local.pos + ( 0 0 4 )
+	wait 1
+	local.p.origin = local.pos + ( 0 0 4 ) + ( ( angles_toforward ( 0 0 0 ) ) * 300 )
+	wait 0.5
+}end
+
+test_has local.p local.model:{
+	local.inv = local.p.inventory
+	if( local.inv == NIL ){ end 0 }
+	for( local.i = 1; local.i <= local.inv.size; local.i++ ){
+		if( local.inv[local.i] != NULL && local.inv[local.i].model == local.model ){ end 1 }
+	}
+	end 0
+}end
+
+test_touch_shells local.p local.pos local.shell:{
+	local.max = int( getcvar( "maxentities" ) )
+	for( local.i = 0; local.i < local.max; local.i++ ){
+		local.e = getentbyentnum local.i
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.model != local.shell ){ continue }
+		if( vector_length ( local.e.origin - local.pos ) > 96 ){ continue }
+		local.p.origin = local.e.origin + ( 0 0 4 )
+		wait 0.5
+	}
+	local.p.origin = local.pos + ( 0 0 4 ) + ( ( angles_toforward ( 0 0 0 ) ) * 300 )
+	wait 0.5
+}end
+
+test_run:{
+	local.p = NULL
+	for( local.t = 0; local.t < 120; local.t++ ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			if( $player[local.i] != NULL && $player[local.i].flags["coop_isActive"] == 1 && isAlive $player[local.i] ){
+				local.p = $player[local.i]
+			}
+		}
+		if( local.p != NULL ){ break }
+		wait 1
+	}
+	if( local.p == NULL ){
+		println "^~^~^ ATSUPPLY_TEST abort=no_active_player"
+		end
+	}
+	wait 2
+	if( level.coop_atSupplyN < 1 ){
+		println "^~^~^ ATSUPPLY_TEST census abort=no_supply_on_this_map"
+		end
+	}
+	local.pos = level.coop_atSupplyPos[1]
+	local.model = level.coop_atSupplyModel[1]
+	local.shell = "models/items/item_heavy_ammobox.tik"
+	local.w0 = waitthread test_count local.model local.pos
+	local.s0 = waitthread test_count local.shell local.pos
+	println( "^~^~^ ATSUPPLY_TEST start tag=" + level.coop_atSupplyTag[1] + " launchers=" + local.w0 + " shells=" + local.s0 )
+
+	//a test player may still be riding an intro vehicle: free him, and strip him so the launcher is a NEW weapon
+	local.p unglue
+	local.p physics_on
+	local.p takeall
+
+	//1. take; strip and re-touch while it is hidden (must NOT give one); re-touch after the delay (must)
+	waitthread test_touch local.p local.pos
+	local.k1 = waitthread test_has local.p local.model
+	local.p takeall
+	wait 0.5
+	local.k2a = waitthread test_has local.p local.model
+	waitthread test_touch local.p local.pos
+	local.k2 = waitthread test_has local.p local.model
+	println( "^~^~^ ATSUPPLY_TEST strip has_after_takeall=" + local.k2a + " t=" + level.time )
+	wait 11
+	waitthread test_touch local.p local.pos
+	local.k3 = waitthread test_has local.p local.model
+	println( "^~^~^ ATSUPPLY_TEST launcher has_after_take=" + local.k1 + " has_while_hidden=" + local.k2 + " has_after_delay=" + local.k3 )
+
+	//3. spend rockets, walk over every shell, wait, again
+	local.spend = 0 - 20
+	local.p ammo "heavy" local.spend
+	local.sa = level.coop_atSupplyPick["s1"]
+	waitthread test_touch_shells local.p local.pos local.shell
+	local.sb = level.coop_atSupplyPick["s1"]
+	local.p ammo "heavy" local.spend
+	wait 11
+	waitthread test_touch_shells local.p local.pos local.shell
+	local.sc = level.coop_atSupplyPick["s1"]
+	println( "^~^~^ ATSUPPLY_TEST shell picks before=" + local.sa + " first_pass=" + local.sb + " after_delay=" + local.sc )
+
+	//2. entity census at the spot after all of it
+	wait 11
+	local.w9 = waitthread test_count local.model local.pos
+	local.s9 = waitthread test_count local.shell local.pos
+	local.ok = 0
+	if( local.w0 == 1 && local.k1 == 1 && local.k3 == 1 && local.sb > local.sa && local.sc > local.sb && local.w9 == 1 && local.s9 == local.s0 ){ local.ok = 1 }
+	println( "^~^~^ ATSUPPLY_TEST census launchers=" + local.w9 + " shells=" + local.s9 + " RESULT ok=" + local.ok )
+}end
+
+//=========================================================================
+//VIEW (coop_atsupply_viewpoll 1, dev only - the in-engine screenshot harness): whenever coop_atsupply_viewseq
+//changes, player 1 is frozen at a camera spot looking at supply point coop_atsupply_view, coop_atsupply_viewdist
+//units back along coop_atsupply_viewyaw and 72 up. No cheats, nothing else changes.
+//=========================================================================
+view_poll:{
+	local.last = ""
+	println "^~^~^ ATSUPPLY_VIEW ready"
+	while( 1 ){
+		local.s = getcvar( "coop_atsupply_viewseq" )
+		if( local.s != "" && local.s != local.last && $player != NULL && $player.size >= 1 ){
+			local.last = local.s
+			local.n = int( getcvar( "coop_atsupply_view" ) )
+			local.d = float( getcvar( "coop_atsupply_viewdist" ) )
+			local.yw = float( getcvar( "coop_atsupply_viewyaw" ) )
+			local.pos = level.coop_atSupplyPos[local.n]
+			if( local.pos != NIL ){
+				local.p = $player[1]
+				local.p physics_off
+				local.p nodamage
+				local.p notarget 1
+				local.p unglue
+				cueplayer
+				local.cam = local.pos + ( ( angles_toforward ( 0 local.yw 0 ) ) * local.d ) + ( 0 0 24 )
+				local.look = local.pos - ( local.cam + ( 0 0 64 ) )
+				local.va = vector_toangles local.look
+				local.hold = local.cam
+				local.holda = ( local.va[0] local.va[1] 0 )
+				println( "^~^~^ ATSUPPLY_VIEW n=" + local.n + " cam=" + local.cam + " ang=" + local.holda + " tag=" + level.coop_atSupplyTag[local.n] )
+			}
+		}
+		if( local.hold != NIL && $player != NULL && $player.size >= 1 ){
+			$player[1].origin = local.hold
+			$player[1].viewangles = local.holda
+			$player[1].velocity = ( 0 0 0 )
+		}
+		waitframe
+	}
+}end
