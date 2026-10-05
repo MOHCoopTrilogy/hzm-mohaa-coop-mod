@@ -427,15 +427,37 @@ dbno_corpse_revive local.player:{
 dbno_bleedout_timer local.player:{
 	local.timer = local.player.flags["coop_dbno_timer_actual"]
 
+	//[user 2026-10-05] BLEED-OUT RING: publish the countdown to the engine every tick (coop_setbleed). The engine
+	//re-publishes it on the player's entity state for the HUD ring + teammates' medic icon, smooths it between
+	//ticks, and EXPIRES it 2.5 s after the last publish - so every DBNO exit clears the ring on its own.
+	waitthread dbno_publishBleed local.player 0
 	while( local.player.flags["coop_dbno_elapsed"] < local.timer && local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
 		wait 1
-		if( local.player.flags["coop_dbno_healing"] == 1 ){ continue }
+		if( local.player.flags["coop_dbno_healing"] == 1 ){
+			waitthread dbno_publishBleed local.player 1
+			continue
+		}
 		local.player.flags["coop_dbno_elapsed"] = local.player.flags["coop_dbno_elapsed"] + 1
+		waitthread dbno_publishBleed local.player 0
 	}
 
 	if( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
 		thread dbno_die local.player
 	}
+}end
+
+
+//[user 2026-10-05] one publish of the bleed-out countdown (seconds left, total, paused). Player::coop_setbleed.
+dbno_publishBleed local.player local.paused:{
+	if( local.player == NIL ){ end }
+	if( local.player == NULL ){ end }
+	if( local.player.flags["coop_dbno_active"] != 1 ){ end }
+	local.t   = local.player.flags["coop_dbno_timer_actual"]
+	local.rem = local.t - local.player.flags["coop_dbno_elapsed"]
+	if( local.rem < 0 ){ local.rem = 0 }
+	//the engine command lives in dbno_bleed.scr: an unknown command fails a file at compile time, so an older
+	//game.dll loses only the ring, never DBNO
+	waitthread coop_mod/dbno_bleed.scr::publish local.player local.rem local.t local.paused
 }end
 
 
@@ -448,7 +470,7 @@ dbno_fade_manager:{
 	ihuddraw_virtualsize self local.hud_slot 1
 	ihuddraw_rect        self local.hud_slot 0 0 640 480
 	ihuddraw_color       self local.hud_slot 0 0 0
-	ihuddraw_alpha       self local.hud_slot 0.3
+	ihuddraw_alpha       self local.hud_slot 0.12
 
 	thread dbno_heartbeat self
 
@@ -465,7 +487,10 @@ dbno_fade_manager:{
 	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
 		local.elapsed = self.flags["coop_dbno_elapsed"]
 		local.frac    = local.elapsed * 1.0 / local.timer
-		local.alpha   = 0.3 + local.frac * 0.7
+		//[user 2026-10-05] the edges now close in on their own (cgame drives the suppression tunnel + the low-health
+		//desaturation from the bleed-out), so this flat black is only the last of the light going: a light veil
+		//at the start, steepening to 0.67 at the end (was 0.3 -> 1.0, which flattened the tunnel into a grey card).
+		local.alpha   = 0.12 + local.frac * local.frac * 0.55
 		ihuddraw_alpha self local.hud_slot local.alpha
 
 		local.vol = "1"
@@ -578,23 +603,32 @@ dbno_heartbeat local.player:{
 		local.elapsed  = local.player.flags["coop_dbno_elapsed"]
 		local.progress = local.elapsed * 1.0 / local.timer
 
+		//[user 2026-10-05] THE HEART SLOWS AND GETS LOUDER as the bleed-out runs (bed1 -> bed2 -> bed3 are now lower
+		//pitch = slower, and louder - ubersound.scr), and QUICKENS while crawling accelerates the bleed
+		//(dbno_crawl_manager stamps coop_dbno_quickUntil; bedq). Same one-slot swap as below, so no click.
+		local.want = 1
+		if( local.progress >= 0.75 ){ local.want = 3 }
+		else if( local.progress >= 0.4 ){ local.want = 2 }
+		if( local.player.flags["coop_dbno_quickUntil"] != NIL ){
+			if( level.time < local.player.flags["coop_dbno_quickUntil"] ){ local.want = 4 }
+		}
+		if( local.want != local.stage ){
+			local.stage = local.want
+			if( local.stage == 4 ){ local.player playlocalsound coop_dbno_bedq 1 }
+			else if( local.stage == 3 ){ local.player playlocalsound coop_dbno_bed3 1 }
+			else if( local.stage == 2 ){ local.player playlocalsound coop_dbno_bed2 1 }
+			else { local.player playlocalsound coop_dbno_bed1 1 }
+			println ( "^~^~^ DBNO bed stage=" + local.stage + " p=" + local.player.netname )
+		}
+
 		//[2026-09-05] SWAP, DO NOT STOP-THEN-START. Writing the next bed's alias straight over the
 		//slot is the whole transition: playlocalsound overwrites loopSound, and a preceding
 		//stoplocalsound would only add gi.StopSound(entnum, CHAN_LOCAL) - a side effect on the
 		//player's one-shot channel that this thread has no business firing (bug-2437).
 		//When the stages share one wav at different pitches, gi.soundindex returns the SAME index,
 		//so S_OPENAL_UpdateLoopSound never tears the loop down (it only does that when pSfx
-		//changes) and simply re-rates it: the heart speeds up mid-beat with no click.
-		if( local.progress >= 0.75 && local.stage != 3 ){
-			local.stage = 3
-			local.player playlocalsound coop_dbno_bed3 1
-			println ( "^~^~^ DBNO bed stage=3 p=" + local.player.netname )
-		}
-		else if( local.progress >= 0.4 && local.stage < 2 ){
-			local.stage = 2
-			local.player playlocalsound coop_dbno_bed2 1
-			println ( "^~^~^ DBNO bed stage=2 p=" + local.player.netname )
-		}
+		//changes) and simply re-rates it: the heart changes tempo mid-beat with no click. (The stage
+		//pick is the block above.)
 		waitframe
 	}
 
@@ -637,8 +671,8 @@ coop_dbnoBedStop local.player:{
 
 
 dbno_crawl_manager local.player:{
-	//[user 07-16] "Seek cover - movement is dangerous!" text removed (obnoxious); the iprint
-	//"Moving is accelerating your bleed-out!" still fires once, which is enough feedback.
+	//[user 07-16] "Seek cover - movement is dangerous!" text removed (obnoxious). [user 2026-10-05] the
+	//"Moving is accelerating your bleed-out!" iprint is gone too: a ring flare + a quickened heartbeat say it.
 	ihuddraw_virtualsize local.player 32 1
 	ihuddraw_string      local.player 32 ""
 	ihuddraw_alpha       local.player 32 0
@@ -659,8 +693,13 @@ dbno_crawl_manager local.player:{
 			if( local.penalty_frames >= 10 ){
 				local.penalty_frames = 0
 				local.player.flags["coop_dbno_elapsed"] = local.player.flags["coop_dbno_elapsed"] + 1
+				//[user 2026-10-05] no "Moving is accelerating your bleed-out!" iprint any more: the ring flares
+				//once as the penalty starts (coop_bleedflare) and the heart quickens for as long as it lasts
+				//(dbno_heartbeat stage 4, held by this stamp). The ring also visibly drains faster.
+				local.player.flags["coop_dbno_quickUntil"] = level.time + 1.6
+				waitthread dbno_publishBleed local.player 0
 				if( local.penalty_shown == 0 ){
-					local.player iprint "Moving is accelerating your bleed-out!" 0
+					waitthread coop_mod/dbno_bleed.scr::flare local.player
 					local.penalty_shown = 1
 				}
 			}
@@ -1325,31 +1364,23 @@ dbno_ai_revive local.player:{
 }end
 
 
+//[user 2026-10-05] THE "BLEEDING OUT: Ns" TEXT IS GONE. The countdown is the cgame ring round the crosshair now
+//(cg_coopbleed.c, fed by dbno_publishBleed; coop_bleedNumber 1 puts a small number under it). Slot 27 is no longer
+//drawn at all; this keeps only its teardown, so a slot left up by anything older (or a lost clear) can never
+//freeze on a revived remote player (bug-2906): blank on the way down, blank + resend on the way up.
 dbno_countdown_hud:{
 	local.hud_slot = 27
-	local.timer    = self.flags["coop_dbno_timer_actual"]
-
-	waitthread coop_mod/hudresend.scr::claim self local.hud_slot local.hud_slot	//bug-2906
-	ihuddraw_virtualsize self local.hud_slot 1
-	ihuddraw_align       self local.hud_slot center center
-	ihuddraw_alpha       self local.hud_slot 1
-	ihuddraw_font        self local.hud_slot "verdana-12"	//[user 07-16] was handle-23 (huge); WAY smaller now
-	ihuddraw_color       self local.hud_slot 1 0.35 0.35
-	ihuddraw_rect        self local.hud_slot 0 -44 0 0
-	ihuddraw_string      self local.hud_slot ""
-
-	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
-		local.elapsed   = self.flags["coop_dbno_elapsed"]
-		local.remaining = local.timer - local.elapsed
-		if( local.remaining < 0 ){ local.remaining = 0 }
-		local.text = "BLEEDING OUT: " + local.remaining + "s"
-		ihuddraw_string self local.hud_slot local.text
-		wait 1
-	}
 
 	ihuddraw_alpha  self local.hud_slot 0
 	ihuddraw_string self local.hud_slot ""
-	//bug-2906: a lost clear leaves "BLEEDING OUT: Ns" frozen on a revived remote player
+
+	while( self != NULL && self.flags["coop_dbno_active"] == 1 ){
+		wait 1
+	}
+	if( self == NULL ){ end }
+
+	ihuddraw_alpha  self local.hud_slot 0
+	ihuddraw_string self local.hud_slot ""
 	thread coop_mod/hudresend.scr::resendUnless self local.hud_slot local.hud_slot 1 "coop_dbno_active"
 }end
 
@@ -1503,11 +1534,8 @@ dbno_medic_callout local.player:{
 dbno_marker_manager local.player:{
 	local.hud_label = "[DOWN] " + local.player.netname
 
-	local.medkit = spawn script_model
-	local.medkit model "models/items/item_50_healthbox.tik"
-	local.medkit notsolid
-	local.medkit scale 0.5
-	local.medkit.origin = local.player.origin + (0 0 70)
+	//[user 2026-10-05] the spinning 3D healthbox over a downed player is gone: teammates get the cgame medic icon
+	//with a mini ring of his remaining time instead (cg_coopbleed.c, through walls within 1200u; none in Hardcore).
 
 	local.glow = spawn script_model
 	local.glow model "fx/dummy.tik"
@@ -1546,11 +1574,9 @@ dbno_marker_manager local.player:{
 	local.spin = 0
 	wait 0.1
 	while( local.player != NULL && local.player.flags["coop_dbno_active"] == 1 ){
-		local.medkit.origin = local.player.origin + (0 0 70)
 		local.glow.origin = local.player.origin
 		local.spin = local.spin + 10
 		if( local.spin >= 360 ){ local.spin = 0 }
-		local.medkit.angles = (90 local.spin 0)
 
 		//redraw on a slow cadence so a player who respawns, un-spectates or joins mid-down still gets
 		//the label. Every frame would be wasteful; twice a second is invisible to the reader.
@@ -1571,7 +1597,6 @@ dbno_marker_manager local.player:{
 		waitframe
 	}
 
-	if( local.medkit != NULL ){ local.medkit delete }
 	if( local.glow   != NULL ){ local.glow   delete }
 
 	local.maxclients = $player.size

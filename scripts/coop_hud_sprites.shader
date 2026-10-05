@@ -96,3 +96,20 @@ textures/hud/coop_officer_icon
 		rgbGen identity
 	}
 }
+// [user 2026-10-05] SURRENDERED German: one icon split diagonally - the allied star (top-left) and the officer's
+// Reichsadler (bottom-right), composited from coop_ally_icon + coop_officer_icon by
+// docs/proposals/bleedout_2026-10-05/tools/gen_surrender_icon.py. Drawn by CG_ActorOverheadIcon iconType 3 while
+// the actor carries +lightstyledynamiclight (officer.scr surrender); recruiting clears the bit -> the normal star.
+textures/hud/coop_surrender_icon
+{
+	spritegen parallel
+	surfaceparm nolightmap
+	nomipmaps
+	nopicmip
+	cull none
+	{
+		map textures/hud/coop_surrender_icon.tga
+		blendFunc blend
+		rgbGen identity
+	}
+}
