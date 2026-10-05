@@ -2696,6 +2696,8 @@ state RELOAD_MG
 		//in anims_breda.txt but was never selected: mg_reload cut its hands clip at 57 %.
 		breda_reload			      : IS_WEAPON_ACTIVE "mainhand" "Breda"
 		coop_reload_dp28		      : IS_WEAPON_ACTIVE "mainhand" "DP-28"
+		//[reload audit phase B 2026-10-05] the Lewis gun's top pan (was the BAR box-magazine torso)
+		coop_reload_lewis		      : IS_WEAPON_ACTIVE "mainhand" "Lewis Gun"
 		mg_reload			      : default
 	}
 
