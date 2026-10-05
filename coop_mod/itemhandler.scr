@@ -769,9 +769,39 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 		}
 	}
 
-	//if no weapons are allowed
-	if (level.coop_noWeapon){ end }	
-	
+	//[user 2026-10-05] bug-3399 LATE JOINER / RESPAWNER INTO A LIVE STEALTH WINDOW.
+	//Player report: "if a player joins late, it breaks stealth when they spawn. They aren't auto given
+	//the disguise." The no-weapon exit below ends this label BEFORE the uniform re-give further down,
+	//so on every papers-only map (m2l2a, m6l1c, e1l3, m6l2a with coop_stealthHolster 0) a joiner
+	//spawned in his own Allied model; and on e1l3, which sets coop_noWeapon without
+	//coop_startUnarmed, the stealth branch above never ran either, so he had no disguise at all.
+	//Same recipe the squad got at the pickup (giveUniformToAll + giveDisguiseToAll +
+	//coop_stealthStripWeapons' setIsDisguised/hold watchdog), applied to one player, and only while
+	//coop_stealthLive says the mission is still quiet - a loud mission spawns him loud, as before.
+	if (level.coop_noWeapon){
+		if( isAlive group.player && group.player.dmteam != "spectator" ){
+			if( waitthread coop_stealthLive ){
+				if( group.player.has_disguise != 1 ){
+					waitthread giveDisguiseOnSpawn group.player
+				}
+				if( group.player.has_disguise == 1 ){
+					if( level.coop_uniformOnSpawn == 1 ){
+						thread giveUniformToPlayer group.player
+					}
+					//as coop_stealthStripWeapons does: giveWeaponLoadout never runs on this path, so the
+					//flag is otherwise unset and coop_stealthHoldDisguise's `.classname` read throws on it
+					group.player.flags["coop_activeWeapon"] = NULL
+					waitthread setIsDisguised group.player game.true game.true
+					if( level.coop_startUnarmed == 1 ){
+						group.player thread coop_stealthHoldDisguise group.player
+					}
+				}
+			}
+		}
+		if( group.player != NULL ){ group.player.flags["coop_startingDisguise"] = game.false }
+		end
+	}
+
 	//[200] Smithy - check if this is a briefing mission. if so, don't allow weapons
 	if (level.coop_mapname[0] == "b"){
 		local.mapPrefix 	= "briefing"
@@ -810,11 +840,13 @@ if(level.cMTE_coop_itemhandler){if(!level.cMTE){level.cMTE=0}; level.cMTE++; pri
 	//disguise', it is what the grant actually sets, and it does not move when a rifle points at
 	//you. The model-refresh branch immediately below already handles the re-spawn case, so
 	//nothing is lost by not re-granting here.
-	if (level.coop_enableDisguises && level.coop_uniformOnSpawn && !group.player.is_disguised && !group.player.has_disguise){
+	//[user 2026-10-05] bug-3399 and never while the alarm is up - a loud mission spawns you loud. e1l3
+	//raises level.alarm without takeAllDisguises, so the two level flags alone still read "quiet" there.
+	if (level.coop_enableDisguises && level.coop_uniformOnSpawn && !group.player.is_disguised && !group.player.has_disguise && level.alarm != 1){
 		waitthread giveDisguiseOnSpawn group.player
 	}
 	//as player models reset on spawn re-give them the uniform if they need one
-	if (level.coop_enableDisguises && level.coop_uniformOnSpawn && group.player.flags["coop_hasDisguise"] && group.player.has_disguise){
+	if (level.coop_enableDisguises && level.coop_uniformOnSpawn && group.player.flags["coop_hasDisguise"] && group.player.has_disguise && level.alarm != 1){
 		thread giveUniformToPlayer group.player
 	}else{
 		thread takeUniformFromPlayer group.player
@@ -1596,6 +1628,98 @@ coop_stealthHoldDisguise local.player:{
 		wait 0.5
 	}
 	if( local.player != NULL ){ local.player.flags["coop_holdDisgRun"] = NIL }
+}end
+
+//=========================================================================
+// [user 2026-10-05] bug-3399 IS THE MISSION STILL QUIET? One answer for every disguise map, read by
+// the spawn path so a joiner or respawner gets the state the squad is in right now.
+//  - coop_enableDisguises: the map runs the disguise layer (set at load on m2l2a/m2l2b/e1l4, at the
+//    uniform pickup elsewhere). takeAllDisguises - the single "cover blown for good" choke point the
+//    alarm, the uniform removal and bust.scr all reach - clears it.
+//  - level.alarm: e1l3 goes loud without takeAllDisguises, and the engine itself refuses a disguise
+//    while it is set (player.cpp m_bAlarm), so a spawn in that state is loud whatever the flags say.
+//  - a uniform has been issued (coop_uniformOnSpawn) or the papers-only start is still running
+//    (coop_startUnarmed, m2l2a before the pickup) - otherwise the map has nothing to give yet
+//    (m6l1c "find a disguise", e1l3 before the escape).
+// `!= 1` / `== 1` only: these are read before some maps ever assign them (TRAPS T17).
+//=========================================================================
+coop_stealthLive:{
+	if( level.gametype == 0 ){ end (0) }
+	if( level.alarm == 1 ){ end (0) }
+	if( level.coop_enableDisguises != 1 ){ end (0) }
+	if( level.coop_uniformOnSpawn == 1 ){ end (1) }
+	if( level.coop_startUnarmed == 1 ){ end (1) }
+}end (0)
+
+//=========================================================================
+// [user 2026-10-05] bug-3399 THE SPAWN MUST NOT TRIP THE BASE. Called from
+// player.scr::manageAliveSpawning BEFORE the player is placed. The disguise lands a few frames later
+// (managePlayerInventory -> giveDisguise runs a changeGameType window, and on an armed disguise map
+// the engine's MP auto-raise puts a rifle in his hand for ~0.25s before giveWeaponLoadout holsters
+// it). In that gap the engine reads him as an undisguised Allied soldier and any german with line of
+// sight acquires him - and an actor in attack thinkstate never re-checks a disguise. The original
+// squad never had this gap: they spawn before the AI is awake, or get the disguise all at once with
+// empty hands at the pickup.
+// So hold FL_NOTARGET (gates ENTRY into attack, actor.cpp) and the script aggro funnel
+// (coop_stealthBlocksAggro reads coop_stealthSpawnGuard) until the engine itself reports him
+// disguised, then let go. Shared-flag rules copied from player.scr::coop_notargetWatch (bug-2064/2068):
+// read the flag back, write only on a real disagreement, release only what WE acquired. Bounded.
+// No wait before the acquire: the caller waitthreads this, so the flag is on before placement.
+//=========================================================================
+coop_stealthSpawnGuard local.player:{
+	if( local.player == NULL || local.player == NIL ){ end }
+	if( local.player.dmteam == "spectator" ){ end }
+	if( !(waitthread coop_stealthLive) ){ end }
+	local.player.flags["coop_stealthSpawnGuard"] = 1
+	local.player.flags["coop_stealthSpawnT"] = level.time
+	//ownership lives on the PLAYER, not in a thread local: a fast respawn re-enters here while the
+	//previous release loop still runs, reads notarget=1 (our own claim) and must not lose track of it
+	local.have = 0 - 1		//-1 survives when the getter is absent (older game.dll)
+	local.have = local.player.notarget
+	if( local.have == 0 ){
+		local.player notarget 1
+		local.player.flags["coop_stealthNtHeld"] = 1
+	}
+	local.held = local.player.flags["coop_stealthNtHeld"]
+	if( local.held != 1 ){ local.held = 0 }
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ STEALTHSPAWN guard on " + local.player.entnum + " notargetHeld=" + local.held )
+	}
+	if( local.player.flags["coop_stealthSpawnRun"] == 1 ){ end }	//a live hold loop will release it
+	local.player.flags["coop_stealthSpawnRun"] = 1
+	local.player thread coop_stealthSpawnRelease local.player
+}end
+
+//=========================================================================
+// bug-3399 companion: lets go once the ENGINE says disguised (has + is, i.e. empty hands or papers),
+// once the mission goes loud, or after 6s whatever happens - a player who will not take a disguise
+// must never be left untargetable. Re-arm on a fast respawn just restarts the clock.
+//=========================================================================
+coop_stealthSpawnRelease local.player:{
+	local.ok = 0
+	local.el = 0
+	while( local.player != NULL && isAlive local.player ){
+		local.el = level.time - local.player.flags["coop_stealthSpawnT"]
+		if( local.el >= 6 ){ break }
+		if( !(waitthread coop_stealthLive) ){ break }
+		if( local.el >= 1 && local.player.has_disguise == 1 && local.player.is_disguised == 1 ){
+			local.ok = local.ok + 1
+			if( local.ok >= 2 ){ break }	//two consecutive reads: past the spawn-burst flicker
+		}else{
+			local.ok = 0
+		}
+		wait 0.25
+	}
+	if( local.player == NULL ){ end }
+	local.player.flags["coop_stealthSpawnGuard"] = NIL
+	local.player.flags["coop_stealthSpawnRun"] = NIL
+	if( local.player.flags["coop_stealthNtHeld"] == 1 ){
+		local.player.flags["coop_stealthNtHeld"] = NIL
+		local.player notarget 0
+	}
+	if( getcvar( "coop_aggroDebug" ) == "1" ){
+		println( "^~^~^ STEALTHSPAWN guard off " + local.player.entnum + " has=" + local.player.has_disguise + " is=" + local.player.is_disguised + " t=" + local.el )
+	}
 }end
 
 
