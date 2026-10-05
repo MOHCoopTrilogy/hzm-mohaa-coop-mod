@@ -22,6 +22,7 @@ fl_sting local.alias:{
 	if(level.gametype == 0){ end }
 	if(getcvar("coop_stingers") == "0"){ end }
 	if(level.time < 15){ end }		//map-setup objective pushes must never sting
+	level.flmusic_lastSting = level.time	//[2026-10-05] lets the area-cleared sting keep clear of the others
 	for(local.i = 1; local.i <= $player.size; local.i++){
 		local.p = $player[local.i]
 		if(local.p != NULL){
@@ -247,4 +248,84 @@ coop_flmusic_isCalm:{
 	}
 	if( ( level.time - local.ref ) < 20 ){ end 0 }
 	end 1
+}end
+
+//=========================================================================
+//[user 2026-10-05, Frontline expansion: "victory after clearing an area"] AREA-CLEARED STING.
+//Same doctrine as the stings above - one short 2D hit at an unambiguous beat, over whatever music
+//is playing, never a music switch. The cue (sound/frontline/sting_clear1.wav) is the "_10" slot of
+//Frontline mission 1-3's stinger set, the slot whose mission 1-2 cue is the shipped objective sting,
+//level-matched to it (RMS -29.3 dBFS).
+//A "clear" is: German AI genuinely engaged (flchatter.scr's level.coop_flchatEngaged, the thinkstate
+//attack / live .enemy scan) for at least 15s, at least 3 registered Germans dead since the fight
+//began, then 20s with no engagement AND no living registered German within 1600u of any player.
+//240s cooldown, and never within 20s of another sting. Started from flchatter.scr::flchatter_init.
+//=========================================================================
+fl_clear_monitor:{
+//=========================================================================
+	if(level.flmusic_clearMon == 1){ end }
+	level.flmusic_clearMon = 1
+	local.inFight = 0
+	local.fightStart = 0
+	local.dead0 = 0
+	while(1){
+		wait 2
+		if(level.gametype == 0){ continue }
+		if(getcvar("coop_stingers") == "0"){ continue }
+		local.eng = level.coop_flchatEngaged
+		if(local.eng == NIL){ continue }
+		if(local.inFight == 0){
+			if((level.time - local.eng) < 3){
+				local.inFight = 1
+				local.fightStart = level.time
+				local.dead0 = waitthread fl_deadGermans
+			}
+			continue
+		}
+		if((level.time - local.eng) < 20){ continue }
+		local.inFight = 0
+		if((local.eng - local.fightStart) < 15){ continue }
+		local.dead = waitthread fl_deadGermans
+		if((local.dead - local.dead0) < 3){ continue }
+		local.near = waitthread fl_liveGermanNearPlayer 1600
+		if(local.near == 1){ continue }
+		if(getcvar("coop_flchatDebug") == "1"){
+			println("^~^~^ FLSTING clear fight " + (local.eng - local.fightStart) + "s dead " + (local.dead - local.dead0))
+		}
+		thread fl_sting_clear
+	}
+}end
+
+fl_sting_clear:{
+	if(level.flmusic_lastClear != NIL && (level.time - level.flmusic_lastClear) < 240){ end }
+	if(level.flmusic_lastSting != NIL && (level.time - level.flmusic_lastSting) < 20){ end }
+	level.flmusic_lastClear = level.time
+	waitthread fl_sting "coop_sting_clear"
+}end
+
+fl_deadGermans:{
+	local.n = 0
+	for(local.j = 0; local.j < level.coop_flchatDEn; local.j++){
+		local.a = level.coop_flchatDE[local.j]
+		if(local.a == NULL || local.a == NIL){
+			local.n++
+		} else if(!(isAlive local.a)){
+			local.n++
+		}
+	}
+	end local.n
+}end
+
+fl_liveGermanNearPlayer local.range:{
+	for(local.j = 0; local.j < level.coop_flchatDEn; local.j++){
+		local.a = level.coop_flchatDE[local.j]
+		if(local.a == NULL || local.a == NIL){ continue }
+		if(!(isAlive local.a)){ continue }
+		for(local.i = 1; local.i <= $player.size; local.i++){
+			local.p = $player[local.i]
+			if(local.p == NULL){ continue }
+			if(vector_length(local.p.origin - local.a.origin) < local.range){ end 1 }
+		}
+	}
+	end 0
 }end
