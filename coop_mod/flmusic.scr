@@ -22,12 +22,24 @@ fl_sting local.alias:{
 	if(level.gametype == 0){ end }
 	if(getcvar("coop_stingers") == "0"){ end }
 	if(level.time < 15){ end }		//map-setup objective pushes must never sting
-	//[2026-10-05] NEVER OVER MISSION-SCRIPTED MUSIC. level.coop_musicCommand is the last scripted tmstart(loop)
-	//(replace.scr), NIL when nothing owns the triggered-music channel; our own filler track is told apart by
-	//level.coop_flmusic_playing. The mission-end sting is exempt (it closes the mission).
-	if(local.alias != "coop_sting_end" && level.coop_musicCommand != NIL && level.coop_musicCommand != level.coop_flmusic_playing){
-		if(getcvar("coop_flchatDebug") == "1"){ println("^~^~^ FLSTING skip " + local.alias + " (scripted music)") }
-		end
+	//[2026-10-05] NEVER OVER A MISSION-SCRIPTED MUSIC CUE. A looping tmstartloop is the map's score bed (45 maps,
+	//e.g. m3l2's Border Town) and stings sit over it by design; what must not be stepped on is a ONE-SHOT
+	//scripted cue - replace.scr::tmstart, a set-piece/cinematic score - while it is still playing (taken as the
+	//first 150s after it started; fl_music_watch timestamps every change of level.coop_musicCommand) - or a
+	//skippable cinematic (replace.scr::skip holds level.coop_skip). The mission-end sting is exempt.
+	//(The first in-engine run proved the coarse version wrong: gating on ANY coop_musicCommand muted every
+	//sting on m3l2, whose map score is a tmstartloop.)
+	if(local.alias != "coop_sting_end"){
+		local.scripted = 0
+		if(level.coop_skip == 1){ local.scripted = 1 }
+		if(level.coop_musicCommand != NIL && level.flmusic_cmdAt != NIL && (level.time - level.flmusic_cmdAt) < 150){
+			local.c = level.coop_musicCommand
+			if(local.c.size > 8 && local.c[7] == " "){ local.scripted = 1 }	//"tmstart <file>" (a loop has "tmstartloop")
+		}
+		if(local.scripted == 1){
+			if(getcvar("coop_flchatDebug") == "1"){ println("^~^~^ FLSTING skip " + local.alias + " (scripted cue/cinematic)") }
+			end
+		}
 	}
 	level.flmusic_lastSting = level.time	//[2026-10-05] lets the area-cleared sting keep clear of the others
 	if(getcvar("coop_flchatDebug") == "1"){ println("^~^~^ FLSTING play " + local.alias) }
@@ -345,6 +357,20 @@ fl_sting_monitors:{
 	thread fl_clear_monitor
 	thread fl_alarm_monitor
 	thread fl_stealth_intro
+	thread fl_music_watch
+}end
+
+//timestamps every change of the scripted-music command (replace.scr sets level.coop_musicCommand).
+fl_music_watch:{
+	local.last = level.coop_musicCommand
+	level.flmusic_cmdAt = level.time
+	while(1){
+		wait 0.5
+		if(level.coop_musicCommand != local.last){
+			local.last = level.coop_musicCommand
+			level.flmusic_cmdAt = level.time
+		}
+	}
 }end
 
 //ALARM RAISED (1-2 / 11). Fires on the 0 -> 1 EDGE of the shared go-loud flags (level.alarm /
