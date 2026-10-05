@@ -1233,6 +1233,8 @@ state CHECK_SECONDARY_ATTACK
 		ATTACK_SMG_SECONDARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "smg" "secondary" IS_WEAPON_ACTIVE "mainhand" "Moschetto"              
  
 		ATTACK_MG_SECONDARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg" "secondary" IS_WEAPON_ACTIVE "mainhand" "BAR"
+		//[reload audit 2026-10-05] the Lewis gun variant was "BAR (M1918 WWI)" (suffix-matched "BAR" above); keep its butt-stroke
+		ATTACK_MG_SECONDARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg" "secondary" IS_WEAPON_ACTIVE "mainhand" "Lewis Gun"
 		ATTACK_MG_SECONDARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg" "secondary" IS_WEAPON_ACTIVE "mainhand" "StG 44"
 		ATTACK_MG_SECONDARY		: IS_WEAPONCLASS_READY_TO_FIRE "mainhand" "mg" "secondary" IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier"
 
@@ -2547,6 +2549,14 @@ state RELOAD_WEAPON
 
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Springfield '03 Sniper"
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "KAR98 - Sniper"
+		//[reload audit 2026-10-05] these two already wear the one-round-at-a-time hands (cgame maps
+		//them to the springfield/kar98sniper prefix) but fell to RELOAD_RIFLE's Garand en-bloc torso:
+		//only the start clip played, no round went in on screen, and a Garand clip sat in the hand.
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Springfield M1903"
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Silenced Kar98 Sniper"
+		//[reload audit 2026-10-05] StG44 Scoped is class rifle but wears StG 44 hands: give it the
+		//MG reload state (magazine prop + attachment correction on interrupt), not the Garand's.
+		RELOAD_MG			: IS_WEAPON_ACTIVE "mainhand" "StG44 Scoped"
 		RELOAD_SHOTGUN			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
 		RELOAD_NAGANTREV		: IS_WEAPON_ACTIVE "mainhand" "Nagant Revolver"
 		RELOAD_WEBLEY			: IS_WEAPON_ACTIVE "mainhand" "Webley Revolver"
@@ -2591,6 +2601,17 @@ state RELOAD_RIFLE
 		enfieldl42a1_reload		: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
 		carcano_reload			: IS_WEAPON_ACTIVE "mainhand" "Carcano"
 		delisle_reload			: IS_WEAPON_ACTIVE "mainhand" "DeLisle"
+		//[reload audit 2026-10-05] each of these wears its BASE gun's first-person reload (cgame
+		//prefix) but fell through to rifle_reload: Garand en-bloc prop, gun handed back to the right
+		//hand at 1.9 s mid-clip, and the reload ended at 2.03 s while the hands clip ran 2.9-3.9 s.
+		kar98_reload			: IS_WEAPON_ACTIVE "mainhand" "Arisaka Type 99"
+		kar98_reload			: IS_WEAPON_ACTIVE "mainhand" "Arisaka Sniper"
+		mosin_reload			: IS_WEAPON_ACTIVE "mainhand" "Mosin-Nagant Sniper"
+		mosin_reload			: IS_WEAPON_ACTIVE "mainhand" "Silenced Mosin Sniper"
+		enfield_reload			: IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield Sniper"
+		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "G43 Sniper"
+		carcano_reload			: IS_WEAPON_ACTIVE "mainhand" "Carcano Sniper"
+		coop_reload_johnson		: IS_WEAPON_ACTIVE "mainhand" "Johnson M1941"
 		rifle_reload			: default
 	}
 
@@ -2620,7 +2641,14 @@ state RELOAD_SMG
 		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "MP40"
 		sten_reload				: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II"
 		ppsh_reload				: IS_WEAPON_ACTIVE "mainhand" "PPSH SMG"
-            moschetto_reload          	: IS_WEAPON_ACTIVE "mainhand" "Moschetto"              
+            moschetto_reload          	: IS_WEAPON_ACTIVE "mainhand" "Moschetto"
+		//[reload audit 2026-10-05] guns that wear MP40 / Moschetto hands get that gun's torso too
+		//(its magazine prop and its exact clip length) instead of the Thompson default.
+		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "Silenced MP40"
+		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "M3 Grease Gun"
+		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "Silenced Grease Gun"
+		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "Silenced PPS-43"
+		moschetto_reload			: IS_WEAPON_ACTIVE "mainhand" "Beretta M38"
 		smg_reload				: default
                 
 	}
@@ -2651,7 +2679,15 @@ state RELOAD_MG
 	{
 	      vickers_reload		   	: IS_WEAPON_ACTIVE "mainhand" "Vickers-Berthier"
 		mp44_reload			      : IS_WEAPON_ACTIVE "mainhand" "StG 44"
-		fg42_reload			      : IS_WEAPON_ACTIVE "mainhand" "FG 42"
+		mp44_reload			      : IS_WEAPON_ACTIVE "mainhand" "StG44 Scoped"
+		//[reload audit 2026-10-05] was fg42_reload (= the BAR torso: 3.27 s, a BAR magazine held
+		//upright, shown together with the gun's own magazine 1.32-1.65 s). coop_reload_fg42 matches
+		//DaRKaNGeL's 2.34 s hands and carries the FG42's own magazine on the hand's away window.
+		coop_reload_fg42		      : IS_WEAPON_ACTIVE "mainhand" "FG 42"
+		//[reload audit 2026-10-05] the Breda's own TA torso (whole-reload hand swap, 5.73 s) existed
+		//in anims_breda.txt but was never selected: mg_reload cut its hands clip at 57 %.
+		breda_reload			      : IS_WEAPON_ACTIVE "mainhand" "Breda"
+		coop_reload_dp28		      : IS_WEAPON_ACTIVE "mainhand" "DP-28"
 		mg_reload			      : default
 	}
 
@@ -2683,6 +2719,8 @@ state RELOAD_PISTOL
 	      beretta_reload			  : IS_WEAPON_ACTIVE "mainhand" "Beretta"
 		p38_reload			        : IS_WEAPON_ACTIVE "mainhand" "Walther P38"
 		histandard_reload	              : IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
+		//[reload audit 2026-10-05] East's revolver hands; pistol_reload hung a Colt MAGAZINE in the hand
+		coop_reload_m10		        : IS_WEAPON_ACTIVE "mainhand" "S&W M10 .38"
 		pistol_reload		        : default
 	}
 
