@@ -3173,183 +3173,24 @@ coop_strike_scatter local.center local.minr local.maxr:{
 }end
 
 
-// Type 4: Stuka flyover -- visible dive bomber via origin lerp + MG strafing + timed bomb
-// NOTE: spawn ClassName "key" "value" keyvalue syntax is NOT valid in MOHAA script.
-// All spawns use bare classname; properties set via assignment or command afterward.
-// HZM coop - SHARED AERIAL BOMBING RUN (used by BOTH the player's binoc strike AND the officer's
-// airstrike wave). A plane flies a BANKED, DIVING arc: in high+far, descends LOW over the target
-// (nose-down), drops a stick of real falling bombs, then climbs away (nose-up). Attitude (pitch+yaw)
-// follows the flight and it BANKS into the turn, so it reads like a real bomb run instead of a flat
-// slide. The whole envelope (altitude + approach length) AUTO-SCALES from the map's $world.farplane so
-// the plane stays INSIDE the fog/far-clip and is actually visible on EVERY map WITHOUT touching the fog.
-// Origin-stepped (the proven mover; runtime flypath/SplinePath is a future upgrade - see [[plane_bomber_research]]).
+// Type 4 / binocular strike: SHARED AERIAL BOMBING RUN (the player's binoc strike AND the officer's airstrike wave).
+//[aircraft 2026-10-05] The flight now lives in coop_mod/aircraft.scr::bomb_run (docs/proposals/aircraft_2026-10-05):
+// a real dive-bomb profile (level entry, push-over, 70 deg Stuka / 45 deg P-47 dive, release, pull-out, climb away),
+// drawn to scale at the map's own height, moved every server frame, bombs on their real falling arc from the plane.
+// The old run here dove to 0.4 x alt (about 27 ft on most maps) with a full-size model, stepped every 2nd/4th server
+// frame, flipped attitude in one tick at the bottom of a V, and spawned/deleted the plane in plain view.
 //   local.target = ground impact point     local.fwd = flat approach dir (NIL = random)
-//   local.strafe = 1 to add the MG strafe   local.model = plane .tik (NIL = Allied C-47)
-//   local.leadin = seconds of AUDIBLE approach before the dive begins (NIL/0 = dive
-//                  immediately, the old behavior). The plane spawns further out along the
-//                  approach axis and cruises in with its engine loop running, so players
-//                  HEAR it coming that long before the attack run (officer stuka passes
-//                  8.2 -> first impact ~10.2s after the drone starts).
-//   local.wide   = 1 = officer AREA-DENIAL scatter for the bomb stick (see coop_drop_bombs);
-//                  NIL/0 = the tight player-called (binoc) stick, unchanged.
+//   local.strafe = 1 for the German Stuka (MG burst, shootable)   local.model = plane .tik (kind is taken from it)
+//   local.leadin = seconds of AUDIBLE approach before the attack (the 10 s officer warning, user 08-20)
+//   local.wide   = 1 = officer AREA-DENIAL aim point (120-700u off the target); NIL/0 = the player-called strike
 coop_air_bombing_run local.target local.fwd local.strafe local.model local.leadin local.wide:{
 	if( local.target == NIL ){ end }
-	if( local.model == NIL ){ local.model = "models/vehicles/p47fly.tik" }	// P-47 fighter-bomber - matches the mission's own bombing plane (global/bomber.scr default)
-	if( local.leadin == NIL ){ local.leadin = 0 }
-	if( local.wide == NIL ){ local.wide = 0 }
-	if( local.fwd == NIL ){ local.fwd = angles_toforward ( 0 (randomint 360) 0 ) }
-	local.fwd[2] = 0
-	local.fwd = vector_normalize local.fwd
-	local.fwdang = vector_toangles local.fwd
-	local.side   = angles_toleft local.fwdang
-
-	// --- per-map visible envelope from the farplane (fog end). 0/NIL = unlimited -> assume 8000. ---
-	local.fp = $world.farplane
-	if( local.fp == NIL ){ local.fp = 0 }
-	local.fpeff = local.fp
-	if( local.fpeff <= 0 ){ local.fpeff = 8000 }
-	local.budget   = local.fpeff * 0.7
-	local.alt      = local.budget * 0.45
-	if( local.alt > 1100 ){ local.alt = 1100 }
-	local.approach = local.budget * 0.55
-	if( local.approach > 2600 ){ local.approach = 2600 }
-	if( local.approach < 900 ){ local.approach = 900 }
-
-	// --- ceiling clamp: never punch a real roof (a SURF_SKY hit overhead is fine - keep alt). ---
-	local.upt = traced (local.target + (0 0 16)) (local.target + (0 0 4096))
-	if( local.upt["fraction"] < 1.0 ){
-		local.sf = local.upt["surfaceFlags"]
-		if( local.sf == NIL ){ local.sf = 0 }
-		local.q  = int( local.sf / 4 )
-		local.hb = int( local.q / 2 )
-		if( (local.q - (local.hb * 2)) != 1 ){
-			local.room = (local.upt["fraction"] * 4096) - 96
-			if( local.alt > local.room ){ local.alt = local.room }
-		}
+	local.kind = "p47"
+	if( local.strafe == 1 ){ local.kind = "stuka" }
+	if( local.model != NIL ){
+		if( waitthread coop_mod/main.scr::containsText local.model "stuka" 0 ){ local.kind = "stuka" }
 	}
-
-	// --- no room for a visible pass (cramped interior) -> just deliver the bombs, skip the flyover ---
-	if( local.alt < 250 ){
-		if( local.leadin > 0 ){
-			// no flyover possible, but the warning still has to arrive >=leadin early:
-			// audible engine drone above the target for the whole lead-in, then the stick.
-			// (loopsound needs a modeled entity to transmit -> fx/dummy, the glow pattern)
-			local.warn = spawn script_model
-			local.warn model "models/fx/dummy.tik"
-			local.warn.origin = local.target + ( 0 0 200 )
-			local.warn notsolid
-			local.warn loopsound coop_stuka_engine
-			wait local.leadin
-			local.warn stoploopsound
-			local.warn delete
-		}
-		thread coop_drop_bombs local.target local.fwd 700 local.wide
-		end
-	}
-
-	local.lowalt = local.alt * 0.4		// how low it dives over the target
-	local.bowamt = local.approach * 0.22	// lateral bow so the bank visibly reads
-
-	local.faroff    = vector_scale local.fwd local.approach
-	local.startp    = local.target - local.faroff
-	local.startp[2] = local.target[2] + local.alt
-	local.endp      = local.target + local.faroff
-	local.endp[2]   = local.target[2] + local.alt
-	local.span = local.endp - local.startp
-
-	// Long audible approach leg (warning time): spawn further out along the approach
-	// axis and cruise in for local.leadin seconds. Capped at 6000u so the entity stays
-	// well inside server transmit range (the engine LOOPSOUND rides the entity state,
-	// so the plane must transmit for players to hear the drone growing louder). Beyond
-	// the farplane the plane is fog-culled anyway: heard first, then it emerges.
-	local.legdist = 0
-	if( local.leadin > 0 ){
-		local.arcspeed = (local.approach * 2) / 3.55
-		local.legdist = local.arcspeed * local.leadin
-		if( local.legdist > 6000 ){ local.legdist = 6000 }
-	}
-	local.holdp = local.startp - (vector_scale local.fwd local.legdist)
-
-	local.plane = spawn script_model
-	if( local.plane == NULL ){ end }	//[user 08-02] entity-pool guard
-	local.plane model local.model
-	local.plane.origin = local.holdp
-	local.plane.angles = local.fwdang
-	local.plane notsolid
-	if( local.strafe == 1 ){
-		// looped so the drone runs the WHOLE approach+dive (one-shot ended too early);
-		// stoploopsound at the end of the run already handles it
-		local.plane loopsound coop_stuka_engine
-	} else {
-		local.plane loopsound coop_c47_approach
-	}
-
-	if( local.legdist > 0 ){
-		local.legticks = int( local.leadin * 10 )
-		if( local.legticks < 1 ){ local.legticks = 1 }
-		local.legstep = vector_scale local.fwd (local.legdist / local.legticks)
-		local.k = 0
-		while( local.plane != NULL && local.k < local.legticks ){
-			local.plane.origin = local.plane.origin + local.legstep
-			wait 0.1
-			local.k++
-		}
-		if( local.plane == NULL ){
-			// plane vanished mid-approach: still deliver the (already warned) stick
-			thread coop_drop_bombs local.target local.fwd local.lowalt local.wide
-			end
-		}
-		local.plane.origin = local.startp
-		// classic dive/flyby scream as the attack run begins (vanilla m1l3b strafing-run wav)
-		local.plane playsound coop_stuka_dive
-	}
-
-	if( local.strafe == 1 ){ thread coop_stuka_mg_strafe local.plane local.target }
-	// release the bomb stick once the plane is overhead (tied to its live position)
-	thread coop_bombrun_release local.plane local.target local.fwd local.lowalt local.wide
-
-	local.prevpos = NIL
-	local.prevyaw = NIL
-	local.i = 0
-	while( local.plane != NULL && local.i <= 70 ){
-		local.frac = local.i / 70.0
-		local.u = (2 * local.frac) - 1
-		if( local.u < 0 ){ local.u = 0 - local.u }
-		local.dip = 1 - local.u			// 1 over the target, 0 at the ends (a shallow V dive)
-
-		local.along = vector_scale local.span local.frac
-		local.pos   = local.startp + local.along
-		local.drop  = (local.alt - local.lowalt) * local.dip
-		local.pos[2] = local.target[2] + local.alt - local.drop
-		local.bowscale = local.bowamt * local.dip
-		local.bow = vector_scale local.side local.bowscale
-		local.pos = local.pos + local.bow
-
-		if( local.prevpos != NIL ){
-			local.vel = local.pos - local.prevpos
-			local.ang = vector_toangles local.vel
-			if( local.prevyaw != NIL ){
-				local.dy = local.ang[1] - local.prevyaw
-				if( local.dy > 180 ){ local.dy = local.dy - 360 }
-				if( local.dy < (0 - 180) ){ local.dy = local.dy + 360 }
-				local.roll = local.dy * 5		// bank INTO the turn
-				if( local.roll > 35 ){ local.roll = 35 }
-				if( local.roll < (0 - 35) ){ local.roll = 0 - 35 }
-				local.ang[2] = 0 - local.roll
-			}
-			local.plane.angles = local.ang
-			local.prevyaw = local.ang[1]
-		}
-		local.plane.origin = local.pos
-		local.prevpos = local.pos
-		wait 0.05
-		local.i++
-	}
-
-	if( local.plane != NULL ){
-		local.plane stoploopsound
-		local.plane delete
-	}
+	waitthread coop_mod/aircraft.scr::bomb_run local.target local.fwd local.kind local.leadin local.wide
 }end
 
 
@@ -4662,31 +4503,8 @@ coop_bombing_run_sequence local.target:{
 }end
 
 
-// Waits until the bombing-run plane is roughly overhead the target, then releases the
-// bomb stick. Range-gated off the plane's live position (like bomber.scr::bombdrop).
-//[2026-08-21] local.wide was MISSING from this parameter list while officer.scr:2817 passed it
-//as a fifth argument, so it was silently dropped here and then arrived NIL in coop_drop_bombs -
-//meaning the officer AREA-DENIAL spread below has never once run on the normal flight path. The
-//two secondary paths pass it correctly, which is exactly why it survived unnoticed.
-coop_bombrun_release local.plane local.center local.fwd local.alt local.wide:{
-	// Release the instant the plane CROSSES the target along the flight axis (project the flat
-	// plane->target vector onto fwd). Radial-distance detection was wrong with the new banked run:
-	// the lateral bow means the plane is offset sideways at overhead and never gets within a small
-	// radial threshold, so bombs dropped only after the plane was deleted. Axis-projection is robust
-	// regardless of the bow: 'ahead' goes from -approach (run-in) up through 0 (over target) to +.
-	local.go = 0
-	while( local.plane != NULL && local.go == 0 ){
-		local.hd = local.plane.origin - local.center
-		local.hd[2] = 0
-		local.ahead = (local.hd[0] * local.fwd[0]) + (local.hd[1] * local.fwd[1])
-		if( local.ahead >= 0 ){ local.go = 1 }
-		wait 0.05
-	}
-	thread coop_drop_bombs local.center local.fwd local.alt local.wide
-}end
-
-
-// Walks a stick of real falling bombs along the plane's heading across the target.
+// Walks a stick of falling bombs along a heading across the target. Since 2026-10-05 only the class D fallback
+// (no usable sky, aircraft.scr::bomb_run) uses it: there is no aircraft to drop them from.
 coop_drop_bombs local.center local.fwd local.alt local.wide:{
 	local.i = 0
 	while( local.i < 8 ){

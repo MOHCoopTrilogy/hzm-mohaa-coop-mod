@@ -1,0 +1,1042 @@
+// coop_mod/aircraft.scr
+// HZM coop [aircraft 2026-10-05] SHARED FLIGHT LIBRARY for the coop aircraft call-ins:
+//   the signal-smoke C-47 paradrop (paradrop.scr), the binocular P-47 bombing run and the officer's Stuka dive
+//   (officer.scr::coop_air_bombing_run). Design, root causes and per-map data: docs/proposals/aircraft_2026-10-05.
+//
+// WHY IT IS BUILT THIS WAY (each line was a defect in the old flight code):
+//  - Planes are FORCED-PERSPECTIVE: drawn at scale s (0.12-1) and flown at s x real speed and s x real height. From
+//    the ground that is indistinguishable from a full-size aircraft at its real altitude and speed (same angle,
+//    same angular speed), and it fits inside every map's fog and sky. Bombs fall with g x s, so their arcs match.
+//  - Motion is evaluated EVERY SERVER FRAME (waitframe) from distance along a pre-sampled path, never stepped on
+//    `wait 0.05` (every 2nd frame at sv_fps 40 - the client blends 40 Hz snapshots, so that stuttered at 20 Hz).
+//    Heading and pitch come from the path tangent, bank from the turn rate (tan bank = turn rate x real speed / g).
+//  - `svflags +broadcast`: an entity whose link box is above the sky brush is in no leaf and was never sent
+//    (sv_world.c / sv_snapshot.c) - that was "so high you can't see it" on 49 of 54 maps.
+//  - Every position stays inside +-7900: entity origins travel as 16-bit quarter units and WRAP past +-8192.
+//  - Planes enter and leave out of sight: beyond the fog, or at the coordinate edge while shrunk to a speck.
+//  - German planes are shootable (`coop_aircraft <radius> <hp>`, game.dll): MG/flak full damage, small arms reduced;
+//    a downed plane crashes on playable ground or trails smoke over the horizon. Allied planes are not shootable.
+//
+// ENTRY POINTS
+//   c47_run local.target                       -> array: ["tcpa"] time over target, ["planes"][1..3], ["s"], ["z"]
+//   bomb_run local.target local.fwd local.kind local.leadin local.wide   (kind "p47" | "stuka"; blocks until done)
+//   door local.plane                           -> world position of the C-47 jump door
+//   fallback local.target local.kind local.secs-> class D maps: engine drone + flak + shake, no plane
+// All tunables are cvars with the defaults below; coop_acDebug 1 prints ^~^~^ AIR lines.
+
+init:{
+	if( level.ac_ready == 1 ){ end }
+	level.ac_ready = 1
+	level.ac_env = waitthread coop_mod/aircraft_envelope.scr::row level.coop_mapname
+	level.ac_g = 515.0
+	level.ac_box = 7900.0
+	level.ac_debug = 0
+	if( getcvar( "coop_acDebug" ) == "1" ){ level.ac_debug = 1 }
+	if( level.ac_active == NIL ){ level.ac_active = 0 }
+	if( level.coop_planesDowned == NIL ){ level.coop_planesDowned = 0 }
+}end
+
+
+// --------------------------------------------------------------------------------------------------- envelope
+// Map class: A open, B fog-limited, C sky too low (fly above it), D no usable sky.
+mapClass:{
+	waitthread init
+	if( level.ac_env == NIL ){ end "A" }
+}end level.ac_env["cls"]
+
+
+// Fog distance now (the fog profiles and scripted ramps can change it at runtime), 0 = none.
+fogDist:{
+	local.f = $world.farplane
+	if( local.f == NIL ){ local.f = 0 }
+	if( local.f <= 0 && level.ac_env != NIL ){ local.f = level.ac_env["fog"] }
+	if( local.f < 0 ){ local.f = 0 }
+}end local.f
+
+
+// Ground under a point: a down trace from just above it.
+ground local.p:{
+	local.a = local.p + ( 0 0 48 )
+	local.b = local.p - ( 0 0 3000 )
+	local.t = traced ( local.a ) ( local.b ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.t["fraction"] < 1.0 && local.t["startSolid"] != 1 ){ end local.t["endpos"] }
+}end local.p
+
+
+// Highest solid top along the horizontal segment a-b (both at height z), sampled every 384u.
+// Probes from just under the sky (or z + 600), so a plane flying above the sky brush is never constrained by it.
+obstacleTop local.a local.b local.z:{
+	local.top = local.z - 100000
+	local.zs = local.z + 600
+	if( level.ac_env != NIL ){
+		if( level.ac_env["sky"] - 24 < local.zs ){ local.zs = level.ac_env["sky"] - 24 }
+	}
+	local.d = local.b - local.a
+	local.d[2] = 0
+	local.len = vector_length local.d
+	local.n = int( local.len / 384.0 ) + 1
+	for( local.i = 0; local.i <= local.n; local.i++ ){
+		local.p = local.a + ( vector_scale local.d ( local.i * 1.0 / local.n ) )
+		local.p[2] = local.zs
+		local.q = local.p
+		local.q[2] = local.zs - 4000
+		local.t = traced ( local.p ) ( local.q ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.t["startSolid"] == 1 || local.t["allSolid"] == 1 ){ continue }
+		if( local.t["fraction"] < 1.0 ){
+			if( local.t["endpos"][2] > local.top ){ local.top = local.t["endpos"][2] }
+		}
+	}
+}end local.top
+
+
+// Largest t >= 0 with p + dir * t inside the +-7900 box (x and y).
+boxDist local.p local.dir:{
+	local.best = 100000.0
+	for( local.k = 0; local.k <= 1; local.k++ ){
+		local.c = local.dir[local.k]
+		if( local.c > 0.0001 ){
+			local.t = ( level.ac_box - local.p[local.k] ) / local.c
+			if( local.t < local.best ){ local.best = local.t }
+		} else if( local.c < ( 0 - 0.0001 ) ){
+			local.t = ( ( 0 - level.ac_box ) - local.p[local.k] ) / local.c
+			if( local.t < local.best ){ local.best = local.t }
+		}
+	}
+	if( local.best < 0 ){ local.best = 0 }
+}end local.best
+
+
+// ---------------------------------------------------------------------------------------------- aircraft types
+// Real, full-size numbers (16 u = 1 ft): span, cruise and dive speed (u/s), height the scale is taken from,
+// dive angle, pull-out radius, minimum scale.
+profile local.kind:{
+	local.p["kind"] = local.kind
+	if( local.kind == "c47" ){
+		local.p["model"] = "models/vehicles/c47fly.tik"
+		local.p["span"] = 1552
+		local.p["v"] = 2580.0		// 110 mph jump speed
+		local.p["vd"] = 2580.0
+		local.p["hreal"] = 9600.0	// 600 ft drop height
+		local.p["smin"] = 0.2
+		local.p["snd"] = "coop_c47_approach"
+		local.p["hp"] = 0
+	} else if( local.kind == "stuka" ){
+		local.p["model"] = "models/vehicles/stuka_strafe.tik"
+		local.p["span"] = 720
+		local.p["v"] = 4690.0		// 200 mph
+		local.p["vd"] = 7980.0		// 340 mph with dive brakes
+		local.p["hreal"] = 16000.0	// release at 1000 ft (a low but real Ju 87 release; reads better than 1500)
+		local.p["dive"] = 70.0
+		local.p["rreal"] = 16000.0	// ~6 g pull-out
+		local.p["smin"] = 0.18
+		local.p["snd"] = "coop_stuka_engine"
+		local.p["hp"] = 600
+		local.cv = getcvar( "coop_acStukaHp" )
+		if( local.cv != "" && local.cv != "0" ){ local.p["hp"] = float( local.cv ) }
+	} else {
+		local.p["kind"] = "p47"
+		local.p["model"] = "models/vehicles/p47fly.tik"
+		local.p["span"] = 653
+		local.p["v"] = 7040.0		// 300 mph
+		local.p["vd"] = 9390.0		// 400 mph in the dive
+		local.p["hreal"] = 14400.0	// release at 900 ft
+		local.p["dive"] = 45.0
+		local.p["rreal"] = 12000.0
+		local.p["smin"] = 0.18
+		local.p["snd"] = "coop_c47_approach"
+		local.p["hp"] = 0
+	}
+}end local.p
+
+
+// -------------------------------------------------------------------------------------------- path machinery
+// A path is a 2D profile (x along the heading, z height) mapped onto the heading through the origin O.
+// Samples are built here; xs/zs are arrays 1..n. Returns the plane-independent path array.
+pathFromProfile local.O local.fwd local.xs local.zs:{
+	local.n = local.xs.size
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.p = local.O + ( vector_scale local.fwd local.xs[local.i] )
+		local.p[2] = local.zs[local.i]
+		local.P[local.i] = waitthread clampBox local.p
+	}
+}end local.P
+
+
+clampBox local.p:{
+	for( local.k = 0; local.k <= 2; local.k++ ){
+		if( local.p[local.k] > level.ac_box ){ local.p[local.k] = level.ac_box }
+		if( local.p[local.k] < ( 0 - level.ac_box ) ){ local.p[local.k] = 0 - level.ac_box }
+	}
+}end local.p
+
+
+// Per-sample distance, yaw, pitch, bank and speed. Bank: tan(bank) = turn rate x real speed / g (coordinated
+// turn of the REAL aircraft - the scale cancels), left turn = left wing down = negative roll.
+prepare local.path local.prof local.s:{
+	local.P = local.path
+	local.n = local.P.size
+	local.D[1] = 0.0
+	for( local.i = 2; local.i <= local.n; local.i++ ){
+		local.D[local.i] = local.D[local.i - 1] + vector_length( local.P[local.i] - local.P[local.i - 1] )
+	}
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.a = local.i
+		local.b = local.i + 1
+		if( local.b > local.n ){ local.a = local.n - 1; local.b = local.n }
+		local.ang = vector_toangles( local.P[local.b] - local.P[local.a] )
+		local.YAW[local.i] = local.ang[1]
+		// vector_toangles pitch is in (-360, 0]: wrap to -180..180, positive = nose down
+		local.PIT[local.i] = waitthread wrap180 local.ang[0]
+		local.sp = sin local.PIT[local.i]
+		if( local.sp < 0 ){ local.sp = 0 }
+		local.V[local.i] = local.s * ( local.prof["v"] + ( local.prof["vd"] - local.prof["v"] ) * local.sp )
+		if( local.V[local.i] < 50 ){ local.V[local.i] = 50 }
+	}
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.a = local.i - 1
+		local.b = local.i + 1
+		if( local.a < 1 ){ local.a = 1 }
+		if( local.b > local.n ){ local.b = local.n }
+		local.R[local.i] = 0
+		local.ds = local.D[local.b] - local.D[local.a]
+		if( local.ds > 1 ){
+			local.dy = waitthread wrap180 ( local.YAW[local.b] - local.YAW[local.a] )
+			// real turn rate in rad/s = (dyaw/ds) * game speed (deg->rad)
+			local.w = ( local.dy / local.ds ) * local.V[local.i] * 0.0174533
+			local.x = local.w * ( local.V[local.i] / local.s ) / level.ac_g
+			local.r = atan local.x
+			if( local.r > 70 ){ local.r = 70 }
+			if( local.r < ( 0 - 70 ) ){ local.r = 0 - 70 }
+			local.R[local.i] = 0 - local.r
+		}
+	}
+	// smooth the bank (3 passes) so it eases in and out of each turn
+	for( local.pass = 1; local.pass <= 3; local.pass++ ){
+		for( local.i = 2; local.i < local.n; local.i++ ){
+			local.R2[local.i] = ( local.R[local.i - 1] + local.R[local.i] * 2 + local.R[local.i + 1] ) * 0.25
+		}
+		for( local.i = 2; local.i < local.n; local.i++ ){ local.R[local.i] = local.R2[local.i] }
+	}
+	local.out["P"] = local.P
+	local.out["D"] = local.D
+	local.out["YAW"] = local.YAW
+	local.out["PIT"] = local.PIT
+	local.out["ROL"] = local.R
+	local.out["V"] = local.V
+	local.out["n"] = local.n
+	local.out["len"] = local.D[local.n]
+}end local.out
+
+
+wrap180 local.a:{
+	while( local.a > 180 ){ local.a = local.a - 360 }
+	while( local.a < ( 0 - 180 ) ){ local.a = local.a + 360 }
+}end local.a
+
+
+// Pose on the path at distance d: array ["p"] position, ["a"] angles, ["v"] speed, ["dir"] unit tangent.
+pose local.path local.d:{
+	local.n = local.path["n"]
+	local.D = local.path["D"]
+	local.P = local.path["P"]
+	local.i = 1
+	if( local.d <= 0 ){
+		local.dir = vector_normalize( local.P[2] - local.P[1] )
+		local.o["p"] = local.P[1] + ( vector_scale local.dir local.d )
+		local.o["a"] = ( local.path["PIT"][1] local.path["YAW"][1] local.path["ROL"][1] )
+		local.o["v"] = local.path["V"][1]
+		local.o["dir"] = local.dir
+		end local.o
+	}
+	// binary search for the segment
+	local.lo = 1
+	local.hi = local.n
+	while( local.hi - local.lo > 1 ){
+		local.mid = int( ( local.lo + local.hi ) / 2 )
+		if( local.D[local.mid] <= local.d ){ local.lo = local.mid } else { local.hi = local.mid }
+	}
+	local.i = local.lo
+	local.j = local.i + 1
+	if( local.j > local.n ){ local.j = local.n }
+	local.seg = local.D[local.j] - local.D[local.i]
+	local.f = 0.0
+	if( local.seg > 0.001 ){ local.f = ( local.d - local.D[local.i] ) / local.seg }
+	if( local.f > 1 ){ local.f = 1 }
+	local.o["p"] = local.P[local.i] + ( vector_scale ( local.P[local.j] - local.P[local.i] ) local.f )
+	local.dy = waitthread wrap180 ( local.path["YAW"][local.j] - local.path["YAW"][local.i] )
+	local.yaw = local.path["YAW"][local.i] + local.dy * local.f
+	local.pit = local.path["PIT"][local.i] + ( local.path["PIT"][local.j] - local.path["PIT"][local.i] ) * local.f
+	local.rol = local.path["ROL"][local.i] + ( local.path["ROL"][local.j] - local.path["ROL"][local.i] ) * local.f
+	local.o["a"] = ( local.pit local.yaw local.rol )
+	local.o["v"] = local.path["V"][local.i] + ( local.path["V"][local.j] - local.path["V"][local.i] ) * local.f
+	local.o["dir"] = vector_normalize( local.P[local.j] - local.P[local.i] )
+}end local.o
+
+
+// Spawn one aircraft (not yet moving). Shootable only if the profile has hp (German types).
+spawnPlane local.prof local.s local.p local.a:{
+	local.e = spawn script_model
+	if( local.e == NULL ){ end NULL }
+	local.e model local.prof["model"]
+	local.e.origin = local.p
+	local.e.angles = local.a
+	local.e notsolid
+	local.e scale local.s
+	local.e svflags "+broadcast"
+	local.e.ac_s = local.s
+	local.e.ac_kind = local.prof["kind"]
+	local.e.ac_dead = 0
+	if( local.prof["hp"] > 0 ){
+		local.rad = local.prof["span"] * local.s * 0.75
+		if( local.rad < 120 ){ local.rad = 120 }
+		local.e coop_aircraft local.rad local.prof["hp"]
+		// without the aircraft game.dll the command is unknown and health stays 0: then it is simply not shootable
+		if( local.e.health > 0 ){ local.e.ac_hp0 = local.prof["hp"] }
+	} else {
+		local.e coop_aircraft 0
+	}
+	local.e loopsound local.prof["snd"]
+	level.ac_lastPlane = local.e	// read by test/debug tools only
+}end local.e
+
+
+// Nearest living player distance to p (100000 if none).
+nearestPlayer local.p:{
+	local.best = 100000.0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		local.d = vector_length( local.q.origin - local.p )
+		if( local.d < local.best ){ local.best = local.d }
+	}
+}end local.best
+
+
+// THE DRIVER. One thread moves a whole formation every server frame.
+// planes[k]: entity; offs[k]: ( back side up ) in game units relative to the path pose; the formation leader is k=1.
+// Each plane gets .ac_d (its distance along the path) and .ac_vel so other threads (bombs, jumpers) can read it.
+drive local.path local.planes local.offs local.fog:{
+	local.t = level.time
+	local.d = 0.0
+	local.len = local.path["len"]
+	local.n = local.planes.size
+	local.maxBack = 0
+	for( local.k = 1; local.k <= local.n; local.k++ ){
+		if( local.offs[local.k][0] > local.maxBack ){ local.maxBack = local.offs[local.k][0] }
+	}
+	level.ac_active++
+	while( local.d < local.len + local.maxBack ){
+		local.alive = 0
+		local.now = level.time
+		local.dt = local.now - local.t
+		local.t = local.now
+		local.lead = waitthread pose local.path local.d
+		local.d = local.d + local.lead["v"] * local.dt
+		for( local.k = 1; local.k <= local.n; local.k++ ){
+			local.e = local.planes[local.k]
+			if( local.e == NULL || local.e == NIL ){ continue }
+			if( local.e.ac_dead == 1 ){ continue }
+			local.alive++
+			local.o = local.offs[local.k]
+			local.dk = local.d - local.o[0]
+			local.ps = waitthread pose local.path local.dk
+			local.left = angles_toleft ( 0 local.ps["a"][1] 0 )
+			local.pos = local.ps["p"] + ( vector_scale local.left local.o[1] ) + ( 0 0 local.o[2] )
+			local.pos = waitthread clampBox local.pos
+			local.e.ac_vel = vector_scale local.ps["dir"] local.ps["v"]
+			local.e.ac_d = local.dk
+			local.e.origin = local.pos
+			local.e.angles = local.ps["a"]
+			// no fog: the cgame shrinks it to a speck toward the coordinate edge (cg_hzm_aircraft.c), so it never
+			// pops in or out in plain view; the networked scale stays the true scale (the Doppler reads it)
+			// shot down?
+			if( local.e.ac_hp0 != NIL ){
+				if( local.e.health <= 0 ){
+					local.e.ac_dead = 1
+					local.e thread crash local.path local.ps
+				} else {
+					waitthread hitMarker local.e
+				}
+			}
+		}
+		if( local.alive == 0 ){ break }
+		waitframe
+	}
+	for( local.k = 1; local.k <= local.n; local.k++ ){
+		local.e = local.planes[local.k]
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.ac_dead == 1 ){ continue }
+		local.e stoploopsound
+		local.e delete
+	}
+	level.ac_active--
+}end
+
+
+// Hit confirm for whoever is shooting the plane (throttled), from the attacker game.dll publishes.
+hitMarker local.e:{
+	if( local.e.coop_acHitTime == NIL ){ end }
+	if( local.e.ac_lastHit == local.e.coop_acHitTime ){ end }
+	local.e.ac_lastHit = local.e.coop_acHitTime
+	local.a = local.e.coop_acAttacker
+	if( local.a == NIL || local.a == NULL ){ end }
+	if( local.a.classname != "Player" ){ end }
+	if( local.e.ac_lastMark != NIL && level.time - local.e.ac_lastMark < 0.12 ){ end }
+	local.e.ac_lastMark = level.time
+	local.a playsound dm_hit_notify
+	if( local.e.ac_smoking != 1 && local.e.health < local.e.ac_hp0 * 0.5 ){
+		local.e.ac_smoking = 1
+		local.e anim smoke
+		local.e playsound coop_ac_sputter
+	}
+}end
+
+
+// ------------------------------------------------------------------------------------------------- C-47 drop
+// Straight, level pass of a V of three over the target, at the map's C-47 height, flying in from and out to
+// beyond sight. Returns at once; the formation flies on its own thread.
+c47_run local.target:{
+	waitthread init
+	local.prof = waitthread profile "c47"
+	local.g = waitthread ground local.target
+	local.h = 1600
+	local.yaw0 = randomint 360
+	if( level.ac_env != NIL ){
+		local.h = level.ac_env["hc"]
+		local.yaw0 = level.ac_env["yaw"] + ( randomint 61 ) - 30 + 180 * ( randomint 2 )
+	}
+	local.F = waitthread fogDist
+	if( local.F > 0 && local.h > local.F * 0.7 ){ local.h = local.F * 0.7 }
+	local.cv = getcvar( "coop_c47Alt" )
+	if( local.cv != "" && local.cv != "0" ){ local.h = float( local.cv ) }
+	local.fwd = angles_toforward ( 0 local.yaw0 0 )
+	local.z = local.g[2] + local.h
+	// out of sight both ways
+	local.L = waitthread boxDist local.g local.fwd
+	local.Lb = waitthread boxDist local.g ( vector_scale local.fwd ( 0 - 1 ) )
+	if( local.F > 0 ){
+		local.want = local.F * 2.5 + 1500
+		if( local.L > local.want ){ local.L = local.want }
+		if( local.Lb > local.want ){ local.Lb = local.want }
+	}
+	// obstacles along the whole track
+	local.a = local.g - ( vector_scale local.fwd local.Lb )
+	local.b = local.g + ( vector_scale local.fwd local.L )
+	local.top = waitthread obstacleTop local.a local.b local.z
+	if( local.top + 400 > local.z ){ local.z = local.top + 400 }
+	local.s = ( local.z - local.g[2] ) / local.prof["hreal"]
+	if( local.s < local.prof["smin"] ){ local.s = local.prof["smin"] }
+	if( local.s > 1 ){ local.s = 1 }
+	local.xs[1] = 0 - local.Lb
+	local.zs[1] = local.z
+	local.xs[2] = local.L
+	local.zs[2] = local.z
+	local.path = waitthread pathFromProfile local.g local.fwd local.xs local.zs
+	local.path = waitthread prepare local.path local.prof local.s
+	// V of three: wingmen one span back and 1.1 spans out, slightly stepped up
+	local.sp = local.prof["span"] * local.s
+	local.offs[1] = ( 0 0 0 )
+	local.o2 = ( 0 0 0 )
+	local.o2[0] = local.sp * 1.0
+	local.o2[1] = local.sp * 1.1
+	local.o2[2] = local.sp * 0.08
+	local.offs[2] = local.o2
+	local.o3 = local.o2
+	local.o3[1] = 0 - local.sp * 1.1
+	local.offs[3] = local.o3
+	local.st = waitthread pose local.path 0
+	for( local.k = 1; local.k <= 3; local.k++ ){
+		local.planes[local.k] = waitthread spawnPlane local.prof local.s local.st["p"] local.st["a"]
+	}
+	thread drive local.path local.planes local.offs local.F
+	local.run["planes"] = local.planes
+	local.run["s"] = local.s
+	local.run["z"] = local.z
+	local.run["fwd"] = local.fwd
+	local.run["v"] = local.st["v"]
+	local.run["tcpa"] = level.time + local.Lb / local.st["v"]
+	local.run["sp"] = local.sp
+	thread flybySound local.planes[1] local.run["tcpa"] "coop_c47_flyby"
+	if( level.ac_debug == 1 ){
+		println ( "^~^~^ AIR kind=c47 map=" + level.coop_mapname + " cls=" + ( waitthread mapClass ) + " H=" + int( local.z - local.g[2] ) + " s=" + local.s + " v=" + int( local.st["v"] ) + " fog=" + int( local.F ) + " in=" + int( local.Lb ) + " out=" + int( local.L ) + " tcpa=" + ( local.run["tcpa"] - level.time ) )
+	}
+}end local.run
+
+
+// World position of the C-47's port (left) cargo door, aft. The model has no tag; offsets measured on the
+// scale-1 model (x back, y left, z up from the origin) and scaled with the plane.
+door local.e:{
+	local.s = local.e.ac_s
+	local.f = angles_toforward local.e.angles
+	local.l = angles_toleft local.e.angles
+	local.u = angles_toup local.e.angles
+	local.p = local.e.origin + ( vector_scale local.f ( 0 - 420 * local.s ) ) + ( vector_scale local.l ( 80 * local.s ) ) + ( vector_scale local.u ( 110 * local.s ) )
+}end local.p
+
+
+// The engine drone is on the plane; this adds the baked-Doppler pass one-shot timed to the closest approach.
+flybySound local.e local.tcpa local.alias:{
+	local.lead = 1.4
+	while( local.e != NULL && level.time < local.tcpa - local.lead ){ waitframe }
+	if( local.e != NULL ){ local.e playsound local.alias }
+}end
+
+
+// ------------------------------------------------------------------------------------------- dive-bomb run
+// Level entry at the bomber height -> push-over -> straight dive at the profile angle -> release (bombs aimed by
+// their real falling arc) -> pull-out -> climb away -> level exit, all out of sight at both ends.
+// kind "p47": a pair (bombs from both); kind "stuka": one aircraft, shootable, MG burst in the dive.
+bomb_run local.target local.fwd local.kind local.leadin local.wide:{
+	waitthread init
+	if( local.target == NIL ){ end }
+	if( local.leadin == NIL ){ local.leadin = 0 }
+	if( local.wide == NIL ){ local.wide = 0 }
+	local.prof = waitthread profile local.kind
+	if( local.fwd == NIL ){ local.fwd = angles_toforward ( 0 ( randomint 360 ) 0 ) }
+	local.fwd[2] = 0
+	local.fwd = vector_normalize local.fwd
+		local.cls = waitthread mapClass
+	local.aim = local.target
+	if( local.wide == 1 ){ local.aim = exec coop_mod/officer.scr::coop_strike_scatter local.target 120 700 }
+	local.g = waitthread ground local.aim
+	if( local.cls == "D" ){
+		thread fallback local.g local.kind local.leadin
+		wait local.leadin
+		waitthread coop_mod/officer.scr::coop_drop_bombs local.g local.fwd 700 local.wide
+		end
+	}
+	local.F = waitthread fogDist
+	local.hb = 2400
+	local.floor = 640
+	if( level.ac_env != NIL ){
+		local.hb = level.ac_env["hb"]
+		local.floor = level.ac_env["obs"] - level.ac_env["g"] + 384
+		if( local.floor < 640 ){ local.floor = 640 }
+	}
+	if( local.F > 0 && local.hb > local.F * 0.8 ){ local.hb = local.F * 0.8 }
+	// local obstacles around the aim point raise the floor
+	local.top = waitthread obstacleTop ( local.g - ( vector_scale local.fwd 1500 ) ) ( local.g + ( vector_scale local.fwd 2500 ) ) ( local.g[2] + local.hb )
+	if( local.top - local.g[2] + 300 > local.floor ){ local.floor = local.top - local.g[2] + 300 }
+	if( local.hb < local.floor * 2.2 ){ local.hb = local.floor * 2.2 }
+
+	// geometry in the vertical plane (x along fwd from the aim point, z = height above the aim ground)
+	local.th = local.prof["dive"]
+	local.hrel = local.hb * 0.55
+	local.s = local.hrel / local.prof["hreal"]
+	if( local.s < local.prof["smin"] ){ local.s = local.prof["smin"] }
+	if( local.s > 1 ){ local.s = 1 }
+	local.R = local.prof["rreal"] * local.s
+	local.Rp = local.R * 0.5
+	local.vd = local.prof["vd"] * local.s
+	local.gs = level.ac_g * local.s
+	local.cth = cos local.th
+	local.sth = sin local.th
+	local.tth = local.sth / local.cth
+	// pull-out bottom must clear the floor: raise the release until it does
+	for( local.it = 1; local.it <= 6; local.it++ ){
+		local.q = local.vd * 0.35
+		local.zq = local.hrel - local.q * local.sth
+		local.zb = local.zq - local.R * ( 1 - local.cth )
+		if( local.zb >= local.floor ){ break }
+		local.hrel = local.hrel + ( local.floor - local.zb ) + 50
+	}
+	if( local.hb < local.hrel + local.Rp ){ local.hb = local.hrel + local.Rp + 200 }
+	// bomb lead from the release point: vertical fall with the dive's downward speed
+	// release speed = the speed prepare() gives the path at the dive angle (not the full dive speed)
+	local.vrel = local.s * ( local.prof["v"] + ( local.prof["vd"] - local.prof["v"] ) * local.sth )
+	local.vz = local.vrel * local.sth
+	local.vx = local.vrel * local.cth
+	// the script `sqrt` is sqrtf(DEG2RAD(x)) in this engine (scriptthread.cpp, also noted at maps/m2l2a.scr):
+	// multiply by 180/pi first to get a true square root
+	local.tf = ( sqrt( ( local.vz * local.vz + 2 * local.gs * local.hrel ) * 57.2957795 ) - local.vz ) / local.gs
+	local.xr = 0 - local.vx * local.tf
+
+	// push-over: level at hb, arc of radius Rp down to the dive angle, dive line through the release point
+	local.xpe = local.xr - ( local.hb - local.Rp * ( 1 - local.cth ) - local.hrel ) / local.tth
+	local.xps = local.xpe - local.Rp * local.sth
+	local.cz = local.hb - local.Rp
+	// pull-out arc centre: from Q (q along the dive past the release) one R along the upward normal
+	local.qx = local.xr + local.q * local.cth
+	local.qz = local.hrel - local.q * local.sth
+	local.pcx = local.qx + local.R * local.sth
+	local.pcz = local.qz + local.R * local.cth
+	local.climb = 20.0
+	// end of the pull-out arc (flight path angle +climb)
+	local.xce = local.pcx + local.R * ( sin local.climb )
+	local.zce = local.pcz - local.R * ( cos local.climb )
+	// climb until back at hb, then level
+	local.xcl = local.xce + ( local.hb - local.zce ) / ( ( sin local.climb ) / ( cos local.climb ) )
+
+	local.L = waitthread boxDist local.g local.fwd
+	local.Lb = waitthread boxDist local.g ( vector_scale local.fwd ( 0 - 1 ) )
+	if( local.F > 0 ){
+		local.want = local.F * 2.5 + 1500
+		if( local.L > local.want ){ local.L = local.want }
+		if( local.Lb > local.want ){ local.Lb = local.want }
+	}
+	if( local.Lb < ( 0 - local.xps ) + 500 ){ local.Lb = ( 0 - local.xps ) + 500 }
+	if( local.L < local.xcl + 500 ){ local.L = local.xcl + 500 }
+
+	local.i = 0
+	local.i++
+	local.xs[local.i] = 0 - local.Lb
+	local.zs[local.i] = local.hb
+	for( local.a = 0; local.a <= local.th; local.a = local.a + 5 ){
+		local.i++
+		local.xs[local.i] = local.xps + local.Rp * ( sin local.a )
+		local.zs[local.i] = local.cz + local.Rp * ( cos local.a )
+	}
+	local.i++
+	local.xs[local.i] = local.xr
+	local.zs[local.i] = local.hrel
+	local.iRel = local.i
+	for( local.gam = 0 - local.th; local.gam <= local.climb; local.gam = local.gam + 5 ){
+		local.i++
+		local.xs[local.i] = local.pcx + local.R * ( sin local.gam )
+		local.zs[local.i] = local.pcz - local.R * ( cos local.gam )
+	}
+	local.i++
+	local.xs[local.i] = local.xcl
+	local.zs[local.i] = local.hb
+	if( local.L > local.xcl + 1 ){
+		local.i++
+		local.xs[local.i] = local.L
+		local.zs[local.i] = local.hb
+	}
+	for( local.k = 1; local.k <= local.i; local.k++ ){ local.zs[local.k] = local.zs[local.k] + local.g[2] }
+	local.path = waitthread pathFromProfile local.g local.fwd local.xs local.zs
+	local.path = waitthread prepare local.path local.prof local.s
+	// Stuka: the classic half-roll into the dive (cosmetic bank through the push-over)
+	if( local.kind == "stuka" ){
+		local.ROL = local.path["ROL"]
+		local.cnt = int( local.th / 5 ) + 1
+		for( local.k = 2; local.k <= local.cnt + 1; local.k++ ){
+			local.ROL[local.k] = 0 - 90 * ( sin ( 180.0 * ( local.k - 2 ) / local.cnt ) )
+		}
+		local.path["ROL"] = local.ROL
+	}
+	local.dRel = local.path["D"][local.iRel]
+	local.dDive = local.path["D"][2]
+
+	// formation: Stuka alone; P-47s as a pair (wingman 1.2 spans back, 2 spans out)
+	local.sp = local.prof["span"] * local.s
+	local.offs[1] = ( 0 0 0 )
+	local.np = 1
+	if( local.kind == "p47" ){
+		local.np = 2
+		local.o2 = ( 0 0 0 )
+		local.o2[0] = local.sp * 1.2
+		local.o2[1] = local.sp * 2.0
+		local.offs[2] = local.o2
+	}
+	// audible warning: if the flight to the release is shorter than the lead-in, a distant drone fills the gap
+	local.vlev = local.prof["v"] * local.s
+	local.tpre = local.dRel / local.vlev
+	if( local.leadin > local.tpre ){
+		local.warn = spawn script_model
+		if( local.warn != NULL ){
+			local.warn model "models/fx/dummy.tik"
+			local.warn.origin = waitthread clampBox ( local.g - ( vector_scale local.fwd ( local.Lb + 1000 ) ) + ( 0 0 local.hb ) )
+			local.warn notsolid
+			local.warn loopsound local.prof["snd"] 1 levelwide
+			wait ( local.leadin - local.tpre )
+			local.warn stoploopsound
+			local.warn delete
+		}
+	}
+	local.st = waitthread pose local.path 0
+	for( local.k = 1; local.k <= local.np; local.k++ ){
+		local.planes[local.k] = waitthread spawnPlane local.prof local.s local.st["p"] local.st["a"]
+	}
+	if( level.ac_debug == 1 ){
+		println ( "^~^~^ AIR kind=" + local.kind + " map=" + level.coop_mapname + " cls=" + local.cls + " top=" + int( local.hb ) + " rel=" + int( local.hrel ) + " bottom=" + int( local.zb ) + " floor=" + int( local.floor ) + " s=" + local.s + " vd=" + int( local.vd ) + " fall=" + local.tf + " fog=" + int( local.F ) + " in=" + int( local.Lb ) + " out=" + int( local.L ) + " trel=" + ( local.dRel / local.vlev ) )
+	}
+	thread drive local.path local.planes local.offs local.F
+	// per plane: dive scream at the push-over, MG burst (Stuka), bombs at its own release distance
+	for( local.k = 1; local.k <= local.np; local.k++ ){
+		thread releaseWatch local.planes[local.k] local.dDive local.dRel local.kind local.s local.wide local.aim local.target
+	}
+	// block until the formation is gone (callers wait on this like the old run)
+	local.alive = 1
+	while( local.alive == 1 ){
+		local.alive = 0
+		for( local.k = 1; local.k <= local.np; local.k++ ){
+			if( local.planes[local.k] != NULL && local.planes[local.k] != NIL ){
+				if( local.planes[local.k].ac_dead != 1 ){ local.alive = 1 }
+			}
+		}
+		wait 0.5
+	}
+}end
+
+
+releaseWatch local.e local.dDive local.dRel local.kind local.s local.wide local.aim local.target:{
+	local.screamed = 0
+	local.strafed = 0
+	while( local.e != NULL ){
+		if( local.e.ac_dead == 1 ){ end }		// shot down before the release: no bombs
+		if( local.e.ac_d != NIL ){
+			if( local.screamed == 0 && local.e.ac_d >= local.dDive ){
+				local.screamed = 1
+				local.e playsound coop_stuka_dive
+			}
+			if( local.kind == "stuka" && local.strafed == 0 && local.e.ac_d >= local.dRel - ( vector_length local.e.ac_vel ) * 1.2 ){
+				local.strafed = 1
+				thread coop_mod/officer.scr::coop_stuka_mg_strafe local.e local.target
+			}
+			if( local.e.ac_d >= local.dRel ){
+				waitthread releaseBombs local.e local.kind local.s local.wide local.aim
+				end
+			}
+		}
+		waitframe
+	}
+}end
+
+
+// The stick. Stuka: one 500 kg + four 50 kg; P-47: four per aircraft (two pairs of the binocular strike's eight).
+releaseBombs local.e local.kind local.s local.wide local.aim:{
+	local.n = 4
+	if( local.kind == "stuka" ){ local.n = 5 }
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		if( local.e == NULL ){ end }
+		local.p = local.e.origin
+		if( local.kind == "stuka" ){ local.p = local.e gettagposition "tag_bomb" }
+		local.big = 0
+		if( local.kind == "stuka" && local.i == 1 ){ local.big = 1 }
+		if( local.kind == "p47" ){ local.big = 1 }
+		thread bomb local.p local.e.ac_vel local.s local.big
+		wait 0.07
+	}
+	thread coop_mod/officer.scr::coop_bomb_aftermath local.aim
+}end
+
+
+// One falling bomb: ballistic with the plane's velocity and g x s, nose along the velocity, explodes on contact.
+bomb local.p local.v local.s local.big:{
+	local.b = spawn script_model
+	if( local.b == NULL ){ end }	// entity-pool guard (bug-927)
+	local.b model "models/ammo/us_bomb.tik"
+	local.b notsolid
+	local.b.origin = local.p
+	local.b scale ( local.s * 1.6 )
+	local.b svflags "+broadcast"
+	local.b playsound coop_stuka_bomb
+	local.gs = level.ac_g * local.s
+	local.t = level.time
+	local.hit = NIL
+	local.life = 0
+	while( local.b != NULL && local.life < 25 ){
+		waitframe
+		local.dt = level.time - local.t
+		local.t = level.time
+		local.life = local.life + local.dt
+		local.v[2] = local.v[2] - local.gs * local.dt
+		local.np = local.b.origin + ( vector_scale local.v local.dt )
+		local.tr = traced ( local.b.origin ) ( local.np ) local.b.entnum
+		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 && local.tr["allSolid"] != 1 ){
+			local.hit = local.tr["endpos"]
+			break
+		}
+		local.b.origin = local.np
+		local.b.angles = vector_toangles local.v
+	}
+	if( local.b != NULL ){ local.b delete }
+	if( local.hit == NIL ){ end }
+	local.blast = spawn "models/emitters/explosion_bombwall.tik"
+	if( local.blast == NULL ){ end }
+	local.blast.origin = local.hit
+	local.blast anim start
+	local.blast notsolid
+	local.r = randomint 3
+	if( local.r == 0 ){ local.blast playsound explo_large } else if( local.r == 1 ){ local.blast playsound explo_medium } else { local.blast playsound explo_close }
+	if( local.big == 1 ){
+		radiusdamage local.hit 600 900
+	} else {
+		radiusdamage local.hit 300 500
+	}
+	wait 6
+	if( local.blast != NULL ){ local.blast remove }
+}end
+
+
+// --------------------------------------------------------------------------------------------- shoot-down
+// self = the downed plane. Wing-off model + smoke, then a decaying, spinning fall; it must hit playable ground away
+// from players, spawns, objectives and Omaha, else it trails smoke over the horizon and booms in the distance.
+crash local.path local.ps:{
+	local.e = self
+	local.v = local.e.ac_vel
+	if( local.v == NIL ){ local.v = ( 0 0 0 ) }
+	local.s = local.e.ac_s
+	local.gs = level.ac_g * local.s
+	local.e.ac_crashing = 1
+	waitthread credit local.e
+	local.fx = spawn "models/fx/fx_stuka_explosion.tik"
+	if( local.fx != NULL ){
+		local.fx.origin = local.e.origin
+		local.fx scale local.s
+		local.fx anim start
+		local.fx notsolid
+		local.fx thread removeLater 4
+	}
+	local.e playsound explo_medium
+	local.e playsound coop_ac_sputter
+	if( local.e.ac_kind == "stuka" ){
+		local.e model "models/vehicles/stuka_wing_d.tik"
+		local.e scale local.s
+		local.e anim smoke
+	}
+	// choose where it comes down: try the current heading, then veer 35/70 degrees either way
+	local.omaha = 0
+	if( level.coop_mapname == "m3l1a" || level.coop_mapname == "m3l1b" ){ local.omaha = 1 }
+	local.best = NIL
+	if( local.omaha == 0 ){
+		local.tries[1] = 0
+		local.tries[2] = 35
+		local.tries[3] = 0 - 35
+		local.tries[4] = 70
+		local.tries[5] = 0 - 70
+		for( local.k = 1; local.k <= 5; local.k++ ){
+			local.vv = waitthread turnVec local.v local.tries[local.k]
+			local.hitp = waitthread predictCrash local.e.origin local.vv local.gs
+			if( local.hitp != NIL ){
+				if( waitthread crashPointOk local.hitp ){
+					local.best = local.vv
+					break
+				}
+			}
+		}
+	}
+	if( local.best == NIL ){
+		local.e thread overHorizon local.v
+		end
+	}
+	// fly the predicted fall: drag on the horizontal, gravity, nose follows the velocity, spinning roll
+	local.v = local.best
+	local.t = level.time
+	local.roll = 0
+	local.life = 0
+	local.hit = NIL
+	while( local.e != NULL && local.life < 15 ){
+		waitframe
+		local.dt = level.time - local.t
+		local.t = level.time
+		local.life = local.life + local.dt
+		local.v = waitthread fallStep local.v local.gs local.dt
+		local.np = local.e.origin + ( vector_scale local.v local.dt )
+		local.tr = traced ( local.e.origin ) ( local.np ) local.e.entnum
+		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 ){
+			local.hit = local.tr["endpos"]
+			break
+		}
+		local.e.origin = waitthread clampBox local.np
+		local.a = vector_toangles local.v
+		local.roll = local.roll + 160 * local.dt
+		local.a[2] = local.roll
+		local.e.angles = local.a
+	}
+	if( local.e == NULL ){ end }
+	if( local.hit == NIL ){
+		local.e thread overHorizon local.v
+		end
+	}
+	waitthread impact local.e local.hit local.v
+}end
+
+
+fallStep local.v local.gs local.dt:{
+	local.h = local.v
+	local.h[2] = 0
+	local.h = vector_scale local.h ( 1 - 0.18 * local.dt )
+	local.v[0] = local.h[0]
+	local.v[1] = local.h[1]
+	local.v[2] = local.v[2] - local.gs * local.dt
+}end local.v
+
+
+turnVec local.v local.deg:{
+	local.a = vector_toangles local.v
+	local.sp = vector_length local.v
+	local.a[1] = local.a[1] + local.deg
+	local.o = vector_scale ( angles_toforward local.a ) local.sp
+}end local.o
+
+
+// Simulate the fall (no entity) in 0.1 s steps for up to 15 s; the ground point or NIL.
+predictCrash local.p local.v local.gs:{
+	for( local.i = 1; local.i <= 150; local.i++ ){
+		local.v = waitthread fallStep local.v local.gs 0.1
+		local.np = local.p + ( vector_scale local.v 0.1 )
+		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ end NIL }
+		local.tr = traced ( local.p ) ( local.np ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 && local.tr["allSolid"] != 1 ){
+			if( local.tr["surfaceFlags"] != NIL ){
+				// SURF_SKY (0x4): it would plough into the sky box, not the map
+				local.q = int( local.tr["surfaceFlags"] / 4 )
+				if( local.q - int( local.q / 2 ) * 2 == 1 ){ end NIL }
+			}
+			end local.tr["endpos"]
+		}
+		local.p = local.np
+	}
+}end NIL
+
+
+// Playable, and clear of players, spawns and the objective drop.
+crashPointOk local.p:{
+	// on walkable-ish ground near the play band
+	if( level.ac_env != NIL ){
+		if( local.p[2] < level.ac_env["g"] - 1500 ){ end 0 }
+		if( local.p[2] > level.ac_env["sky"] ){ end 0 }
+	}
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.q = $player[local.i]
+		if( local.q == NULL ){ continue }
+		if( vector_length( local.q.origin - local.p ) < 700 ){ end 0 }
+	}
+	for( local.i = 1; local.i <= 16; local.i++ ){
+		local.so = level.flags["coop_spawn" + local.i + "origin"]
+		if( local.so == NIL ){ continue }
+		if( vector_length( local.so - local.p ) < 900 ){ end 0 }
+	}
+	if( level.coop_objdrop_origin != NIL ){
+		if( vector_length( level.coop_objdrop_origin - local.p ) < 900 ){ end 0 }
+	}
+}end 1
+
+
+// Impact: fireball, blast, area damage, burning wreck, scorched crater with fires (the bomb-run aftermath).
+impact local.e local.p local.v:{
+	local.s = local.e.ac_s
+	local.blast = spawn "models/emitters/explosion_bombwall.tik"
+	if( local.blast != NULL ){
+		local.blast.origin = local.p
+		local.blast anim start
+		local.blast notsolid
+		local.blast playsound explo_large
+		local.blast thread removeLater 8
+	}
+	local.fb = spawn "models/fx/fx_stuka_explosion.tik"
+	if( local.fb != NULL ){
+		local.fb.origin = local.p + ( 0 0 32 )
+		local.fb anim start
+		local.fb notsolid
+		local.fb thread removeLater 6
+	}
+	radiusdamage local.p 350 600
+	// the wreck: nose in, smoking, then gone
+	local.e stoploopsound
+	local.e.origin = local.p
+	local.a = vector_toangles local.v
+	if( local.a[0] < 25 ){ local.a[0] = 25 }
+	local.e.angles = local.a
+	local.e svflags "-broadcast"
+	local.smk = spawn "models/emitters/linger_smoke.tik"
+	if( local.smk != NULL ){
+		local.smk.origin = local.p + ( 0 0 16 )
+		local.smk notsolid
+		local.smk anim start
+		local.smk thread removeLater 40
+	}
+	local.fire = spawn "models/emitters/firegood.tik"
+	if( local.fire != NULL ){
+		local.fire.origin = local.p + ( 0 0 8 )
+		local.fire notsolid
+		local.fire anim start
+		local.fire loopsound coop_snd_fire_small
+		local.fire thread removeLater 30
+	}
+	thread coop_mod/officer.scr::coop_bomb_aftermath local.p
+	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR crash map=" + level.coop_mapname + " at=" + local.p ) }
+	wait 40
+	if( local.e != NULL ){ local.e delete }
+}end
+
+
+// Off-map or into the sky: a smoking shallow glide away from the players, then a distant boom.
+overHorizon local.v:{
+	local.e = self
+	local.h = local.v
+	local.h[2] = 0
+	if( ( vector_length local.h ) < 1 ){ local.h = ( 1 0 0 ) }
+	local.dir = vector_normalize local.h
+	local.sp = vector_length local.v
+	if( local.sp < 300 ){ local.sp = 300 }
+	local.t = level.time
+	local.life = 0
+	local.roll = 0
+	while( local.e != NULL && local.life < 12 ){
+		waitframe
+		local.dt = level.time - local.t
+		local.t = level.time
+		local.life = local.life + local.dt
+		local.np = local.e.origin + ( vector_scale local.dir ( local.sp * local.dt ) ) - ( 0 0 ( local.sp * 0.18 * local.dt ) )
+		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ break }
+		local.e.origin = local.np
+		local.roll = local.roll + 40 * local.dt
+		local.a = vector_toangles ( local.dir - ( 0 0 0.18 ) )
+		local.a[2] = local.roll
+		local.e.angles = local.a
+	}
+	if( local.e == NULL ){ end }
+	local.boom = spawn script_model
+	if( local.boom != NULL ){
+		local.boom model "models/fx/dummy.tik"
+		local.boom.origin = local.e.origin
+		local.boom notsolid
+		local.boom playsound coop_ex_distant_01
+		local.boom thread removeLater 6
+	}
+	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR crash map=" + level.coop_mapname + " overhorizon at=" + local.e.origin ) }
+	local.e stoploopsound
+	local.e delete
+}end
+
+
+// Kill feed + XP for whoever brought it down (game.dll publishes the last attacker).
+credit local.e:{
+	local.a = local.e.coop_acAttacker
+	local.what = "a German plane"
+	if( local.e.ac_kind == "stuka" ){ local.what = "a Stuka" }
+	if( local.a == NIL || local.a == NULL ){
+		iprintln ( "Allied fire brought down " + local.what + "!" )
+		end
+	}
+	if( local.a.classname == "Player" ){
+		iprintln_noloc ( local.a.netname + " shot down " + local.what + "!" )
+		local.a playsound dm_hit_notify
+		thread coop_mod/xp.scr::xp_award local.a 50 "kills" "Plane Shot Down"
+	} else {
+		iprintln ( "Allied fire brought down " + local.what + "!" )
+	}
+	level.coop_planesDowned++
+}end
+
+
+removeLater local.t:{
+	wait local.t
+	if( self != NULL ){ self remove }
+}end
+
+
+// ------------------------------------------------------------------------------------------------- class D
+// No usable sky: the plane is only heard. A levelwide drone passes over, flak thumps, the ground shakes.
+fallback local.target local.kind local.secs:{
+	if( local.secs == NIL || local.secs < 4 ){ local.secs = 6 }
+	local.snd = "coop_c47_approach"
+	if( local.kind == "stuka" ){ local.snd = "coop_stuka_engine" }
+	local.d = spawn script_model
+	if( local.d == NULL ){ end }
+	local.d model "models/fx/dummy.tik"
+	local.d.origin = local.target + ( 0 0 400 )
+	local.d notsolid
+	local.d loopsound local.snd 1 levelwide
+	for( local.i = 0; local.i < local.secs; local.i++ ){
+		if( ( randomint 2 ) == 0 ){ local.d playsound coop_ac_flak }
+		wait 1
+	}
+	earthquake 0.8 0.5 0 0
+	local.d stoploopsound
+	local.d delete
+	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR kind=" + local.kind + " map=" + level.coop_mapname + " cls=D fallback" ) }
+}end

@@ -48,46 +48,12 @@ coop_paradrop_main local.smoke_pos:{
 	if( local.refplr != NULL && local.base_z < (local.refplr.origin[2] - 200) ){
 		local.base_z = local.refplr.origin[2]
 	}
-	// IMPORTANT: do NOT raise $world farplane -- it doubles as the FOG end distance, so
-	// inflating it erases all map fog. Instead we fly a HIGHER but still close pass that
-	// stays inside the map's native far-clip (m4l3 = 1500) for normal throws, so fog is
-	// preserved; far throws simply let the plane fade into the haze.
-	//[user 2026-08-16] "make it higher and it should go for a long time across the map... make it
-	//fly the entire span of the map if you have to". Was 1050 up and 2200 units end to end at
-	//230 u/s - a 9 second hop. m3l3 spans roughly 11400 x 10150, so 16000 units of run gives a
-	//genuine cross-map pass. Speed raised with it: 230 u/s is a crawl for a transport, and at 700
-	//the whole traverse still takes ~23s, which is a long time to watch a plane.
-	//[user 2026-08-16] "needs to fly for way longer... give it a solid 30 seconds after the drop
-	//its only going to go off map so it doesnt matter. If possible bump it even higher."
-	//Out = 30s x speed, so the aircraft keeps going long after the sticks are away and leaves the
-	//map under its own power instead of blinking out overhead. Approach stays 10s.
-	//[user 2026-08-16] 2600 was too high - 2200 keeps it clearly overhead without becoming a speck.
-	//All four are cvar-tunable now so the altitude can be dialled in during a flight instead of
-	//costing a rebuild per guess: coop_c47Alt / coop_c47Run / coop_c47Out / coop_c47Speed.
-	if( level.coop_c47Alt == NIL ){ level.coop_c47Alt = 2200 }
-	if( level.coop_c47Run == NIL ){ level.coop_c47Run = 7000 }
-	if( level.coop_c47Out == NIL ){ level.coop_c47Out = 21000 }
-	if( level.coop_c47Speed == NIL ){ level.coop_c47Speed = 700 }
-
-	local.cv = getcvar( "coop_c47Alt" )
-	if( local.cv != "" ){
-		if( local.cv != "0" ){ level.coop_c47Alt = int( local.cv ) }
-	}
-	local.cv = getcvar( "coop_c47Out" )
-	if( local.cv != "" ){
-		if( local.cv != "0" ){ level.coop_c47Out = int( local.cv ) }
-	}
-	local.cv = getcvar( "coop_c47Speed" )
-	if( local.cv != "" ){
-		if( local.cv != "0" ){ level.coop_c47Speed = int( local.cv ) }
-	}
-	//descent scales with the altitude, so the rate goes up with it - 175 was tuned for a 950u drop
-	//and would leave troopers hanging for 15s from 2600.
-	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 220 }
-
-	local.drop_z = local.base_z + level.coop_c47Alt
-	//leave the aircraft just under it, rather than materialising 1000u below
-	local.chute_start_z = local.drop_z - 100
+	//[aircraft 2026-10-05] the C-47s come from coop_mod/aircraft.scr: a V of three at the map's own height (generated
+	//envelope), drawn to scale so they look like real aircraft at ~600 ft, at real (scaled) jump speed, moved every
+	//server frame, sent to every client (+broadcast). The old fixed 2200u pass was ABOVE THE SKY BRUSH on 49 of 54
+	//maps, and an entity outside every leaf is never transmitted - that was "so high you can't see the planes".
+	//coop_c47Alt still overrides the height (aircraft.scr::c47_run); coop_c47Chute is the descent rate at full scale.
+	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 280 }
 
 	// Persistent YELLOW drop-zone marker, parked at the (clamped) ground so it isn't
 	// buried under the map if the smoke clipped low.
@@ -99,23 +65,20 @@ coop_paradrop_main local.smoke_pos:{
 	local.dzmark notsolid
 	thread coop_paradrop_cleanup_marker local.dzmark
 
-	// Random flight axis
-	local.fwd_ang = (0 (randomint 360) 0)
-	local.fwd = angles_toforward local.fwd_ang
-
-	local.neg_runin = 0 - level.coop_c47Run
-	local.c47_start = local.smoke_pos + (vector_scale local.fwd local.neg_runin)
-	local.c47_start[2] = local.drop_z
-	local.c47_end = local.smoke_pos + (vector_scale local.fwd level.coop_c47Out)
-	local.c47_end[2] = local.drop_z
-
-	// Fly C-47
-	thread coop_paradrop_c47 local.c47_start local.c47_end local.fwd
-
-	// Wait until plane is roughly overhead before dropping. Derived from the run-in and speed now,
-	// not a hardcoded 6 - with a 7000u approach a fixed wait would drop the sticks miles short.
-	local.overhead = level.coop_c47Run / level.coop_c47Speed
-	wait local.overhead
+	// Fly the V of three over the smoke (or, on a map with no usable sky, only let it be heard).
+	local.cls = waitthread coop_mod/aircraft.scr::mapClass
+	local.run = NIL
+	if( local.cls != "D" ){
+		local.run = waitthread coop_mod/aircraft.scr::c47_run local.smoke_pos
+	}
+	if( local.run == NIL ){
+		thread coop_mod/aircraft.scr::fallback local.smoke_pos "c47" 8
+		wait 8
+	} else {
+		// green light ahead of the smoke: each man keeps the aircraft's forward speed for ~1/1.2 s worth of
+		// drift (coop_paradrop_actor), so the middle of the stick lands on the smoke
+		while( level.time < local.run["tcpa"] - 1.25 ){ waitframe }
+	}
 
 	//[user 2026-08-16] the sticks are away HERE, which is what "until the paratroopers drop" means -
 	//not when the aircraft spawned. m3l3's hold line keys on this.
@@ -132,54 +95,54 @@ coop_paradrop_main local.smoke_pos:{
 	//second drop gets a second brain instead of orphaning the first squad's members.
 	local.sid = waitthread coop_mod/parasquad.scr::newSquad level.coop_smoke_player
 
-	local.i = 1
-	while( local.i <= 5 ){
-		// Offset each drop along the flight path + small lateral spread
-		local.path_off = vector_scale local.fwd ((local.i * 220) - 550)
-		local.lat_off = (randomint 180) - 90
-		local.drop_pos = local.smoke_pos + local.path_off
-		local.drop_pos[0] = local.drop_pos[0] + local.lat_off
-		local.drop_pos[1] = local.drop_pos[1] + ((randomint 180) - 90)
-		local.drop_pos[2] = local.chute_start_z
-		thread coop_paradrop_actor local.drop_pos local.i local.base_z local.sid
-		wait 1.5
-		local.i++
+	// Three sticks in parallel, one man per door per 0.4 s: lead 1+2, left wing 3+4, right wing 5.
+	// Each man leaves through his own aircraft's door with its velocity (aircraft.scr::door).
+	local.pk[1] = 1
+	local.pk[2] = 1
+	local.pk[3] = 2
+	local.pk[4] = 2
+	local.pk[5] = 3
+	local.wave[1] = 1
+	local.wave[2] = 3
+	local.wave[3] = 1
+	local.wave[4] = 3
+	local.wave[5] = 2
+	for( local.w = 1; local.w <= 3; local.w++ ){
+		for( local.i = 1; local.i <= 5; local.i++ ){
+			if( local.wave[local.i] != local.w ){ continue }
+			local.vel = ( 0 0 0 )
+			local.sc = 1
+			local.drop_pos = NIL
+			if( local.run != NIL ){
+				local.sc = local.run["s"]
+				local.pl = local.run["planes"][local.pk[local.i]]
+				if( local.pl != NULL && local.pl != NIL ){
+					if( local.pl.ac_dead != 1 ){
+						local.drop_pos = waitthread coop_mod/aircraft.scr::door local.pl
+						local.vel = local.pl.ac_vel
+					}
+				}
+			}
+			if( local.drop_pos == NIL ){
+				// no aircraft (class D, or it was lost): from the room above the smoke, spread a little
+				local.up = traced ( local.smoke_pos + ( 0 0 48 ) ) ( local.smoke_pos + ( 0 0 1200 ) )
+				local.room = local.up["fraction"] * 1200 - 96
+				if( local.room > 900 ){ local.room = 900 }
+				if( local.room < 64 ){ local.room = 64 }
+				local.drop_pos = local.smoke_pos
+				local.drop_pos[0] = local.drop_pos[0] + ( randomint 300 ) - 150
+				local.drop_pos[1] = local.drop_pos[1] + ( randomint 300 ) - 150
+				local.drop_pos[2] = local.base_z + local.room
+			}
+			thread coop_paradrop_actor local.drop_pos local.i local.base_z local.sid local.vel local.sc
+		}
+		if( local.w < 3 ){ wait 0.4 }
 	}
 	thread coop_mod/parasquad.scr::brain local.sid
 
 	// Monitor squad survival
 	wait 12
 	thread coop_paradrop_squad_monitor
-}end
-
-
-coop_paradrop_c47 local.startpos local.endpos local.fwd:{
-	local.c47 = spawn script_model
-	local.c47 model "models/vehicles/c47fly.tik"
-	local.c47.origin = local.startpos
-	local.c47 notsolid
-	// Face the direction of travel
-	local.c47.angles = vector_toangles (local.endpos - local.startpos)
-	// Looping engine drone for the whole pass.
-	local.c47 loopsound coop_c47_approach
-	// Fly by STEPPING the origin each tick. moveto/move silently no-op on script_models
-	// here (confirmed: the C-47 never translated, so players never saw it), so we drive
-	// position directly -- the proven-reliable mover (same as the marker tracker).
-	local.full = local.endpos - local.startpos
-	local.dist = vector_length local.full
-	if( level.coop_c47Speed == NIL ){ level.coop_c47Speed = 700 }
-	local.step = level.coop_c47Speed * 0.05
-	local.delta = vector_scale local.full (local.step / local.dist)
-	local.trav = 0
-	while( local.c47 != NULL && local.trav < local.dist ){
-		local.c47.origin = local.c47.origin + local.delta
-		local.trav = local.trav + local.step
-		wait 0.05
-	}
-	if( local.c47 != NULL ){
-		local.c47 stoploopsound
-		local.c47 delete
-	}
 }end
 
 
@@ -192,13 +155,15 @@ coop_paradrop_cleanup_marker local.marker:{
 
 // Descend parachute with actor visually riding it, spawn live actor on landing.
 // wtype: 1=BAR, 2=Thompson, 3=Garand/Rifle, 4=Sniper, 5=Medic
-coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid:{
+coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel local.s:{
+	//[aircraft 2026-10-05] vel = the aircraft's velocity at the door, s = its drawn scale (aircraft.scr). The man
+	//is drawn at the same scale at the door and grows to full size at the ground, so he matches the plane he left
+	//and the ground he lands on; his fall rates are real ones at that scale (forced perspective, PLAN.md section 6).
+	if( local.vel == NIL ){ local.vel = ( 0 0 0 ) }
+	if( local.s == NIL ){ local.s = 1 }
 	// Land at the smoke's ground level. The drop_pos is ~1100 units up in the air, so
 	// tracing down from there (coop_find_ground only goes 512u) hits rooftops and the
 	// troopers got stuck in the sky. Use the known ground Z; the live actor droptofloors.
-	local.ground_pos = local.drop_pos
-	local.ground_pos[2] = local.base_z
-
 	// Spawn the parachute canopy.
 	local.chute = spawn script_model
 	local.chute model "models/static/parachute_actors.tik"
@@ -230,28 +195,69 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid:{
 	local.actor dontdropweapons
 	local.actor.origin = local.drop_pos
 
-	// Descend by STEPPING the chute origin down each tick (moveto no-ops on script_models),
-	// dragging the inert actor 70u below the canopy center. The chute stops 70u ABOVE the
-	// ground so the rider lands AT the ground (it used to sink to ground-70 = underground).
-	local.chute_end = local.ground_pos
-	local.chute_end[2] = local.base_z + 70
-	local.cfull = local.chute_end - local.drop_pos
-	local.cdist = vector_length local.cfull
-	if( local.cdist < 1 ){ local.cdist = 1 }
-	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 220 }
-	local.cstep = level.coop_c47Chute * 0.05
-	local.cdelta = vector_scale local.cfull (local.cstep / local.cdist)
-	local.ctrav = 0
-	while( local.chute != NULL && local.ctrav < local.cdist ){
-		local.chute.origin = local.chute.origin + local.cdelta
-		if( local.actor != NULL ){
-			local.apos = local.chute.origin
-			local.apos[2] = local.apos[2] - 70
-			local.actor.origin = local.apos
+	// EXIT -> STATIC LINE -> CANOPY -> RIDE DOWN, every server frame (the old `wait 0.05` steps were every 2nd frame).
+	//  ~1.0 s of fall with the aircraft's forward throw decaying, canopy opens over 0.6 s, then the real descent
+	//  rate (coop_c47Chute, 280 u/s = 17.5 ft/s at full size) at the current scale. The canopy rides 70u (scaled)
+	//  above the man; he stops at the smoke's ground level, as before.
+	local.chute hide
+	local.chute scale ( local.s * 0.3 )
+	local.actor scale local.s
+	local.pos = local.drop_pos
+	local.top = local.drop_pos[2] - local.base_z
+	if( local.top < 1 ){ local.top = 1 }
+	local.h = local.vel
+	local.h[2] = 0
+	local.vz = local.vel[2]
+	local.t = level.time
+	local.age = 0
+	local.open = 0
+	if( level.coop_c47Chute == NIL ){ level.coop_c47Chute = 280 }
+	// the floor under the man, traced as he drifts (not the smoke's height: he can come down on a roof or a slope)
+	local.floor = local.base_z
+	while( local.actor != NULL && local.pos[2] > local.floor + 4 && local.age < 60 ){
+		waitframe
+		local.dt = level.time - local.t
+		local.t = level.time
+		local.age = local.age + local.dt
+		local.frac = ( local.pos[2] - local.base_z ) / local.top
+		if( local.frac > 1 ){ local.frac = 1 }
+		if( local.frac < 0 ){ local.frac = 0 }
+		local.sc = local.s + ( 1 - local.s ) * ( 1 - local.frac )
+		local.h = vector_scale local.h ( 1 - 1.2 * local.dt )
+		if( local.age < 1.0 ){
+			local.vz = local.vz - 515 * local.sc * local.dt
+		} else {
+			if( local.open == 0 && local.chute != NULL ){
+				local.open = 1
+				local.chute show
+			}
+			local.want = 0 - level.coop_c47Chute * local.sc
+			local.k = 3 * local.dt
+			if( local.k > 1 ){ local.k = 1 }
+			local.vz = local.vz + ( local.want - local.vz ) * local.k
 		}
-		local.ctrav = local.ctrav + local.cstep
-		wait 0.05
+		local.pos = local.pos + ( vector_scale local.h local.dt )
+		local.pos[2] = local.pos[2] + local.vz * local.dt
+		local.ft = traced ( local.pos + ( 0 0 32 ) ) ( local.pos - ( 0 0 4000 ) ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.ft["fraction"] < 1.0 && local.ft["startSolid"] != 1 ){
+			local.floor = local.ft["endpos"][2]
+			if( local.floor < local.base_z - 300 ){ local.floor = local.base_z }
+		}
+		if( local.pos[2] < local.floor + 4 ){ local.pos[2] = local.floor + 4 }
+		local.actor.origin = local.pos
+		local.actor scale local.sc
+		if( local.chute != NULL ){
+			local.of = ( local.age - 1.0 ) / 0.6
+			if( local.of < 0 ){ local.of = 0 }
+			if( local.of > 1 ){ local.of = 1 }
+			local.chute scale ( local.sc * ( 0.3 + 0.7 * local.of ) )
+			local.chute.origin = local.pos + ( 0 0 ( 70 * local.sc ) )
+		}
 	}
+	if( local.actor != NULL ){ local.actor scale 1 }
+	local.base_z = local.floor
+	local.ground_pos = local.pos
+	local.ground_pos[2] = local.base_z
 
 	// Touchdown - drop the canopy, settle the trooper, then ACTIVATE it into live AI.
 	if( local.chute != NULL ){ local.chute delete }
