@@ -2617,6 +2617,9 @@ state RELOAD_RIFLE
 		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "G43 Sniper"
 		carcano_reload			: IS_WEAPON_ACTIVE "mainhand" "Carcano Sniper"
 		coop_reload_johnson		: IS_WEAPON_ACTIVE "mainhand" "Johnson M1941"
+		//[reload audit phase B 2026-10-05] the M1 Carbine's 15-round box magazine: the G43 torso (bottom box,
+		//g43_clip prop, 2.93 s) under its own retargeted hands (coopr_m1_carbine_reload); was the Garand en-bloc.
+		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "M1 Carbine"
 		rifle_reload			: default
 	}
 
