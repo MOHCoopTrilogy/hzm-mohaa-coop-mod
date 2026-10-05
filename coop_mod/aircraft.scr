@@ -31,7 +31,8 @@ init:{
 	level.ac_g = 515.0
 	level.ac_box = 7900.0
 	level.ac_debug = 0
-	if( getcvar( "coop_acDebug" ) == "1" ){ level.ac_debug = 1 }
+	local.dbg = getcvar( "coop_acDebug" )
+	if( local.dbg != "" && local.dbg != "0" ){ level.ac_debug = 1 }
 	if( level.ac_active == NIL ){ level.ac_active = 0 }
 	if( level.coop_planesDowned == NIL ){ level.coop_planesDowned = 0 }
 }end
@@ -125,10 +126,11 @@ profile local.kind:{
 		local.p["span"] = 720
 		local.p["v"] = 4690.0		// 200 mph
 		local.p["vd"] = 7980.0		// 340 mph with dive brakes
-		local.p["hreal"] = 16000.0	// release at 1000 ft (a low but real Ju 87 release; reads better than 1500)
+		local.p["hreal"] = 8000.0	// release ~500 ft, pull-out bottom ~150-250 ft: low but real for a Ju 87, and it has to
+						// READ at the bottom of the dive (1000-1500 ft was a speck the whole run - coordinator review)
 		local.p["dive"] = 70.0
 		local.p["rreal"] = 16000.0	// ~6 g pull-out
-		local.p["smin"] = 0.18
+		local.p["smin"] = 0.3
 		local.p["snd"] = "coop_stuka_engine"
 		local.p["hp"] = 600
 		local.cv = getcvar( "coop_acStukaHp" )
@@ -139,10 +141,10 @@ profile local.kind:{
 		local.p["span"] = 653
 		local.p["v"] = 7040.0		// 300 mph
 		local.p["vd"] = 9390.0		// 400 mph in the dive
-		local.p["hreal"] = 14400.0	// release at 900 ft
+		local.p["hreal"] = 7200.0	// release ~450 ft (P-47 low glide-bombing; reads at the bottom of the dive)
 		local.p["dive"] = 45.0
 		local.p["rreal"] = 12000.0
-		local.p["smin"] = 0.18
+		local.p["smin"] = 0.3
 		local.p["snd"] = "coop_c47_approach"
 		local.p["hp"] = 0
 	}
@@ -783,6 +785,7 @@ crash local.path local.ps:{
 	local.e playsound coop_ac_sputter
 	if( local.e.ac_kind == "stuka" ){
 		local.e model "models/vehicles/stuka_wing_d.tik"
+		local.e notsolid	// a .tik model swap re-solidifies a ScriptSlave (TRAPS T9, bug-2496)
 		local.e scale local.s
 		local.e anim smoke
 	}
@@ -990,6 +993,197 @@ overHorizon local.v:{
 	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR crash map=" + level.coop_mapname + " overhorizon at=" + local.e.origin ) }
 	local.e stoploopsound
 	local.e delete
+}end
+
+
+// ------------------------------------------------------------------------------------------ C-47 lost to flak
+// self = one C-47 of a drop (paradrop.scr rolls coop_paraShootdownChance). Flak burst beside it, smoke + fire trail,
+// it falls out of the V, rolls away from the players and goes down OVER THE MAP EDGE (never on the playable area):
+// the sink rate is set so it is still above every structure when it reaches the coordinate edge. Distant boom and
+// a smoke column where it went down. Same per-frame mover as everything else (no wait 0.05 steps).
+stricken:{
+	local.e = self
+	if( local.e == NULL ){ end }
+	local.e.ac_dead = 1		// the formation driver lets go of it
+	local.s = local.e.ac_s
+	local.v = local.e.ac_vel
+	if( local.v == NIL ){ local.v = ( 516 0 0 ) }
+	local.sp = vector_length local.v
+	if( local.sp < 200 ){ local.sp = 200 }
+	level.ac_lastPlane = local.e
+	// the burst: two flak shells off the wing, the second one hits (own thread: the plane keeps flying)
+	thread flakBursts local.e
+	local.e playsound coop_ac_sputter
+	// smoke trail glued to the plane - the retail bomber.scr recipe (emitters/plane_smoke.tik + glue). The volumetric
+	// planesmokefly.tik drew as one solid black sausage under VSS (capture 2026-10-05).
+	local.trail = spawn "models/emitters/plane_smoke.tik"
+	if( local.trail != NULL ){
+		local.trail notsolid
+		local.trail svflags "+broadcast"
+		local.trail.origin = local.e.origin
+		local.trail glue local.e
+		local.trail anim start
+	}
+	// away from the players: turn toward the side of the track with fewer players, keep turning gently
+	local.h = local.v
+	local.h[2] = 0
+	if( ( vector_length local.h ) < 1 ){ local.h = ( 1 0 0 ) }
+	local.dir = vector_normalize local.h
+	local.left = angles_toleft ( vector_toangles local.dir )
+	local.side = 1
+	local.cnt = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		if( $player[local.i] == NULL ){ continue }
+		local.rel = $player[local.i].origin - local.e.origin
+		if( ( local.rel[0] * local.left[0] + local.rel[1] * local.left[1] ) > 0 ){ local.cnt++ } else { local.cnt-- }
+	}
+	if( local.cnt > 0 ){ local.side = 0 - 1 }
+	//[user 2026-10-05] "I'd like to see the plane actually get shot down when possible": first look for a SAFE
+	//crash on the map (playable ground, away from players/spawns/objectives - crashPointOk, the Stuka rules) along a
+	//visible wing-down glide; only if there is none does it stagger on over the edge.
+	local.yawRate = 6 * local.side		// deg/s, a lazy turn away
+	local.crashVz = NIL
+	if( level.coop_mapname != "m3l1a" && level.coop_mapname != "m3l1b" ){
+		local.slopes[1] = 0.32
+		local.slopes[2] = 0.45
+		local.slopes[3] = 0.6
+		local.slopes[4] = 0.22
+		local.turns[1] = 10 * local.side
+		local.turns[2] = 18 * local.side
+		local.turns[3] = 4 * local.side
+		for( local.a1 = 1; local.a1 <= 4 && local.crashVz == NIL; local.a1++ ){
+			for( local.a2 = 1; local.a2 <= 3 && local.crashVz == NIL; local.a2++ ){
+				local.vzTry = 0 - local.sp * local.slopes[local.a1]
+				local.hp = waitthread glideSim local.e.origin local.dir local.sp local.vzTry local.turns[local.a2]
+				if( local.hp != NIL ){
+					if( waitthread crashPointOk local.hp ){
+						local.crashVz = local.vzTry
+						local.yawRate = local.turns[local.a2]
+					}
+				}
+			}
+		}
+	}
+	if( local.crashVz != NIL ){
+		local.vz = local.crashVz
+		local.T = 30
+	} else {
+		// no safe zone: sink so it is still clear of everything when it reaches the edge (in view as long as possible)
+		local.L = waitthread boxDist local.e.origin local.dir
+		if( local.L < 1500 ){ local.L = 1500 }
+		local.clear = local.e.origin[2] - 2000
+		if( level.ac_env != NIL ){ local.clear = level.ac_env["obs"] + 250 }
+		local.drop = local.e.origin[2] - local.clear
+		if( local.drop < 0 ){ local.drop = 0 }
+		local.T = local.L / local.sp
+		local.vz = 0 - local.drop / local.T
+	}
+	local.t = level.time
+	local.life = 0
+	local.roll = 0
+	local.hit = NIL
+	while( local.e != NULL && local.life < local.T + 2 ){
+		waitframe
+		local.dt = level.time - local.t
+		local.t = level.time
+		local.life = local.life + local.dt
+		local.a = vector_toangles local.dir
+		local.a[1] = local.a[1] + local.yawRate * local.dt
+		local.dir = angles_toforward ( 0 local.a[1] 0 )
+		local.np = local.e.origin + ( vector_scale local.dir ( local.sp * local.dt ) ) + ( 0 0 ( local.vz * local.dt ) )
+		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ break }
+		if( local.crashVz != NIL ){
+			local.tr = traced ( local.e.origin ) ( local.np ) local.e.entnum
+			if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 ){
+				local.hit = local.tr["endpos"]
+				break
+			}
+		}
+		local.e.origin = local.np
+		if( local.roll < 55 ){ local.roll = local.roll + 9 * local.dt }
+		local.pa = ( 0 0 0 )
+		local.pa[0] = 8 + local.roll * 0.2
+		if( local.crashVz != NIL ){ local.pa[0] = local.pa[0] + 8 }
+		local.pa[1] = local.a[1]
+		local.pa[2] = local.roll * local.side
+		local.e.angles = local.pa
+	}
+	if( local.e == NULL ){ end }
+	if( local.hit != NIL ){
+		if( local.trail != NULL ){ local.trail thread removeLater 2 }
+		local.vv = vector_scale local.dir local.sp
+		local.vv[2] = local.vz
+		if( level.ac_debug == 1 ){ println ( "^~^~^ AIR c47 crash map=" + level.coop_mapname + " at=" + local.hit ) }
+		waitthread impact local.e local.hit local.vv
+		end
+	}
+	if( local.e == NULL ){ end }
+	// gone over the edge: a distant boom and, if there is sky there, a column of smoke
+	local.p = local.e.origin
+	local.boom = spawn script_model
+	if( local.boom != NULL ){
+		local.boom model "models/fx/dummy.tik"
+		local.boom.origin = local.p
+		local.boom notsolid
+		local.boom playsound coop_ex_distant_01
+		local.boom thread removeLater 6
+	}
+	local.g = traced ( local.p ) ( local.p - ( 0 0 6000 ) ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.g["fraction"] < 1.0 && local.g["startSolid"] != 1 ){
+		local.col = spawn "models/emitters/linger_smoke.tik"
+		if( local.col != NULL ){
+			local.col.origin = local.g["endpos"] + ( 0 0 16 )
+			local.col notsolid
+			local.col svflags "+broadcast"
+			local.col anim start
+			local.col thread removeLater 45
+		}
+	}
+	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR c47 lost map=" + level.coop_mapname + " at=" + local.p ) }
+	if( local.trail != NULL ){ local.trail thread removeLater 3 }
+	local.e stoploopsound
+	local.e delete
+}end
+
+
+// Simulated wing-down glide (0.2 s steps, up to 25 s): the ground point it would hit, or NIL (off the map / sky).
+glideSim local.p local.dir local.sp local.vz local.yawRate:{
+	for( local.i = 1; local.i <= 125; local.i++ ){
+		local.a = vector_toangles local.dir
+		local.a[1] = local.a[1] + local.yawRate * 0.2
+		local.dir = angles_toforward ( 0 local.a[1] 0 )
+		local.np = local.p + ( vector_scale local.dir ( local.sp * 0.2 ) ) + ( 0 0 ( local.vz * 0.2 ) )
+		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ end NIL }
+		local.tr = traced ( local.p ) ( local.np ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 ){
+			if( local.tr["surfaceFlags"] != NIL ){
+				local.q = int( local.tr["surfaceFlags"] / 4 )
+				if( local.q - int( local.q / 2 ) * 2 == 1 ){ end NIL }
+			}
+			end local.tr["endpos"]
+		}
+		local.p = local.np
+	}
+}end NIL
+
+
+flakBursts local.e:{
+	for( local.k = 1; local.k <= 2; local.k++ ){
+		if( local.e == NULL ){ end }
+		local.s = local.e.ac_s
+		local.l = angles_toleft local.e.angles
+		local.f = spawn "models/fx/exp_flak_near.tik"
+		if( local.f != NULL ){
+			local.f.origin = local.e.origin + ( vector_scale local.l ( local.s * ( 900 - 600 * local.k ) ) ) + ( 0 0 ( local.s * 120 ) )
+			local.f notsolid
+			local.f scale ( local.s * 1.4 )
+			local.f svflags "+broadcast"
+			local.f anim start
+			local.f playsound coop_ac_flak
+			local.f thread removeLater 5
+		}
+		wait 0.35
+	}
 }end
 
 

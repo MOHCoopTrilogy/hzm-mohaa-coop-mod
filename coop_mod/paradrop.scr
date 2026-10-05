@@ -65,16 +65,48 @@ coop_paradrop_main local.smoke_pos:{
 	local.dzmark notsolid
 	thread coop_paradrop_cleanup_marker local.dzmark
 
+	//[user 2026-10-04] SQUAD BRAIN (coop_mod/parasquad.scr). Each stick is its own squad, so a
+	//second drop gets a second brain instead of orphaning the first squad's members.
+	local.sid = waitthread coop_mod/parasquad.scr::newSquad level.coop_smoke_player
+	local.sid_pending = local.sid
+	local.bailK = 0
+
 	// Fly the V of three over the smoke (or, on a map with no usable sky, only let it be heard).
 	local.cls = waitthread coop_mod/aircraft.scr::mapClass
 	local.run = NIL
 	if( local.cls != "D" ){
 		local.run = waitthread coop_mod/aircraft.scr::c47_run local.smoke_pos
 	}
+	//[user 2026-10-05] a small chance that flak takes one C-47 of the V: coop_paraShootdownChance (percent, 0 = never).
+	local.lostPlane = 0
+	local.ch = getcvar( "coop_paraShootdownChance" )
+	local.chance = 7
+	if( local.ch != "" ){ local.chance = int( local.ch ) }
+	local.flak = 0
+	if( local.chance > 0 && ( randomint 100 ) < local.chance ){ local.flak = 1 }
 	if( local.run == NIL ){
 		thread coop_mod/aircraft.scr::fallback local.smoke_pos "c47" 8
+		if( local.flak == 1 ){ thread coop_paradrop_flak_unseen local.smoke_pos }
+		if( local.flak == 1 ){ local.lostPlane = 2 }
 		wait 8
 	} else {
+		if( local.flak == 1 ){
+			// a wingman, hit ~5 s before the green light so its fall is seen and is well clear of the drop
+			local.lostPlane = 2 + ( randomint 2 )
+			local.lp = local.run["planes"][local.lostPlane]
+			while( level.time < local.run["tcpa"] - 6.25 ){ waitframe }
+			if( local.lp != NULL && local.lp != NIL ){
+				// one man gets out of the stricken plane before it rolls away (he lands short of the zone)
+				local.bail = waitthread coop_mod/aircraft.scr::door local.lp
+				local.bvel = local.lp.ac_vel
+				local.lp thread coop_mod/aircraft.scr::stricken
+				if( local.lostPlane == 2 ){
+					thread coop_paradrop_actor local.bail 3 local.base_z local.sid_pending local.bvel local.run["s"]
+					local.bailK = 3
+				}
+			}
+			thread coop_paradrop_flak_radio
+		}
 		// green light ahead of the smoke: each man keeps the aircraft's forward speed for ~1/1.2 s worth of
 		// drift (coop_paradrop_actor), so the middle of the stick lands on the smoke
 		while( level.time < local.run["tcpa"] - 1.25 ){ waitframe }
@@ -91,9 +123,8 @@ coop_paradrop_main local.smoke_pos:{
 	level.coop_paradrop_squad[4] = NIL
 	level.coop_paradrop_squad[5] = NIL
 
-	//[user 2026-10-04] SQUAD BRAIN (coop_mod/parasquad.scr). Each stick is its own squad, so a
-	//second drop gets a second brain instead of orphaning the first squad's members.
-	local.sid = waitthread coop_mod/parasquad.scr::newSquad level.coop_smoke_player
+	//[user 2026-10-04] SQUAD BRAIN (coop_mod/parasquad.scr): local.sid is made before the flight now (a man
+	//bailing out of a stricken C-47 joins it).
 
 	// Three sticks in parallel, one man per door per 0.4 s: lead 1+2, left wing 3+4, right wing 5.
 	// Each man leaves through his own aircraft's door with its velocity (aircraft.scr::door).
@@ -110,6 +141,8 @@ coop_paradrop_main local.smoke_pos:{
 	for( local.w = 1; local.w <= 3; local.w++ ){
 		for( local.i = 1; local.i <= 5; local.i++ ){
 			if( local.wave[local.i] != local.w ){ continue }
+			// the flak victim's stick is lost (bar the man who bailed out early)
+			if( local.lostPlane != 0 && local.pk[local.i] == local.lostPlane ){ continue }
 			local.vel = ( 0 0 0 )
 			local.sc = 1
 			local.drop_pos = NIL
@@ -143,6 +176,35 @@ coop_paradrop_main local.smoke_pos:{
 	// Monitor squad survival
 	wait 12
 	thread coop_paradrop_squad_monitor
+}end
+
+
+// One of the C-47s lost to flak (coop_paraShootdownChance): a short radio line for everyone.
+coop_paradrop_flak_radio:{
+	wait 1.2
+	for( local.rp = 1; local.rp <= $player.size; local.rp++ ){
+		if( $player[local.rp] != NULL ){ $player[local.rp] playsound coop_radio_static }
+	}
+	iprintlnbold "Flak got one of the C-47s - fewer troopers inbound!"
+}end
+
+
+// Class D map (no sky to see it in): the loss is only heard - flak far overhead, then a distant boom.
+coop_paradrop_flak_unseen local.pos:{
+	wait 3
+	local.d = spawn script_model
+	if( local.d == NULL ){ end }
+	local.d model "models/fx/dummy.tik"
+	local.d.origin = local.pos + ( 0 0 600 )
+	local.d notsolid
+	local.d playsound coop_ac_flak
+	wait 0.6
+	local.d playsound coop_ac_flak
+	wait 3.5
+	local.d playsound coop_ex_distant_01
+	thread coop_paradrop_flak_radio
+	wait 6
+	if( local.d != NULL ){ local.d remove }
 }end
 
 
