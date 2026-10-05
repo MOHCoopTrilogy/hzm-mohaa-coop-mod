@@ -1,0 +1,291 @@
+//=========================================================================
+// feed.scr - HZM coop EVENT FEED, script side  [user 2026-10-05]
+// Design + inventory: docs/proposals/hud_declutter_2026-10-05/PLAN.md. Drawn by cgame/cg_coopfeed.c.
+//
+// The engine message box on the left (gmbox) holds 5 lines, decays them ONE AT A TIME, holds a bold line 10 s and
+// beeps "objective_text" for every bold line, so a busy fight parked text on screen for most of a minute. Coop
+// chatter now goes to a small cgame-drawn feed instead: 3 lines bottom-left, each fades on its own, repeats stack
+// ("x3"), no sound. Only mission failure / everyone down / rule-critical prompts stay bold in the old box.
+//
+// WIRE: a per-player `iprint` (a reliable server command - no ihuddraw slot, no hudresend needed) whose text
+// starts with a tag  ~f<cat>[:<key>[:<icon>]]~<text>  that the new cgame intercepts. A client advertises the
+// cgame in its userinfo (cg_hzmFeed 1); any other client gets the plain text, non-bold.
+//   cat 0 alert (amber; the ONLY category drawn in Hardcore)   1 team   2 self   3 pickup icon
+//   4 hint (shown once per player profile; coop_hints 0 = never)   5 armory status (coop_armoryStatus, not drawn)
+//   6 last-mission page line (key 0-9 -> coop_lm<key>, ui/coop_lastmission.urc; never sent to an old cgame)
+// The key is the stacking key: the same key while the line is still up restarts it and counts "x2", "x3".
+// Text: no double quotes, no "~" (the tag delimiter). Keys: short, no ":" or "~".
+//
+// COOP ONLY. MP scripts never call this file (check_mp_isolation clause 10). No wait in any label here, so every
+// call returns in the same frame (safe from main.scr::main and other single-frame paths).
+//=========================================================================
+
+//=========================================================================
+feed_capable local.player:{
+//=========================================================================
+	if( local.player == NULL ){ end 0 }
+	local.v = info_valueforkey local.player.userinfo "cg_hzmFeed"
+	if( local.v == "1" ){ end 1 }
+	end 0
+}end
+
+//=========================================================================
+// feed_player <player> <cat> <key> <text> - one player
+//=========================================================================
+feed_player local.player local.cat local.key local.text:{
+	if( local.player == NULL ){ end }
+	if( local.text == NIL ){ end }
+	if( local.text == "" ){ end }
+	if( local.cat == NIL ){ local.cat = 2 }
+	if( local.key == NIL ){ local.key = "" }
+	// vanilla single player keeps its own bold line
+	if( level.gametype == 0 ){
+		if( local.cat < 5 ){ local.player iprint local.text 1 }
+		end
+	}
+	local.cap = waitthread feed_capable local.player
+	if( local.cap == 1 ){
+		local.tag = "~f" + local.cat
+		if( local.key != "" ){ local.tag = local.tag + ":" + local.key }
+		local.player iprint ( local.tag + "~" + local.text ) 0
+		end
+	}
+	// an older cgame: plain, non-bold text. No last-mission lines (it has no page for them), and a hint at most
+	// once per map (it has no hint memory).
+	if( local.cat == 6 ){ end }
+	if( local.cat == 4 ){
+		local.hk = "coop_feedHint_" + local.key
+		if( local.player.flags[local.hk] == 1 ){ end }
+		local.player.flags[local.hk] = 1
+	}
+	local.player iprint local.text 0
+}end
+
+//=========================================================================
+// feed_all <cat> <key> <text> - every connected player
+//=========================================================================
+feed_all local.cat local.key local.text:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			waitthread feed_player local.p local.cat local.key local.text
+		}
+	}
+}end
+
+//=========================================================================
+// feed_others <skip> <cat> <key> <text> - every player except <skip> (e.g. "X is down" to his teammates)
+//=========================================================================
+feed_others local.skip local.cat local.key local.text:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			if( local.p != local.skip ){
+				waitthread feed_player local.p local.cat local.key local.text
+			}
+		}
+	}
+}end
+
+//=========================================================================
+// feed_others_cap <skip> <cat> <key> <text> - like feed_others, but ONLY to feed-capable clients: for a caller that
+// already gives an older cgame its own presentation (dbno.scr's slot-216 banner), so nobody gets it twice
+//=========================================================================
+feed_others_cap local.skip local.cat local.key local.text:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			if( local.p != local.skip ){
+				if( waitthread feed_capable local.p ){
+					waitthread feed_player local.p local.cat local.key local.text
+				}
+			}
+		}
+	}
+}end
+
+//=========================================================================
+// hints - shown once per player profile (the cgame remembers the key)
+//=========================================================================
+feed_hint local.player local.key local.text:{
+	waitthread feed_player local.player 4 local.key local.text
+}end
+
+feed_hint_all local.key local.text:{
+	waitthread feed_all 4 local.key local.text
+}end
+
+//=========================================================================
+// feed_icon <player> <key> <icon shader> <label> - a pickup: the item icon pops in beside one word
+//=========================================================================
+feed_icon local.player local.key local.icon local.label:{
+	if( local.player == NULL ){ end }
+	if( level.gametype == 0 ){ end }
+	local.cap = waitthread feed_capable local.player
+	if( local.cap == 1 ){
+		local.player iprint ( "~f3:" + local.key + ":" + local.icon + "~" + local.label ) 0
+		end
+	}
+	local.player iprint ( "Picked up: " + local.label ) 0
+}end
+
+//=========================================================================
+// feed_itemPickup <picker> <item> <icon> - global/items.scr::add_item in coop. items.scr passes NIL: every coop player
+// receives a mission item (replace.scr::item), and parm.other is stale after any wait in a scripted give, so the
+// icon goes to everyone. A caller that really knows the one player may pass him.
+//=========================================================================
+feed_itemPickup local.picker local.item local.icon:{
+	local.label = waitthread feed_itemLabel local.item
+	if( local.label == "" ){ end }
+	if( local.icon == NIL ){ local.icon = "" }
+	local.ok = 0
+	if( local.picker != NIL ){
+		if( local.picker != NULL ){
+			if( local.picker.classname == "Player" ){ local.ok = 1 }
+		}
+	}
+	if( local.ok == 1 ){
+		waitthread feed_icon local.picker ( "it_" + local.item ) local.icon local.label
+		end
+	}
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			waitthread feed_icon local.p ( "it_" + local.item ) local.icon local.label
+		}
+	}
+}end
+
+feed_itemLabel local.item:{
+	if( local.item == "camera" ){ end "Spy camera" }
+	if( local.item == "binoculars" ){ end "Binoculars" }
+	if( local.item == "bangalores" ){ end "Bangalores" }
+	if( local.item == "battery" ){ end "Battery" }
+	if( local.item == "clipboard" ){ end "Manifest" }
+	if( local.item == "keys" ){ end "Keys" }
+	if( local.item == "radar_blueprints" ){ end "Naxos radar blueprints" }
+	if( local.item == "radar_notes" ){ end "Naxos radar notes" }
+	if( local.item == "uboat_blueprints" ){ end "U-boat blueprints" }
+	if( local.item == "uboat_notes" ){ end "U-boat research notes" }
+	if( local.item == "explosive" ){ end "Explosives" }
+	if( local.item == "explosives" ){ end "Explosives" }
+	if( local.item == "radio_explosives" ){ end "Radio-detonated explosives" }
+	if( local.item == "gasmask" ){ end "Gas mask" }
+	if( local.item == "papers_level1" ){ end "Papers" }
+	if( local.item == "papers_level2" ){ end "Papers (level 2)" }
+	if( local.item == "wirecutters" ){ end "Wirecutters" }
+	if( local.item == "wirecutter" ){ end "Wirecutters" }
+	if( local.item == "cutters" ){ end "Wirecutters" }
+	if( local.item == "cutter" ){ end "Wirecutters" }
+	if( local.item == "radio" ){ end "Radio" }
+	if( local.item == "uniform" ){ end "Officer's uniform" }
+	if( local.item == "stg44_blueprints" ){ end "StG 44 blueprints" }
+	if( local.item == "tigerii_manual" ){ end "King Tiger field manual" }
+	if( local.item == "battleplans" ){ end "Battle plans" }
+	if( local.item == "stickybomb" ){ end "Sticky bombs" }
+	end ""
+}end
+
+//=========================================================================
+// feed_mapList <player> <text> - add a line to this map's "EARNED THIS MISSION" list on the debrief card
+// (player.flags coop_mapUnlockList, "~"-joined, stamped with the map name - challenges.scr::chal_add_unlock)
+//=========================================================================
+feed_mapList local.player local.text:{
+	if( local.player == NULL ){ end }
+	if( local.text == NIL || local.text == "" ){ end }
+	if( local.player.flags["coop_mapUnlockStamp"] != level.coop_mapname ){
+		local.player.flags["coop_mapUnlockStamp"] = level.coop_mapname
+		local.player.flags["coop_mapUnlockList"]  = ""
+	}
+	local.ml = local.player.flags["coop_mapUnlockList"]
+	if( local.ml == NIL || local.ml == "" ){ local.ml = local.text }
+	else { local.ml = local.ml + "~" + local.text }
+	local.player.flags["coop_mapUnlockList"] = local.ml
+}end
+
+//=========================================================================
+// feed_chalDone <player> <title> - challenges.scr::chal_toast_show for a feed-capable client: one quiet line now,
+// the title on the debrief card. Titles arrive bare (a challenge), "Variant unlocked: X" or "MEDAL EARNED: X".
+//=========================================================================
+feed_chalDone local.player local.title:{
+	if( local.player == NULL ){ end }
+	local.medal = waitthread coop_mod/main.scr::containsText local.title "MEDAL EARNED: " 0
+	local.variant = waitthread coop_mod/main.scr::containsText local.title "Variant unlocked" 0
+	if( local.medal ){
+		local.name = waitthread feed_after local.title 14
+		waitthread feed_player local.player 2 "chal" ( "Medal earned: " + local.name )
+		waitthread feed_mapList local.player ( "Medal: " + local.name )
+		end
+	}
+	if( local.variant ){
+		waitthread feed_player local.player 2 "chal" local.title
+		end
+	}
+	waitthread feed_player local.player 2 "chal" ( "Challenge complete: " + local.title )
+	waitthread feed_mapList local.player ( "Challenge: " + local.title )
+}end
+
+// the part of a string from character <n> on (no engine substring helper)
+feed_after local.s local.n:{
+	local.out = ""
+	for( local.i = local.n; local.i < local.s.size; local.i++ ){
+		local.out = local.out + local.s[local.i]
+	}
+	end local.out
+}end
+
+//=========================================================================
+// feed_lastMission <player> - at the debrief: fill the client's coop_lm0..9 for the LAST MISSION page
+// (ui/coop_lastmission.urc, main menu). Only a feed-capable cgame understands these lines.
+//=========================================================================
+feed_lastMission local.p:{
+	if( local.p == NULL ){ end }
+	if( !(waitthread feed_capable local.p) ){ end }
+	local.xp = local.p.flags["coop_xp_map"]
+	if( local.xp == NIL ){ local.xp = 0 }
+	local.rank = local.p.flags["coop_xp_rank"]
+	local.rname = ""
+	if( local.rank != NIL ){ local.rname = level.coop_xp_rankName[local.rank] }
+	if( local.rname == NIL ){ local.rname = "" }
+	local.mname = level.coop_mapDescription[level.coop_mapname]	//variables.scr::initMissionNames display name
+	if( local.mname == NIL || local.mname == "" ){ local.mname = level.coop_mapname }
+	local.l[0] = ( "Mission: " + local.mname )
+	local.l[1] = ( "XP earned: +" + local.xp )
+	if( local.rname != "" ){ local.l[1] = ( local.l[1] + "   Rank: " + local.rname ) }
+	local.l[2] = ""
+	local.r0 = local.p.flags["coop_xp_rankmapstart"]
+	if( local.r0 != NIL && local.rank != NIL ){
+		if( local.rank > local.r0 ){ local.l[2] = ( "Promoted to " + local.rname ) }
+	}
+	// the map's earned list (same parse as xp.scr::xp_card_unlocks)
+	local.pd = ""
+	if( local.p.flags["coop_mapUnlockStamp"] == level.coop_mapname ){ local.pd = local.p.flags["coop_mapUnlockList"] }
+	if( local.pd == NIL ){ local.pd = "" }
+	local.n = 3
+	local.extra = 0
+	local.field = ""
+	local.i = 0
+	while( local.i <= local.pd.size ){
+		local.done = 0
+		if( local.i == local.pd.size ){ local.done = 1 }
+		else if( local.pd[local.i] == "~" ){ local.done = 1 }
+		if( local.done == 1 ){
+			if( local.field != "" ){
+				if( local.n <= 8 ){ local.l[local.n] = local.field; local.n++ }
+				else { local.extra++ }
+			}
+			local.field = ""
+		} else {
+			local.field += local.pd[local.i]
+		}
+		local.i++
+	}
+	if( local.n == 3 ){ local.l[3] = "Nothing new earned this mission"; local.n = 4 }
+	for( local.j = local.n; local.j <= 9; local.j++ ){ local.l[local.j] = "" }
+	if( local.extra > 0 ){ local.l[9] = ( "+" + local.extra + " more" ) }
+	for( local.j = 0; local.j <= 9; local.j++ ){
+		local.t = local.l[local.j]
+		if( local.t == "" ){ local.t = " " }
+		local.p iprint ( "~f6:" + local.j + "~" + local.t ) 0
+	}
+}end

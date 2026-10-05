@@ -423,7 +423,7 @@ xp_identify local.player:{
 	local.srline = ( "Service record: " + level.coop_xp_rankAbbr[local.rank] + " - " + local.total + " XP" )
 	if( local.prestige > 0 ){ local.srline = ( local.srline + " (Prestige " + local.prestige + ")" ) }
 	if( !(waitthread coop_mod/menumirror.scr::coop_quietNotices) ){	//bug-3234 no armory/unlock toasts over a briefing
-		local.player iprint local.srline 1
+		println ( "^~^~^ XP " + local.srline )
 	}
 }end
 
@@ -607,7 +607,10 @@ xp_award local.player local.amount local.reason local.label:{
 		if( local.player.flags["coop_xp_popupGain"] == NIL ){ local.player.flags["coop_xp_popupGain"] = 0 }
 		local.player.flags["coop_xp_popupGain"]  = local.player.flags["coop_xp_popupGain"] + local.amount
 		local.player.flags["coop_xp_popupUntil"] = level.time + 3
-		thread xp_hud_popup local.player
+		//[user 2026-10-05] HUD declutter: the mid-mission rank bar is gone - rank and XP are on the debrief card and the
+		//Service Record. coop_xpRankBar 1 brings the bar back. The crosshair "+N" micro popups are unchanged.
+		if( getcvar( "coop_xpRankBar" ) == "1" ){ thread xp_hud_popup local.player }
+		else { local.player.flags["coop_xp_popupGain"] = 0 }	//nothing shows the accumulated gain - do not let it grow
 	}
 	if( local.reason == NIL ){ local.reason = "kills" }
 	local.bkey = "coop_xp_b_" + local.reason
@@ -635,7 +638,8 @@ xp_award local.player local.amount local.reason local.label:{
 	if( local.newprestige > local.player.flags["coop_xp_prestige"] ){
 		local.player.flags["coop_xp_prestige"] = local.newprestige
 		local.player stufftext ( "seta coop_xp_prestige " + local.newprestige )
-		local.player iprint ( "PRESTIGE STAR " + local.newprestige + "!" ) 1
+		waitthread coop_mod/feed.scr::feed_player local.player 2 "promo" ( "Prestige star " + local.newprestige )
+		waitthread coop_mod/feed.scr::feed_mapList local.player ( "Prestige star " + local.newprestige )
 		waitthread xp_flush
 	}
 
@@ -1974,6 +1978,7 @@ xp_summary_card local.p:{
 	if( local.p == NULL ){ end }
 	if( local.p.flags["coop_xp_cardOn"] == 1 ){ end }		// [user 07-18 bug-804] one card per player - a second thread on the same slots is the glitch machine
 	local.p.flags["coop_xp_cardOn"] = 1
+	thread coop_mod/feed.scr::feed_lastMission local.p	//[user 2026-10-05] the LAST MISSION page (main menu) gets this debrief
 	if( level.coop_xp_rankMax == NIL ){ level.coop_xp_rankMax = 21 }		// defensive: unset max -> ceil=floor+1 -> fill reads full (matches xp_hud_popup / xp_rankForTotal)
 	//[2026-09-25, bug-2906] the card (and xp_card_categories, which draws 62/66-68 later) takes over the
 	//gain popup's and ceremony's slots: claim them all now, so no late re-send of their teardowns lands on it
@@ -2218,7 +2223,7 @@ xp_card_unlocks local.p:{
 	ihuddraw_align       local.p 127 center top
 	ihuddraw_rect        local.p 127 0 340 0 0
 	ihuddraw_font        local.p 127 "verdana-12"
-	ihuddraw_string      local.p 127 "UNLOCKED THIS MISSION:"
+	ihuddraw_string      local.p 127 "EARNED THIS MISSION:"	//[user 2026-10-05] + challenges, medals, prestige (feed.scr::feed_mapList)
 	ihuddraw_color       local.p 127 1 0.85 0.4
 	ihuddraw_alpha       local.p 127 0.95
 
@@ -2267,6 +2272,15 @@ xp_card_unlocks local.p:{
 //=========================================================================
 xp_promo_ceremony local.player local.rank:{
 	if( local.player == NULL ){ end }
+	//[user 2026-10-05] HUD declutter: mid-mission a promotion is ONE quiet feed line (no ceremony, no ping, no duck).
+	//The debrief card still rolls every rank crossed with the full moment (xp_summary_card). An older cgame keeps
+	//the ceremony below.
+	if( level.coop_xp_summaryActive != 1 ){
+		if( waitthread coop_mod/feed.scr::feed_capable local.player ){
+			waitthread coop_mod/feed.scr::feed_player local.player 2 "promo" ( "Promoted: " + level.coop_xp_rankName[local.rank] )
+			end
+		}
+	}
 	if( level.coop_xp_summaryActive == 1 ){ end }		// [fix] at mission end the debrief card rolls the rank-up itself (insignia swap + ping + promo toast) - don't also fire the standalone ceremony over it
 	if( local.player.flags["coop_xp_ceremony"] == 1 ){ end }
 	local.player.flags["coop_xp_ceremony"] = 1
