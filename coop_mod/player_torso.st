@@ -2646,6 +2646,11 @@ state RELOAD_SMG
 
 	action
 	{
+		//[reload audit phase B 2026-10-05] DRUM guns (exact names - above the "MP40" row, which would match "MP40 (MP18)"
+		//through the skin-suffix strip): the drum comes off sideways, own drum props.
+		coop_reload_mp18			: IS_WEAPON_ACTIVE "mainhand" "MP40 (MP18)"
+		coop_reload_tommydrum50		: IS_WEAPON_ACTIVE "mainhand" "Thompson 50rd"
+		coop_reload_tommydrum1928		: IS_WEAPON_ACTIVE "mainhand" "Thompson (1928 Tommy)"
 		mp40_reload				: IS_WEAPON_ACTIVE "mainhand" "MP40"
 		sten_reload				: IS_WEAPON_ACTIVE "mainhand" "Sten Mark II"
 		ppsh_reload				: IS_WEAPON_ACTIVE "mainhand" "PPSH SMG"
@@ -2696,8 +2701,6 @@ state RELOAD_MG
 		//in anims_breda.txt but was never selected: mg_reload cut its hands clip at 57 %.
 		breda_reload			      : IS_WEAPON_ACTIVE "mainhand" "Breda"
 		coop_reload_dp28		      : IS_WEAPON_ACTIVE "mainhand" "DP-28"
-		//[reload audit phase B 2026-10-05] the Lewis gun's top pan (was the BAR box-magazine torso)
-		coop_reload_lewis		      : IS_WEAPON_ACTIVE "mainhand" "Lewis Gun"
 		mg_reload			      : default
 	}
 
