@@ -325,7 +325,31 @@ xp_autosave_loop:{
 	level.coop_xp_autosave = 1
 	while( 1 ){
 		wait 60
-		waitthread xp_flush
+		waitthread xp_flush_staggered
+	}
+}end
+
+
+//=========================================================================
+//[srvperf 2026-10-04] the 60 s autosave's flush, ONE player per server frame. Each synchronous
+//fs_write_content costs ~1 ms; xp_flush does every player in the same frame (~4.6 ms with 4 players,
+//measured on m1l1). Same skip-unchanged gate as xp_flush. Event flushes (rank-up, mission complete,
+//maptest) keep the immediate xp_flush.
+//=========================================================================
+xp_flush_staggered:{
+	if( level.coop_xp_enabled != 1 ){ end }
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.flags["coop_xp_id"] != NIL ){
+			local.xs = "" + local.p.flags["coop_xp_total"]
+			if( local.p.flags["coop_xp_flushed"] != local.xs ){
+				fs_write_content ( "coop_mod/save/xp_" + local.p.flags["coop_xp_id"] + ".dat" ) local.xs
+				local.p.flags["coop_xp_flushed"] = local.xs
+				waitframe
+			}
+		}
+		local.i++
 	}
 }end
 
@@ -2347,7 +2371,14 @@ xp_flush:{
 	while( local.i <= $player.size ){
 		local.p = $player[local.i]
 		if( local.p != NULL && local.p.flags["coop_xp_id"] != NIL ){
-			fs_write_content ( "coop_mod/save/xp_" + local.p.flags["coop_xp_id"] + ".dat" ) ( "" + local.p.flags["coop_xp_total"] )
+			//[srvperf 2026-10-04] skip the write when this player's total is what we last wrote: the file
+			//writes are synchronous and cost up to ~4.6 ms in one server frame (measured on m1l1), every
+			//60 s autosave, even for players whose XP had not moved. A changed total always writes.
+			local.xs = "" + local.p.flags["coop_xp_total"]
+			if( local.p.flags["coop_xp_flushed"] != local.xs ){
+				fs_write_content ( "coop_mod/save/xp_" + local.p.flags["coop_xp_id"] + ".dat" ) local.xs
+				local.p.flags["coop_xp_flushed"] = local.xs
+			}
 		}
 		local.i++
 	}

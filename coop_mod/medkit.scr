@@ -109,10 +109,18 @@ medkit_hud_monitor local.player:{
 					local.cap = level.coop_medkitCap	//[user 2026-09-25] 1 under Hardcore (hardcore.scr)
 					if( local.cap == NIL ){ local.cap = 2 }
 					if( local.mk3 < local.cap && level.time >= local.cd3 && local.player.flags["coop_medkit_in_use"] != 1 ){
-						local.si = 0
-						while( local.si < local.maxent ){
-							local.sent = getentbyentnum local.si
-							if( local.sent != NULL ){
+						//[srvperf 2026-10-04] walk the SHARED Health-item list (::healthItemSweep) instead of all
+						//maxentities: the full getentbyentnum walk cost 1.5-2.2 ms in ONE server frame, per player,
+						//every 5 s - a hitch a 125 fps listen-server host feels. Same distance/consume logic below.
+						local.beat = level.coop_healthSweepBeat
+						if( local.beat == NIL ){ thread healthItemSweep }
+						else if( level.time - local.beat >= 1 ){ thread healthItemSweep }
+						local.hn = level.coop_healthItemCount
+						if( local.hn == NIL ){ local.hn = 0 }
+						local.si = 1
+						while( local.si <= local.hn ){
+							local.sent = level.coop_healthItems[local.si]
+							if( local.sent != NULL && local.sent != NIL ){
 								if( local.sent.classname == "Health" ){
 									if( vector_length(local.player.origin - local.sent.origin) <= 100 ){
 										println "^~^~^ DBNO health_pickup_while_down"
@@ -125,7 +133,7 @@ medkit_hud_monitor local.player:{
 										local.sent notsolid
 										local.player.flags["coop_medkit_refill_cooldown"] = level.time + 5
 										local.player iprint ( "Medkit stowed (" + ( local.mk3 + 1 ) + "/" + local.cap + ")" ) 1
-										local.si = local.maxent
+										local.si = local.hn
 									}
 								}
 							}
@@ -831,6 +839,46 @@ dbno_selfrevive local.player:{
 		//dbno_ai_revive's "An Allied Medic revived you!" lands on 33 a few frames later - it claims first.
 		thread coop_mod/hudresend.scr::resendUnless local.player 33 35 0 "coop_dbno_active"
 		thread coop_mod/hudresend.scr::resendUnless local.player 38 38 0 "coop_dbno_active"
+	}
+}end
+
+
+//[srvperf 2026-10-04] ONE level-wide, time-sliced sweep for classname "Health" (was: every player's
+//medkit_hud_monitor walked all maxentities in a single frame every 5 s). 64 entnums per 0.1 s, so a
+//full pass over 1024 takes ~1.6 s and no frame pays more than ~0.1 ms. Finds are written straight into
+//level.coop_healthItems[1..n]; level.coop_healthItemCount publishes n when a pass completes. Entries are
+//re-validated by the reader (NULL + classname), so a slot left over from the previous pass is harmless.
+//Started from main.scr (self = level). A heartbeat, not a one-shot flag, guards the single instance: if
+//it ever dies, the next medkit_hud_monitor that needs the list restarts it (see the caller).
+healthItemSweep:{
+	if( level.coop_healthSweepBeat != NIL ){
+		if( level.time - level.coop_healthSweepBeat < 1 ){ end }
+	}
+	level.coop_healthSweepBeat = level.time
+	local.maxent = int(getcvar("maxentities"))
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	local.si = 0
+	local.n  = 0
+	while( 1 ){
+		local.k = 0
+		while( local.k < 64 && local.si < local.maxent ){
+			local.e = getentbyentnum local.si
+			if( local.e != NULL ){
+				if( local.e.classname == "Health" ){
+					local.n++
+					level.coop_healthItems[local.n] = local.e
+				}
+			}
+			local.si++
+			local.k++
+		}
+		if( local.si >= local.maxent ){
+			level.coop_healthItemCount = local.n
+			local.si = 0
+			local.n  = 0
+		}
+		wait 0.1
+		level.coop_healthSweepBeat = level.time
 	}
 }end
 
