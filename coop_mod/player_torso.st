@@ -2554,6 +2554,13 @@ state RELOAD_WEAPON
 		//only the start clip played, no round went in on screen, and a Garand clip sat in the hand.
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Springfield M1903"
 		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Silenced Kar98 Sniper"
+		//[reload audit phase B 2026-10-05] scoped bolt rifles load ONE ROUND AT A TIME (the scope sits over the
+		//action, so stripper clips cannot be used - historically correct, user decision). Their hands are the
+		//coopr_<gun>_reload* aliases in anims_shared.txt (the kar98sniper single-round set; ejection ports within ~1u).
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Arisaka Sniper"
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Mosin-Nagant Sniper"
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Silenced Mosin Sniper"
+		RELOAD_SPRINGFIELD		: IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield Sniper"
 		//[reload audit 2026-10-05] StG44 Scoped is class rifle but wears StG 44 hands: give it the
 		//MG reload state (magazine prop + attachment correction on interrupt), not the Garand's.
 		RELOAD_MG			: IS_WEAPON_ACTIVE "mainhand" "StG44 Scoped"
@@ -2605,10 +2612,6 @@ state RELOAD_RIFLE
 		//prefix) but fell through to rifle_reload: Garand en-bloc prop, gun handed back to the right
 		//hand at 1.9 s mid-clip, and the reload ended at 2.03 s while the hands clip ran 2.9-3.9 s.
 		kar98_reload			: IS_WEAPON_ACTIVE "mainhand" "Arisaka Type 99"
-		kar98_reload			: IS_WEAPON_ACTIVE "mainhand" "Arisaka Sniper"
-		mosin_reload			: IS_WEAPON_ACTIVE "mainhand" "Mosin-Nagant Sniper"
-		mosin_reload			: IS_WEAPON_ACTIVE "mainhand" "Silenced Mosin Sniper"
-		enfield_reload			: IS_WEAPON_ACTIVE "mainhand" "Lee-Enfield Sniper"
 		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "G43 Sniper"
 		carcano_reload			: IS_WEAPON_ACTIVE "mainhand" "Carcano Sniper"
 		coop_reload_johnson		: IS_WEAPON_ACTIVE "mainhand" "Johnson M1941"
