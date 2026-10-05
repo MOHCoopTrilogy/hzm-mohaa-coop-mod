@@ -2757,7 +2757,9 @@ state RELOAD_WEBLEY
 
 	action
 	{
-		WEBLEY_reload_start	     	: default
+		//[reload audit phase B 2026-10-05] user: "revolvers should also drop old shells" - the same torso clip, plus the
+		//star extractor throwing ALL fired cases at the break-open (anims_shared.txt coop_reload_webley_start)
+		coop_reload_webley_start	     	: default
 	}
 
 	states
