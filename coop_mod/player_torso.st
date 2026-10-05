@@ -2734,6 +2734,8 @@ state RELOAD_PISTOL
 		histandard_reload	              : IS_WEAPON_ACTIVE "mainhand" "Hi-Standard Silenced"
 		//[reload audit 2026-10-05] East's revolver hands; pistol_reload hung a Colt MAGAZINE in the hand
 		coop_reload_m10		        : IS_WEAPON_ACTIVE "mainhand" "S&W M10 .38"
+		//[reload audit phase B 2026-10-05] the C96 loads from the TOP with a stripper clip (was the P38 grip swap)
+		coop_reload_c96		        : IS_WEAPON_ACTIVE "mainhand" "Mauser C96"
 		pistol_reload		        : default
 	}
 
