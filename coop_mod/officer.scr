@@ -2229,6 +2229,30 @@ coop_apply_personality local.actor:{
 	}
 }end
 
+//[2026-10-05, bug-3360] puts a prone shooter's gun 32u toward his target (clears a 15u half-width box
+//diagonally). World trace first: if a wall is in the way the muzzle stops 4u short of it. Returns 0 when that
+//leaves the muzzle inside his own box (cover within ~20u) - the caller holds fire rather than shoot him.
+//=========================================================================
+coop_prone_gunpos local.actor local.gun local.target:{
+//=========================================================================
+	if( local.actor == NULL || local.gun == NULL || local.target == NULL ){ end (0) }
+	local.base = local.actor.origin + (0 0 20)
+	local.dir = local.target.origin - local.actor.origin
+	local.dir[2] = 0
+	local.len = vector_length local.dir
+	if( local.len < 1 ){ end (0) }
+	local.dir = local.dir * ( 1.0 / local.len )
+	local.want = local.base + ( local.dir * 32 )
+	local.hit = trace local.base local.want 1
+	local.d = vector_length ( local.hit - local.base )
+	if( local.d < 31.5 ){
+		local.d = local.d - 4
+		if( local.d < 22 ){ end (0) }
+		local.want = local.base + ( local.dir * local.d )
+	}
+	local.gun.origin = local.want
+}end (1)
+
 //[209] HZM coop - CRASH-SAFE PRONE SHOOTER. The actor is locked into a cosmetic scripted prone pose
 // via anim_scripted, which suspends its normal AI think -- so it NEVER enters the attack.scr prone/
 // crouch branch that tight-spins and crashes the server (see [[attack_scr_aiprone_fix]]). The real
@@ -2297,6 +2321,9 @@ coop_prone_shooter local.actor:{
 		}
 		end
 	}
+	//[2026-10-05, bug-3360] nor a vehicle passenger: global/vehicles_thinkers.scr marks every rider
+	//ainoprone 1 ("don't prone while on vehicle!"), and the gun below would sit inside the vehicle
+	if( local.actor.ainoprone == 1 ){ end }
 	//[bug-2976] and never off a mounted gun - anim_scripted below would release his turret
 	if( waitthread coop_isMannedGunner local.actor ){
 		if( level.coop_prbActor == 1 ){ waitthread coop_mod/probe.scr::prb "actor.mghold" local.actor "why=prone" }
@@ -2436,7 +2463,14 @@ coop_prone_shooter local.actor:{
 				println( "^~^~^ PRB prone.target t=" + int( level.time ) + " ent=" + local.actor.entnum + " tn=" + local.prbTn + " verdict=" + local.prbNow + " foeTbias=" + local.prbTb )
 			}
 		}
-		if( local.target != NULL && (local.actor cansee local.target) ){
+		//[2026-10-05, bug-3360] the muzzle goes OUTSIDE the shooter: at origin + (0 0 20) it sat inside his own box,
+		//and the round's owner is the GUN (scriptslave.cpp GunFire), so Projectile::Touch skipped only the gun and
+		//every shot could hit the man firing it (bug-3309 measured it on paratroopers). Blocked close in front = no shot.
+		local.muzzleOk = 0
+		if( local.target != NULL ){
+			if( local.actor cansee local.target ){ local.muzzleOk = waitthread coop_prone_gunpos local.actor local.gun local.target }
+		}
+		if( local.muzzleOk == 1 ){
 			local.lostsight = 0
 			local.gun aimtarget local.target
 			//[bug-2058] the gun ACTUALLY firing - the fact that separates the two readings
@@ -2455,6 +2489,10 @@ coop_prone_shooter local.actor:{
 			local.gun playsound local.shotsnd
 			local.gun on
 			wait 0.75
+			if( local.gun != NULL && local.actor != NULL && local.target != NULL ){
+				local.muzzleOk = waitthread coop_prone_gunpos local.actor local.gun local.target
+				if( local.muzzleOk != 1 ){ local.gun off }
+			}
 			if( local.gun != NULL ){ local.gun playsound local.shotsnd }
 			wait 0.75
 			local.gun off
