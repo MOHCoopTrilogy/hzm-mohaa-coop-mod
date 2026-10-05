@@ -2567,6 +2567,8 @@ state RELOAD_WEAPON
 		RELOAD_SHOTGUN			: IS_WEAPON_ACTIVE "mainhand" "Shotgun"
 		RELOAD_NAGANTREV		: IS_WEAPON_ACTIVE "mainhand" "Nagant Revolver"
 		RELOAD_WEBLEY			: IS_WEAPON_ACTIVE "mainhand" "Webley Revolver"
+		//[reload audit phase B 2026-10-05] the renamed colt45_colt1911w.tik is a Webley break-top mesh
+		RELOAD_WEBLEY			: IS_WEAPON_ACTIVE "mainhand" "Webley Mk VI"
 
 		RELOAD_PISTOL			: IS_WEAPONCLASS_ACTIVE "mainhand" "pistol"
 		RELOAD_PISTOL			: IS_WEAPON_ACTIVE      "mainhand" "Beretta"
