@@ -8,7 +8,7 @@ coop_skin_delisle_gold
 {
 	qer_editorimage textures/models/weapons/delisle/delisle.jpg
 	{
-		map textures/models/weapons/delisle/delisle.jpg
+		map textures/models/weapons/DeLisle/delisle.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -28,7 +28,7 @@ coop_skin_delisle_chrome
 {
 	qer_editorimage textures/models/weapons/delisle/delisle.jpg
 	{
-		map textures/models/weapons/delisle/delisle.jpg
+		map textures/models/weapons/DeLisle/delisle.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -48,7 +48,7 @@ coop_skin_delisle_blued
 {
 	qer_editorimage textures/models/weapons/delisle/delisle.jpg
 	{
-		map textures/models/weapons/delisle/delisle.jpg
+		map textures/models/weapons/DeLisle/delisle.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -296,7 +296,7 @@ coop_skin_gr_w_minedetector_gold
 {
 	qer_editorimage textures/models/weapons/minedetector/gr_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/gr_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/Gr_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -316,7 +316,7 @@ coop_skin_gr_w_minedetector_chrome
 {
 	qer_editorimage textures/models/weapons/minedetector/gr_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/gr_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/Gr_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -336,7 +336,7 @@ coop_skin_gr_w_minedetector_blued
 {
 	qer_editorimage textures/models/weapons/minedetector/gr_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/gr_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/Gr_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -392,7 +392,7 @@ coop_skin_it_w_beretta_gold
 {
 	qer_editorimage textures/models/weapons/beretta/it_w_beretta.jpg
 	{
-		map textures/models/weapons/beretta/it_w_beretta.jpg
+		map textures/models/weapons/Beretta/It_W_Beretta.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -412,7 +412,7 @@ coop_skin_it_w_beretta_chrome
 {
 	qer_editorimage textures/models/weapons/beretta/it_w_beretta.jpg
 	{
-		map textures/models/weapons/beretta/it_w_beretta.jpg
+		map textures/models/weapons/Beretta/It_W_Beretta.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -432,7 +432,7 @@ coop_skin_it_w_beretta_blued
 {
 	qer_editorimage textures/models/weapons/beretta/it_w_beretta.jpg
 	{
-		map textures/models/weapons/beretta/it_w_beretta.jpg
+		map textures/models/weapons/Beretta/It_W_Beretta.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -488,7 +488,7 @@ coop_skin_it_w_breda_gold
 {
 	qer_editorimage textures/models/weapons/breda/it_w_breda.jpg
 	{
-		map textures/models/weapons/breda/it_w_breda.jpg
+		map textures/models/weapons/Breda/It_W_Breda.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -508,7 +508,7 @@ coop_skin_it_w_breda_chrome
 {
 	qer_editorimage textures/models/weapons/breda/it_w_breda.jpg
 	{
-		map textures/models/weapons/breda/it_w_breda.jpg
+		map textures/models/weapons/Breda/It_W_Breda.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -528,7 +528,7 @@ coop_skin_it_w_breda_blued
 {
 	qer_editorimage textures/models/weapons/breda/it_w_breda.jpg
 	{
-		map textures/models/weapons/breda/it_w_breda.jpg
+		map textures/models/weapons/Breda/It_W_Breda.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -584,7 +584,7 @@ coop_skin_it_w_carcano_gold
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -604,7 +604,7 @@ coop_skin_it_w_carcano_chrome
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -624,7 +624,7 @@ coop_skin_it_w_carcano_blued
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -680,7 +680,7 @@ coop_skin_it_w_carcano_lite_gold
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -700,7 +700,7 @@ coop_skin_it_w_carcano_lite_chrome
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -720,7 +720,7 @@ coop_skin_it_w_carcano_lite_blued
 {
 	qer_editorimage textures/models/weapons/carcano/it_w_carcano.jpg
 	{
-		map textures/models/weapons/carcano/it_w_carcano.jpg
+		map textures/models/weapons/Carcano/It_W_Carcano.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -776,7 +776,7 @@ coop_skin_it_w_moschetto_gold
 {
 	qer_editorimage textures/models/weapons/moschetto/it_w_moschetto.jpg
 	{
-		map textures/models/weapons/moschetto/it_w_moschetto.jpg
+		map textures/models/weapons/Moschetto/It_W_Moschetto.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -796,7 +796,7 @@ coop_skin_it_w_moschetto_chrome
 {
 	qer_editorimage textures/models/weapons/moschetto/it_w_moschetto.jpg
 	{
-		map textures/models/weapons/moschetto/it_w_moschetto.jpg
+		map textures/models/weapons/Moschetto/It_W_Moschetto.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -816,7 +816,7 @@ coop_skin_it_w_moschetto_blued
 {
 	qer_editorimage textures/models/weapons/moschetto/it_w_moschetto.jpg
 	{
-		map textures/models/weapons/moschetto/it_w_moschetto.jpg
+		map textures/models/weapons/Moschetto/It_W_Moschetto.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -968,7 +968,7 @@ coop_skin_mosin_nagant_rifle_gold
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -988,7 +988,7 @@ coop_skin_mosin_nagant_rifle_chrome
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1008,7 +1008,7 @@ coop_skin_mosin_nagant_rifle_blued
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1064,7 +1064,7 @@ coop_skin_mosin_nagant_rifle_lite_gold
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1084,7 +1084,7 @@ coop_skin_mosin_nagant_rifle_lite_chrome
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1104,7 +1104,7 @@ coop_skin_mosin_nagant_rifle_lite_blued
 {
 	qer_editorimage models/weapons/mosin_nagant/mosin_nagant.jpg
 	{
-		map models/weapons/mosin_nagant/mosin_nagant.jpg
+		map models/weapons/mosin_nagant/mosin_nagant.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1256,7 +1256,7 @@ coop_skin_us_w_minedetector_gold
 {
 	qer_editorimage textures/models/weapons/minedetector/us_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/us_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/US_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1276,7 +1276,7 @@ coop_skin_us_w_minedetector_chrome
 {
 	qer_editorimage textures/models/weapons/minedetector/us_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/us_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/US_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1296,7 +1296,7 @@ coop_skin_us_w_minedetector_blued
 {
 	qer_editorimage textures/models/weapons/minedetector/us_w_minedetector.jpg
 	{
-		map textures/models/weapons/minedetector/us_w_minedetector.jpg
+		map textures/models/weapons/MineDetector/US_W_MineDetector.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1352,7 +1352,7 @@ coop_skin_uk_w_l42a1_gold
 {
 	qer_editorimage textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
 	{
-		map textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
+		map textures/models/weapons/Enfield_L42A1/Uk_W_L42A1.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1372,7 +1372,7 @@ coop_skin_uk_w_l42a1_chrome
 {
 	qer_editorimage textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
 	{
-		map textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
+		map textures/models/weapons/Enfield_L42A1/Uk_W_L42A1.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1392,7 +1392,7 @@ coop_skin_uk_w_l42a1_blued
 {
 	qer_editorimage textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
 	{
-		map textures/models/weapons/enfield_l42a1/uk_w_l42a1.jpg
+		map textures/models/weapons/Enfield_L42A1/Uk_W_L42A1.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1448,7 +1448,7 @@ coop_skin_uk_w_piat_gold_0
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piat.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piat.jpg
+		map textures/models/weapons/Piat/Uk_W_Piat.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1468,7 +1468,7 @@ coop_skin_uk_w_piat_gold_1
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piatrocket.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piatrocket.jpg
+		map textures/models/weapons/Piat/Uk_W_PiatRocket.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1488,7 +1488,7 @@ coop_skin_uk_w_piat_chrome_0
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piat.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piat.jpg
+		map textures/models/weapons/Piat/Uk_W_Piat.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1508,7 +1508,7 @@ coop_skin_uk_w_piat_chrome_1
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piatrocket.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piatrocket.jpg
+		map textures/models/weapons/Piat/Uk_W_PiatRocket.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1528,7 +1528,7 @@ coop_skin_uk_w_piat_blued_0
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piat.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piat.jpg
+		map textures/models/weapons/Piat/Uk_W_Piat.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1548,7 +1548,7 @@ coop_skin_uk_w_piat_blued_1
 {
 	qer_editorimage textures/models/weapons/piat/uk_w_piatrocket.jpg
 	{
-		map textures/models/weapons/piat/uk_w_piatrocket.jpg
+		map textures/models/weapons/Piat/Uk_W_PiatRocket.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1640,7 +1640,7 @@ coop_skin_uk_w_vickers_gold
 {
 	qer_editorimage textures/models/weapons/vickers/uk_w_vickers.jpg
 	{
-		map textures/models/weapons/vickers/uk_w_vickers.jpg
+		map textures/models/weapons/Vickers/Uk_W_Vickers.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1660,7 +1660,7 @@ coop_skin_uk_w_vickers_chrome
 {
 	qer_editorimage textures/models/weapons/vickers/uk_w_vickers.jpg
 	{
-		map textures/models/weapons/vickers/uk_w_vickers.jpg
+		map textures/models/weapons/Vickers/Uk_W_Vickers.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1680,7 +1680,7 @@ coop_skin_uk_w_vickers_blued
 {
 	qer_editorimage textures/models/weapons/vickers/uk_w_vickers.jpg
 	{
-		map textures/models/weapons/vickers/uk_w_vickers.jpg
+		map textures/models/weapons/Vickers/Uk_W_Vickers.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1736,7 +1736,7 @@ coop_skin_webley_revolver_gold_1
 {
 	qer_editorimage textures/models/weapons/webley.jpg
 	{
-		map textures/models/weapons/webley.jpg
+		map textures/models/weapons/webley.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1776,7 +1776,7 @@ coop_skin_webley_revolver_chrome_1
 {
 	qer_editorimage textures/models/weapons/webley.jpg
 	{
-		map textures/models/weapons/webley.jpg
+		map textures/models/weapons/webley.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1816,7 +1816,7 @@ coop_skin_webley_revolver_blued_1
 {
 	qer_editorimage textures/models/weapons/webley.jpg
 	{
-		map textures/models/weapons/webley.jpg
+		map textures/models/weapons/webley.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1928,7 +1928,7 @@ coop_skin_bar_gold_1
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar.tga
 	{
-		map textures/models/weapons/bar/s93_bar.tga
+		map textures/models/weapons/bar/S93_bar.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1948,7 +1948,7 @@ coop_skin_bar_gold_0
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar-bipod.tga
 	{
-		map textures/models/weapons/bar/s93_bar-bipod.tga
+		map textures/models/weapons/bar/S93_bar-bipod.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1968,7 +1968,7 @@ coop_skin_bar_chrome_1
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar.tga
 	{
-		map textures/models/weapons/bar/s93_bar.tga
+		map textures/models/weapons/bar/S93_bar.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -1988,7 +1988,7 @@ coop_skin_bar_chrome_0
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar-bipod.tga
 	{
-		map textures/models/weapons/bar/s93_bar-bipod.tga
+		map textures/models/weapons/bar/S93_bar-bipod.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -2008,7 +2008,7 @@ coop_skin_bar_blued_1
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar.tga
 	{
-		map textures/models/weapons/bar/s93_bar.tga
+		map textures/models/weapons/bar/S93_bar.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -2028,7 +2028,7 @@ coop_skin_bar_blued_0
 {
 	qer_editorimage textures/models/weapons/bar/s93_bar-bipod.tga
 	{
-		map textures/models/weapons/bar/s93_bar-bipod.tga
+		map textures/models/weapons/bar/S93_bar-bipod.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -2504,7 +2504,7 @@ coop_skin_coop_smoke_grenade_gold
 {
 	qer_editorimage textures/models/weapons/m18_smoke_grenade.jpg
 	{
-		map textures/models/weapons/m18_smoke_grenade.jpg
+		map textures/models/weapons/M18_smoke_grenade.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -2524,7 +2524,7 @@ coop_skin_coop_smoke_grenade_chrome
 {
 	qer_editorimage textures/models/weapons/m18_smoke_grenade.jpg
 	{
-		map textures/models/weapons/m18_smoke_grenade.jpg
+		map textures/models/weapons/M18_smoke_grenade.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -2544,7 +2544,7 @@ coop_skin_coop_smoke_grenade_blued
 {
 	qer_editorimage textures/models/weapons/m18_smoke_grenade.jpg
 	{
-		map textures/models/weapons/m18_smoke_grenade.jpg
+		map textures/models/weapons/M18_smoke_grenade.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4712,7 +4712,7 @@ coop_skin_kar98_gold_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4752,7 +4752,7 @@ coop_skin_kar98_chrome_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4792,7 +4792,7 @@ coop_skin_kar98_blued_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4904,7 +4904,7 @@ coop_skin_kar98_lite_gold_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4944,7 +4944,7 @@ coop_skin_kar98_lite_chrome_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -4984,7 +4984,7 @@ coop_skin_kar98_lite_blued_0
 {
 	qer_editorimage textures/models/weapons/kar98/kar98.tga
 	{
-		map textures/models/weapons/kar98/kar98.tga
+		map textures/models/weapons/KAR98/KAR98.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5096,7 +5096,7 @@ coop_skin_kar98_mortar_gold_1
 {
 	qer_editorimage models/weapons/kar98grenade/kar98gren_01.tga
 	{
-		map models/weapons/kar98grenade/kar98gren_01.tga
+		map models/weapons/kar98Grenade/kar98Gren_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5116,7 +5116,7 @@ coop_skin_kar98_mortar_gold_3
 {
 	qer_editorimage models/weapons/kar98grenade/riflegrenade_01.tga
 	{
-		map models/weapons/kar98grenade/riflegrenade_01.tga
+		map models/weapons/kar98Grenade/RifleGrenade_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5136,7 +5136,7 @@ coop_skin_kar98_mortar_gold_2
 {
 	qer_editorimage models/weapons/kar98grenade/kar98sight.tga
 	{
-		map models/weapons/kar98grenade/kar98sight.tga
+		map models/weapons/kar98Grenade/Kar98Sight.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5156,7 +5156,7 @@ coop_skin_kar98_mortar_gold_0
 {
 	qer_editorimage models/weapons/kar98grenade/grenlaunchcup.tga
 	{
-		map models/weapons/kar98grenade/grenlaunchcup.tga
+		map models/weapons/kar98Grenade/GrenLaunchCup.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5176,7 +5176,7 @@ coop_skin_kar98_mortar_gold_4
 {
 	qer_editorimage models/weapons/kar98grenade/wrapping_06.tga
 	{
-		map models/weapons/kar98grenade/wrapping_06.tga
+		map models/weapons/kar98Grenade/wrapping_06.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5196,7 +5196,7 @@ coop_skin_kar98_mortar_chrome_1
 {
 	qer_editorimage models/weapons/kar98grenade/kar98gren_01.tga
 	{
-		map models/weapons/kar98grenade/kar98gren_01.tga
+		map models/weapons/kar98Grenade/kar98Gren_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5216,7 +5216,7 @@ coop_skin_kar98_mortar_chrome_3
 {
 	qer_editorimage models/weapons/kar98grenade/riflegrenade_01.tga
 	{
-		map models/weapons/kar98grenade/riflegrenade_01.tga
+		map models/weapons/kar98Grenade/RifleGrenade_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5236,7 +5236,7 @@ coop_skin_kar98_mortar_chrome_2
 {
 	qer_editorimage models/weapons/kar98grenade/kar98sight.tga
 	{
-		map models/weapons/kar98grenade/kar98sight.tga
+		map models/weapons/kar98Grenade/Kar98Sight.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5256,7 +5256,7 @@ coop_skin_kar98_mortar_chrome_0
 {
 	qer_editorimage models/weapons/kar98grenade/grenlaunchcup.tga
 	{
-		map models/weapons/kar98grenade/grenlaunchcup.tga
+		map models/weapons/kar98Grenade/GrenLaunchCup.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5276,7 +5276,7 @@ coop_skin_kar98_mortar_chrome_4
 {
 	qer_editorimage models/weapons/kar98grenade/wrapping_06.tga
 	{
-		map models/weapons/kar98grenade/wrapping_06.tga
+		map models/weapons/kar98Grenade/wrapping_06.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5296,7 +5296,7 @@ coop_skin_kar98_mortar_blued_1
 {
 	qer_editorimage models/weapons/kar98grenade/kar98gren_01.tga
 	{
-		map models/weapons/kar98grenade/kar98gren_01.tga
+		map models/weapons/kar98Grenade/kar98Gren_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5316,7 +5316,7 @@ coop_skin_kar98_mortar_blued_3
 {
 	qer_editorimage models/weapons/kar98grenade/riflegrenade_01.tga
 	{
-		map models/weapons/kar98grenade/riflegrenade_01.tga
+		map models/weapons/kar98Grenade/RifleGrenade_01.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5336,7 +5336,7 @@ coop_skin_kar98_mortar_blued_2
 {
 	qer_editorimage models/weapons/kar98grenade/kar98sight.tga
 	{
-		map models/weapons/kar98grenade/kar98sight.tga
+		map models/weapons/kar98Grenade/Kar98Sight.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5356,7 +5356,7 @@ coop_skin_kar98_mortar_blued_0
 {
 	qer_editorimage models/weapons/kar98grenade/grenlaunchcup.tga
 	{
-		map models/weapons/kar98grenade/grenlaunchcup.tga
+		map models/weapons/kar98Grenade/GrenLaunchCup.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -5376,7 +5376,7 @@ coop_skin_kar98_mortar_blued_4
 {
 	qer_editorimage models/weapons/kar98grenade/wrapping_06.tga
 	{
-		map models/weapons/kar98grenade/wrapping_06.tga
+		map models/weapons/kar98Grenade/wrapping_06.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -8360,7 +8360,7 @@ coop_skin_p38_gold
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -8380,7 +8380,7 @@ coop_skin_p38_chrome
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -8400,7 +8400,7 @@ coop_skin_p38_blued
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9128,7 +9128,7 @@ coop_skin_thompsonsmg_gold_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsonsmg.tga
+		map textures/models/weapons/ThompsonSMG/ThompsonSMG.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9148,7 +9148,7 @@ coop_skin_thompsonsmg_gold_0
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsite.tga
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9168,7 +9168,7 @@ coop_skin_thompsonsmg_chrome_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsonsmg.tga
+		map textures/models/weapons/ThompsonSMG/ThompsonSMG.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9188,7 +9188,7 @@ coop_skin_thompsonsmg_chrome_0
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsite.tga
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9208,7 +9208,7 @@ coop_skin_thompsonsmg_blued_1
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsonsmg.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsonsmg.tga
+		map textures/models/weapons/ThompsonSMG/ThompsonSMG.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9228,7 +9228,7 @@ coop_skin_thompsonsmg_blued_0
 {
 	qer_editorimage textures/models/weapons/thompsonsmg/thompsite.tga
 	{
-		map textures/models/weapons/thompsonsmg/thompsite.tga
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9340,7 +9340,7 @@ coop_skin_tt33_gold_0
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9380,7 +9380,7 @@ coop_skin_tt33_chrome_0
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9420,7 +9420,7 @@ coop_skin_tt33_blued_0
 {
 	qer_editorimage textures/models/weapons/p38/p38.tga
 	{
-		map textures/models/weapons/p38/p38.tga
+		map textures/models/weapons/P38/P38.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9512,7 +9512,7 @@ coop_skin_tt33silenced_gold
 {
 	qer_editorimage textures/models/weapons/ppk/ppk_silencer.tga
 	{
-		map textures/models/weapons/ppk/ppk_silencer.tga
+		map textures/models/weapons/PPK/PPK_Silencer.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9532,7 +9532,7 @@ coop_skin_tt33silenced_chrome
 {
 	qer_editorimage textures/models/weapons/ppk/ppk_silencer.tga
 	{
-		map textures/models/weapons/ppk/ppk_silencer.tga
+		map textures/models/weapons/PPK/PPK_Silencer.tga
 		rgbGen lightingSpherical
 	}
 	{
@@ -9552,7 +9552,7 @@ coop_skin_tt33silenced_blued
 {
 	qer_editorimage textures/models/weapons/ppk/ppk_silencer.tga
 	{
-		map textures/models/weapons/ppk/ppk_silencer.tga
+		map textures/models/weapons/PPK/PPK_Silencer.tga
 		rgbGen lightingSpherical
 	}
 	{
