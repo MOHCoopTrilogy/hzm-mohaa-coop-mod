@@ -798,7 +798,8 @@ crash local.path local.ps:{
 		local.trail anim start
 		local.trail thread removeLater 20
 	}
-	// choose where it comes down: try the current heading, then veer 35/70 degrees either way
+	// choose where it comes down: the current heading, then veering up to 150 degrees either way, each straight and
+	// with the dive half pulled out (a Stuka hit in its dive is aimed AT the players: straight on is never safe)
 	local.omaha = 0
 	if( level.coop_mapname == "m3l1a" || level.coop_mapname == "m3l1b" ){ local.omaha = 1 }
 	local.best = NIL
@@ -808,13 +809,17 @@ crash local.path local.ps:{
 		local.tries[3] = 0 - 35
 		local.tries[4] = 70
 		local.tries[5] = 0 - 70
-		for( local.k = 1; local.k <= 5; local.k++ ){
-			local.vv = waitthread turnVec local.v local.tries[local.k]
-			local.hitp = waitthread predictCrash local.e.origin local.vv local.gs
-			if( local.hitp != NIL ){
-				if( waitthread crashPointOk local.hitp ){
-					local.best = local.vv
-					break
+		local.tries[6] = 110
+		local.tries[7] = 0 - 110
+		local.tries[8] = 150
+		local.tries[9] = 0 - 150
+		for( local.f = 1; local.f <= 2 && local.best == NIL; local.f++ ){
+			for( local.k = 1; local.k <= 9 && local.best == NIL; local.k++ ){
+				local.vv = waitthread turnVec local.v local.tries[local.k]
+				if( local.f == 2 ){ local.vv[2] = local.vv[2] * 0.3 }
+				local.hitp = waitthread predictCrash local.e.origin local.vv local.gs
+				if( local.hitp != NIL ){
+					if( waitthread crashPointOk local.hitp ){ local.best = local.vv }
 				}
 			}
 		}
@@ -876,9 +881,9 @@ turnVec local.v local.deg:{
 
 // Simulate the fall (no entity) in 0.1 s steps for up to 15 s; the ground point or NIL.
 predictCrash local.p local.v local.gs:{
-	for( local.i = 1; local.i <= 150; local.i++ ){
-		local.v = waitthread fallStep local.v local.gs 0.1
-		local.np = local.p + ( vector_scale local.v 0.1 )
+	for( local.i = 1; local.i <= 75; local.i++ ){
+		local.v = waitthread fallStep local.v local.gs 0.2
+		local.np = local.p + ( vector_scale local.v 0.2 )
 		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ end NIL }
 		local.tr = traced ( local.p ) ( local.np ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
 		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 && local.tr["allSolid"] != 1 ){
@@ -982,16 +987,30 @@ overHorizon local.v:{
 	local.t = level.time
 	local.life = 0
 	local.roll = 0
+	local.sink = 0.18
 	while( local.e != NULL && local.life < 12 ){
 		waitframe
 		local.dt = level.time - local.t
 		local.t = level.time
 		local.life = local.life + local.dt
-		local.np = local.e.origin + ( vector_scale local.dir ( local.sp * local.dt ) ) - ( 0 0 ( local.sp * 0.18 * local.dt ) )
+		local.np = local.e.origin + ( vector_scale local.dir ( local.sp * local.dt ) ) - ( 0 0 ( local.sp * local.sink * local.dt ) )
 		if( ( abs( local.np[0] ) ) > level.ac_box || ( abs( local.np[1] ) ) > level.ac_box ){ break }
+		// never through the ground: a safe spot ends it here, an unsafe one makes it level out and stagger on
+		local.tr = traced ( local.e.origin ) ( local.np ) local.e.entnum
+		if( local.tr["fraction"] < 1.0 && local.tr["startSolid"] != 1 ){
+			if( waitthread crashPointOk local.tr["endpos"] ){
+				local.vv = vector_scale local.dir local.sp
+				local.vv[2] = 0 - local.sp * local.sink
+				waitthread impact local.e local.tr["endpos"] local.vv
+				end
+			}
+			local.sink = 0 - 0.1
+			continue
+		}
+		if( local.sink < 0.18 ){ local.sink = local.sink + 0.05 * local.dt }
 		local.e.origin = local.np
 		local.roll = local.roll + 40 * local.dt
-		local.a = vector_toangles ( local.dir - ( 0 0 0.18 ) )
+		local.a = vector_toangles ( local.dir - ( 0 0 local.sink ) )
 		local.a[2] = local.roll
 		local.e.angles = local.a
 	}
