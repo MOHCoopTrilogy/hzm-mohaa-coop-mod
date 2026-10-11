@@ -1,0 +1,153 @@
+//=========================================================================
+//[2026-10-11, bug-3483] HZM coop - BODY AND GORE BUDGET. Opt-in per map (the two Omaha maps thread it); every
+//other map keeps every body forever, which is the mod's rule (coop_corpseLife 0).
+//
+//WHY OMAHA NEEDS ONE. Five minutes into m3l1a an idle test client held 226 actors of which 128 were dead, plus
+//about 520 blood and gore entities - and every one of them is a skeletal model the renderer has to draw each
+//frame, whether or not anyone can make it out through the fog. Measured there: the dead cost 7.5 ms a frame and
+//the gore 8.3 ms, out of 52.
+//
+//WHAT IT DOES. Every few seconds it counts four populations - dead bodies, gore chunks, blood slicks, and the
+//small pieces that hang off a body (wounds, drips, stumps, head gibs, helmets) - and where one is over its cap it
+//removes the ones FARTHEST from every player first. Inside level.coop_budgetKeepDist of a player a thing is only
+//removed when it is BEHIND him and more than level.coop_budgetNearDist away; nothing in front of a player at
+//that range, and nothing close to him at all, is ever touched - so what you can see stays as it fell.
+//A body with a targetname is never removed (a script may still want it), nor is the officer.
+//
+//  level.coop_bodyCap 40   level.coop_goreCap 60   level.coop_slickCap 80   level.coop_woundCap 60
+//  level.coop_budgetKeepDist 1400   level.coop_budgetNearDist 500   kill switch: level.coop_bodyBudgetOn 0
+//=========================================================================
+budget:{
+//=========================================================================
+	if( level.gametype == 0 ){ end }
+	if( level.coop_bodyBudgetRunning == 1 ){ end }
+	level.coop_bodyBudgetRunning = 1
+	if( level.coop_bodyBudgetOn == NIL ){ level.coop_bodyBudgetOn = 1 }
+	if( level.coop_bodyCap == NIL ){ level.coop_bodyCap = 40 }
+	if( level.coop_goreCap == NIL ){ level.coop_goreCap = 60 }
+	if( level.coop_slickCap == NIL ){ level.coop_slickCap = 80 }
+	if( level.coop_woundCap == NIL ){ level.coop_woundCap = 60 }
+	if( level.coop_budgetKeepDist == NIL ){ level.coop_budgetKeepDist = 1400 }
+	if( level.coop_budgetNearDist == NIL ){ level.coop_budgetNearDist = 500 }
+
+	wait 20
+	while( level.coop_bodyBudgetOn ){
+		local.nb = 0
+		local.ng = 0
+		local.ns = 0
+		local.nw = 0
+		local.i = 0
+		while( local.i < 4096 ){
+			local.e = getentbyentnum local.i
+			if( local.e != NULL ){
+				local.c = local.e.classname
+				if( local.c == "Actor" ){
+					if( !isalive local.e ){
+						local.keep = 0
+						if( local.e.targetname != NIL && local.e.targetname != "" ){ local.keep = 1 }
+						if( level.coop_officer != NULL && local.e == level.coop_officer ){ local.keep = 1 }
+						if( local.keep == 0 ){
+							local.nb++
+							local.b[local.nb] = local.e
+						}
+					}
+				}else{
+					if( local.c == "HeadGibObject" || local.c == "HelmetObject" ){
+						local.nw++
+						local.w[local.nw] = local.e
+					}else{
+						local.m = local.e.model
+						if( local.m != NIL ){
+							if( local.m == "models/fx/coop_gorechunk.tik" ){
+								local.ng++
+								local.g[local.ng] = local.e
+							}else if( local.m == "models/fx/coop_bloodslick.tik" ){
+								local.ns++
+								local.s[local.ns] = local.e
+							}else if( local.m == "models/fx/coop_wound1.tik" || local.m == "models/fx/coop_blooddrip.tik" || local.m == "models/fx/coop_blooddrip_slow.tik" || local.m == "models/fx/coop_stump_neck.tik" ){
+								local.nw++
+								local.w[local.nw] = local.e
+							}
+						}
+					}
+				}
+			}
+			local.i++
+			if( ( local.i % 200 ) == 0 ){ waitframe }
+		}
+
+		local.rb = waitthread trim local.b local.nb level.coop_bodyCap
+		waitframe
+		local.rg = waitthread trim local.g local.ng level.coop_goreCap
+		waitframe
+		local.rs = waitthread trim local.s local.ns level.coop_slickCap
+		waitframe
+		local.rw = waitthread trim local.w local.nw level.coop_woundCap
+		println ( "^~^~^ BODYBUDGET bodies=" + local.nb + "-" + local.rb + " chunks=" + local.ng + "-" + local.rg + " slicks=" + local.ns + "-" + local.rs + " small=" + local.nw + "-" + local.rw )
+		wait 3
+	}
+	level.coop_bodyBudgetRunning = 0
+}end
+
+//Remove up to 16 entities of one population, farthest from every player first, never one a player could be watching.
+//=========================================================================
+trim local.arr local.n local.cap:{
+//=========================================================================
+	local.over = local.n - local.cap
+	if( local.over <= 0 ){ end 0 }
+	if( local.over > 16 ){ local.over = 16 }
+	if( $player == NULL || $player == NIL ){ end 0 }
+	if( $player.size < 1 ){ end 0 }
+
+	//distance from each entity to its NEAREST player
+	local.i = 1
+	while( local.i <= local.n ){
+		local.d[local.i] = 0
+		if( local.arr[local.i] != NULL && local.arr[local.i] != NIL ){
+			local.near = 999999
+			local.seen = 0
+			local.p = 1
+			while( local.p <= $player.size ){
+				if( $player[local.p] != NULL ){
+					local.to = local.arr[local.i].origin - $player[local.p].origin
+					local.len = vector_length local.to
+					if( local.len < local.near ){ local.near = local.len }
+					//inside the keep distance it is protected while this player could be looking at it:
+					//always when it is close, otherwise when it is in front of him
+					if( local.len < level.coop_budgetKeepDist ){
+						if( local.len < level.coop_budgetNearDist ){
+							local.seen = 1
+						}else{
+							local.fwd = angles_toforward $player[local.p].viewangles
+							if( ( vector_dot local.fwd local.to ) > 0 ){ local.seen = 1 }
+						}
+					}
+				}
+				local.p++
+			}
+			if( local.seen == 0 ){ local.d[local.i] = local.near + 1 }
+		}
+		local.i++
+	}
+
+	local.removed = 0
+	while( local.removed < local.over ){
+		local.best = 0
+		local.bestD = 0
+		local.i = 1
+		while( local.i <= local.n ){
+			if( local.d[local.i] > local.bestD ){
+				local.best = local.i
+				local.bestD = local.d[local.i]
+			}
+			local.i++
+		}
+		if( local.best == 0 ){ break }
+		if( local.arr[local.best] != NULL && local.arr[local.best] != NIL ){
+			local.arr[local.best] remove
+			local.removed++
+		}
+		local.d[local.best] = 0
+	}
+	end local.removed
+}end
