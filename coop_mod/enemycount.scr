@@ -1,5 +1,5 @@
 //=========================================================================
-// enemycount.scr - "ENEMIES REMAINING: N", top right, under the score
+// enemycount.scr - "ENEMIES REMAINING: N", top right
 //=========================================================================
 // [user 2026-10-11, bug-3485] "an enemies remaining count that will appear at the top right of the
 // screen for objectives like post-clearing the uboat, and after you exit the bunker on the omaha
@@ -22,16 +22,12 @@
 //   label defaults to "ENEMIES REMAINING"; pass another only where the counted men are a named
 //   few among other enemies ("SNIPERS REMAINING"), so killing an uncounted one is not a surprise.
 //
-// HUD SLOT 249, by the dbno.scr slot-216 reasoning (_research/hud_slot_map.md): the fade-exempt
-// band (>= 100) is full, and a sub-100 slot fades out exactly when a player stands still to look
-// for the last man. 249 is the Service Record's last count row (challenges.scr 232 + r), which is
-// drawn only while that panel is open - so the readout stands down for a player who has it open
-// (coop_chalMenuPage) and comes back within a tick of him closing it.
-// Drawn by the holdout.scr::holdout_hud recipe: one loop redraws it per player, which is also what
-// makes it right for a late joiner or a respawn without a single hook in player.scr, and the
-// takedown goes through hudresend.scr so a lost snapshot cannot strand it on a remote client.
-// Position: the score sits in the top right corner at about y 5-20 of the 640x480 virtual HUD and
-// the compass strip is top centre; this is one small line just under the score.
+// DRAWN BY CGAME, not the script HUD (cg_coopfeed.c CG_DrawCoopPinned): the server only sets the
+// client cvar coop_ecLine. One loop keeps every player's copy current, which is also what makes it
+// right for a late joiner or a respawn without a hook in player.scr. It stands down for a player
+// who has the Service Record open (coop_chalMenuPage). No HUD slot is used.
+// Position: the very top right. The retail Score readout that used to sit there is hidden in coop
+// (ui/hud_score.urc is gated on coop_mp_session), since the scoreboard on Tab already shows it.
 //=========================================================================
 
 
@@ -96,40 +92,35 @@ ec_loop local.gen:{
 	local.tick = 0
 	while( level.coop_ecOn == 1 && level.coop_ecGen == local.gen ){
 		local.txt = level.coop_ecLabel + ": " + level.coop_ecCount
-		//huddraw text starts AT its x whatever the alignment (cg_drawtools.cpp CG_HudDrawElements
-		//only adds 640 for "right"), so the line is right-justified here: start it its own width
-		//in from the edge. 6.6 units a character is verdana-12 capitals measured in engine
-		//(136 for "ENEMIES REMAINING: 12", 159 for the 24-character label), and the 14 puts the
-		//last digit under the score's closing bracket.
-		local.x = 0 - int( ( local.txt.size * 6.6 ) + 14 )
 		local.i = 1
 		while( local.i <= $player.size ){
 			local.p = $player[local.i]
 			local.i++
 			if( local.p == NULL ){ continue }
 
-			//Service Record open: slot 249 is its last count row. Stand down until it closes.
+			//Service Record open: it fills the top right. Stand down until it closes.
 			local.pg = local.p.flags["coop_chalMenuPage"]
 			if( local.pg != NIL && local.pg != 0 ){
-				local.p.flags["coop_ecSeen"] = NIL
+				if( local.p.flags["coop_ecSeen"] != "-" ){
+					local.p.flags["coop_ecSeen"] = "-"
+					local.p stufftext "set coop_ecLine -"
+				}
 				continue
 			}
 
-			//send on a change, and re-send the whole element every 2 s: that is what reaches a
-			//player who joined after the last change, or whose copy was lost or wiped (the
-			//Service Record blanks 196-249 when it closes).
+			//[user 2026-10-11] "Make the enemies remaining text smaller". The script HUD's smallest font is
+			//verdana-12 at virtual-480 scale, 1.5x to 2.25x its real size, so the line is drawn by cgame
+			//instead (cg_coopfeed.c CG_DrawCoopPinned): the client cvar coop_ecLine, top right, in the event
+			//feed's own small type. Sent on a change and again every 2 s - that is what reaches a player who
+			//joined after the last change, and one whose cgame restarted (CG_Init clears the cvar).
+			//NO QUOTES in the command (readygate.scr coop_gateSet, bug D): stufftext wraps the whole command
+			//in quotes on the wire, so an inner quote cuts it short. `set` takes the rest of the line, spaces
+			//and all; "-" is the agreed empty value.
 			local.seen = local.p.flags["coop_ecSeen"]
 			if( local.seen == NIL ){ local.seen = "" }
 			if( local.seen != local.txt || local.tick == 0 ){
 				local.p.flags["coop_ecSeen"] = local.txt
-				waitthread coop_mod/hudresend.scr::claim local.p 249 249
-				ihuddraw_virtualsize local.p 249 1
-				ihuddraw_align       local.p 249 right top
-				ihuddraw_font        local.p 249 "verdana-12"
-				ihuddraw_color       local.p 249 1 0.86 0.55
-				ihuddraw_rect        local.p 249 local.x 24 0 0
-				ihuddraw_string      local.p 249 local.txt
-				ihuddraw_alpha       local.p 249 0.9
+				local.p stufftext ( "set coop_ecLine " + local.txt )
 			}
 		}
 		local.tick++
@@ -140,12 +131,10 @@ ec_loop local.gen:{
 
 
 //=========================================================================
-// ec_hide local.p - take it off one player's screen, and make that stick (hudresend.scr)
+// ec_hide local.p - take it off one player's screen
 //=========================================================================
 ec_hide local.p:{
 	if( local.p == NULL ){ end }
 	local.p.flags["coop_ecSeen"] = NIL
-	ihuddraw_alpha  local.p 249 0
-	ihuddraw_string local.p 249 ""
-	thread coop_mod/hudresend.scr::resend local.p 249 249 1
+	local.p stufftext "set coop_ecLine -"
 }end
