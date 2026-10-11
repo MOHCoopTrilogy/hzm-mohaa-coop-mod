@@ -3609,6 +3609,23 @@ coop_boatBurn local.pos local.owner:{
 	if(local.owner != NIL && local.owner != NULL){ local.own = local.owner }
 	local.fxn = 0
 
+	//[user 2026-10-11, bug-3481] "we can remove some of the fires that are placed out in the ocean
+	//(which Ive asked for several times now)". A census of the running map found exactly four
+	//boat burns and ALL FOUR stand in water: ashore #2 (-2820 -2500), #6 (-4200 -2500), #9
+	//(1480 -1700) and the fleet wreck at (-2600 -5600). Each is 2 fires + a superlong column + a
+	//linger cloud burning for the whole map. bug-2532 bound them to their hulls and the 2026-09-20
+	//pass took the farBattle pair, but a fire on a hull that is IN THE SEA is still a fire in the
+	//ocean. So the rule is on the water now, not on the caller: a wreck in the sea (coop_waterZ
+	//returns a plane for y <= -768) gets NO standing fire. One that was just HIT and has an owner
+	//burns for 25 s while she goes down, then the emitters are removed whatever the hull does.
+	//The wrecked hull, the men in the water and the slick are untouched.
+	local.sea = 0
+	local.swz = waitthread coop_waterZ local.pos[1]
+	if(local.swz > ( 0 - 9000 )){ local.sea = 1 }
+	local.lit = 1
+	if(local.sea == 1 && local.own == NULL){ local.lit = 0 }
+	println("^~^~^ BOATBURN y=" + int( local.pos[1] ) + " sea=" + local.sea + " lit=" + local.lit)
+
 	//[user 2026-09-01] "if any higgins boats are getting destroyed they need to be obviously hit and
 	//exploded, ideally with fires and bodies and gore." One small fire and one smoke puff read as a
 	//boat with an engine problem. A boat that took a shell is on fire in three places, streaming black
@@ -3619,6 +3636,7 @@ coop_boatBurn local.pos local.owner:{
 	//least." Three fires on every hull plus a superlong column plus linger smoke, times five wrecks, is
 	//what turned the waterline into a wall of flame in the user's screenshots.
 	local.k = 0
+	if(local.lit == 0){ local.k = 2 }		//[bug-3481] in the sea, unowned: no fire
 	while(local.k < 2){
 		local.f = spawn "models/emitters/tehao_fire.tik"
 		if(local.f != NULL && local.f != NIL){			//entity-pool guard
@@ -3641,14 +3659,16 @@ coop_boatBurn local.pos local.owner:{
 	}
 
 	//--- the column. superlong is the tall one; linger_smoke alone barely clears the gunwale.
-	local.sm = spawn "models/emitters/tehao_firesmoke_superlong.tik"
+	local.sm = NULL
+	if(local.lit == 1){ local.sm = spawn "models/emitters/tehao_firesmoke_superlong.tik" }		//[bug-3481]
 	if(local.sm != NULL && local.sm != NIL){
 		local.sm.origin = local.pos + (0 0 130)		//[bug-2504] deck height
 		local.sm notsolid
 		if(local.own != NULL){ local.sm bind local.own; local.fxn++; local.fx[local.fxn] = local.sm }
 		local.sm anim start
 	}
-	local.sm2 = spawn "models/emitters/linger_smoke.tik"
+	local.sm2 = NULL
+	if(local.lit == 1){ local.sm2 = spawn "models/emitters/linger_smoke.tik" }		//[bug-3481]
 	if(local.sm2 != NULL && local.sm2 != NIL){
 		local.sm2.origin = local.pos + (0 0 150)		//[bug-2504] deck height
 		local.sm2 notsolid
@@ -3733,7 +3753,12 @@ coop_boatBurn local.pos local.owner:{
 	//never removed and simply burn where they end up, and coop_lateBoatRun removes its hull at 90 s.
 	//Only runs when an owner was passed, so the static beach wrecks are untouched.
 	if(local.own != NULL){
-		while(local.own != NULL && local.own != NIL){ wait 5 }
+		//[bug-3481] in the sea the burn is 25 s at most, hull or no hull
+		local.bt = 0
+		while(local.own != NULL && local.own != NIL && ( local.sea == 0 || local.bt < 25 )){
+			wait 5
+			local.bt = local.bt + 5
+		}
 		local.q = 1
 		while(local.q <= local.fxn){
 			if(local.fx[local.q] != NULL && local.fx[local.q] != NIL){ local.fx[local.q] remove }
@@ -7107,7 +7132,10 @@ coop_beachWorkParty:{
 	//prop the player walks past twice and stops seeing, while one that keeps turning over is a beach
 	//still being worked. A RING, not a queue: slot = madeSoFar % cap, so the entity count is exactly
 	//coop_crateCap forever and the crate that goes is always the one that has been there longest.
-	if(level.coop_crateCap == NIL){ level.coop_crateCap = 20 }
+	//[user 2026-10-11, bug-3482] "make it so the two soldiers carrying ammo boxes drop a max of 2
+	//before the boxes despawn, right now its a lot before the boxes begin to despawn." 20 -> 2.
+	//The ring does the rest: the third box down retires the first.
+	if(level.coop_crateCap == NIL){ level.coop_crateCap = 2 }
 	if(level.coop_cratesMade == NIL){ level.coop_cratesMade = 0 }
 
 	//[user, bug-2265] UP THE BEACH, NOT IN THE SURF. The user: "some guys just standing in the water
@@ -11503,7 +11531,11 @@ coop_higginsSinkBurn local.pos local.band:{
 			local.f bind $higgins1
 			local.f anim start
 			//NO loopsound - one coop_snd_fire_large already plays on the hull (bug-2313)
-			thread coop_fxCleanup local.f 150
+			//[user 2026-10-11, bug-3481] 150 -> 45, and the column below 300 -> 60: she burns while she
+			//goes down and then she is out. "keeps her on the skyline for the rest of the map" was five
+			//minutes of fire and smoke standing on open water - the fires in the ocean the user has
+			//asked to have removed. See the note at the top of coop_boatBurn.
+			thread coop_fxCleanup local.f 45
 		}
 		local.k++
 	}
@@ -11514,7 +11546,7 @@ coop_higginsSinkBurn local.pos local.band:{
 			local.fm notsolid
 			local.fm bind $higgins1
 			local.fm anim start
-			thread coop_fxCleanup local.fm 150
+			thread coop_fxCleanup local.fm 45
 		}
 	}
 
@@ -11530,7 +11562,7 @@ coop_higginsSinkBurn local.pos local.band:{
 		local.sm.origin = local.cp + (0 0 50)
 		local.sm notsolid
 		local.sm anim start
-		thread coop_fxCleanup local.sm 300
+		thread coop_fxCleanup local.sm 60
 	}
 	local.s2 = spawn "models/emitters/linger_smoke.tik"
 	if(local.s2 != NULL && local.s2 != NIL){
@@ -11538,7 +11570,7 @@ coop_higginsSinkBurn local.pos local.band:{
 		local.s2 notsolid
 		local.s2 scale 2.4
 		local.s2 anim start
-		thread coop_fxCleanup local.s2 300
+		thread coop_fxCleanup local.s2 60
 	}
 
 	//LAYER 3 - the water taking her. Near and mid only.
