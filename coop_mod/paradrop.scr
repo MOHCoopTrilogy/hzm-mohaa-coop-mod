@@ -256,6 +256,11 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	local.actor immune vehicle	//[user 07-20 round 2] the ACTUAL run-over damage type: engine vehicle collision deals MOD_VEHICLE (vehicle.cpp RunOverEntity health*2 hits), NOT crush - the first immunity was aimed at the wrong MOD
 	local.actor dontdropweapons
 	local.actor.origin = local.drop_pos
+	//[bug-3478] above the sky brush the man and his canopy are outside every leaf, and such an entity is never sent
+	//to a client - the aircraft get +broadcast for exactly this (aircraft.scr). Same here for the ride down, taken
+	//off again at touchdown so five live actors are not broadcast map-wide for the rest of the mission.
+	local.actor svflags "+broadcast"
+	local.chute svflags "+broadcast"
 
 	// EXIT -> STATIC LINE -> CANOPY -> RIDE DOWN, every server frame (the old `wait 0.05` steps were every 2nd frame).
 	//  ~1.0 s of fall with the aircraft's forward throw decaying, canopy opens over 0.6 s, then the real descent
@@ -302,8 +307,26 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 		local.pos[2] = local.pos[2] + local.vz * local.dt
 		local.ft = traced ( local.pos + ( 0 0 32 ) ) ( local.pos - ( 0 0 4000 ) ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
 		if( local.ft["fraction"] < 1.0 && local.ft["startSolid"] != 1 ){
-			local.floor = local.ft["endpos"][2]
-			if( local.floor < local.base_z - 300 ){ local.floor = local.base_z }
+			//[user 2026-10-11, bug-3478] "the planes would fly over, but I wouldnt see the paratroopers drop, they would
+			//eventually spawn near me because of the failsafe". On a class C map the V flies ABOVE the sky brush (m4l3:
+			//aircraft at z 1946, lowest sky at 1022). This down-trace then hit the TOP of that brush, took it for the
+			//floor and ended the descent up there: the stick "landed" on the roof of the sky, outside every leaf, and
+			//only the landing failsafe ever brought the men into the map. A hit on a sky surface (aircraft.scr glideSim
+			//test) or at/above the map's own lowest sky height is not ground - keep falling through it.
+			local.fsky = 0
+			if( local.ft["surfaceFlags"] != NIL ){
+				local.fq = int( local.ft["surfaceFlags"] / 4 )
+				if( local.fq - int( local.fq / 2 ) * 2 == 1 ){ local.fsky = 1 }
+			}
+			if( level.ac_env != NIL ){
+				if( level.ac_env["sky"] != NIL ){
+					if( local.ft["endpos"][2] >= level.ac_env["sky"] - 16 ){ local.fsky = 1 }
+				}
+			}
+			if( local.fsky == 0 ){
+				local.floor = local.ft["endpos"][2]
+				if( local.floor < local.base_z - 300 ){ local.floor = local.base_z }
+			}
 		}
 		if( local.pos[2] < local.floor + 4 ){ local.pos[2] = local.floor + 4 }
 		local.actor.origin = local.pos
@@ -317,6 +340,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 		}
 	}
 	if( local.actor != NULL ){ local.actor scale 1 }
+	if( local.actor != NULL ){ local.actor svflags "-broadcast" }
 	local.base_z = local.floor
 	local.ground_pos = local.pos
 	local.ground_pos[2] = local.base_z
