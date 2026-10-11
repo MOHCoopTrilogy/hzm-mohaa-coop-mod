@@ -1,0 +1,151 @@
+//=========================================================================
+// enemycount.scr - "ENEMIES REMAINING: N", top right, under the score
+//=========================================================================
+// [user 2026-10-11, bug-3485] "an enemies remaining count that will appear at the top right of the
+// screen for objectives like post-clearing the uboat, and after you exit the bunker on the omaha
+// map as well as any other mission where enemy count determines an outcome of objective
+// completion". ONE readout for every such objective, so they all look and behave the same.
+//
+// THE NUMBER IS THE MAP'S OWN. This file counts nothing: the map hands it the same number its own
+// gate tests (m2l2b level.gatecount, m3l1b the coop_rear_headcount poll, ...), so the readout can
+// never disagree with what completes the objective. A map that cannot hand over such a number
+// does not get a readout.
+//
+//   thread coop_mod/enemycount.scr::show <count> [label]
+//        start the readout, or change its number. count <= 0 takes it down.
+//        Safe to call every poll of a gate loop - it only stores the number.
+//   thread coop_mod/enemycount.scr::update <count> [label]
+//        the same, but ONLY while the readout is already up. For a death thread that also runs
+//        outside the objective's window (m1l1 bodycount, m2l2b countdeaths).
+//   thread coop_mod/enemycount.scr::stop
+//        take it down for everyone. Safe when it is not up.
+//   label defaults to "ENEMIES REMAINING"; pass another only where the counted men are a named
+//   few among other enemies ("SNIPERS REMAINING"), so killing an uncounted one is not a surprise.
+//
+// HUD SLOT 249, by the dbno.scr slot-216 reasoning (_research/hud_slot_map.md): the fade-exempt
+// band (>= 100) is full, and a sub-100 slot fades out exactly when a player stands still to look
+// for the last man. 249 is the Service Record's last count row (challenges.scr 232 + r), which is
+// drawn only while that panel is open - so the readout stands down for a player who has it open
+// (coop_chalMenuPage) and comes back within a tick of him closing it.
+// Drawn by the holdout.scr::holdout_hud recipe: one loop redraws it per player, which is also what
+// makes it right for a late joiner or a respawn without a single hook in player.scr, and the
+// takedown goes through hudresend.scr so a lost snapshot cannot strand it on a remote client.
+// Position: the score sits in the top right corner at about y 5-20 of the 640x480 virtual HUD and
+// the compass strip is top centre; this is one small line just under the score.
+//=========================================================================
+
+
+//=========================================================================
+// show local.count local.label
+//=========================================================================
+show local.count local.label:{
+	if( local.count == NIL ){ end }
+	local.count = int( local.count )
+	if( local.count <= 0 ){
+		waitthread stop
+		end
+	}
+	if( local.label == NIL ){ local.label = "ENEMIES REMAINING" }
+	level.coop_ecCount = local.count
+	level.coop_ecLabel = local.label
+	//already up: ec_loop picks the new number up on its next tick
+	if( level.coop_ecOn == 1 ){ end }
+	level.coop_ecOn = 1
+	//a generation, not just the flag: stop + show inside one tick must not leave two loops running
+	if( level.coop_ecGen == NIL ){ level.coop_ecGen = 0 }
+	level.coop_ecGen = level.coop_ecGen + 1
+	thread ec_loop level.coop_ecGen
+}end
+
+
+//=========================================================================
+// update local.count local.label
+//=========================================================================
+update local.count local.label:{
+	if( level.coop_ecOn != 1 ){ end }
+	waitthread show local.count local.label
+}end
+
+
+//=========================================================================
+// stop
+//=========================================================================
+stop:{
+	if( level.coop_ecOn != 1 ){ end }
+	level.coop_ecOn = 0
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		local.i++
+		if( local.p == NULL ){ continue }
+		//Service Record open: it wiped 249 when it opened and the slot is its row now - leave it
+		local.pg = local.p.flags["coop_chalMenuPage"]
+		if( local.pg != NIL && local.pg != 0 ){
+			local.p.flags["coop_ecSeen"] = NIL
+			continue
+		}
+		waitthread ec_hide local.p
+	}
+}end
+
+
+//=========================================================================
+// ec_loop local.gen - the one drawing loop. Ends when the readout is stopped or restarted.
+//=========================================================================
+ec_loop local.gen:{
+	local.tick = 0
+	while( level.coop_ecOn == 1 && level.coop_ecGen == local.gen ){
+		local.txt = level.coop_ecLabel + ": " + level.coop_ecCount
+		//huddraw text starts AT its x whatever the alignment (cg_drawtools.cpp CG_HudDrawElements
+		//only adds 640 for "right"), so the line is right-justified here: start it its own width
+		//in from the edge. 6.6 units a character is verdana-12 capitals measured in engine
+		//(136 for "ENEMIES REMAINING: 12", 159 for the 24-character label), and the 14 puts the
+		//last digit under the score's closing bracket.
+		local.x = 0 - int( ( local.txt.size * 6.6 ) + 14 )
+		local.i = 1
+		while( local.i <= $player.size ){
+			local.p = $player[local.i]
+			local.i++
+			if( local.p == NULL ){ continue }
+
+			//Service Record open: slot 249 is its last count row. Stand down until it closes.
+			local.pg = local.p.flags["coop_chalMenuPage"]
+			if( local.pg != NIL && local.pg != 0 ){
+				local.p.flags["coop_ecSeen"] = NIL
+				continue
+			}
+
+			//send on a change, and re-send the whole element every 2 s: that is what reaches a
+			//player who joined after the last change, or whose copy was lost or wiped (the
+			//Service Record blanks 196-249 when it closes).
+			local.seen = local.p.flags["coop_ecSeen"]
+			if( local.seen == NIL ){ local.seen = "" }
+			if( local.seen != local.txt || local.tick == 0 ){
+				local.p.flags["coop_ecSeen"] = local.txt
+				waitthread coop_mod/hudresend.scr::claim local.p 249 249
+				ihuddraw_virtualsize local.p 249 1
+				ihuddraw_align       local.p 249 right top
+				ihuddraw_font        local.p 249 "verdana-12"
+				ihuddraw_color       local.p 249 1 0.86 0.55
+				ihuddraw_rect        local.p 249 local.x 24 0 0
+				ihuddraw_string      local.p 249 local.txt
+				ihuddraw_alpha       local.p 249 0.9
+			}
+		}
+		local.tick++
+		if( local.tick >= 8 ){ local.tick = 0 }
+		wait 0.25
+	}
+}end
+
+
+//=========================================================================
+// ec_hide local.p - take it off one player's screen, and make that stick (hudresend.scr)
+//=========================================================================
+ec_hide local.p:{
+	if( local.p == NULL ){ end }
+	local.p.flags["coop_ecSeen"] = NIL
+	ihuddraw_alpha  local.p 249 0
+	ihuddraw_string local.p 249 ""
+	thread coop_mod/hudresend.scr::resend local.p 249 249 1
+}end
