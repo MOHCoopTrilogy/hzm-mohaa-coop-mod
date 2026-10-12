@@ -281,7 +281,9 @@ coop_bp_think local.ownerNum local.n:{
 		if( local.bestd < 96 ){
 			if( local.hinted != 1 ){
 				local.hinted = 1
-				waitthread coop_mod/feed.scr::feed_player local.best 2 "bp" "Press USE to take the blueprint"
+				//[user 2026-10-12] "the hint that a blueprint is nearby needs to go completely": no prompt any
+				//more (it was a feed line, "Press USE to take the blueprint"). The copy's own pulse is the only
+				//tell; USE within reach still takes it. The INRANGE line below goes to the console only.
 				println( "^~^~^ BP INRANGE " + local.n + " dist " + local.bestd )
 			}
 			if( local.best.useheld == 1 ){
@@ -326,10 +328,8 @@ coop_bp_collect local.player local.key local.n:{
 
 	local.player playsound coop_bp_pickup
 
-	//[user 2026-08-10] "make it the same DBNO Text ... Blueprint x / x Found", x/x being THIS
-	//map. Slot 141: must be >= 100 or the engine fade multiplies its alpha away for a calm
-	//player (cg_drawtools.cpp:648-656) - the exact bug that hid the revive HUD at 21-26.
-	//141-149 is the only free block: 135-140 is the revive channel, 150+ is challenges.
+	//[user 2026-10-12] "the pickup confirm can be in the feed": Blueprint x / x found, x / x being THIS
+	//map. Was the centre toast of 2026-08-10 (slot 141, three seconds, DBNO-style text).
 	local.mn = level.coop_mapname
 	if( local.mn == NIL ){ local.mn = "" }
 	local.tot = level.coop_bp_count
@@ -340,19 +340,8 @@ coop_bp_collect local.player local.key local.n:{
 		if( local.player.flags["coop_bpF_" + local.mn + "_" + local.i] == 1 ){ local.got = local.got + 1 }
 		local.i++
 	}
-	//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
-	waitthread coop_mod/hudresend.scr::claim local.player 141 141
-	ihuddraw_virtualsize local.player 141 1
-	ihuddraw_align       local.player 141 center center
-	ihuddraw_font        local.player 141 "verdana-12"
-	ihuddraw_color       local.player 141 1 1 1
-	ihuddraw_rect        local.player 141 0 -58 0 0
-	ihuddraw_string      local.player 141 ( "Blueprint " + local.got + " / " + local.tot + " Found" )
-	ihuddraw_alpha       local.player 141 1
-	//clear on an ENTITY thread with ZERO args: self binds reliably where an entity PARAMETER
-	//does not (bugs 1624/1632/1665), and this must not block the caller - the copy is deleted
-	//immediately after coop_bp_collect returns.
-	local.player thread coop_bp_hudClear
+	//its own key: the coin-flip and set-complete lines (key "bp") can follow at once and must not replace it
+	waitthread coop_mod/feed.scr::feed_player local.player 2 "bp_found" ( "Blueprint " + local.got + " / " + local.tot + " found" )
 
 	//persist immediately. Safe on the pickup frame: this is a rare event, and the measured server
 	//frame graph stayed flat at worst=26ms straight through a pickup with the challenge write in it.
@@ -366,24 +355,16 @@ coop_bp_collect local.player local.key local.n:{
 
 	//Unlocks are granted at the DEBRIEF, not here - one per 5 found. Banked so the debrief has
 	//something to show, and so finding three in one map is not three popups mid-firefight.
-	if( ( local.t / 5 ) == int( local.t / 5 ) ){
+	//[bug-3527] was `( local.t / 5 ) == int( local.t / 5 )`: both sides are INTEGER division (TRAPS, int / int), so it
+	//was true for every total and "Blueprint set complete" showed on EVERY pickup. local.rem (above) is the
+	//remainder the coin flip already uses.
+	if( local.rem == 0 ){
 		if( local.player.flags["coop_bpPending"] == NIL ){ local.player.flags["coop_bpPending"] = 0 }
 		local.player.flags["coop_bpPending"] = local.player.flags["coop_bpPending"] + 1
 		waitthread coop_mod/feed.scr::feed_player local.player 2 "bp" "Blueprint set complete - see the debrief"
 	}
 }end
 
-
-//=========================================================================
-// Clear the blueprint acknowledgement. Entity thread - self IS the player.
-//=========================================================================
-coop_bp_hudClear:{
-	wait 3
-	if( self == NULL || self == NIL ){ end }
-	ihuddraw_alpha  self 141 0
-	ihuddraw_string self 141 ""
-	thread coop_mod/hudresend.scr::resend self 141 141 1
-}end
 
 //=========================================================================
 // [user 2026-08-18] Every 5th blueprint: flip a coin on a random unlock of ANY type.
