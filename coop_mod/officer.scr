@@ -4708,98 +4708,72 @@ coop_binoc_remove_now local.player:{
 
 
 // Devastating 10-bomb carpet run at player position.
-// === BINOCULARS / SMOKE HUD ===
-// Row above medkit/sandbag (y=-82, left bottom):
-//   Slot 50-51: Binoculars icon + strike count
-//   Slot 52-53: Smoke icon + PARADROP label
+// === BINOCULARS / SIGNAL SMOKE IN THE ITEM READOUT ===
+// [user 2026-10-12] "the new text on the left side also seems to overlap with the paradrop and airstrike icons when
+// you get those" / "those icons could also be made smaller and higher def like your new icons you just did with
+// hotkeys". Were: two script HUD pairs (slots 50-53: a 16x16 icon + "3x" / the word PARADROP) at the bottom left,
+// exactly where the feed and the medkit / sandbag / ammo box readout are. Now they are two more entries of that
+// readout row, drawn by cgame (cg_coopfeed.c CG_DrawCoopItems): small icon, the strikes left as a subscript, the
+// key that selects them underneath. The script only publishes two client cvars, the same way medkit.scr does:
+//   coop_hudBinoc  <strikes left>   to the player who carries the binoculars, "-" to everyone else
+//   coop_hudSmoke  y                to the player who carries the signal smoke while it is unthrown, "-" otherwise
+// The four labels below keep their names (objective_drop.scr, m1l2a.scr and the self-test call them): they set what
+// is shown and wake the one publisher loop, which sends on a change and again every 10 s (a stufftext to a client
+// that is still loading is dropped without a trace, bug-595).
 
-// Binoc icon + strike count - shown ONLY to the owner (level.coop_binoc_owner); explicitly
-// hidden for everyone else (each ihuddraw_* targets one client, so HUD slots are per-player).
 coop_binoc_update_hud local.player:{
-	local.pi = 1
-	while( local.pi <= $player.size ){
-		local.p = $player[local.pi]
-		if( local.p != NULL ){
-			if( level.coop_binoc_owner != NULL && local.p == level.coop_binoc_owner ){
-				//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8)
-				waitthread coop_mod/hudresend.scr::claim local.p 50 51
-				ihuddraw_shader      local.p 50 "textures/hud/artillery"
-				ihuddraw_rect        local.p 50 5 -82 16 16
-				ihuddraw_align       local.p 50 left bottom
-				ihuddraw_alpha       local.p 50 1.0
-				ihuddraw_virtualsize local.p 50 1
-				ihuddraw_string      local.p 51 (level.coop_binoc_uses + "x")
-				ihuddraw_rect        local.p 51 23 -80 0 0
-				ihuddraw_align       local.p 51 left bottom
-				ihuddraw_color       local.p 51 1.0 1.0 0.0
-				ihuddraw_alpha       local.p 51 1.0
-				ihuddraw_virtualsize local.p 51 1
-			} else {
-				ihuddraw_alpha       local.p 50 0
-				ihuddraw_alpha       local.p 51 0
-			}
-		}
-		local.pi++
-	}
+	level.coop_hudBinocOn = 1
+	thread coop_reward_hud_start
 }end
 
-
-// Clears binoc HUD slots for ALL players.
 coop_binoc_clear_hud local.player:{
-	local.pi = 1
-	while( local.pi <= $player.size ){
-		local.p = $player[local.pi]
-		if( local.p != NULL ){
-			ihuddraw_alpha local.p 50 0
-			ihuddraw_alpha local.p 51 0
-			thread coop_mod/hudresend.scr::resend local.p 50 51 0
-		}
-		local.pi++
-	}
+	level.coop_hudBinocOn = 0
+	thread coop_reward_hud_start
 }end
 
-
-// Smoke/paradrop icon - shown ONLY to the owner (level.coop_smoke_player); hidden for others.
 coop_smoke_hud_show:{
-	local.pi = 1
-	while( local.pi <= $player.size ){
-		local.p = $player[local.pi]
-		if( local.p != NULL ){
-			if( level.coop_smoke_player != NULL && local.p == level.coop_smoke_player ){
-				waitthread coop_mod/hudresend.scr::claim local.p 52 53	//bug-2906
-				ihuddraw_shader      local.p 52 "textures/hud/coop_paradrop_icon"
-				ihuddraw_rect        local.p 52 40 -82 16 16
-				ihuddraw_align       local.p 52 left bottom
-				ihuddraw_alpha       local.p 52 1.0
-				ihuddraw_virtualsize local.p 52 1
-				ihuddraw_font        local.p 53 "verdana-12"
-				ihuddraw_string      local.p 53 "PARADROP"
-				ihuddraw_rect        local.p 53 58 -78 0 0
-				ihuddraw_align       local.p 53 left bottom
-				ihuddraw_color       local.p 53 0.5 0.8 1.0
-				ihuddraw_alpha       local.p 53 1.0
-				ihuddraw_virtualsize local.p 53 1
-			} else {
-				ihuddraw_alpha       local.p 52 0
-				ihuddraw_alpha       local.p 53 0
+	level.coop_hudSmokeOn = 1
+	thread coop_reward_hud_start
+}end
+
+coop_smoke_hud_clear:{
+	level.coop_hudSmokeOn = 0
+	thread coop_reward_hud_start
+}end
+
+// Start the publisher once per map; every later call only asks for an immediate pass.
+coop_reward_hud_start:{
+	level.coop_rewardHudDirty = 1
+	if( level.coop_rewardHudRunning == 1 ){ end }
+	level.coop_rewardHudRunning = 1
+	while( 1 ){
+		for( local.pi = 1; local.pi <= $player.size; local.pi++ ){
+			local.p = $player[local.pi]
+			if( local.p == NULL ){ continue }
+			local.b = "-"
+			if( level.coop_hudBinocOn == 1 && level.coop_binoc_owner != NULL && local.p == level.coop_binoc_owner && level.coop_binoc_uses != NIL ){
+				local.b = "" + int( level.coop_binoc_uses )
+			}
+			local.s = "-"
+			if( level.coop_hudSmokeOn == 1 && level.coop_smoke_player != NULL && local.p == level.coop_smoke_player && level.coop_paradrop_armed == 1 ){
+				local.s = "y"
+			}
+			if( local.p.flags["coop_hudRewardSent"] == NIL ){
+				local.p.flags["coop_hudRewardSent"] = ""
+				local.p.flags["coop_hudRewardNext"] = 0
+			}
+			local.now = local.b + "/" + local.s
+			if( local.now != local.p.flags["coop_hudRewardSent"] || level.time >= local.p.flags["coop_hudRewardNext"] ){
+				local.p stufftext ( "set coop_hudBinoc " + local.b + ";set coop_hudSmoke " + local.s )
+				local.p.flags["coop_hudRewardSent"] = local.now
+				local.p.flags["coop_hudRewardNext"] = level.time + 10
 			}
 		}
-		local.pi++
-	}
-}end
-
-
-// Clears smoke HUD slots for ALL players.
-coop_smoke_hud_clear:{
-	local.pi = 1
-	while( local.pi <= $player.size ){
-		local.p = $player[local.pi]
-		if( local.p != NULL ){
-			ihuddraw_alpha local.p 52 0
-			ihuddraw_alpha local.p 53 0
-			thread coop_mod/hudresend.scr::resend local.p 52 53 0
+		level.coop_rewardHudDirty = 0
+		for( local.w = 0; local.w < 5; local.w++ ){
+			if( level.coop_rewardHudDirty == 1 ){ break }
+			wait 0.1
 		}
-		local.pi++
 	}
 }end
 
