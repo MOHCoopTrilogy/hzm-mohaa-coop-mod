@@ -1,6 +1,7 @@
-// HZM coop [gore phase A] ARTERY jet art. Same shapes as coop_blood_long / coop_blood_drop (coop_blood.shader) but baked
-// at BLOOD_RGB (150,12,10) - fresh arterial blood - instead of the #150200 stain hue, which renders as black
-// flecks in daylight. rgbGen identity so the baked hue is what draws; alphaGen vertex so the emitter fades drive alpha.
+// HZM coop [gore phase A] ARTERY jet art: drawn strings and droplets (docs/proposals/gore_2026-10-05/tools/gen_artery.py).
+// [user 2026-10-12] the SAME colour as the mod's other blood (coop_blood.shader: sprays, drips, wound decal, pools -
+// 21-25 2-3 0, the #150200 stain hue); it had been baked four times brighter for the sign-off close-up and clashed in play.
+// rgbGen identity so the baked hue is what draws; alphaGen vertex so the emitter fades drive alpha.
 coop_artery_streak
 {
 	cull none
@@ -21,9 +22,9 @@ coop_artery_drop
 		alphaGen vertex
 	}
 }
-// [2026-10-11] where an artery streak lands. The shared coop_bloodsplat decal is the flat #150200 stain hue, which is a
-// black blot on white plaster; this is the same splat shape baked at SPLAT_RGB (98,6,6). Not named *bloodpool*, so
-// cgame fades it like every other splat.
+// [2026-10-11] where an artery streak lands: a crisp lobed blot with satellite drops (the shared coop_bloodsplat shape is
+// a soft haze). [2026-10-12] in the shared splat's own colour, SPLAT_RGB (27,3,0). Not named *bloodpool*, and laid by
+// the same bouncedecal mark as every drip, so cgame ages and fades it exactly like every other splat.
 coop_artery_splat
 {
 	polygonOffset
