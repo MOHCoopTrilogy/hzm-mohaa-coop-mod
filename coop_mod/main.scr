@@ -1766,7 +1766,12 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 				local.player.flags["coop_iAmTruelyActive"] = 0 //prevent further handling in critical funcs
 				
 				//[201] chrissstrahl - inform player that he is out
-				waitthread coop_mod/feed.scr::feed_player local.player 0 "lms" "You have 0 lives left - Last Man Standing is active"				
+				//[bug-3518] a late joiner held out by the host's rule is told that, not that they ran out of lives
+				if( local.player.flags["coop_lmsLate"] == 1 ){
+					waitthread coop_mod/feed.scr::feed_player local.player 0 "lms" "Late joining is off - you play from the next mission"
+				}else{
+					waitthread coop_mod/feed.scr::feed_player local.player 0 "lms" "You have 0 lives left - Last Man Standing is active"
+				}
 
 				//[200] chrissstrahl - fail mission if all players are dead
 				local.numActivePlayers = 0
@@ -1798,6 +1803,64 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 		waitframe
 	}
 }end 1
+
+//[bug-3518] LMS deaths remembered per player for the length of the map (level var, so a map load clears it).
+//Key = "g" + the engine's coop_guid (never a bare number as an array key). A bot has no guid and is skipped.
+//=========================================================================
+lmsLedgerStore local.player:{
+//=========================================================================
+	if( local.player == NULL || local.player == NIL ){ end }
+	local.guid = local.player.coop_guid
+	if( local.guid == NIL || local.guid == "" ){ end }
+	local.deaths = local.player.flags["coop_deaths"]
+	if( local.deaths == NIL ){ local.deaths = 0 }
+	level.coop_lmsLedger[ ( "g" + local.guid ) ] = local.deaths
+}end
+
+//[bug-3518] Give a joining player the LMS death count they left this map with (0 for a first-time joiner).
+//Called from player.scr::manageSetup: with waitthread when the guid is already known (no frame passes), as a
+//thread when it is not - then the player was held out by the old lockout and is let in here, and a running
+//lmsForceSpectatorHandle loop puts them back in the game by itself ("You are allowed back in the game").
+//No guid after 10 s = the old lockout stands, which is the safe side of a reconnect-to-reset-lives cheat.
+//=========================================================================
+lmsRestoreLives local.player:{
+//=========================================================================
+	if( local.player == NULL || local.player == NIL ){ end }
+	local.tries = 0
+	while( ( local.player.coop_guid == NIL || local.player.coop_guid == "" ) && local.tries < 20 ){
+		wait 0.5
+		if( local.player == NULL || local.player == NIL ){ end }
+		local.tries++
+	}
+	local.guid = local.player.coop_guid
+	if( local.guid == NIL || local.guid == "" ){
+		println( "^~^~^ LMSLEDGER noguid ent=" + local.player.entnum )
+		end
+	}
+	if( level.coop_lmsLedger == NIL ){ level.coop_lmsLedger[ "g" ] = 0 }
+	local.key = ( "g" + local.guid )
+	local.was = level.coop_lmsLedger[ local.key ]
+	local.late = 0
+	if( local.was == NIL ){
+		//first time on this map. [user 2026-10-12] HOST RULES > Late Joiners Can Spawn (coop_lmsLateJoin, default 1):
+		//with it off, a player new to the mission more than 3 minutes after the first spawn sits it out and plays
+		//from the next map. 3 minutes and not less: a slow loader at a map change must never be taken for a late joiner.
+		local.was = 0
+		if( getcvar( "coop_lmsLateJoin" ) == "0" && level.coop_gameStartedAt != NIL && ( level.time - level.coop_gameStartedAt ) > 180 ){
+			local.was = level.coop_lmsLives
+			local.late = 1
+		}
+		//written at once, deaths or none, so the same player coming back is known and keeps this answer
+		level.coop_lmsLedger[ local.key ] = local.was
+		level.coop_lmsLedger[ ( "late" + local.guid ) ] = local.late
+	}else{
+		local.late = level.coop_lmsLedger[ ( "late" + local.guid ) ]
+		if( local.late == NIL ){ local.late = 0 }
+	}
+	local.player.flags["coop_deaths"] = local.was
+	local.player.flags["coop_lmsLate"] = local.late
+	println( "^~^~^ LMSLEDGER restore ent=" + local.player.entnum + " deaths=" + local.was + " lives=" + level.coop_lmsLives + " late=" + local.late )
+}end
 
 /* [202] chrissstrahl - THIS WAS MOVED TO player.scr::manage
 - reason 1: this function is only called there

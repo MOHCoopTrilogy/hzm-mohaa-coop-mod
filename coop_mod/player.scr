@@ -250,7 +250,7 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 				}
 
 				if(local.timePassed > 30){
-					waitthread coop_mod/feed.scr::feed_all 1 "lms_state" "Last Man Standing on - no late joining"
+					waitthread coop_mod/feed.scr::feed_all 1 "lms_state" "Last Man Standing - a returning player keeps the lives they had"
 					level.coop_lmsAllowJoin = 0
 				}
 			}
@@ -366,10 +366,19 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 	//During LMS add deaths to prevent player from playing if he is not allowed to
 	//New players are not allowed in if one player left before on the current map
 	//this prevents players from just reconnecting when dead
-	if( level.coop_lmsAllowJoin != 1){
-		local.lmsLives = level.coop_lmsLives
-		if(local.lmsLives > 0){
-			local.player.flags["coop_deaths"] = local.lmsLives
+	//[bug-3518] A player who was DISCONNECTED and came back was locked in spectator for the rest of the map with
+	//"0 lives left", lives or no lives: the lockout above could not tell a returning player from a new one. The
+	//deaths are now remembered per player (main.scr::lmsLedgerStore, keyed by the engine's coop_guid), so whoever
+	//joins gets the life count they left with, and a first-time joiner starts with all lives. Only a player the
+	//server cannot identify yet is held out the old way until main.scr::lmsRestoreLives has an answer.
+	if( level.coop_lmsLives > 0 ){
+		if( local.player.coop_guid == NIL || local.player.coop_guid == "" ){
+			if( level.coop_lmsAllowJoin != 1 ){
+				local.player.flags["coop_deaths"] = level.coop_lmsLives
+			}
+			thread coop_mod/main.scr::lmsRestoreLives local.player
+		}else{
+			waitthread coop_mod/main.scr::lmsRestoreLives local.player
 		}
 	}
 	
@@ -1724,7 +1733,9 @@ if(level.cMTE_coop_player){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println(
 			local.deaths = local.player.flags["coop_deaths"]
 			local.deaths++
 			local.player.flags["coop_deaths"] = local.deaths
-			
+			//[bug-3518] remembered per player, so a reconnect neither resets the count nor loses the lives left
+			waitthread coop_mod/main.scr::lmsLedgerStore local.player
+
 			//print info to player hud
 			local.deaths = (level.coop_lmsLives - local.deaths)
 			if(local.deaths < 0){local.deaths=0}
