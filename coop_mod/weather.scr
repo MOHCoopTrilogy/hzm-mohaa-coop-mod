@@ -11,8 +11,9 @@
 //
 //   coop_dynWeather 1/0                = master on/off (threaded once per map from main.scr::main)
 //   coop_weatherForce ""/rain/snow/off = OVERRIDE the per-map theme (set BEFORE the map loads to test)
-//   coop_weatherPin ""/cycle/0..3      = "" fluid random storms (default) | "cycle" native fixed cycle |
-//                                        0..3 hold a fixed intensity (0 calm .. 3 storm/blizzard)
+//   coop_weatherPin ""/cycle/0..4      = "" fluid random storms (default) | "cycle" native fixed cycle |
+//                                        0..3 hold a fixed intensity (0 calm .. 3 storm) | 4 = 3 + the extreme
+//                                        tier held (blizzard / torrential downpour, coop_mod/wxextreme.scr)
 //   coop_rainVolume 0.85               = peak rain-ambience loudness
 //   coop_dynWeatherLightning 1         = per-client lightning flash on thunder (0 = thunder sound only)
 //
@@ -28,6 +29,8 @@ coop_weather_init:{
 	//bug-2710/2796 class). The theme is not known yet (the map sets it after main.scr::main), so the boot keys
 	//on the nine sand map names; it ends at once on Omaha, and in MP unless mp_weather.scr allowed dust (level.coop_dustMp).
 	waitthread coop_mod/duststorm.scr::coop_dust_boot
+	//[2026-10-12] BLIZZARD / DOWNPOUR tier: its veil models, registered in the first frame for the same reason
+	waitthread coop_mod/wxextreme.scr::coop_wx_boot
 
 	// HZM coop - DEFER until the map's own main has set level.coop_weatherTheme. This thread is started from
 	// inside main.scr::main, which runs BEFORE the map script's main reaches its 'level.coop_weatherTheme = ...'
@@ -112,12 +115,23 @@ coop_weather_init:{
 	// FLUID RANDOM storms (default): random-walk the intensity up/down so light rain builds into
 	// thunderstorms / light snow into blizzards and eases back, unpredictably. coop_weatherPin "cycle" (native
 	// fixed cycle) or 0-3 (fixed intensity) disables this.
+	local.wxMode = "fluid random"
+	local.wxWalk = 0
 	if( level.coop_weatherHold != NIL && level.coop_weatherHold != "" ){
 		println( "^~^~^ WEATHER HOLD at intensity " + level.weatherpattern + " - map-authored constant, random driver OFF" )
+		local.wxMode = "map hold"
 	} else {
 		if( getcvar( "coop_weatherPin" ) == "" ){
 			thread coop_weather_randomDriver
+			local.wxWalk = 1
+		} else {
+			local.wxMode = "pinned " + getcvar( "coop_weatherPin" )
 		}
+	}
+	//[2026-10-12] BLIZZARD / TORRENTIAL DOWNPOUR (coop_mod/wxextreme.scr): the tier above intensity 3, rain and snow
+	//maps. After the native exec (it reads level.raindensity) and after the look is seeded (it ramps from it).
+	if( local.theme == "rain" || local.theme == "snow" ){
+		thread coop_mod/wxextreme.scr::coop_wx_start local.theme local.wxWalk
 	}
 
 	if( local.theme == "rain" ){
@@ -142,7 +156,8 @@ coop_weather_init:{
 		//Started here, after the pattern is seeded and the native renderer is up, because it reads both.
 		thread coop_mod/duststorm.scr::coop_dust_start
 	}
-	println( "^~^~^ WEATHER coop=" + local.theme + " (native SP, fluid random)" )
+	//[2026-10-12] this line said "fluid random" whatever the mode was - a pinned run read as if the pin had not taken
+	println( "^~^~^ WEATHER coop=" + local.theme + " (native SP, " + local.wxMode + ")" )
 }end
 
 //=========================================================================
@@ -191,6 +206,15 @@ coop_weather_snowLook:{
 	level.rain_slant      = 250
 	level.rain_min_dist   = 1800
 	level.thundertime     = 0		// snow: no thunder/lightning (native gates the thunder thread on this)
+	//[2026-10-12] the same look, readable: the engine's rain fields are write-only, and the blizzard tier
+	//(coop_mod/wxextreme.scr) ramps from these and back to them. Change a value above -> change it here.
+	level.coop_wxBSpeed = 32.0
+	level.coop_wxBVary  = 16.0
+	level.coop_wxBLen   = 2.0
+	level.coop_wxBWidth = 1.0
+	level.coop_wxBDist  = 1800.0
+	level.coop_wxBShader = "textures/snow"
+	level.coop_wxBNum    = 12
 	//[bug-1206] the old `setcvar "r_ppRainDrops" "0"` guard is GONE. It was a server-side setcvar, so it
 	//only ever reached a listen HOST - every remote coop client kept its beads - and because
 	//r_ppRainDrops is CVAR_ARCHIVE it also stomped the player's own Advanced Graphics setting for the
@@ -233,6 +257,16 @@ coop_weather_rainLook:{
 	level.rain_length     = 90
 	level.rain_slant      = 250
 	level.thundertime     = 20		// rain: thunder + lightning on (native scales frequency with intensity)
+	//[2026-10-12] the same look, readable, for the downpour tier (coop_mod/wxextreme.scr). Width and min_dist are what
+	//the CLIENT reports on a rain map (coop_rainDebug 3: width 1.00, min_dist 512) - the engine's own defaults; the
+	//"0.4" in global/weather.scr never applies, level.rain_width is not NIL when it tests it.
+	level.coop_wxBSpeed = 2048.0
+	level.coop_wxBVary  = 400.0
+	level.coop_wxBLen   = 90.0
+	level.coop_wxBWidth = 1.0
+	level.coop_wxBDist  = 512.0
+	level.coop_wxBShader = "textures/rain"
+	level.coop_wxBNum    = 12
 	//[bug-1206] the old `setcvar "r_ppRainDrops" "1"` re-arm is GONE too: it existed only to undo the
 	//snow/sand stomps above, and as a side effect it overrode a player who had deliberately turned
 	//rain-on-lens OFF in Advanced Graphics. r_ppRainDrops is now purely the user's master toggle; the
@@ -287,6 +321,9 @@ coop_weather_randomDriver:{
 		//[2026-09-28 dust frequency] SAND maps (coop_mod/duststorm.scr coop_dust_walkBias, once its driver is armed):
 		//each dust storm a kind - a FULL one builds straight to 3, a HAZE one never past 2. Rain and snow: untouched.
 		if( level.coop_dustWalk == 1 ){ local.pb = waitthread coop_mod/duststorm.scr::coop_dust_walkBias local.cur local.pb }
+		//[2026-10-12] RAIN and SNOW maps (coop_mod/wxextreme.scr, once its driver is armed): a storm rolled EXTREME
+		//builds straight to 3, where the blizzard / downpour tier starts.
+		if( level.coop_wxWalk == 1 ){ local.pb = waitthread coop_mod/wxextreme.scr::coop_wx_walkBias local.cur local.pb }
 		if( local.r < local.pb ){				// HZM coop - build 38% / ease 47% / hold 15% = slight DOWNWARD bias so
 			local.cur = local.cur + 1		// storms clear more readily and dry spells come around more often (per
 		} else {						// user "more dry spells"). Was 45/40/15 (upward-biased = leaned stormy).
@@ -298,6 +335,7 @@ coop_weather_randomDriver:{
 		if( local.cur < 0 ){ local.cur = 0 }
 		if( local.cur > 3 ){ local.cur = 3 }
 		if( level.coop_stormOn == 1 ){ local.cur = waitthread coop_mod/stormlight.scr::coop_storm_holdFloor local.cur }	//[2026-09-28] variable storm length
+		if( level.coop_wxWalk == 1 ){ local.cur = waitthread coop_mod/wxextreme.scr::coop_wx_walkFloor local.cur }	//[2026-10-12] the extreme tier holds the walk at 3
 		//[2026-09-28] STORM DARKNESS: CLOUDS BEFORE RAIN. Leaving a dry spell, the storm's kind is picked and its
 		//clouds start rolling in 15-25 s before the rain pattern rises (stormlight.scr coop_storm_preroll).
 		if( local.cur > 0 && level.weatherpattern == 0 && level.coop_stormOn == 1 ){

@@ -1,0 +1,741 @@
+//=========================================================================
+// HZM coop - BLIZZARD / TORRENTIAL DOWNPOUR: the extreme weather tier  [user 2026-10-12]
+// "I have seen 'snow' weather in our dynamic weather, but I have yet to see 'blizzard'... that should sometimes
+// trigger and be aggressive snow and really hard to see far infront of you. I would say the same thing for
+// rainstorms, sometimes it should be an aggressive torrential downpour that really messes with visibility."
+//
+// WHY NOBODY SAW A BLIZZARD. Intensity 3 only raised the flake COUNT, and the count was already at its ceiling:
+// cgame draws at most 4096 streaks, a slow flake lives ~20 s, so light snow already fills the pool and "3" looks
+// like "1". Nothing else changed - no wind, no murk. This file adds a tier ABOVE 3 for snow and rain maps.
+//
+// WHAT IT IS (the dust storm's recipe, coop_mod/duststorm.scr, on rain and snow maps):
+//   PRECIP  - the streak LOOK is driven up, not just the count. Snow: fast, wind-driven, pulled in close round the
+//             player (the same flake pool in a twentieth of the area), and above strength 0.35 the flakes are drawn
+//             as STREAKS (textures/coop_snowgust0): the stock flake is a camera-facing dot, which is white on white
+//             in a blizzard. Rain: denser, slanted, thicker streaks.
+//             These are the engine's rain configstrings, so every client and every late joiner gets them.
+//   MURK    - $world fog closes to 1250 (never closer - see FOG) in a colour taken from the MAP'S OWN fog colour:
+//             a blizzard goes to a grey murk on a day map (the light is gone, and white flakes need something
+//             darker behind them to be seen), a moonlit grey on a night map; a downpour to a grey murk.
+//             Fog is a configstring too.
+//   VEIL    - duststorm.scr's per-player sheet with a snow / rain skin (models/emitters/coop_dustveil_snow*.tik,
+//             coop_dustveil_rain*.tik): camera-locked, private to its owner, FADES INDOORS, deleted at the end.
+//   SOUND   - the storm wind looped on each player's sheet (35 % indoors); a downpour's is quieter.
+//   LIGHT   - rain: the storm-darkness director (stormlight.scr) is held at least at 0.9 x strength.
+//             snow: the grey murk, the pale veil and the bright streaks are its light; nothing else is darkened.
+// It builds over 30 s, holds 60-180 s, eases out over 40 s. Never a pop: every value is ramped, and the fog is
+// handed back exactly (profile maps: coop_fog_apply; others: the recorded values).
+//
+// WHEN. Each storm gets a KIND as the weather walk leaves a dry spell: EXTREME with chance coop_wxExtremeChance
+// (AUTO 0.25), unless the last one ended less than coop_wxExtremeCool (AUTO 420 s) ago or the map is younger than
+// 150 s. An extreme storm builds straight to intensity 3 (the dust storm's FULL kind), and the tier starts the
+// moment it gets there; the walk stays at 3 until the hold is over.
+//
+//   coop_wxExtreme 1/0      = master (seta in coop_defaults.cfg). 0 = intensity 3 is the top, as before.
+//   coop_weatherPin 4       = TEST: hold intensity 3 AND the extreme tier for the whole map (set before the map loads).
+//   coop_wxNow ""/1/0       = TEST: 1 forces the tier now, 0 forces it off, "" follows the weather. Reset at map load.
+//   coop_wxFog 0            = TEST: no fog change (precip, veil and sound only).
+//   coop_maptest != 0       = no random extreme storms (fog distance permanently lowers AI sight - see FOG).
+//
+// FOG, and ENEMY SIGHT (exactly the dust storm's handling): Actor::FixAIParameters permanently LOWERS every actor's
+// max engage distance to 0.828 x the current fog distance and never raises it again. 1250 x 0.828 = 1035, above the
+// 1024 default, so an actor at the default keeps it; one authored to see farther is cut to ~1035 for the rest of the
+// map - enemies do see less in the murk, and no AI code is touched. Distance is NEVER written below 1250.
+// The driver owns $world fog through level.coop_dustOwnsFog (the flag fogmode.scr's keeper already stands down on;
+// sand never shares a map with rain or snow). It keeps level.farplane_color equal to what it wrote, so the native
+// lightning flash / unflash pulse from and back to the storm colour. If the MAP moves the fog distance while a storm
+// is up, the driver YIELDS the fog at once (colour and bias back, distance left to the map) and the storm goes on
+// without it; maps whose script ramps or animates their fog all level never get the fog part (coop_wx_fogMap).
+//
+// NOT: PvP / MP (level.coop_mpRun), arena sessions (no weather there), sand maps (dust storms), the five Omaha
+// maps, a map with a coop_weatherHold below 3.
+// Markers (developer 1): ^~^~^ WXX armed / kind / fire / start / hold / step / yield / restore.
+//=========================================================================
+
+//canary (TRAPS T1)
+alive:{
+	end 1
+}end
+
+//=========================================================================
+coop_wx_mapName:{
+//=========================================================================
+	local.m = level.coop_mapname
+	if( local.m == NIL || local.m == "" ){ local.m = getcvar( "mapname" ) }
+	if( local.m == NIL ){ local.m = "" }
+}end local.m
+
+coop_wx_omaha local.m:{
+	if( local.m == "m3l1a" || local.m == "m3l1b" || local.m == "e3l1" || local.m == "e3l2" || local.m == "obj_team3" ){ end 1 }
+}end 0
+
+//=========================================================================
+// The theme a map WILL have, by name - only for the first-frame model cache below (the map sets
+// level.coop_weatherTheme after main.scr::main, too late for it). A map forced to another theme with
+// coop_weatherForce registers its veil at first use instead (a test path).
+//=========================================================================
+coop_wx_bootTheme local.m:{
+//=========================================================================
+	if( local.m == "m2l1" || local.m == "m2l3" || local.m == "m6l1a" || local.m == "m6l1b" || local.m == "m6l1c" ){ end "snow" }
+	if( local.m == "m6l2a" || local.m == "m6l2b" || local.m == "m6l3a" || local.m == "m6l3e" ){ end "snow" }
+	if( local.m == "t2l1" || local.m == "t2l2" || local.m == "t2l3" || local.m == "t2l4" || local.m == "co_lobby5" ){ end "snow" }
+	if( local.m == "m1l3c" || local.m == "m3l2" || local.m == "m3l3" || local.m == "m4l0" || local.m == "m4l1" ){ end "rain" }
+	if( local.m == "m4l2" || local.m == "m4l3" || local.m == "m5l1a" || local.m == "m5l2a" || local.m == "m5l2b" ){ end "rain" }
+	if( local.m == "m5l3" || local.m == "e2l2" || local.m == "e2l3" || local.m == "t1l1" || local.m == "t1l2" ){ end "rain" }
+	if( local.m == "t1l3" || local.m == "t3l1" || local.m == "t3l2" ){ end "rain" }
+}end "none"
+
+//=========================================================================
+// Maps whose own script ramps or animates the fog all level (m6l2a / m6l3a / m3l3 / m4l3 farplane_near / _far
+// loops, m6l1c level.fogplane, e2l2's fog function, t2l1 / t2l4 animated_farplane): the tier runs there WITHOUT
+// the fog part. Everything else: 1.
+//=========================================================================
+coop_wx_fogMap local.m:{
+//=========================================================================
+	if( local.m == "m6l2a" || local.m == "m6l3a" || local.m == "m3l3" || local.m == "m4l3" ){ end 0 }
+	if( local.m == "m6l1c" || local.m == "e2l2" || local.m == "t2l1" || local.m == "t2l4" ){ end 0 }
+}end 1
+
+//=========================================================================
+// Map boot - from weather.scr::coop_weather_init in the FIRST frame (model registration at map load, never
+// mid-game: the bug-2710/2796 hitch). Also clears a forced storm left over from the previous map.
+//=========================================================================
+coop_wx_boot:{
+//=========================================================================
+	if( level.coop_mpRun == 1 ){ end }
+	local.m = waitthread coop_wx_mapName
+	if( local.m == "" ){ end }
+	local.om = waitthread coop_wx_omaha local.m
+	if( local.om == 1 ){ end }
+
+	local.now = getcvar( "coop_wxNow" )
+	if( local.now != "" ){
+		println( "^~^~^ WXX coop_wxNow was " + local.now + " - reset at map load" )
+		setcvar "coop_wxNow" ""
+	}
+	if( getcvar( "coop_wxExtreme" ) == "0" ){ end }
+
+	local.t = waitthread coop_wx_bootTheme local.m
+	if( local.t == "snow" ){
+		cache models/emitters/coop_dustveil_snow.tik
+		cache models/emitters/coop_dustveil_snownight.tik
+	}
+	if( local.t == "rain" ){
+		cache models/emitters/coop_dustveil_rain.tik
+		cache models/emitters/coop_dustveil_rainnight.tik
+	}
+	if( local.t != "none" ){ println( "^~^~^ WXX boot map=" + local.m + " theme=" + local.t + " veil models cached" ) }
+}end
+
+//=========================================================================
+// A host tuning cvar: "" or negative = AUTO (local.def), else its float value (duststorm.scr coop_dust_cvarAuto).
+//=========================================================================
+coop_wx_cvarAuto local.name local.def:{
+//=========================================================================
+	local.s = getcvar( local.name )
+	if( local.s == "" ){ end local.def }
+	local.v = float( local.s )
+	if( local.v < 0 ){ end local.def }
+}end local.v
+
+//=========================================================================
+// THE DRIVER. Threaded once per map from weather.scr (rain and snow themes), after the native weather is exec'd.
+// local.theme = "rain" / "snow"; local.walk = 1 when weather.scr's random walk drives the intensity.
+//=========================================================================
+coop_wx_start local.theme local.walk:{
+//=========================================================================
+	if( level.coop_mpRun == 1 ){ end }
+	if( level.coop_wxStarted == 1 ){ end }
+	if( local.theme != "rain" && local.theme != "snow" ){ end }
+	local.m = waitthread coop_wx_mapName
+	local.om = waitthread coop_wx_omaha local.m
+	if( local.om == 1 ){ end }
+	if( getcvar( "coop_wxExtreme" ) == "0" ){
+		println( "^~^~^ WXX off reason=switch map=" + local.m )
+		end
+	}
+	// a map-authored constant below the top level keeps its weather exactly as authored
+	local.own = 0
+	if( level.coop_weatherHold != NIL && level.coop_weatherHold != "" ){
+		local.h = int( level.coop_weatherHold )
+		if( local.h < 3 ){
+			println( "^~^~^ WXX off reason=hold map=" + local.m )
+			end
+		}
+		local.own = 1
+	}
+	level.coop_wxStarted = 1
+	level.coop_wxMap = local.m
+	level.coop_wxTheme = local.theme
+
+	// seeded before anything reads them (TRAPS T17)
+	level.coop_wxS = 0.0
+	level.coop_wxDark = 0.0
+	level.coop_wxKind = ""
+	level.coop_wxNext = ""
+	level.coop_wxFired = 0
+	level.coop_wxUntil = 0 - 100000
+	level.coop_wxLastEnd = 0 - 100000
+	level.coop_wxOpenAt = level.time + 150.0
+	level.coop_wxFogOn = 0
+	level.coop_wxSelf = local.own
+	// no storm in the map's first 15 s, forced or pinned ones included: the map's fog init, the fog profile's late
+	// re-asserts (10 s) and the native weather's own fog write (1 s) all land in that window, and each of them would
+	// read as "the map moved its fog" and make the driver yield the fog
+	level.coop_wxReadyAt = level.time + 15.0
+	level.coop_wxSelfNext = level.time + 240 + randomfloat( 360 )
+	waitthread coop_wx_targets
+
+	// the per-player sheets are duststorm.scr's, with this tier's skin (set per storm in coop_wx_begin)
+	waitthread coop_mod/duststorm.scr::coop_dust_sheetsInit
+	level.coop_dustStrength = 0.0
+	level.coop_dustRising = 1
+	level.coop_dustAlphaMax = 0.5
+	level.coop_dustBotSheets = 0
+	level.coop_dustNight = 0
+	level.coop_dustWindGain = 1.0
+	thread coop_mod/duststorm.scr::coop_dust_sheets
+
+	level.coop_wxWalk = 0
+	if( local.walk == 1 ){ level.coop_wxWalk = 1 }
+	println( "^~^~^ WXX armed map=" + local.m + " theme=" + local.theme + " walk=" + level.coop_wxWalk + " self=" + local.own )
+
+	local.s = 0.0
+	local.active = 0
+	local.holdSaid = 0
+	local.n = 0
+	while( 1 ){
+		// a map held at the top level by its author has no walk: its own timer rolls the kind
+		if( level.coop_wxSelf == 1 && level.time >= level.coop_wxSelfNext ){
+			level.coop_wxSelfNext = level.time + 240 + randomfloat( 360 )
+			local.k = waitthread coop_wx_rollKind
+			if( local.k == "extreme" ){ waitthread coop_wx_fire }
+		}
+
+		local.forced = 0
+		local.f = getcvar( "coop_wxNow" )
+		if( local.f == "1" ){
+			local.forced = 1
+			local.target = 1.0
+		} else if( local.f == "0" ){
+			local.forced = 1
+			local.target = 0.0
+		} else {
+			local.target = waitthread coop_wx_autoTarget
+		}
+		if( level.time < level.coop_wxReadyAt ){ local.target = 0.0 }
+
+		// in over 30 s (0.00667 per 0.2 s), out over 40 s (0.005 per 0.2 s)
+		if( local.s < local.target ){
+			local.s = local.s + 0.00667
+			if( local.s >= local.target ){ local.s = local.target }
+			level.coop_dustRising = 1
+			local.holdSaid = 0
+		} else if( local.s > local.target ){
+			local.s = local.s - 0.005
+			if( local.s < local.target ){ local.s = local.target }
+			level.coop_dustRising = 0
+		}
+		if( local.s < 0.001 ){ local.s = 0.0 }
+
+		if( local.active == 0 && local.s > 0 ){
+			waitthread coop_wx_begin local.target local.forced
+			local.active = 1
+			local.n = 0
+		}
+		level.coop_wxS = local.s
+		level.coop_dustStrength = local.s
+		if( level.coop_wxTheme == "rain" ){ level.coop_wxDark = 0.9 * local.s }
+
+		if( local.active == 1 ){
+			waitthread coop_wx_precipStep local.s
+			if( level.coop_wxFogOn == 1 ){
+				local.y = waitthread coop_wx_fogStep local.s
+				if( local.y == 1 ){ waitthread coop_wx_yield }
+			}
+			if( local.holdSaid == 0 && local.s > 0 && local.s == local.target ){
+				local.holdSaid = 1
+				println( "^~^~^ WXX hold s=" + local.s + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color )
+			}
+			local.n++
+			if( local.n >= 25 ){
+				local.n = 0
+				println( "^~^~^ WXX step s=" + local.s + " target=" + local.target + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color )
+			}
+			if( local.s <= 0 ){
+				waitthread coop_wx_restore
+				local.active = 0
+			}
+		}
+		wait 0.2
+	}
+}end
+
+//=========================================================================
+// What the tier drives the precip LOOK to at full strength. The base values are the ones weather.scr's look
+// functions set (mirrored there into level.coop_wxB*; the engine's rain fields are write-only).
+//=========================================================================
+coop_wx_targets:{
+//=========================================================================
+	if( level.coop_wxTheme == "snow" ){
+		level.coop_wxTSpeed = 340.0
+		level.coop_wxTVary  = 220.0
+		level.coop_wxTLen   = 13.0
+		level.coop_wxTWidth = 3.0
+		level.coop_wxTDist  = 420.0
+		level.coop_wxTSlant = 900.0
+		level.coop_wxDenK   = 3.0
+		level.coop_wxVeil   = 0.4
+		level.coop_wxWind   = 1.0
+		level.coop_wxTShader = "textures/coop_snowgust"		// engine builds "%s%i" -> coop_snowgust0; "snow" in the name keeps the lens dry
+		level.coop_wxTNum    = 1
+	} else {
+		level.coop_wxTSpeed = 2400.0
+		level.coop_wxTVary  = 500.0
+		level.coop_wxTLen   = 140.0
+		level.coop_wxTWidth = 1.15
+		level.coop_wxTDist  = 512.0
+		level.coop_wxTSlant = 380.0
+		level.coop_wxDenK   = 6.0
+		level.coop_wxVeil   = 0.45
+		level.coop_wxWind   = 0.55
+		level.coop_wxTShader = ""		// rain keeps its own streaks
+		level.coop_wxTNum    = 0
+	}
+	level.coop_wxGust = 0
+	if( level.coop_wxBShader == NIL || level.coop_wxBNum == NIL ){ level.coop_wxTShader = "" }	// no base to hand back to
+	// the base look, if weather.scr's look function did not mirror it (it always does)
+	if( level.coop_wxBSpeed == NIL ){ level.coop_wxBSpeed = level.coop_wxTSpeed }
+	if( level.coop_wxBVary == NIL ){ level.coop_wxBVary = level.coop_wxTVary }
+	if( level.coop_wxBLen == NIL ){ level.coop_wxBLen = level.coop_wxTLen }
+	if( level.coop_wxBWidth == NIL ){ level.coop_wxBWidth = level.coop_wxTWidth }
+	if( level.coop_wxBDist == NIL ){ level.coop_wxBDist = level.coop_wxTDist }
+}end
+
+//=========================================================================
+// Where the weather wants the tier: 1 while an extreme storm holds at the top, else 0.
+//=========================================================================
+coop_wx_autoTarget:{
+//=========================================================================
+	if( getcvar( "coop_wxExtreme" ) == "0" ){ end 0.0 }
+	if( getcvar( "coop_weatherPin" ) == "4" ){ end 1.0 }
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){ end 0.0 }
+	if( level.weatherpattern == NIL ){ end 0.0 }
+	local.p = int( level.weatherpattern )
+	if( local.p < 3 ){ end 0.0 }
+	if( level.time < level.coop_wxUntil ){ end 1.0 }
+}end 0.0
+
+//=========================================================================
+// extreme or normal, for the next storm
+//=========================================================================
+coop_wx_rollKind:{
+//=========================================================================
+	local.k = "normal"
+	if( getcvar( "coop_wxExtreme" ) == "0" ){ end local.k }
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "" && local.mt != "0" ){ end local.k }
+	if( level.time < level.coop_wxOpenAt ){ end local.k }
+	local.cool = waitthread coop_wx_cvarAuto "coop_wxExtremeCool" 420.0
+	local.since = level.time - level.coop_wxLastEnd
+	if( local.since < local.cool ){ end local.k }
+	local.pc = waitthread coop_wx_cvarAuto "coop_wxExtremeChance" 0.25
+	if( local.pc > 1 ){ local.pc = 1.0 }
+	local.r = randomfloat( 1 )
+	if( local.r < local.pc ){ local.k = "extreme" }
+}end local.k
+
+//=========================================================================
+// The storm reached the top: the tier starts now and holds 60-180 s after its 30 s build.
+//=========================================================================
+coop_wx_fire:{
+//=========================================================================
+	local.hold = 60 + randomfloat( 120 )
+	level.coop_wxFired = 1
+	level.coop_wxUntil = level.time + 30 + local.hold
+	if( level.coop_wxSelf == 1 ){ level.coop_wxLastEnd = level.coop_wxUntil }
+	local.hs = int( local.hold )
+	println( "^~^~^ WXX fire map=" + level.coop_wxMap + " theme=" + level.coop_wxTheme + " hold=" + local.hs + " s at=" + level.time )
+}end
+
+//=========================================================================
+// weather.scr's random walk, hook 1 (the dust storm's coop_dust_walkBias): the BUILD chance for this step.
+// A dry step rolls what the next storm will be; the first wet step fixes it; an extreme storm builds straight to 3.
+//=========================================================================
+coop_wx_walkBias local.cur local.pb:{
+//=========================================================================
+	if( level.coop_wxWalk != 1 ){ end local.pb }
+	if( local.cur <= 0 ){
+		level.coop_wxNext = waitthread coop_wx_rollKind
+		end local.pb
+	}
+	if( level.coop_wxKind == "" ){
+		local.k = level.coop_wxNext
+		if( local.k != "extreme" ){ local.k = "normal" }
+		level.coop_wxKind = local.k
+		level.coop_wxNext = ""
+		level.coop_wxFired = 0
+		println( "^~^~^ WXX kind=" + local.k + " map=" + level.coop_wxMap + " at=" + level.time )
+		// a downpour is a dark storm: the storm-darkness director follows the kind (stormlight.scr)
+		if( local.k == "extreme" && level.coop_stormOn == 1 ){ level.coop_stormKind = "dark" }
+	}
+	if( level.coop_wxKind == "extreme" && level.coop_wxFired != 1 ){ end 0.85 }
+}end local.pb
+
+//=========================================================================
+// hook 2: the walk's new level. Reaching 3 fires the tier; the walk then stays at 3 until the hold is over.
+// Back at 0 the kind is forgotten, so the next storm rolls a new one.
+//=========================================================================
+coop_wx_walkFloor local.cur:{
+//=========================================================================
+	if( level.coop_wxWalk != 1 ){ end local.cur }
+	if( level.coop_wxKind == "extreme" ){
+		if( level.coop_wxFired != 1 && local.cur >= 3 ){ waitthread coop_wx_fire }
+		if( level.coop_wxFired == 1 && level.time < level.coop_wxUntil ){ end 3 }
+	}
+	if( local.cur <= 0 && level.coop_wxKind != "" ){
+		if( level.coop_wxFired == 1 ){ level.coop_wxLastEnd = level.time }
+		level.coop_wxKind = ""
+	}
+}end local.cur
+
+//=========================================================================
+// The murk colour, from the MAP'S OWN fog colour (so it sits in that map's light): its luminance lifted, its hue
+// pulled 60 % to a cool neutral. A night map stays inside 0.12-0.26 - the dust storm's
+// night rails: enemies read as dark shapes, and headlights / lamp flares keep burning (cg_hzmHeadlightsDarkFog 0.3).
+// A day blizzard is a GREY murk, 0.36-0.50 luminance: under the bloom knee, and dark enough for white streaks to read.
+//=========================================================================
+coop_wx_colour local.r local.g local.b:{
+//=========================================================================
+	local.l = ( 0.299 * local.r ) + ( 0.587 * local.g ) + ( 0.114 * local.b )
+	// night: fog luminance under 0.2 on a snow map (white ground keeps a dusk scene bright), under 0.25 on a rain map
+	level.coop_wxNight = 0
+	if( local.l < 0.2 ){ level.coop_wxNight = 1 }
+	if( level.coop_wxTheme != "snow" && local.l < 0.25 ){ level.coop_wxNight = 1 }
+	if( level.coop_wxTheme == "snow" ){
+		local.lt = local.l * 0.95
+		local.lo = 0.36
+		local.hi = 0.50
+		if( level.coop_wxNight == 1 ){
+			local.lo = 0.14
+			local.hi = 0.26
+		}
+		local.tr = 0.97
+		local.tg = 0.99
+		local.tb = 1.06
+	} else {
+		local.lt = ( local.l * 1.05 ) + 0.03
+		local.lo = 0.22
+		local.hi = 0.46
+		if( level.coop_wxNight == 1 ){
+			local.lo = 0.12
+			local.hi = 0.22
+		}
+		local.tr = 0.95
+		local.tg = 0.99
+		local.tb = 1.07
+	}
+	if( local.lt < local.lo ){ local.lt = local.lo }
+	if( local.lt > local.hi ){ local.lt = local.hi }
+	local.ld = local.l
+	if( local.ld < 0.02 ){ local.ld = 0.02 }
+	local.k = local.lt / local.ld
+	level.coop_wxR = ( 0.6 * local.lt * local.tr ) + ( 0.4 * local.r * local.k )
+	level.coop_wxG = ( 0.6 * local.lt * local.tg ) + ( 0.4 * local.g * local.k )
+	level.coop_wxB = ( 0.6 * local.lt * local.tb ) + ( 0.4 * local.b * local.k )
+	if( level.coop_wxR > 0.9 ){ level.coop_wxR = 0.9 }
+	if( level.coop_wxG > 0.9 ){ level.coop_wxG = 0.9 }
+	if( level.coop_wxB > 0.9 ){ level.coop_wxB = 0.9 }
+}end
+
+//=========================================================================
+// A storm starts: record where the fog is, pick the colour and the veil, take ownership BEFORE the first write.
+//=========================================================================
+coop_wx_begin local.target local.forced:{
+//=========================================================================
+	level.coop_wxOrigD = $world.farplane
+	level.coop_wxOrigB = $world.farplane_bias
+	level.coop_wxOrigC = $world.farplane_color
+	if( level.coop_wxOrigD == NIL ){ level.coop_wxOrigD = 0 }
+	if( level.coop_wxOrigB == NIL ){ level.coop_wxOrigB = 0 }
+	if( level.coop_wxOrigC == NIL ){ level.coop_wxOrigC = ( 0 0 0 ) }
+	level.coop_wxNatC = level.farplane_color		// the native weather's saved colour (NIL when it never ran)
+
+	level.coop_wxProfile = 0
+	level.coop_wxNoFog = 0
+	if( level.coop_fogProfileLoaded == 1 && level.coop_fogDist > 0 ){
+		level.coop_wxProfile = 1
+		level.coop_wxD0 = level.coop_fogDist * 1.0
+		level.coop_wxB0 = level.coop_fogBias * 1.0
+		level.coop_wxR0 = level.coop_fogR
+		level.coop_wxG0 = level.coop_fogG
+		level.coop_wxB0c = level.coop_fogB
+	} else {
+		level.coop_wxD0 = level.coop_wxOrigD * 1.0
+		level.coop_wxB0 = level.coop_wxOrigB * 1.0
+		level.coop_wxR0 = level.coop_wxOrigC[0]
+		level.coop_wxG0 = level.coop_wxOrigC[1]
+		level.coop_wxB0c = level.coop_wxOrigC[2]
+	}
+	if( level.coop_wxD0 <= 0 ){
+		// no fog on this map: a night look, and the wall comes in from far past everything in its own colour
+		waitthread coop_wx_colour 0.08 0.085 0.10
+		level.coop_wxNoFog = 1
+		level.coop_wxD0  = 16000.0
+		level.coop_wxB0  = 15900.0
+		level.coop_wxR0  = level.coop_wxR
+		level.coop_wxG0  = level.coop_wxG
+		level.coop_wxB0c = level.coop_wxB
+	} else {
+		waitthread coop_wx_colour level.coop_wxR0 level.coop_wxG0 level.coop_wxB0c
+	}
+
+	// distance: 1250, or the map's own fog if that is already closer (it already set the actors)
+	level.coop_wxFar = 1250.0
+	level.coop_wxFloor = 1250.0
+	if( level.coop_wxD0 < 1250 ){ level.coop_wxFloor = level.coop_wxD0 }
+	// fog start as a fraction of the distance: 0.12, or the map's own if that is lower (a map whose fog starts
+	// behind the camera must not get THINNER near the player)
+	level.coop_wxBf0 = level.coop_wxB0 / level.coop_wxD0
+	level.coop_wxBf1 = 0.12
+	if( level.coop_wxBf0 < level.coop_wxBf1 ){ level.coop_wxBf1 = level.coop_wxBf0 }
+
+	level.coop_wxWroteD = 0 - 1
+	level.coop_wxWroteB = 0 - 100000
+	level.coop_wxWroteR = 0 - 1
+	level.coop_wxWroteG = 0 - 1
+	level.coop_wxWroteBc = 0 - 1
+
+	// the veil: this theme's skin, day or night, at this theme's strength
+	local.tik = "models/emitters/coop_dustveil_" + level.coop_wxTheme
+	if( level.coop_wxNight == 1 ){ local.tik = local.tik + "night" }
+	level.coop_dustTikOverride = local.tik + ".tik"
+	level.coop_dustAlphaMax = level.coop_wxVeil
+	level.coop_dustWindGain = level.coop_wxWind
+
+	// precip: nothing written yet
+	level.coop_wxWSpeed = 0 - 1
+	level.coop_wxWVary = 0 - 1
+	level.coop_wxWLen = 0 - 1
+	level.coop_wxWWidth = 0 - 1
+	level.coop_wxWDist = 0 - 1
+	level.coop_wxWSlant = 0 - 1
+	level.coop_wxWDen = 0 - 1
+
+	level.coop_wxFogOn = 0
+	local.fm = waitthread coop_wx_fogMap level.coop_wxMap
+	local.why = "on"
+	if( local.fm != 1 ){ local.why = "map-script-fog" }
+	if( getcvar( "coop_wxFog" ) == "0" ){ local.why = "switch" }
+	if( level.coop_dustOwnsFog == 1 ){ local.why = "owned" }
+	if( local.why == "on" ){
+		level.coop_wxFogOn = 1
+		level.coop_dustOwnsFog = 1
+	}
+	println( "^~^~^ WXX start map=" + level.coop_wxMap + " theme=" + level.coop_wxTheme + " forced=" + local.forced + " night=" + level.coop_wxNight + " fog=" + local.why + " from dist=" + level.coop_wxD0 + " bias=" + level.coop_wxB0 + " col=" + level.coop_wxR0 + " " + level.coop_wxG0 + " " + level.coop_wxB0c + " to=" + level.coop_wxR + " " + level.coop_wxG + " " + level.coop_wxB + " profile=" + level.coop_wxProfile )
+}end
+
+//=========================================================================
+// Put the fog where strength local.s says (the dust storm's coop_dust_fogStep: smoothstep, distance in 1/d, only
+// changed fields written). Returns 1 when something else moved the fog distance since the last write - the map's
+// own script - so the caller yields the fog.
+//=========================================================================
+coop_wx_fogStep local.s:{
+//=========================================================================
+	local.cur = $world.farplane
+	if( level.coop_wxWroteD >= 0 && local.cur != level.coop_wxWroteD ){ end 1 }
+
+	local.e = local.s * local.s * ( 3.0 - ( 2.0 * local.s ) )
+
+	local.inv0 = 1.0 / level.coop_wxD0
+	local.inv1 = 1.0 / level.coop_wxFar
+	local.d = 1.0 / ( local.inv0 + ( ( local.inv1 - local.inv0 ) * local.e ) )
+	if( local.d < level.coop_wxFloor ){ local.d = level.coop_wxFloor }
+	if( local.s <= 0 ){ local.d = level.coop_wxD0 }
+
+	local.bf = level.coop_wxBf0 + ( ( level.coop_wxBf1 - level.coop_wxBf0 ) * local.e )
+	if( local.bf > 0.995 ){ local.bf = 0.995 }
+	local.b = local.d * local.bf
+
+	local.r = level.coop_wxR0 + ( ( level.coop_wxR - level.coop_wxR0 ) * local.e )
+	local.g = level.coop_wxG0 + ( ( level.coop_wxG - level.coop_wxG0 ) * local.e )
+	local.bl = level.coop_wxB0c + ( ( level.coop_wxB - level.coop_wxB0c ) * local.e )
+
+	local.di = int( local.d + 0.5 )
+	local.bi = int( local.b + 0.5 )
+	if( local.b < 0 ){ local.bi = int( local.b - 0.5 ) }
+
+	// colour first, then bias, then distance. Compared x 1e6: script float compares carry a 0.0001 dead band
+	// (duststorm.scr, bug-2963). No drift check on the colour - the lightning flash moves it and puts it back.
+	local.dr = local.r - level.coop_wxWroteR
+	local.dg = local.g - level.coop_wxWroteG
+	local.db = local.bl - level.coop_wxWroteBc
+	local.eps = 10.0
+	if( local.s >= 1 || local.s <= 0 ){ local.eps = 0.5 }
+	if( ( ( local.dr * local.dr ) + ( local.dg * local.dg ) + ( local.db * local.db ) ) * 1000000.0 > local.eps ){
+		$world farplane_color ( local.r local.g local.bl )
+		level.coop_wxWroteR = local.r
+		level.coop_wxWroteG = local.g
+		level.coop_wxWroteBc = local.bl
+		// the native lightning unflash restores level.farplane_color: keep it on the storm colour
+		if( level.coop_wxNatC != NIL ){ level.farplane_color = ( local.r local.g local.bl ) }
+	}
+	if( local.bi != level.coop_wxWroteB ){
+		$world farplane_bias local.bi
+		level.coop_wxWroteB = local.bi
+	}
+	if( local.di != level.coop_wxWroteD ){
+		$world farplane local.di
+		level.coop_wxWroteD = local.di
+	}
+}end 0
+
+//=========================================================================
+// The precip LOOK at strength local.s. Every field is one configstring, so each is written only when it has moved
+// a visible step, and exactly at both ends. Density and slant are the native weather's while the tier is off
+// (global/weather.scr weatherloop stands down on level.coop_wxS > 0 and takes them back at 0).
+//=========================================================================
+coop_wx_precipStep local.s:{
+//=========================================================================
+	local.e = local.s * local.s * ( 3.0 - ( 2.0 * local.s ) )
+	local.edge = 0
+	if( local.s >= 1 || local.s <= 0 ){ local.edge = 1 }
+
+	// SNOW: above 0.35 the flakes are drawn as streaks, back to the stock flakes under 0.30. New flakes take the
+	// new shader, flakes already falling keep theirs, so the change is a cross-fade. Order matters: every
+	// intermediate name the client builds must exist (count first going up - snow0; name first going down).
+	// Streak length and width only start growing once the streak shader is on (a long stock flake is a big hexagon).
+	local.e2 = local.e
+	if( level.coop_wxTShader != "" ){
+		local.want = level.coop_wxGust
+		if( local.s >= 0.35 ){ local.want = 1 }
+		if( local.s < 0.30 ){ local.want = 0 }
+		if( local.want != level.coop_wxGust ){
+			if( local.want == 1 ){
+				level.rain_numshaders = level.coop_wxTNum
+				level.rain_shader = level.coop_wxTShader
+			} else {
+				level.rain_shader = level.coop_wxBShader
+				level.rain_numshaders = level.coop_wxBNum
+			}
+			level.coop_wxGust = local.want
+			println( "^~^~^ WXX streaks=" + local.want + " s=" + local.s )
+		}
+		local.q = ( local.s - 0.35 ) / 0.65
+		if( local.q < 0 ){ local.q = 0.0 }
+		if( local.q > 1 ){ local.q = 1.0 }
+		local.e2 = local.q * local.q * ( 3.0 - ( 2.0 * local.q ) )
+	}
+
+	local.v = level.coop_wxBSpeed + ( ( level.coop_wxTSpeed - level.coop_wxBSpeed ) * local.e )
+	local.v = int( local.v + 0.5 )
+	local.d = local.v - level.coop_wxWSpeed
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 6 || ( local.edge == 1 && local.d >= 1 ) ){
+		level.rain_speed = local.v
+		level.coop_wxWSpeed = local.v
+	}
+
+	local.v = level.coop_wxBVary + ( ( level.coop_wxTVary - level.coop_wxBVary ) * local.e )
+	local.v = int( local.v + 0.5 )
+	local.d = local.v - level.coop_wxWVary
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 6 || ( local.edge == 1 && local.d >= 1 ) ){
+		level.rain_speed_vary = local.v
+		level.coop_wxWVary = local.v
+	}
+
+	local.v = level.coop_wxBLen + ( ( level.coop_wxTLen - level.coop_wxBLen ) * local.e2 )
+	local.d = local.v - level.coop_wxWLen
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 0.25 || ( local.edge == 1 && local.d >= 0.01 ) ){
+		level.rain_length = local.v
+		level.coop_wxWLen = local.v
+	}
+
+	local.v = level.coop_wxBWidth + ( ( level.coop_wxTWidth - level.coop_wxBWidth ) * local.e2 )
+	local.d = local.v - level.coop_wxWWidth
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 0.03 || ( local.edge == 1 && local.d >= 0.001 ) ){
+		level.rain_width = local.v
+		level.coop_wxWWidth = local.v
+	}
+
+	local.v = level.coop_wxBDist + ( ( level.coop_wxTDist - level.coop_wxBDist ) * local.e )
+	local.v = int( local.v + 0.5 )
+	local.d = local.v - level.coop_wxWDist
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 16 || ( local.edge == 1 && local.d >= 1 ) ){
+		level.rain_min_dist = local.v
+		level.coop_wxWDist = local.v
+	}
+
+	// density and slant ride on the native weather's own smoothed value (global/weather.scr weatherloop's formula)
+	local.rd = level.raindensity
+	if( local.rd == NIL ){ local.rd = 0 }
+	if( local.rd < 0 ){ local.rd = 0 }
+	local.ns = 50.0
+	if( local.rd >= 5 ){ local.ns = 50.0 + ( ( local.rd - 5 ) * 8 ) }
+
+	local.v = local.ns + ( ( level.coop_wxTSlant - local.ns ) * local.e )
+	local.v = int( local.v + 0.5 )
+	local.d = local.v - level.coop_wxWSlant
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 6 || ( local.edge == 1 && local.d >= 1 ) ){
+		level.rain_slant = local.v
+		level.coop_wxWSlant = local.v
+	}
+
+	local.v = local.rd * ( 1.0 + ( ( level.coop_wxDenK - 1.0 ) * local.e ) )
+	local.d = local.v - level.coop_wxWDen
+	if( local.d < 0 ){ local.d = 0 - local.d }
+	if( local.d >= 0.2 || ( local.edge == 1 && local.d >= 0.01 ) ){
+		level.rain_density = local.v
+		level.coop_wxWDen = local.v
+	}
+}end
+
+//=========================================================================
+// The map moved its own fog distance mid-storm: hand the fog back NOW - colour and bias to what was recorded,
+// the distance left where the map just put it - and let the storm go on without the fog part.
+//=========================================================================
+coop_wx_yield:{
+//=========================================================================
+	$world farplane_color level.coop_wxOrigC
+	$world farplane_bias level.coop_wxOrigB
+	if( level.coop_wxNatC != NIL ){ level.farplane_color = level.coop_wxNatC }
+	level.coop_wxFogOn = 0
+	level.coop_dustOwnsFog = 0
+	println( "^~^~^ WXX yield map=" + level.coop_wxMap + " - the map moved its fog (dist=" + $world.farplane + ", we wrote " + level.coop_wxWroteD + "): fog handed back, storm goes on without it" )
+}end
+
+//=========================================================================
+// The storm is over: the precip look is back at the base already (coop_wx_precipStep at 0). Hand the fog back
+// exactly, then give up ownership (LAST).
+//=========================================================================
+coop_wx_restore:{
+//=========================================================================
+	local.how = "none"
+	if( level.coop_wxFogOn == 1 ){
+		if( level.coop_wxNatC != NIL ){ level.farplane_color = level.coop_wxNatC }
+		local.how = "recorded"
+		if( level.coop_wxProfile == 1 && level.coop_fogProfileLoaded == 1 ){
+			waitthread coop_mod/fogmode.scr::coop_fog_apply
+			local.how = "profile"
+		} else if( level.coop_wxNoFog == 1 ){
+			$world farplane_bias level.coop_wxOrigB
+			$world farplane_color level.coop_wxOrigC
+			$world farplane 0
+			local.how = "fogoff"
+		} else {
+			$world farplane_color level.coop_wxOrigC
+			$world farplane_bias level.coop_wxOrigB
+			$world farplane level.coop_wxOrigD
+		}
+		level.coop_wxFogOn = 0
+		level.coop_dustOwnsFog = 0
+	}
+	level.coop_dustTikOverride = NIL
+	println( "^~^~^ WXX restore how=" + local.how + " dist=" + $world.farplane + " bias=" + $world.farplane_bias + " col=" + $world.farplane_color + " orig=" + level.coop_wxOrigD + "/" + level.coop_wxOrigB + " " + level.coop_wxOrigC )
+}end
