@@ -43,6 +43,13 @@ state STAND
 	states
 	{
 		FALL				: FALLING
+		// HZM coop [bug-3560] PRONE FROM ANY UPRIGHT GROUND STATE. Until now only the CROUCH_* states had this
+		// row, on the assumption that the crouch press had always been taken first. It is not: a press made in
+		// a frame the player is off the ground (rough terrain, a landing) is never taken (ONGROUND +CROUCH),
+		// and then Player::TickCoopProne raised COOP_PRONE on a body that stayed standing - crawl speed, no
+		// sprint, nothing on screen. The engine now also refuses to raise the flag outside the states that
+		// carry this row and drops one the body does not follow within 0.75 s.
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 		// HZM coop [216] - manning pose that actually fires for coop players: the vanilla rows
 		// below require !HAS_WEAPON (never true with a rifle in inventory - bug-309)
 		COOP_TURRET_MAN		: COOP_ON_TURRET
@@ -118,6 +125,7 @@ state RUN_FORWARD
 		SPRINT_FORWARD		: COOP_SPRINTING
 
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -170,6 +178,7 @@ state RUN_BACKWARD
 	{
 		LIMP_BACKWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -222,6 +231,7 @@ state RUN_LEFT
 	{
 		LIMP_LEFT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -274,6 +284,7 @@ state RUN_RIGHT
 	{
 		LIMP_RIGHT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -332,6 +343,7 @@ state WALK_FORWARD
 	{
 		LIMP_FORWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -384,6 +396,7 @@ state WALK_BACKWARD
 	{
 		LIMP_BACKWARD	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -436,6 +449,7 @@ state WALK_LEFT
 	{
 		LIMP_LEFT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -488,6 +502,7 @@ state WALK_RIGHT
 	{
 		LIMP_RIGHT	: COOP_LIMPING		// HZM coop bug-1291 - low-health limp
 		FALL				: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE			: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED		: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -2139,6 +2154,7 @@ state LIMP_FORWARD
 		WALK_FORWARD	: !COOP_LIMPING
 
 		FALL			: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -2189,6 +2205,7 @@ state LIMP_BACKWARD
 		WALK_BACKWARD	: !COOP_LIMPING
 
 		FALL			: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -2239,6 +2256,7 @@ state LIMP_LEFT
 		WALK_LEFT	: !COOP_LIMPING
 
 		FALL			: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
@@ -2289,6 +2307,7 @@ state LIMP_RIGHT
 		WALK_RIGHT	: !COOP_LIMPING
 
 		FALL			: FALLING
+		PRONE_IDLE			: COOP_PRONE		// HZM coop [bug-3560] see STAND
 
 		CROUCH_IDLE		: ONGROUND +CROUCH !DUCKED_VIEW_IN_WATER
 		CROUCH_DENIED	: ONGROUND +CROUCH DUCKED_VIEW_IN_WATER
