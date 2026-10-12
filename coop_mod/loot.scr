@@ -1,0 +1,161 @@
+//=========================================================================
+// loot.scr - HZM coop USE-TO-LOOT, the loot table  [user 2026-10-05]
+// Design: docs/proposals/use_pickup_2026-10-05/PLAN.md. The engine does the rest (fgame Player::TickCoopLoot):
+// it finds what the crosshair is on, times the Use key, takes guns and ammo itself, and calls
+//     coop_mod/loot.scr::searched <player> <body> <ammo type> <clip> <grenade type>
+// ONCE for every enemy body a player has finished searching (hold Use, coop_lootSearchTime). What the search
+// turns up is decided here, so the odds can be tuned from the console or coop_defaults.cfg with no engine build.
+//
+// "It should be random and honestly not lean towards the player always finding stuff": every body is one
+// independent roll. There is no pity timer and no streak protection, half of all bodies hold nothing at all, and a
+// find the player cannot use (a full pocket, no gun for it, no grenade to match) is NOT swapped for something
+// else - it is simply nothing.
+//
+//   outcome   base odds (cvar)          what you get
+//   nothing   50  coop_lootPNothing     -
+//   ammo      30  coop_lootPAmmo        half to a whole magazine for ONE gun you carry, chosen at random by the
+//                                       engine (<ammo type>, <clip>; the engine passes clip 0 when that pocket is
+//                                       already full, or you carry no gun with a magazine)
+//   grenade   12  coop_lootPNade        one grenade of YOUR OWN type (<grenade type>, "" when you carry none or
+//                                       are full)
+//   canteen    8  coop_lootPCanteen     one carried medkit, up to the cap the medkit system itself uses
+// The four numbers are weights (they need not add up to 100). On top of them "nothing" grows by 5 points for each
+// active player above two (at most 10) and by 5 more on the hardest skill; the other rows shrink in proportion.
+// Hardcore: enemies yield no health (bug-3187), so the canteen row is folded into "nothing".
+//
+// COOP ONLY: the engine only calls this on a coop map, and the label refuses anywhere else. No wait in this file -
+// a search is settled in the frame it completes.
+//=========================================================================
+
+//=========================================================================
+// the engine's entry point - one completed body search
+//=========================================================================
+searched local.player local.corpse local.ammoType local.clip local.nadeType:{
+	if( level.gametype == 0 ){ end }
+	if( level.coop_mainScriptLoaded != 1 ){ end }
+	if( local.player == NULL ){ end }
+	if( local.ammoType == NIL ){ local.ammoType = "" }
+	if( local.nadeType == NIL ){ local.nadeType = "" }
+	if( local.clip == NIL ){ local.clip = 0 }
+
+	local.outcome = waitthread roll
+
+	local.got = "nothing"
+	local.n = 0
+	local.msg = "Nothing useful"
+
+	if( local.outcome == "ammo" ){
+		if( local.ammoType != "" && local.clip >= 1 ){
+			//half a magazine to a whole one, at least one round
+			local.n = int( ( local.clip * ( 0.5 + ( randomfloat 0.5 ) ) ) + 0.5 )
+			if( local.n < 1 ){ local.n = 1 }
+			if( local.n > local.clip ){ local.n = local.clip }
+			local.player ammo local.ammoType local.n
+			local.got = "ammo"
+			if( local.ammoType == "heavy" ){
+				local.msg = "Found a rocket"
+			}else if( local.n == 1 ){
+				local.msg = "Found 1 " + local.ammoType + " round"
+			}else{
+				local.msg = "Found " + local.n + " " + local.ammoType + " rounds"
+			}
+		}
+	}else if( local.outcome == "nade" ){
+		if( local.nadeType != "" ){
+			local.player ammo local.nadeType 1
+			local.n = 1
+			local.got = "nade"
+			local.msg = "Found a grenade"
+		}
+	}else if( local.outcome == "canteen" ){
+		local.mk = local.player.flags["coop_medkits"]
+		if( local.mk == NIL ){ local.mk = 0 }
+		local.cap = level.coop_medkitCap
+		if( local.cap == NIL ){ local.cap = 2 }
+		if( local.mk < local.cap ){
+			//the medkit HUD monitor polls this flag and shows the new count by itself
+			local.player.flags["coop_medkits"] = local.mk + 1
+			local.n = 1
+			local.got = "canteen"
+			local.msg = "Found a canteen - one more medkit"
+		}
+	}
+
+	//tally, for the harness and for anyone tuning the odds (level.coop_lootRolled = what the dice said,
+	//level.coop_lootGot = what the player actually received)
+	if( level.coop_lootRolled[local.outcome] == NIL ){ level.coop_lootRolled[local.outcome] = 0 }
+	level.coop_lootRolled[local.outcome] = level.coop_lootRolled[local.outcome] + 1
+	if( level.coop_lootGot[local.got] == NIL ){ level.coop_lootGot[local.got] = 0 }
+	level.coop_lootGot[local.got] = level.coop_lootGot[local.got] + 1
+
+	//one short line. The event feed's own small type; under Hardcore the feed draws alerts only, so the line goes
+	//out as an ordinary pickup print there, the way the engine's "Got 5 Rifle Rounds" does.
+	if( level.coop_hardcore == 1 ){
+		local.player iprint local.msg 0
+	}else{
+		waitthread coop_mod/feed.scr::feed_player local.player 2 "loot" local.msg
+	}
+
+	local.bn = 0
+	if( local.corpse != NULL ){ local.bn = local.corpse.entnum }
+	println ( "^~^~^ LOOT search body=" + local.bn + " by=" + local.player.entnum + " rolled=" + local.outcome + " got=" + local.got + " n=" + local.n )
+}end
+
+//=========================================================================
+// roll - one independent draw from the table: "nothing" / "ammo" / "nade" / "canteen"
+//=========================================================================
+roll:{
+	local.pN = int( getcvar "coop_lootPNothing" )
+	local.pA = int( getcvar "coop_lootPAmmo" )
+	local.pG = int( getcvar "coop_lootPNade" )
+	local.pC = int( getcvar "coop_lootPCanteen" )
+	if( local.pN < 0 ){ local.pN = 0 }
+	if( local.pA < 0 ){ local.pA = 0 }
+	if( local.pG < 0 ){ local.pG = 0 }
+	if( local.pC < 0 ){ local.pC = 0 }
+	//never seeded (an old config): the shipped table
+	if( ( local.pN + local.pA + local.pG + local.pC ) < 1 ){
+		local.pN = 50
+		local.pA = 30
+		local.pG = 12
+		local.pC = 8
+	}
+	if( level.coop_hardcore == 1 ){
+		local.pN = local.pN + local.pC
+		local.pC = 0
+	}
+	local.total = local.pN + local.pA + local.pG + local.pC
+
+	local.fN = ( local.pN * 1.0 ) / local.total
+	local.fA = ( local.pA * 1.0 ) / local.total
+	local.fG = ( local.pG * 1.0 ) / local.total
+
+	//more players means more bodies, and the hardest skill is meant to be lean: "nothing" grows, the rest
+	//shrink in proportion
+	local.bonus = 0.0
+	local.act = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p != NULL ){
+			if( local.p.dmteam != "spectator" ){ local.act++ }
+		}
+	}
+	if( local.act > 2 ){
+		local.bonus = 0.05 * ( local.act - 2 )
+		if( local.bonus > 0.10 ){ local.bonus = 0.10 }
+	}
+	if( int( getcvar "skill" ) >= 2 ){ local.bonus = local.bonus + 0.05 }
+
+	local.newN = local.fN + local.bonus
+	if( local.newN > 1.0 ){ local.newN = 1.0 }
+	local.scale = 0.0
+	if( local.fN < 1.0 ){ local.scale = ( 1.0 - local.newN ) / ( 1.0 - local.fN ) }
+	local.fA = local.fA * local.scale
+	local.fG = local.fG * local.scale
+
+	local.r = randomfloat 1.0
+	if( local.r < local.newN ){ end "nothing" }
+	if( local.r < ( local.newN + local.fA ) ){ end "ammo" }
+	if( local.r < ( local.newN + local.fA + local.fG ) ){ end "nade" }
+	if( local.pC < 1 ){ end "nothing" }
+}end "canteen"
