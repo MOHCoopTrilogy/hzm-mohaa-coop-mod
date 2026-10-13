@@ -552,6 +552,9 @@ state ATTACK_SHOTGUN_PRIMARY_AIM
 
 		shotgun_stand_run_fire		: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		shotgun_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		// HZM coop [dbshotgun] a double barrel has no pump: its own torso clips, the left hand stays on the forend
+		coop_dbs_crouch_fire		: POSITION_TYPE "crouching" IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
+		coop_dbs_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		shotgun_crouch_fire		: POSITION_TYPE "crouching"
 		shotgun_stand_fire		: default
 	}
@@ -559,6 +562,8 @@ state ATTACK_SHOTGUN_PRIMARY_AIM
 	states
 	{
 		STAND				: KILLED
+		// HZM coop [dbshotgun] the second barrel while aiming: do not wait for the torso clip
+		COOP_DBS_REFIRE_AIM		: +ATTACK_PRIMARY IS_WEAPON_READY_TO_FIRE "mainhand" IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		AIM				: ANIMDONE_TORSO COOP_ADS
 		STAND				: ANIMDONE_TORSO
 	}
@@ -1175,6 +1180,9 @@ state ATTACK_SHOTGUN_PRIMARY
 
 		shotgun_stand_run_fire	     	: POSITION_TYPE "standing" MOVEMENT_TYPE "running"
 		shotgun_crouch_run_fire		: POSITION_TYPE "crouching" MOVEMENT_TYPE "running"
+		// HZM coop [dbshotgun] a double barrel has no pump: its own torso clips, the left hand stays on the forend
+		coop_dbs_crouch_fire		: POSITION_TYPE "crouching" IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
+		coop_dbs_stand_fire		: IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		shotgun_crouch_fire	     	: POSITION_TYPE "crouching"
 		shotgun_stand_fire	     	: default
 	}
@@ -3608,6 +3616,8 @@ state RELOAD_SHOTGUN
 	states
 	{
 		STAND	 				: KILLED
+		// HZM coop [dbshotgun] an open double barrel is shut before the owed shot: the full end row, not the quick hand-back
+		RELOAD_SHOTGUN_BREAK_END	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand" IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		RELOAD_SHOTGUN_BREAK_QUICK	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py]
 		RELOAD_SHOTGUN_SINGLE_CH	: ANIMDONE_TORSO HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] [quick break-off] rounds were in the gun when the reload began: the chambered chain
 		RELOAD_SHOTGUN_SINGLE		: ANIMDONE_TORSO
@@ -3683,6 +3693,8 @@ state RELOAD_SHOTGUN_END
 	
 	action
 	{
+		// HZM coop [dbshotgun] no pump stroke after the last shell
+		coop_dbs_reload_end		: IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		shotgun_reload_end	    	: default
 	}
 
@@ -3705,6 +3717,8 @@ state RELOAD_SHOTGUN_BREAK_END
 	}
 	action
 	{
+		// HZM coop [dbshotgun] no pump stroke after the last shell
+		coop_dbs_reload_end		: IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		shotgun_reload_end	: default
 	}
 	states
@@ -3756,6 +3770,8 @@ state RELOAD_SHOTGUN_SINGLE_CH
 		RELOAD_INTERUPTED_CORRECT_ATTACHMENTS	: IS_USING_TURRET
 
 		// allow early out
+		// HZM coop [dbshotgun] an open double barrel is shut before the owed shot: the full end row, not the quick hand-back
+		RELOAD_SHOTGUN_BREAK_END	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand" IS_WEAPON_ACTIVE "mainhand" "Shotgun (Double Barrel)"
 		RELOAD_SHOTGUN_BREAK_QUICK	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] the trigger breaks the reload off at any point of the loop
 		RELOAD_SHOTGUN_END		: PUTAWAYMAIN
 		
@@ -4758,5 +4774,22 @@ state COOP_SELFHEAL
 		//Safe against sticking: medkit_use forces STAND at ALL FOUR of its exits (completion, gone
 		//inactive, moved too far), and KILLED above outranks it.
 		COOP_SELFHEAL			: ANIMDONE_TORSO
+	}
+}
+
+// HZM coop [dbshotgun] routing state: the second shot of the double barrel while aiming (see ATTACK_SHOTGUN_PRIMARY_AIM)
+state COOP_DBS_REFIRE_AIM
+{
+	movetype legs
+
+	action
+	{
+		none				: default // stop the torso clip, so the next one fires
+	}
+
+	states
+	{
+		STAND				: KILLED
+		ATTACK_SHOTGUN_PRIMARY_AIM	: default
 	}
 }
