@@ -2607,6 +2607,8 @@ state RELOAD_RIFLE
 		svt_reload				: IS_WEAPON_ACTIVE "mainhand" "SVT 40"
 		mosin_reload			: IS_WEAPON_ACTIVE "mainhand" "Mosin Nagant Rifle"
 		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "G 43"
+		//[g43 irons 2026-10-12] the iron-sight G43: the G43's own torso reload (no hand-over of the gun)
+		g43_reload				: IS_WEAPON_ACTIVE "mainhand" "G 43 Irons"
 		enfieldl42a1_reload		: IS_WEAPON_ACTIVE "mainhand" "Enfield L42A1"
 		carcano_reload			: IS_WEAPON_ACTIVE "mainhand" "Carcano"
 		delisle_reload			: IS_WEAPON_ACTIVE "mainhand" "DeLisle"
