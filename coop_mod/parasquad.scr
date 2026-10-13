@@ -214,6 +214,7 @@ brain local.sid:{
 	local.shaken = 0
 	local.axis = NIL
 	waitthread dbg ( "brain start sid=" + local.sid )
+	thread nadeWatch local.sid
 	while( 1 ){
 		wait 1
 		// ---- roster ----
@@ -233,6 +234,7 @@ brain local.sid:{
 		}
 		if( local.alive == 0 && ( level.time - level.coop_psqT0[local.sid] ) > 45 ){
 			waitthread dbg ( "brain end sid=" + local.sid )
+			level.coop_psqEnd[local.sid] = 1
 			end
 		}
 		if( local.alive == 0 ){ continue }
@@ -957,6 +959,7 @@ throwNade local.a local.t local.why:{
 	if( !( waitthread usable local.a ) ){ end 0 }
 	local.a.coop_psqBusy = 1
 	local.a.coop_psqNadeT = level.time
+	level.coop_psqNadeOwn[local.a.coop_psqSid] = level.time		// nadeWatch: this one is ours
 	local.a.enableEnemy = 0
 	local.look = spawn script_origin
 	local.look.origin = local.t
@@ -2216,10 +2219,11 @@ mgSetup local.a local.sid:{
 		local.gun burstFireSettings 0.5 0.9 1.0 2.2
 		local.gun aibulletspread 150 150
 	}
-	// set down, it lies back on its butt until he is behind it
+	// where it will lie when nobody holds it (mgRest). Level while it is set down: he stands where its butt
+	// would come down
 	local.rp = waitthread mgRest local.a.coop_psqMgGun local.yaw
 	local.gun.coop_psqRest = local.rp
-	waitthread mgRestSet local.gun local.rp
+	waitthread mgRestSet local.gun 0
 	local.a.coop_psqGun = local.gun
 	waitthread mgLower local.gun local.a.coop_psqMgGun 10 0.3 0
 	if( local.a == NULL ){
@@ -2639,7 +2643,6 @@ mgMount local.a local.gun local.sid:{
 	local.rp = local.gun.coop_psqRest
 	waitthread mgRestSet local.gun local.rp
 	thread mgHold local.a local.gun local.sid
-	thread mgNade local.a local.gun local.sid
 	// is he AT the gun? Where the engine cannot seat him it leaves him where he stopped, hands on
 	// nothing. Then there is no gun.
 	wait 0.6
@@ -2746,33 +2749,83 @@ mgPivot local.gun local.sup local.mode local.yaw0:{
 }end
 
 
-// THE MOUNTED GUNNER AND A GRENADE. On the gun his grenade think is the machine gunner's (the retail recipe), and for
-// an American that one does nothing: he sat through it. Script has no way to ask the engine what grenade a man has
-// seen, so the entity table is looked through, 64 slots a frame (all of it in under a second): a projectile that has
-// come to rest - not one in flight, his own squad throws them past him - within 300u of him.
-mgNade local.a local.gun local.sid:{
+// THE SQUAD AND A GRENADE. On the gun a man's grenade think is the machine gunner's (the retail recipe), and for an
+// American that one does nothing: he sat through it. A man on foot has the engine's own grenade think
+// (gren_awareness 90), and in the harness it did not move him either. Script has no way to ask the engine what
+// grenade a man has seen, so the entity table is looked through, 64 slots a frame (all of it in under a second): a
+// projectile that has come to rest - not one in flight, the squad throws its own past its men - within 300u of a
+// man. The gunner leaves the gun and comes back to it (mgFlee); a man on foot runs (nadeRun). One thread a squad.
+nadeWatch local.sid:{
 	local.i = 0
-	while( local.a != NULL && local.gun != NULL ){
-		if( !isAlive local.a ){ break }
-		if( local.a.coop_psqMounted != 1 || local.a.coop_psqGun != local.gun ){ break }
-		local.hit = NIL
+	while( level.coop_psqEnd[local.sid] != 1 ){
 		for( local.n = 0; local.n < 64; local.n++ ){
 			local.i++
 			if( local.i >= 1024 ){ local.i = 1 }
 			local.e = getentbyentnum local.i
 			if( local.e == NULL ){ continue }
 			if( local.e.classname != "Projectile" ){ continue }
-			if( vector_length( local.e.origin - local.a.origin ) > 300 ){ continue }
 			if( ( vector_length local.e.velocity ) > 200 ){ continue }
-			local.hit = local.e
-			break
-		}
-		if( local.hit != NIL ){
-			thread mgFlee local.a local.gun local.sid local.hit
-			break
+			// one of ours, thrown in the last 6s: only a man it has come back to within 150u moves
+			local.own = 0
+			if( level.coop_psqNadeOwn[local.sid] != NIL ){
+				if( ( level.time - level.coop_psqNadeOwn[local.sid] ) < 6 ){ local.own = 1 }
+			}
+			for( local.k = 1; local.k <= 5; local.k++ ){
+				local.m = level.coop_psqM[local.sid][local.k]
+				if( local.m == NIL || local.m == NULL ){ continue }
+				if( !isAlive local.m ){ continue }
+				if( local.m.coop_psqNadeE == local.e ){ continue }
+				local.d = vector_length( local.e.origin - local.m.origin )
+				if( local.d > 300 ){ continue }
+				if( local.own == 1 && local.d > 150 ){ continue }
+				local.m.coop_psqNadeE = local.e
+				if( local.m.coop_psqMounted == 1 ){
+					local.g = local.m.coop_psqGun
+					if( local.g != NIL && local.g != NULL ){ thread mgFlee local.m local.g local.sid local.e }
+				} else {
+					thread nadeRun local.m local.e
+				}
+			}
 		}
 		waitframe
 	}
+}end
+
+
+// a place 300u from where he is, away from a grenade at local.np: straight away from it, else round in 45 degree
+// steps, over ground that was looked at (mgLine: his hull, and ground every 32u). NIL = none.
+nadeAway local.from local.np:{
+	local.v = local.from - local.np
+	local.v[2] = 0
+	if( vector_length local.v < 8 ){ local.v = ( 1 0 0 ) }
+	local.va = vector_toangles local.v
+	local.to = NIL
+	for( local.i = 0; local.i < 5; local.i++ ){
+		local.h = int( ( local.i + 1 ) / 2 ) * 45
+		if( ( local.i - ( int( local.i / 2 ) * 2 ) ) == 0 ){ local.h = 0 - local.h }
+		local.c = local.from + ( vector_scale ( angles_toforward ( 0 ( local.va[1] + local.h ) 0 ) ) 300 )
+		local.cz = waitthread mgSurf local.c 40 60
+		if( local.cz == NIL ){ continue }
+		local.c[2] = local.cz
+		if( !( waitthread mgLine local.from local.c ) ){ continue }
+		local.to = local.c
+		break
+	}
+}end local.to
+
+
+// a man on foot: he runs
+nadeRun local.a local.nade:{
+	if( !( waitthread usable local.a ) ){ end }
+	local.np = local.nade.origin
+	local.to = waitthread nadeAway local.a.origin local.np
+	if( local.a == NULL ){ end }
+	if( local.to == NIL ){
+		waitthread dbg ( "nade run k=" + local.a.coop_psqK + " nowhere_to_go" )
+		end
+	}
+	waitthread dbg ( "nade run k=" + local.a.coop_psqK + " d=" + ( vector_length( local.np - local.a.origin ) ) )
+	waitthread moveTo local.a local.to 3.5 0 "nade"
 }end
 
 
@@ -2786,22 +2839,7 @@ mgFlee local.a local.gun local.sid local.nade:{
 	waitthread dbg ( "mg nade at=" + local.np + " d=" + ( vector_length( local.np - local.seat ) ) )
 	waitthread mgOff local.a
 	local.a.enableEnemy = 0
-	local.v = local.seat - local.np
-	local.v[2] = 0
-	if( vector_length local.v < 8 ){ local.v = angles_toforward ( 0 ( local.gun.angles[1] + 180 ) 0 ) }
-	local.va = vector_toangles local.v
-	local.to = NIL
-	for( local.i = 0; local.i < 5; local.i++ ){
-		local.h = int( ( local.i + 1 ) / 2 ) * 45
-		if( ( local.i - ( int( local.i / 2 ) * 2 ) ) == 0 ){ local.h = 0 - local.h }
-		local.c = local.seat + ( vector_scale ( angles_toforward ( 0 ( local.va[1] + local.h ) 0 ) ) 300 )
-		local.cz = waitthread mgSurf local.c 40 60
-		if( local.cz == NIL ){ continue }
-		local.c[2] = local.cz
-		if( !( waitthread mgLine local.seat local.c ) ){ continue }
-		local.to = local.c
-		break
-	}
+	local.to = waitthread nadeAway local.seat local.np
 	wait 0.25		// hands off the gun
 	if( local.a == NULL ){ end }
 	if( !isAlive local.a ){ end }
@@ -2830,30 +2868,49 @@ mgFlee local.a local.gun local.sid local.nade:{
 			if( local.p.turret == local.gun ){ local.free = 0 }
 		}
 		if( local.free == 1 ){
-			local.straight = 0
-			local.rad = 28
-			if( waitthread mgLine local.a.origin local.seat ){
-				local.straight = 1
-				local.rad = 10
-			}
-			local.left = waitthread mgLeg local.a local.seat local.straight local.rad 8
-			if( local.a == NULL ){ end }
-			if( !isAlive local.a ){ end }
-			if( local.left > 14 && local.left < 110 ){
-				if( waitthread mgLine local.a.origin local.seat ){ local.left = waitthread mgLeg local.a local.seat 1 10 4 }
-			}
-			if( local.a == NULL ){ end }
-			if( !isAlive local.a ){ end }
-			if( local.left < 30 && local.gun != NULL ){
-				local.ok = waitthread mgMount local.a local.gun local.sid
+			local.a.enableEnemy = 0
+			local.left = 99999
+			for( local.n = 0; local.n < 2; local.n++ ){
+				local.straight = 0
+				local.rad = 28
+				if( waitthread mgLine local.a.origin local.seat ){
+					local.straight = 1
+					local.rad = 28
+				}
+				local.left = waitthread mgLeg local.a local.seat local.straight local.rad 8
 				if( local.a == NULL ){ end }
 				if( !isAlive local.a ){ end }
-				if( local.ok != 1 ){ waitthread mgOff local.a }
+				waitthread dbg ( "mg nade walkback straight=" + local.straight + " left=" + local.left )
+				if( local.left < 110 ){ break }
+			}
+			if( local.left < 110 && local.gun != NULL ){
+				// the gun lies on its butt where he has to kneel: it comes level, then the last steps
+				waitthread mgRestSet local.gun 0
+				wait 0.7
+				if( local.a == NULL ){ end }
+				if( !isAlive local.a ){ end }
+				if( local.left > 14 ){
+					if( waitthread mgLine local.a.origin local.seat ){ local.left = waitthread mgLeg local.a local.seat 1 10 4 }
+				}
+				if( local.a == NULL ){ end }
+				if( !isAlive local.a ){ end }
+				if( local.left < 30 && local.gun != NULL ){
+					local.ok = waitthread mgMount local.a local.gun local.sid
+					if( local.a == NULL ){ end }
+					if( !isAlive local.a ){ end }
+					if( local.ok != 1 ){ waitthread mgOff local.a }
+				}
 			}
 		}
 	}
 	waitthread dbg ( "mg nade back=" + local.ok )
-	if( local.ok != 1 ){ waitthread mgGiveUp local.a local.gun }
+	if( local.ok != 1 ){
+		if( local.gun != NULL ){
+			local.rp = local.gun.coop_psqRest
+			waitthread mgRestSet local.gun local.rp
+		}
+		waitthread mgGiveUp local.a local.gun
+	}
 }end
 
 
