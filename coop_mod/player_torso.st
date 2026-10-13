@@ -4111,12 +4111,36 @@ state TURRET_IDLE
 	action
 	{
 		mg42tripod_crouch_aim_straight_straight	: IS_WEAPON_ACTIVE "mainhand" "Packed MG42 Turret"
+		// HZM coop [bug-3658] a LOW gun (engine condition COOP_TURRET_LOW: one an AI gunner would crouch at,
+		// under 55 u over his feet - the .30 cal a paratrooper leaves on a sandbag rest): he crouches behind it
+		// with the AI gunner's crouched clip. This state is `movetype anim`: the action row IS the whole body
+		// (the legs machine does not run on a turret). turret_idle = the retail standing clip, as before.
+		coop_turret_crouch_idle			: COOP_TURRET_LOW
 		turret_idle				: default
 	}
 
 	states
 	{
 		STAND					: !IS_USING_TURRET
+		TURRET_FIRE_LOW				: COOP_TURRET_LOW ATTACK_PRIMARY_BUTTON	// [bug-3658] never true on a standing-height gun
+	}
+}
+
+// HZM coop [bug-3658] the trigger held on a LOW gun: the crouched firing clip. A state of its own because an
+// action row is chosen once, on entering the state.
+state TURRET_FIRE_LOW
+{
+	movetype anim
+
+	action
+	{
+		coop_turret_crouch_fire			: default
+	}
+
+	states
+	{
+		STAND					: !IS_USING_TURRET
+		TURRET_IDLE				: !ATTACK_PRIMARY_BUTTON
 	}
 }
 

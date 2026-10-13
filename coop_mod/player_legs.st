@@ -1438,6 +1438,12 @@ state TURRET_USING
 	legs
 	{
 		// HZM coop [215] - manning pose for ground turrets (MG42 nests) too
+		// HZM coop [bug-3658] a LOW gun (one an AI gunner would crouch at, under 55 u over his feet): he
+		// crouches behind it. The engine sets the crouched hull / view height and the seat (Player::EnterTurret).
+		// On a ground turret the body is the TORSO state's (player_Torso.st TURRET_IDLE, movetype anim) and this
+		// legs state is not evaluated; the rows are here for the day it is.
+		coop_turret_crouch_fire	: COOP_TURRET_LOW ATTACK_PRIMARY_BUTTON
+		coop_turret_crouch_idle	: COOP_TURRET_LOW
 		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
 		coop_turret_stand_idle	: default
 	}
@@ -1454,6 +1460,12 @@ state COOP_TURRET_MAN
 {
 	legs
 	{
+		// HZM coop [bug-3658] a LOW gun (one an AI gunner would crouch at, under 55 u over his feet): he
+		// crouches behind it. The engine sets the crouched hull / view height and the seat (Player::EnterTurret).
+		// On a ground turret the body is the TORSO state's (player_Torso.st TURRET_IDLE, movetype anim) and this
+		// legs state is not evaluated; the rows are here for the day it is.
+		coop_turret_crouch_fire	: COOP_TURRET_LOW ATTACK_PRIMARY_BUTTON
+		coop_turret_crouch_idle	: COOP_TURRET_LOW
 		coop_turret_stand_fire	: ATTACK_PRIMARY_BUTTON
 		coop_turret_stand_idle	: default
 	}
