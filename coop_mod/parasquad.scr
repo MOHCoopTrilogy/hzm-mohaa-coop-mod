@@ -9,14 +9,30 @@
 // driven here; member 5 (medic) keeps its own tend/advance loop and only counts for safety.
 // Who is who (paradrop.scr, by door order): 1 BAR, 2 Thompson, 3 M1 Garand - he carries the
 // .30 cal -, 4 Springfield sniper, 5 medic.
+//   POSTS    every man has a POST: a point his leash is tethered to (the engine's own `tether`:
+//            Actor::Think puts m_vHome on the tether entity every frame). The engine's cover and
+//            turret thinks path, hunt and take cover nodes only INSIDE the leash round that point
+//            (SetPathWithLeash / MovePathWithLeash), so where the post is, is where he fights. The
+//            brain moves posts; the man follows. (Until 2026-10-12 the leash was 640u and was reset
+//            to wherever he stood - on every order here and by the engine on every new enemy - so
+//            it never held anyone: that was the "brainless rush", 1000u past the players.)
 //   FOLLOW   no contact for 8s: wedge behind the anchor (the trooper who threw the smoke, else the
 //            nearest player), the two fire teams (1+3 / 2+4) moving on alternate ticks = bounding.
-//   CONTACT  engine combat (type_attack cover, own prone/crouch legs in anim/attack.scr) plus:
-//            - COVER: a man with a clear line to his enemy and nothing in front of him at waist
-//              height moves (crouched) to the nearest spot with a low obstacle between him and the
-//              enemy that he can still shoot over;
-//            - BOUND: a man left > 900u behind the anchor moves up while the other fire team
-//              suppresses (suppresschance 100 for the move);
+//   CONTACT  the wedge turns to face the enemy and stays BEHIND / BESIDE the players - nobody goes
+//            past them toward the enemy; a man who is, comes back. Engine combat inside the leash
+//            (type_attack cover: cover nodes, peeking; own prone/crouch legs in anim/attack.scr) plus:
+//            - BASE OF FIRE: the .30 cal with the enemy in its arc, else the BAR man with a line to
+//              him, else two riflemen with one. No base of fire = nobody moves up;
+//            - BOUND: with a base of fire up, the men who are behind their place move up one fire
+//              team at a time, 300u at most, to cover where there is some, while the base
+//              suppresses (the gun fires bursts for the move, the others suppresschance 100);
+//            - COVER: a man in plain view of the enemy goes (crouched) to the nearest cover - low
+//              cover he can fire over first, else a corner - and his post goes with him; with no
+//              cover in reach he gets small where he is;
+//            - PINNED: a man who has just been hit stays down where he is (or crawls to cover
+//              within 130u) for 4s: no orders;
+//            - MAN DOWN: for 6s nobody bounds, everybody in view takes cover;
+//            - LANES: a man in front of a player's muzzle steps out of it; no post in a doorway;
 //            - GRENADES: scripted throw (calcgrenadetoss + the retail throw anim), never the
 //              engine's own decision (ammo_grenade stays 0 otherwise);
 //            - ROOM CLEARING: an enemy under a roof and walled in -> two men stack outside the
@@ -82,17 +98,27 @@ member local.k local.sid:{
 	self.coop_psqMounted = 0
 	self.coop_psqNadeT = 0
 	self.coop_psqNoPath = 0
+	self.coop_psqNoGo = 0
+	self.coop_psqWoFail = 0
+	self.coop_psqLost = 0
+	self.coop_psqPinT = 0
+	self.coop_psqSideT = 0
+	self.coop_psqCovT = 0
+	self.coop_psqHp = self.health
 	self type_attack "cover"
-	self.leash = 640
-	self.mindist = 256
-	self.maxdist = 1300
+	self.mindist = 128
+	// maxdist: an American whose enemy is beyond it always CHARGES (Actor::Turret_SelectState - the "hold at
+	// your leash" branch is German-only). 3000 = he fights from where he is posted.
+	self.maxdist = 3000
 	self.interval = 128			// spacing the engine keeps from squadmates while moving
 	self.nosurprise = 1
 	self.ammo_grenade = 0			// no engine-decided throws - only the checked scripted ones below
+	self gren_awareness 90			// he sees a grenade land (engine default 20%): the engine's own grenade think gets him away
 	self.suppresschance = 40
 	self.coop_paraProne = 25		// anim/attack.scr: own prone leg at long range
 	self.coop_paraCrouch = 45		// own crouch leg (raised while he holds a low-cover spot)
 	self.coop_paraBrain = 1			// set LAST: attack.scr reads the two values above once this is 1
+	waitthread post self self.origin 240
 	if( local.sid != NIL ){
 		level.coop_psqM[local.sid][local.k] = self
 		// the .30 cal is the RIFLEMAN's (member 3, the M1 Garand): the BAR man (member 1) keeps his BAR
@@ -101,6 +127,22 @@ member local.k local.sid:{
 		// never take it).
 		if( local.k == 3 ){ thread gunner self local.sid }
 	}
+}end
+
+
+// His POST: the point his leash is tethered to (see the header). local.leash = how far from it the engine may
+// take him. Never `resetleash` on a trooper - it clears the tether (Actor::EventResetLeash).
+post local.a local.pos local.leash:{
+	if( local.a == NIL || local.a == NULL ){ end }
+	local.e = local.a.coop_psqPost
+	if( local.e == NIL || local.e == NULL ){
+		local.e = spawn script_origin
+		local.e.origin = local.pos
+		local.a.coop_psqPost = local.e
+		local.a tether local.e
+	}
+	local.e.origin = local.pos
+	local.a.leash = local.leash
 }end
 
 
@@ -167,6 +209,10 @@ brain local.sid:{
 	local.cc = 0
 	local.wave = 0
 	local.clrTick = 0
+	local.wasContact = 0
+	local.prevAlive = 0
+	local.shaken = 0
+	local.axis = NIL
 	waitthread dbg ( "brain start sid=" + local.sid )
 	while( 1 ){
 		wait 1
@@ -175,7 +221,14 @@ brain local.sid:{
 		for( local.k = 1; local.k <= 5; local.k++ ){
 			local.a = level.coop_psqM[local.sid][local.k]
 			if( local.a != NIL && local.a != NULL ){
-				if( isAlive local.a ){ local.alive++ }
+				if( isAlive local.a ){
+					local.alive++
+				} else {
+					// a dead man's post goes
+					local.pe = local.a.coop_psqPost
+					if( local.pe != NIL && local.pe != NULL ){ local.pe remove }
+					local.a.coop_psqPost = NIL
+				}
 			}
 		}
 		if( local.alive == 0 && ( level.time - level.coop_psqT0[local.sid] ) > 45 ){
@@ -183,6 +236,12 @@ brain local.sid:{
 			end
 		}
 		if( local.alive == 0 ){ continue }
+		if( local.alive < local.prevAlive ){
+			// MAN DOWN: six seconds in which nobody moves up and everybody in view gets behind something
+			local.shaken = level.time + 6
+			waitthread dbg ( "tac mandown alive=" + local.alive )
+		}
+		local.prevAlive = local.alive
 
 		// ---- anchor + facing ----
 		local.anc = waitthread anchor local.sid
@@ -238,6 +297,44 @@ brain local.sid:{
 		local.inContact = 0
 		if( ( level.time - local.lastContact ) < 8 ){ local.inContact = 1 }
 
+		// ---- the way the fight faces: toward the nearest known enemy; it turns only when he is more than 55
+		// degrees off it (a wedge that swung with every new target would have the men running under fire)
+		if( local.thr != NIL ){
+			local.v = local.thr - local.apos
+			local.v[2] = 0
+			if( vector_length local.v > 32 ){
+				local.va = vector_toangles local.v
+				if( local.axis == NIL ){ local.axis = local.va[1] }
+				local.df = local.va[1] - local.axis
+				while( local.df > 180 ){ local.df = local.df - 360 }
+				while( local.df < ( 0 - 180 ) ){ local.df = local.df + 360 }
+				if( local.df < 0 ){ local.df = 0 - local.df }
+				if( local.df > 55 ){ local.axis = local.va[1] }
+			}
+		}
+		if( local.inContact == 0 ){ local.axis = NIL }
+		local.cyaw = local.ayaw
+		if( local.axis != NIL ){ local.cyaw = local.axis }
+		local.cfw = angles_toforward ( 0 local.cyaw 0 )
+
+		// ---- first contact: every man's post is where he stands (nobody runs to a slot under fire) ----
+		if( local.inContact == 1 && local.wasContact == 0 ){
+			for( local.k = 1; local.k <= 5; local.k++ ){
+				local.a = level.coop_psqM[local.sid][local.k]
+				if( local.a == NIL || local.a == NULL ){ continue }
+				if( !isAlive local.a || local.a.coop_psqMounted == 1 || local.k == 5 ){ continue }
+				local.a.coop_psqHp = local.a.health
+				waitthread post local.a local.a.origin 180
+			}
+			waitthread dbg ( "tac contact thr=" + local.thr )
+		}
+		local.wasContact = local.inContact
+
+		// ---- who suppresses? ----
+		local.base = 0
+		if( local.inContact == 1 && local.thr != NIL ){ local.base = waitthread baseOfFire local.sid local.thr }
+		level.coop_psqBase[local.sid] = local.base
+
 		if( local.phase == 1 ){ local.phase = 0 } else { local.phase = 1 }
 		local.boundTick++
 		if( local.boundTick >= 3 ){
@@ -248,6 +345,7 @@ brain local.sid:{
 		if( local.cc > 4 ){ local.cc = 1 }
 
 		// ---- per member ----
+		local.movers = 0
 		for( local.k = 1; local.k <= 4; local.k++ ){
 			local.a = level.coop_psqM[local.sid][local.k]
 			if( !( waitthread usable local.a ) ){ continue }
@@ -258,10 +356,11 @@ brain local.sid:{
 			if( local.inContact == 0 ){
 				// FOLLOW: fire teams leapfrog on alternate ticks; a straggler always moves
 				local.a.coop_paraCrouch = 45
-				local.a resetleash
+				local.a.coop_paraProne = 25
+				local.a.coop_psqHp = local.a.health
 				if( local.da > 240 ){
 					if( local.team == local.phase || local.da > 700 ){
-						local.slot = waitthread slotPos local.a local.k local.apos local.ayaw
+						local.slot = waitthread slotPos local.a local.k local.apos local.ayaw 0
 						if( local.slot != NIL ){
 							local.ds = waitthread flatDist local.a.origin local.slot
 							if( local.ds > 120 ){
@@ -283,22 +382,132 @@ brain local.sid:{
 									local.a.coop_psqNoPath = 0
 									thread walkOut local.a local.slot
 								} else {
+									waitthread post local.a local.slot 320
 									local.a runto local.slot
 								}
 							}
 						}
 					}
 				}
-			} else {
-				if( local.da > 900 && local.team == local.boundTeam ){
-					// BOUND: this team moves up, the other one covers it
-					local.slot = waitthread slotPos local.a local.k local.apos local.ayaw
-					if( local.slot != NIL ){
-						thread overwatch local.sid local.team 3
-						thread moveTo local.a local.slot 3.0 0 "bound"
+				continue
+			}
+
+			// ---- CONTACT ----
+			// hit since the last look: PINNED for 4s - he stays down, and gets no order
+			if( local.a.health < ( local.a.coop_psqHp - 10 ) ){
+				if( level.time >= local.a.coop_psqPinT ){ waitthread dbg ( "tac pinned k=" + local.k + " hp=" + local.a.health ) }
+				local.a.coop_psqPinT = level.time + 4
+			}
+			local.a.coop_psqHp = local.a.health
+			// what is between him and the enemy (0 = nothing: he is in plain view)
+			local.c = 3
+			if( local.thr != NIL ){ local.c = waitthread cov local.a.origin ( local.thr + ( 0 0 56 ) ) }
+			if( level.time < local.a.coop_psqPinT ){
+				local.a.coop_paraCrouch = 100
+				if( local.c == 0 && level.time >= local.a.coop_psqCovT ){
+					local.a.coop_psqCovT = level.time + 4
+					thread coverCheck local.a 130
+				}
+				continue
+			}
+			local.slot = waitthread slotPos local.a local.k local.apos local.cyaw 1
+			if( local.slot == NIL ){ continue }
+			local.ds = waitthread flatDist local.a.origin local.slot
+			// past the players, toward the enemy? Then he comes back.
+			local.v = local.a.origin - local.apos
+			local.v[2] = 0
+			local.al = vector_dot local.v local.cfw
+			local.back = 0
+			if( local.al > 140 ){ local.back = 1 }
+			local.go = 0
+			if( local.back == 1 || local.ds > 340 ){
+				// he is not where he belongs. Coming back, or catching up from far behind, he always may; moving UP
+				// only with a base of fire, his own fire team's turn, two men at most, and nobody just hit
+				if( local.back == 1 || local.da > 1100 ){ local.go = 1 }
+				if( local.go == 0 && local.base >= 1 && level.time >= local.shaken && local.team == local.boundTeam && local.movers < 2 ){ local.go = 1 }
+			}
+			if( local.go == 1 ){
+				local.movers++
+				thread bound local.a local.sid local.slot local.thr local.back
+				continue
+			}
+			if( local.c == 0 ){
+				// in plain view: one man a tick looks for cover (every man, when one of them has just gone down)
+				if( local.k == local.cc || level.time < local.shaken ){
+					if( level.time >= local.a.coop_psqCovT ){
+						local.a.coop_psqCovT = level.time + 3
+						thread coverCheck local.a 200
 					}
-				} else if( local.k == local.cc ){
-					thread coverCheck local.a
+				}
+			} else if( local.c == 1 ){
+				local.a.coop_paraCrouch = 100		// low cover in front of him: down behind it between shots
+			} else {
+				local.a.coop_paraCrouch = 45
+			}
+		}
+
+		// ---- the medic's leash is tethered behind the players: he fights from there and does not run at the enemy.
+		// (His own loop in paradrop.scr still runs him to a patient - a move order is not leash-bound.)
+		local.a = level.coop_psqM[local.sid][5]
+		if( local.a != NIL && local.a != NULL ){
+			if( isAlive local.a ){
+				local.mp = local.apos - ( vector_scale local.cfw 220 )
+				waitthread post local.a local.mp 400
+			}
+		}
+
+		// ---- out of the players' line of fire: in a fight, or while the player is firing ----
+		for( local.k = 1; local.k <= 4; local.k++ ){
+			local.a = level.coop_psqM[local.sid][local.k]
+			if( !( waitthread usable local.a ) ){ continue }
+			if( level.time < local.a.coop_psqSideT ){ continue }
+			local.p = waitthread inFire local.a.origin
+			if( local.p == NIL ){ continue }
+			if( local.inContact != 1 && local.p.fireheld != 1 ){ continue }
+			local.fw = angles_toforward ( 0 local.p.viewangles[1] 0 )
+			local.v = local.a.origin - local.p.origin
+			local.v[2] = 0
+			local.al = vector_dot local.v local.fw
+			local.sd = local.v - ( vector_scale local.fw local.al )
+			if( vector_length local.sd < 2 ){ local.sd = angles_toforward ( 0 ( local.p.viewangles[1] - 90 ) 0 ) }
+			local.sd = vector_normalize local.sd
+			local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.a.origin + ( vector_scale local.sd 110 ) + ( 0 0 40 ) )
+			if( local.g == NIL ){ continue }
+			if( waitthread tight local.g ){ continue }
+			local.a.coop_psqSideT = level.time + 5
+			waitthread dbg ( "tac lane k=" + local.k + " to=" + local.g )
+			thread moveTo local.a local.g 1.5 0 "lane"
+		}
+
+		// ---- and out of the .30 cal's: a man in front of its muzzle silences it (mgHold holds the fire for him) ----
+		local.gn = level.coop_psqM[local.sid][3]
+		if( local.gn != NIL && local.gn != NULL ){
+			if( isAlive local.gn && local.gn.coop_psqMounted == 1 && local.gn.coop_psqMgGun != NIL ){
+				local.gd = angles_toforward ( 0 local.gn.coop_psqMgYaw 0 )
+				for( local.k = 1; local.k <= 4; local.k++ ){
+					local.a = level.coop_psqM[local.sid][local.k]
+					if( local.k == 3 ){ continue }
+					if( !( waitthread usable local.a ) ){ continue }
+					if( level.time < local.a.coop_psqSideT ){ continue }
+					local.v = local.a.origin - local.gn.coop_psqMgGun
+					local.v[2] = 0
+					local.al = vector_dot local.v local.gd
+					if( local.al <= 0 || local.al > 900 ){ continue }
+					local.sd = local.v - ( vector_scale local.gd local.al )
+					local.lat = vector_length local.sd
+					// (the gun's whole traverse at his range, and a man's width)
+					local.need = 80 + ( local.al * 0.25 )
+					if( local.need > 260 ){ local.need = 260 }
+					if( local.lat >= local.need ){ continue }
+					if( local.lat < 2 ){ local.sd = angles_toforward ( 0 ( local.gn.coop_psqMgYaw - 90 ) 0 ) }
+					local.sd = vector_normalize local.sd
+					local.step = ( local.need - local.lat ) + 40
+					if( local.step > 220 ){ local.step = 220 }
+					local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.a.origin + ( vector_scale local.sd local.step ) + ( 0 0 40 ) )
+					if( local.g == NIL ){ continue }
+					local.a.coop_psqSideT = level.time + 4
+					waitthread dbg ( "tac gunlane k=" + local.k + " lat=" + local.lat + " to=" + local.g )
+					thread moveTo local.a local.g 2.0 0 "gunlane"
 				}
 			}
 		}
@@ -330,9 +539,9 @@ brain local.sid:{
 		if( local.inContact == 1 && ( level.time - local.lastNade ) >= 9 ){
 			if( waitthread tryGrenade local.sid ){ local.lastNade = level.time }
 		}
-		// ---- room clearing (one per squad per 30s) ----
+		// ---- room clearing (one per squad per 30s): only with a base of fire, and not with a man just down ----
 		local.clrTick++
-		if( local.clrTick >= 3 && local.inContact == 1 && ( level.time - local.lastClear ) >= 30 ){
+		if( local.clrTick >= 3 && local.inContact == 1 && ( level.time - local.lastClear ) >= 30 && local.base >= 1 && level.time >= local.shaken ){
 			local.clrTick = 0
 			if( waitthread tryClear local.sid local.apos ){ local.lastClear = level.time }
 		}
@@ -341,10 +550,16 @@ brain local.sid:{
 
 
 // wedge slot behind the anchor, grounded and reachable, or NIL
-slotPos local.a local.k local.apos local.ayaw:{
+slotPos local.a local.k local.apos local.ayaw local.fight:{
 	local.back = 170
 	local.side = 150
 	if( local.k >= 3 ){ local.back = 320; local.side = 240 }
+	if( local.fight == 1 ){
+		// in a fight the wedge is flatter and wider: a firing line beside and behind the players
+		local.back = 90
+		local.side = 190
+		if( local.k >= 3 ){ local.back = 200; local.side = 330 }
+	}
 	if( local.k == 1 || local.k == 3 ){ local.side = 0 - local.side }
 	local.fwd = angles_toforward ( 0 local.ayaw 0 )
 	local.rgt = angles_toforward ( 0 ( local.ayaw - 90 ) 0 )
@@ -353,11 +568,19 @@ slotPos local.a local.k local.apos local.ayaw:{
 	// path test, so it refused nearly every slot in the 2026-10-04 run. runto paths; a dead-end order
 	// simply stalls and the next tick re-plans.
 	local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.p + ( 0 0 48 ) )
-	if( local.g != NIL ){ end local.g }
+	if( local.g != NIL ){
+		local.dz = local.g[2] - local.apos[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz < 120 ){ end local.g }		// not the roof or the cellar under that point
+	}
 	// half-size wedge
 	local.p = local.apos - ( vector_scale local.fwd ( local.back * 0.5 ) ) + ( vector_scale local.rgt ( local.side * 0.5 ) )
 	local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.p + ( 0 0 48 ) )
-	if( local.g != NIL ){ end local.g }
+	if( local.g != NIL ){
+		local.dz = local.g[2] - local.apos[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz < 120 ){ end local.g }
+	}
 }end NIL
 
 
@@ -366,9 +589,12 @@ slotPos local.a local.k local.apos local.ayaw:{
 moveTo local.a local.pos local.tmo local.crouch local.why:{
 	if( local.a == NIL || local.a == NULL ){ end }
 	if( !isAlive local.a ){ end }
+	if( local.a.coop_psqBusy == 1 || local.a.coop_psqMounted == 1 ){ end }	// somebody else has him
 	local.a.coop_psqBusy = 1
 	local.a.enableEnemy = 0
 	local.a.movedoneradius = 40
+	local.d0 = vector_length( local.a.origin - local.pos )
+	waitthread post local.a local.pos 240
 	if( local.crouch == 1 ){ local.a crouchto local.pos } else { local.a runto local.pos }
 	local.t = 0
 	while( local.t < local.tmo ){
@@ -382,25 +608,108 @@ moveTo local.a local.pos local.tmo local.crouch local.why:{
 			if( ( local.v[0] * local.v[0] ) + ( local.v[1] * local.v[1] ) < 100 ){ break }
 		}
 	}
+	// his post is where he got to (the leash holds him there; see the header)
+	waitthread post local.a local.a.origin 170
 	local.a.enableEnemy = 1
 	local.a forceactivate
-	local.a resetleash
 	local.a.coop_psqBusy = 0
+	// an order that got him nowhere and found no path (no pathnode in his 256u cell): the second one in a row
+	// and he walks out in a straight line (walkOut); if that fails too he is LOST (see walkOut)
+	if( local.d0 > 100 && vector_length( local.a.origin - local.pos ) > ( local.d0 - 24 ) && local.a.pathdist == 0 ){
+		local.a.coop_psqNoGo++
+		if( local.a.coop_psqNoGo >= 2 ){
+			local.a.coop_psqNoGo = 0
+			thread walkOut local.a local.pos
+		}
+	} else {
+		local.a.coop_psqNoGo = 0
+		local.a.coop_psqWoFail = 0
+		local.a.coop_psqLost = 0
+	}
 	waitthread dbg ( "move k=" + local.a.coop_psqK + " why=" + local.why + " left=" + ( vector_length( local.a.origin - local.pos ) ) )
 }end
 
 
-// the fire team NOT moving lays down suppressing fire for the move
-overwatch local.sid local.movingTeam local.secs:{
+// a line of fire from local.p to an enemy standing at local.thr: clear to within 96u of him
+lineTo local.p local.thr:{
+	local.e = local.thr + ( 0 0 40 )
+	local.d = vector_length( local.e - local.p )
+	if( local.d < 97 ){ end 1 }
+	local.tr = traced local.p local.e 1023 ( 0 0 0 ) ( 0 0 0 ) 270337
+	if( ( local.tr["fraction"] * local.d ) >= ( local.d - 96 ) ){ end 1 }
+}end 0
+
+
+// who suppresses while the others move: 2 = the .30 cal is up with the enemy in its arc and a clear line, 1 = the
+// BAR man has a line to him, or two of the others have; 0 = nobody (then nobody moves up)
+baseOfFire local.sid local.thr:{
+	local.g = level.coop_psqM[local.sid][3]
+	if( local.g != NIL && local.g != NULL ){
+		if( isAlive local.g && local.g.coop_psqMounted == 1 && local.g.coop_psqMgGun != NIL ){
+			local.v = local.thr - local.g.coop_psqMgGun
+			local.v[2] = 0
+			local.va = vector_toangles local.v
+			local.off = local.va[1] - local.g.coop_psqMgYaw
+			while( local.off > 180 ){ local.off = local.off - 360 }
+			while( local.off < ( 0 - 180 ) ){ local.off = local.off + 360 }
+			if( local.off < 0 ){ local.off = 0 - local.off }
+			if( local.off <= local.g.coop_psqMgArc ){
+				if( waitthread lineTo ( local.g.coop_psqMgGun + ( 0 0 4 ) ) local.thr ){ end 2 }
+			}
+		}
+	}
+	local.n = 0
 	for( local.k = 1; local.k <= 4; local.k++ ){
 		local.a = level.coop_psqM[local.sid][local.k]
-		if( local.a == NIL || local.a == NULL ){ continue }
-		if( !isAlive local.a ){ continue }
-		local.team = 0
-		if( local.k == 1 || local.k == 3 ){ local.team = 1 }
-		if( local.team != local.movingTeam ){ local.a.suppresschance = 100 }
+		if( !( waitthread usable local.a ) ){ continue }
+		if( !( waitthread lineTo ( local.a.origin + ( 0 0 56 ) ) local.thr ) ){ continue }
+		if( local.k == 1 ){ end 1 }
+		local.n++
 	}
-	waitthread dbg ( "overwatch movingTeam=" + local.movingTeam )
+	if( local.n >= 2 ){ end 1 }
+}end 0
+
+
+// ONE BOUND toward his place: 300u at most, to cover where there is some near the end of it, while the base of
+// fire suppresses (the gun: bursts for the next 4s, mgHold; the others: suppresschance 100). local.back = 1: he is
+// past the players and is coming back.
+bound local.a local.sid local.slot local.thr local.back:{
+	if( !( waitthread usable local.a ) ){ end }
+	local.v = local.slot - local.a.origin
+	local.v[2] = 0
+	local.len = vector_length local.v
+	local.to = local.slot
+	if( local.len > 300 ){
+		local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.a.origin + ( vector_scale local.v ( 300.0 / local.len ) ) + ( 0 0 48 ) )
+		if( local.g != NIL ){ local.to = local.g }
+	}
+	local.cv = 0
+	if( local.thr != NIL ){
+		local.eye = local.thr + ( 0 0 56 )
+		// never nearer the enemy than the players are, less 100u
+		local.ap = level.coop_psqApos[local.sid]
+		local.lim = waitthread flatDist local.ap local.thr
+		local.lim = local.lim - 100
+		local.c = waitthread coverNear local.to local.eye local.a 130 local.lim
+		if( local.c != NIL ){ local.to = local.c; local.cv = 1 }
+	}
+	level.coop_psqSupT[local.sid] = level.time + 4
+	thread overwatch local.sid local.a 3.5
+	waitthread ev "bound" local.a
+	waitthread dbg ( "tac bound k=" + local.a.coop_psqK + " back=" + local.back + " cover=" + local.cv + " base=" + level.coop_psqBase[local.sid] + " dist=" + ( vector_length( local.to - local.a.origin ) ) )
+	waitthread moveTo local.a local.to 3.5 0 "bound"
+	if( local.a == NULL ){ end }
+	if( isAlive local.a && local.cv == 1 ){ local.a.coop_paraCrouch = 65 }
+}end
+
+
+// the others lay down suppressing fire while local.mover moves
+overwatch local.sid local.mover local.secs:{
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.a = level.coop_psqM[local.sid][local.k]
+		if( local.a == NIL || local.a == NULL || local.a == local.mover ){ continue }
+		if( isAlive local.a ){ local.a.suppresschance = 100 }
+	}
 	wait local.secs
 	for( local.k = 1; local.k <= 4; local.k++ ){
 		local.a = level.coop_psqM[local.sid][local.k]
@@ -414,24 +723,39 @@ overwatch local.sid local.movingTeam local.secs:{
 //====================================================================
 // COVER
 //====================================================================
-coverCheck local.a:{
+coverCheck local.a local.maxr:{
 	if( !( waitthread usable local.a ) ){ end }
+	if( local.maxr == NIL ){ local.maxr = 200 }
+	local.eye = NIL
 	local.e = local.a.enemy
-	if( local.e == NIL || local.e == NULL ){ end }
-	if( !isAlive local.e ){ end }
+	if( local.e != NIL && local.e != NULL ){
+		if( isAlive local.e ){ local.eye = local.e.origin + ( 0 0 56 ) }
+	}
+	if( local.eye == NIL ){
+		local.t = level.coop_psqThreat[local.a.coop_psqSid]
+		if( local.t != NIL ){ local.eye = local.t + ( 0 0 56 ) }
+	}
+	if( local.eye == NIL ){ end }
 	if( local.a.position == "prone" ){ end }	// prone is already a small target
-	local.eye = local.e.origin + ( 0 0 56 )
-	if( waitthread lowCoverAt local.a.origin local.eye ){
-		local.a.coop_paraCrouch = 65
+	local.c = waitthread cov local.a.origin local.eye
+	if( local.c == 1 ){ local.a.coop_paraCrouch = 100; end }
+	if( local.c >= 2 ){ end }
+	local.lim = waitthread flatDist local.a.origin local.eye
+	local.lim = local.lim - 64		// never more than 64u toward him to get there
+	local.spot = waitthread coverNear local.a.origin local.eye local.a local.maxr local.lim
+	if( local.spot == NIL ){
+		// nothing to get behind in reach: he gets small where he is
+		local.a.coop_paraCrouch = 100
+		local.a.coop_paraProne = 60
+		waitthread dbg ( "tac nocover k=" + local.a.coop_psqK )
 		end
 	}
-	if( !( local.a cansee local.e ) ){ end }	// no line to him either: hidden enough
-	local.spot = waitthread findCover local.a local.e
-	if( local.spot == NIL ){ end }
 	local.a.coop_paraCrouch = 65
 	waitthread ev "cover" local.a
 	waitthread dbg ( "cover k=" + local.a.coop_psqK + " from=" + local.a.origin + " to=" + local.spot )
 	waitthread moveTo local.a local.spot 2.5 1 "cover"
+	if( local.a == NULL ){ end }
+	if( isAlive local.a ){ waitthread post local.a local.a.origin 120 }
 }end
 
 
@@ -448,28 +772,86 @@ lowCoverAt local.g local.eye:{
 }end 1
 
 
-findCover local.a local.e:{
-	local.eye = local.e.origin + ( 0 0 56 )
-	local.de = waitthread flatDist local.a.origin local.e.origin
-	local.va = vector_toangles ( local.e.origin - local.a.origin )
-	local.yaw0 = local.va[1]
+// what a man standing at local.g has between him and an enemy's eye at local.eye (solid world only):
+// 0 = nothing - he is in plain view; 1 = LOW cover: hidden to the waist by something within 72u that he can fire
+// over; 2 = out of sight behind something within 220u (a corner, a wall); 3 = out of sight, the blocker far off
+cov local.g local.eye:{
+	if( waitthread lowCoverAt local.g local.eye ){ end 1 }
+	local.p = local.g + ( 0 0 44 )
+	local.d = vector_length( local.eye - local.p )
+	if( local.d < 1 ){ end 0 }
+	local.tr = traced local.p local.eye 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["fraction"] >= 1.0 ){ end 0 }
+	local.d1 = local.tr["fraction"] * local.d
+	local.q = local.g + ( 0 0 70 )
+	local.tr = traced local.q local.eye 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["fraction"] >= 1.0 ){ end 0 }
+	if( local.d1 < 220 ){ end 2 }
+}end 3
+
+
+// a doorway, a corridor, a gap: something within 56u on BOTH sides at chest height, along either axis
+tight local.g:{
+	local.c = local.g + ( 0 0 40 )
+	for( local.j = 0; local.j < 2; local.j++ ){
+		local.d = angles_toforward ( 0 ( local.j * 90 ) 0 )
+		local.n = ( 0 0 0 ) - local.d
+		local.w1 = waitthread mgFree local.c local.d 56
+		local.w2 = waitthread mgFree local.c local.n 56
+		if( local.w1 < 55 && local.w2 < 55 ){ end 1 }
+	}
+}end 0
+
+
+// the player whose muzzle local.g is in front of (within 420u down his aim, 30u + 4% to the side), or NIL
+inFire local.g:{
+	local.r = NIL
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( !isAlive local.p || local.p.dmteam == "spectator" ){ continue }
+		local.fw = angles_toforward ( 0 local.p.viewangles[1] 0 )
+		local.v = local.g - local.p.origin
+		local.dz = local.v[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz > 90 ){ continue }
+		local.v[2] = 0
+		local.al = vector_dot local.v local.fw
+		if( local.al < 20 || local.al > 420 ){ continue }
+		local.lat = vector_length( local.v - ( vector_scale local.fw local.al ) )
+		if( local.lat < ( 30 + ( local.al * 0.04 ) ) ){ local.r = local.p; break }
+	}
+}end local.r
+
+
+// the nearest cover round local.ctr (rings of 64u out to local.maxr) against an enemy's eye at local.eye: low cover
+// he can fire over first, a corner second; never where a mate or a player already is, never in a doorway, never in
+// front of a player's muzzle, never nearer the enemy than local.lim. NIL = none.
+coverNear local.ctr local.eye local.a local.maxr local.lim:{
 	local.best = NIL
 	local.bs = 999999
-	for( local.r = 112; local.r <= 240; local.r = local.r + 128 ){
-		for( local.j = 0; local.j < 10; local.j++ ){
-			local.off = local.j * 36
-			local.c = local.a.origin + ( vector_scale ( angles_toforward ( 0 ( local.yaw0 + local.off ) 0 ) ) local.r )
+	for( local.r = 0; local.r <= local.maxr; local.r = local.r + 64 ){
+		for( local.j = 0; local.j < 8; local.j++ ){
+			if( local.r == 0 && local.j > 0 ){ break }
+			local.c = local.ctr + ( vector_scale ( angles_toforward ( 0 ( ( local.j * 45 ) + ( local.r * 0.3 ) ) 0 ) ) local.r )
 			local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
 			if( local.g == NIL ){ continue }
-			// never advance more than 64u toward him to get there
-			local.dg = waitthread flatDist local.g local.e.origin
-			if( local.dg < ( local.de - 64 ) ){ continue }
-			if( !( waitthread lowCoverAt local.g local.eye ) ){ continue }
+			local.dz = local.g[2] - local.ctr[2]
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			if( local.dz > 70 ){ continue }
+			local.dg = waitthread flatDist local.g local.eye
+			if( local.dg < local.lim ){ continue }
+			local.h = waitthread cov local.g local.eye
+			if( local.h != 1 && local.h != 2 ){ continue }
 			if( waitthread crowded local.g local.a 80 ){ continue }
-			local.s = vector_length( local.g - local.a.origin )
+			if( waitthread tight local.g ){ continue }
+			local.p = waitthread inFire local.g
+			if( local.p != NIL ){ continue }
+			local.s = local.r + ( vector_length( local.g - local.a.origin ) * 0.5 )
+			if( local.h == 2 ){ local.s = local.s + 90 }
 			if( local.s < local.bs ){ local.bs = local.s; local.best = local.g }
 		}
-		if( local.best != NIL ){ break }
+		if( local.best != NIL && local.r >= 64 ){ break }
 	}
 }end local.best
 
@@ -659,11 +1041,11 @@ tryClear local.sid local.apos:{
 		local.tgt = local.g
 	}
 	if( local.tgt == NIL ){ end 0 }
-	// entry pair: Thompson and Garand first, then the others (the gunner last)
+	// entry pair: the Thompson and the BAR first; the man with the .30 cal on his back and the sniper last
 	local.ord[1] = 2
-	local.ord[2] = 3
-	local.ord[3] = 4
-	local.ord[4] = 1
+	local.ord[2] = 1
+	local.ord[3] = 3
+	local.ord[4] = 4
 	local.m1 = NIL
 	local.m2 = NIL
 	for( local.i = 1; local.i <= 4; local.i++ ){
@@ -760,7 +1142,7 @@ enter local.a local.tgt:{
 		if( isAlive local.tgt ){ local.a attackentity local.tgt }
 	}
 	local.a forceactivate
-	local.a resetleash
+	waitthread post local.a local.a.origin 200
 	local.a.coop_psqBusy = 0
 }end
 
@@ -832,7 +1214,7 @@ gunner local.a local.sid:{
 			if( level.coop_psqApos[local.sid] != NIL ){
 				if( vector_length( local.a.origin - level.coop_psqApos[local.sid] ) > 700 ){ local.near = 0 }	// the search is round him: not while he is elsewhere
 			}
-			if( level.coop_psqHolding[local.sid] == 1 && local.a.coop_psqBusy != 1 && level.time >= local.cool && local.near == 1 ){
+			if( level.coop_psqHolding[local.sid] == 1 && local.a.coop_psqBusy != 1 && level.time >= local.cool && local.near == 1 && local.a.coop_psqBeltOut != 1 ){
 				local.f = waitthread mgPlan local.a local.sid
 				if( local.a == NULL ){ break }
 				if( local.f == 1 ){
@@ -850,11 +1232,11 @@ gunner local.a local.sid:{
 				}
 			}
 		} else {
-			local.fired = local.a.coop_psqMgFired
 			local.why = waitthread mgTend local.a local.sid
 			if( local.a == NULL ){ break }
 			if( local.why != "stay" ){
 				waitthread dbg ( "mg leave why=" + local.why )
+				if( local.why == "belt_out" ){ local.a.coop_psqBeltOut = 1 }	// no rounds left: a rifleman from here on
 				waitthread mgPackup local.a
 				local.gun = NIL
 				local.crate = NIL
@@ -890,8 +1272,9 @@ gunner local.a local.sid:{
 // trooper back on it - no other member runs the gunner thread - so it stays the players'. It goes
 // with the map; nothing else removes it.
 mgLeft local.gun local.fired:{
-	local.n = int( local.fired / 250 )
-	local.left = 250 - int( local.fired - ( local.n * 250 ) )
+	// what is left of the belt he was on: the engine counts his rounds (coopaibelt). 125 on an older game.dll.
+	local.left = waitthread coop_mod/parasquad_gun.scr::ammo local.gun
+	if( local.left == NIL ){ local.left = 125 }
 	if( local.left < 25 ){ local.left = 25 }
 	local.gun targettype "none"
 	local.gun stopFiring
@@ -1012,9 +1395,9 @@ mgFire local.gp local.aim local.kind:{
 		}
 		if( local.c < 0.6 ){ end 0 }
 	} else {
-		// the gun's pitch stops at about 20 degrees
+		// the gun's pitch stops at 12 degrees (pitchCaps in mgSetup)
 		if( local.dz < 0 ){ local.dz = 0 - local.dz }
-		if( local.dz > ( local.dist * 0.36 ) ){ end 0 }
+		if( local.dz > ( local.dist * 0.21 ) ){ end 0 }
 		local.e = local.aim + ( 0 0 40 )
 		local.tr = traced local.q local.e 1023 ( 0 0 0 ) ( 0 0 0 ) 270337
 		local.c = local.tr["fraction"]
@@ -1339,7 +1722,7 @@ mgTry local.a local.sid local.g local.aim local.kind local.bags local.tripod:{
 		local.sup = local.c0
 		local.sup[2] = local.s0 + 17.1		// the bipod hangs 17.1u below its origin: feet on the surface
 		local.gun = local.c0				// the gun turns about its origin: the bipod stands under it
-		local.gun[2] = local.s0 + 18.5
+		local.gun[2] = local.s0 + 17.8
 		waitthread mgSite local.a local.sid "A" local.g local.gun local.sup local.g local.fyaw ( local.s0 - local.g[2] ) local.aim local.kind
 		end
 	}
@@ -1399,7 +1782,7 @@ mgTry local.a local.sid local.g local.aim local.kind local.bags local.tripod:{
 	local.sup = local.g
 	local.sup[2] = local.low + 21.5 + 17.1		// the bags are 21.5u high
 	local.gun = local.g
-	local.gun[2] = local.low + 21.5 + 18.5
+	local.gun[2] = local.low + 21.5 + 17.8
 	waitthread mgSite local.a local.sid "C" local.g local.gun local.sup local.bag local.fyaw 0 local.aim local.kind
 }end
 
@@ -1410,6 +1793,9 @@ mgTry local.a local.sid local.g local.aim local.kind local.bags local.tripod:{
 mgPlan local.a local.sid:{
 	if( level.coop_psqPlanBusy == 1 ){ end 0 }
 	level.coop_psqPlanBusy = 1
+	// he is the planner's from here on: the brain gives a busy man no order. (A bound or a room-clearing order
+	// that started during the search took him off the walk-up - 2026-10-12, m3l2: "mg walk how=2 left=42 ok=0".)
+	local.a.coop_psqBusy = 1
 	local.t0 = level.time
 	local.apos = level.coop_psqApos[local.sid]
 	local.aim = waitthread mgAim local.sid
@@ -1449,6 +1835,40 @@ mgPlan local.a local.sid:{
 				waitframe
 				if( local.a == NULL ){ level.coop_psqPlanBusy = 0; end 0 }
 				if( !isAlive local.a ){ level.coop_psqPlanBusy = 0; end 0 }
+			}
+		}
+	}
+	if( level.coop_psqCn == 0 && local.kind != "advance" ){
+		// no place round him from which the gun sees the enemy himself: a place that covers the ground TOWARD him
+		// (800u clear down that line) is the next best thing - the gun is up when he shows
+		local.v = local.aim - local.apos
+		local.v[2] = 0
+		if( vector_length local.v > 200 ){
+			local.kind = "advance"
+			local.aim = local.apos + ( vector_scale ( vector_normalize local.v ) 1200 )
+			local.aim[2] = local.apos[2]
+			local.n = 0
+			for( local.r = 0; local.r <= 432; local.r = local.r + 72 ){
+				for( local.j = 0; local.j < 12; local.j++ ){
+					if( local.r == 0 && local.j > 0 ){ break }
+					local.c = local.ctr + ( vector_scale ( angles_toforward ( 0 ( ( local.j * 30 ) + ( local.r * 0.2 ) ) 0 ) ) local.r )
+					local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+					if( local.g == NIL ){ continue }
+					local.dz = local.g[2] - local.ctr[2]
+					if( local.dz < 0 ){ local.dz = 0 - local.dz }
+					if( local.dz > 120 ){ continue }
+					if( ( waitthread flatDist local.g local.apos ) > 520 ){ continue }
+					local.b = local.bags
+					if( local.r > 300 ){ local.b = 0 }
+					waitthread mgTry local.a local.sid local.g local.aim local.kind local.b local.tripod
+					local.n++
+					if( local.n >= 4 ){
+						local.n = 0
+						waitframe
+						if( local.a == NULL ){ level.coop_psqPlanBusy = 0; end 0 }
+						if( !isAlive local.a ){ level.coop_psqPlanBusy = 0; end 0 }
+					}
+				}
 			}
 		}
 	}
@@ -1494,7 +1914,7 @@ mgPlan local.a local.sid:{
 		local.a runto local.a.origin
 		local.a.enableEnemy = 1
 		local.a forceactivate
-		local.a resetleash
+		waitthread post local.a local.a.origin 200
 		local.a.coop_psqBusy = 0
 	}
 	// why the rest were refused
@@ -1593,7 +2013,7 @@ mgWalk local.a local.pos local.how local.via:{
 		if( local.ok != 1 ){
 			local.a.enableEnemy = 1
 			local.a forceactivate
-			local.a resetleash
+			waitthread post local.a local.a.origin 200
 			local.a.coop_psqBusy = 0
 		}
 	}
@@ -1614,7 +2034,7 @@ mgAbort local.a local.why:{
 		if( isAlive local.a ){
 			local.a.enableEnemy = 1
 			local.a forceactivate
-			local.a resetleash
+			waitthread post local.a local.a.origin 200
 		}
 		local.a.coop_psqBusy = 0
 	}
@@ -1654,7 +2074,7 @@ mgSetup local.a local.sid:{
 	// what the plan rests on is looked at once more, now that he is standing there: a surface that
 	// has gone (a door swung, a crate was pushed in) means no gun
 	local.chk = local.a.coop_psqMgSup
-	local.chk[2] = local.a.coop_psqMgGun[2] - 18.5
+	local.chk[2] = local.a.coop_psqMgGun[2] - 17.8
 	if( local.mode == "B" ){ local.chk[2] = local.a.coop_psqMgSup[2] - 49.4 }
 	if( local.mode == "C" ){ local.chk = local.a.coop_psqMgBag + ( 0 0 1 ) }
 	local.sz = waitthread mgSurf local.chk 10 14
@@ -1730,6 +2150,12 @@ mgSetup local.a local.sid:{
 	local.gun burstFireSettings 1.2 3.0 0.8 2.2
 	local.gun aibulletspread 300 300
 	local.gun maxYawOffset local.a.coop_psqMgArc
+	// level when nobody aims it. The engine lets an unmanned gun tip back to maxIdlePitch (-80 = barrel up,
+	// TurretGun::ThinkIdle); in the 0.3s of the set-down it tipped 13 degrees and, with no enemy, nothing ever
+	// levelled it: the grips sank 10u under the hands of a crouched gunner. 0 = it rests level, manned or left.
+	// pitch: 12 degrees either way. The engine holds his hands 39u behind the pivot at one height
+	// (Actor::ThinkHoldGun_TurretGun); every degree the gun tips takes the grips 0.7u away from them.
+	local.gun pitchCaps ( -12 12 0 )
 	// the turret's own cycle: track what he sees, then 5s on where he last saw it (a 96 x 40u
 	// patch), 3s watching it, then back to the middle
 	local.gun convergeTime 1.0
@@ -1737,6 +2163,27 @@ mgSetup local.a local.sid:{
 	local.gun suppressWaitTime 3
 	local.gun suppressWidth 96
 	local.gun suppressHeight 40
+	// the belt, the barrel and the true rate of fire: engine keys of game.dll 1.10.22 (weapturret.cpp, bug-3636..3639),
+	// set in a helper file because a command an older game.dll does not know fails the WHOLE file it stands in
+	// (TRAPS T1, bug-3423). He carries the belt in the gun and one more.
+	if( local.a.coop_psqBelt == NIL ){
+		local.a.coop_psqBelt = 250
+		local.a.coop_psqBelts = 1
+	}
+	local.a.coop_psqMgKeys = 0
+	local.a.coop_psqReload = 0
+	local.kk = waitthread coop_mod/parasquad_gun.scr::belt local.gun local.a.coop_psqBelt
+	if( local.kk == 1 ){
+		local.a.coop_psqMgKeys = 1
+		// with the keys he fires at the gun's own 10 rounds a second (without: one round a server frame, 40 a second,
+		// which is what the wide cone and the long bursts above were chosen for): bursts of 5-9, a tighter cone
+		local.gun burstFireSettings 0.5 0.9 1.0 2.2
+		local.gun aibulletspread 150 150
+	} else {
+		// older game.dll: the gun at least rests level (the engine tips an unmanned gun barrel-up - ThinkIdle - and in
+		// the 0.3s of the set-down it tipped 13 degrees and stayed there: the grips sank 10u under his hands)
+		local.gun maxIdlePitch 0
+	}
 	local.a.coop_psqGun = local.gun
 	waitthread mgLower local.gun local.a.coop_psqMgGun 10 0.3 0
 	if( local.a == NULL ){
@@ -1796,9 +2243,22 @@ mgTend local.a local.sid:{
 	if( level.coop_psqHolding[local.sid] != 1 ){
 		if( vector_length( local.apos - local.gun.origin ) > 560 ){ end "squad_moved_on" }
 	}
+	// the belt: out = the second belt goes in (4s with the gun silent), and when that is gone too he packs up
+	if( local.a.coop_psqMgKeys == 1 && local.a.coop_psqReload != 1 ){
+		local.am = waitthread coop_mod/parasquad_gun.scr::ammo local.gun
+		if( local.am != NIL ){
+			local.a.coop_psqBelt = local.am
+			if( local.am == 0 ){
+				if( local.a.coop_psqBelts < 1 ){ end "belt_out" }
+				local.a.coop_psqBelts--
+				thread mgReload local.a local.gun
+				end "stay"
+			}
+		}
+	}
 	// what the gun stands on is still there
 	if( local.a.coop_psqMgMode == "A" ){
-		local.chk = local.gun.origin - ( 0 0 18.5 )
+		local.chk = local.gun.origin - ( 0 0 17.8 )
 		local.sz = waitthread mgSurf local.chk 10 14
 		if( local.sz == NIL ){ end "support_gone" }
 		local.dz = local.sz - local.chk[2]
@@ -1845,24 +2305,61 @@ mgTend local.a local.sid:{
 }end "stay"
 
 
+// a new belt: the gun is silent for 4s (mgHold holds it), then it has 250 rounds again
+mgReload local.a local.gun:{
+	local.a.coop_psqReload = 1
+	waitthread dbg ( "mg newbelt left=" + local.a.coop_psqBelts )
+	wait 4
+	if( local.a == NULL || local.gun == NULL ){ end }
+	local.gun coopammo 250
+	local.a.coop_psqBelt = 250
+	local.a.coop_psqReload = 0
+}end
+
+
 // four times a second while he is on the gun: hold fire with a friend in front of the muzzle, and
 // suppress an enemy only the squad knows (the turret's own cycle covers the ones he sees himself)
 mgHold local.a local.gun local.sid:{
 	local.held = 0
 	local.next = level.time + 2
 	local.tgt = spawn script_origin
+	local.watch = 0
+	local.hot = 0
+	local.lastSee = level.time - 100
 	while( local.a != NULL && local.gun != NULL ){
 		if( !isAlive local.a ){ break }
 		if( local.a.coop_psqMounted != 1 || local.a.coop_psqGun != local.gun ){ break }
 		local.dir = angles_toforward ( 0 local.gun.angles[1] 0 )
 		local.blk = waitthread playerInFront local.gun.origin local.dir
 		if( local.blk != 1 ){ local.blk = waitthread mateInFront local.gun.origin local.dir local.sid local.a }
+		local.hw = "friend_in_front"
+		if( local.blk != 1 && local.a.coop_psqReload == 1 ){ local.blk = 1; local.hw = "new_belt" }
+		if( local.blk != 1 && local.a.coop_psqMgKeys == 1 ){
+			// the barrel: he stops at 45 of 100 and lets it bleed to 12 (the engine locks a cooked gun for 2s);
+			// while the squad is bounding on his fire he takes it to 70
+			local.ht = waitthread coop_mod/parasquad_gun.scr::heat local.gun
+			if( local.ht != NIL ){
+				local.cap = 45
+				local.st = level.coop_psqSupT[local.sid]
+				if( local.st != NIL ){
+					if( level.time < local.st ){ local.cap = 70 }
+				}
+				if( local.hot == 1 ){
+					if( local.ht > 12 ){ local.blk = 1; local.hw = "barrel_hot" } else { local.hot = 0 }
+				} else if( local.ht >= local.cap ){
+					local.hot = 1
+					local.blk = 1
+					local.hw = "barrel_hot"
+				}
+			}
+		}
 		if( local.blk == 1 && local.held != 1 ){
 			local.gun targettype "none"
 			local.gun stopFiring
 			local.gun clearAimTarget
 			local.held = 1
-			waitthread dbg "mg hold fire=friend_in_front"
+			local.watch = 0
+			waitthread dbg ( "mg hold fire=" + local.hw )
 		}
 		if( local.blk != 1 && local.held == 1 ){
 			local.gun targettype "auto"
@@ -1875,13 +2372,36 @@ mgHold local.a local.gun local.sid:{
 		if( local.e != NIL && local.e != NULL ){
 			if( isAlive local.e ){ local.own = 1 }
 		}
-		if( local.held != 1 && local.own == 1 ){
-			// a target of his own in sight: the turret's burst cycle is firing about 58% of the time
-			if( local.a cansee local.e ){ local.a.coop_psqMgFired = local.a.coop_psqMgFired + 1.6 }
+		local.sees = 0
+		if( local.own == 1 ){
+			if( local.a cansee local.e ){ local.sees = 1 }
+		}
+		if( local.sees == 1 ){ local.lastSee = level.time }
+		if( local.held != 1 && local.sees == 1 ){
+			// a target of his own in sight: the turret's own cycle tracks and fires (about 58% of the time)
+			if( local.watch == 1 ){
+				local.gun clearAimTarget
+				local.gun targettype "auto"
+				local.watch = 0
+				waitthread dbg "mg track"
+			}
+		}
+		if( local.held != 1 && local.watch != 1 && ( level.time - local.lastSee ) > 9 ){
+			// nobody in his sight for 9s (the turret has fired its 5s at where he lost him and waited its 3):
+			// he WATCHES - the gun level, down the middle of his arc. Left to itself the engine now turns the gun
+			// to a "default position" whose pitch points at the first player, wherever he is
+			// (TurretGun::AI_MoveToDefaultPosition), and the grips leave the gunner's hands.
+			local.wp = local.gun.origin + ( vector_scale ( angles_toforward ( 0 local.a.coop_psqMgYaw 0 ) ) 600 )
+			local.tgt.origin = local.wp
+			local.gun targettype "none"
+			local.gun stopFiring
+			local.gun setAimTarget local.tgt
+			local.watch = 1
+			waitthread dbg "mg watch"
 		}
 		if( local.held != 1 && level.time >= local.next ){
 			local.lt = level.coop_psqLastThr[local.sid]
-			if( local.own != 1 && local.lt != NIL ){
+			if( local.sees != 1 && local.lt != NIL ){
 				if( ( level.time - level.coop_psqLastThrT[local.sid] ) < 12 ){
 					// inside his arc, and the first 250u of the line free
 					local.v = local.lt - local.gun.origin
@@ -1918,29 +2438,43 @@ mgHold local.a local.gun local.sid:{
 						if( local.gun == NULL ){ break }
 						local.gun startFiring
 						waitthread dbg ( "mg suppress at=" + local.tgt.origin + " age=" + ( level.time - level.coop_psqLastThrT[local.sid] ) )
-						local.t = 0.8 + ( randomfloat 1.0 )
+						local.t = 0.6 + ( randomfloat 0.4 )
+						local.st = level.coop_psqSupT[local.sid]
+						if( local.st != NIL ){
+							if( level.time < local.st ){ local.t = 1.5 + ( randomfloat 1.0 ) }
+						}
 						while( local.t > 0 ){
 							wait 0.25
 							local.t = local.t - 0.25
-							if( local.a != NULL ){ local.a.coop_psqMgFired = local.a.coop_psqMgFired + 2.8 }
 							if( local.gun == NULL || local.a == NULL ){ break }
 							local.dir = angles_toforward ( 0 local.gun.angles[1] 0 )
 							if( waitthread playerInFront local.gun.origin local.dir ){ break }
 							if( waitthread mateInFront local.gun.origin local.dir local.sid local.a ){ break }
 						}
 						if( local.gun == NULL ){ break }
+						// the burst is over: he keeps the gun on that place (the watch), until he sees a man himself
 						local.gun stopFiring
-						local.gun clearAimTarget
-						local.gun targettype "auto"
+						local.watch = 1
 					}
 				}
 			}
 			local.next = level.time + 2 + ( randomfloat 2.5 )
+			// a bound is on (bound sets this): keep their heads down, burst on burst
+			local.st = level.coop_psqSupT[local.sid]
+			if( local.st != NIL ){
+				if( level.time < local.st ){ local.next = level.time + 0.5 }
+			}
 		}
 		wait 0.25
 	}
 	if( local.tgt != NULL ){ local.tgt remove }
-	if( local.gun != NULL && local.held == 1 ){ local.gun targettype "auto" }
+	if( local.gun != NULL ){
+		if( local.held == 1 || local.watch == 1 ){
+			local.gun stopFiring
+			local.gun clearAimTarget
+			local.gun targettype "auto"
+		}
+	}
 }end
 
 
@@ -1985,12 +2519,44 @@ mgPackup local.a:{
 		local.a unholster
 		local.a.enableEnemy = 1
 		local.a forceactivate
-		local.a resetleash
+		waitthread post local.a local.a.origin 200
 	}
 	local.a.coop_psqBusy = 0
 	waitthread dbg "mg packup k=1"
 }end
 
+
+
+// Is HE on the path network? 1 when the engine finds him a path to anywhere that is known to be on it: the point he
+// landed on (tested before the jump, paradrop.scr::coop_para_lz), a squad mate, the anchor. (A path search starts
+// in his own 256u map cell: with no pathnode there he has no path to anywhere - that is the man to rescue. A
+// destination in such a cell fails the same way and says nothing about him.)
+onNet local.a:{
+	local.sid = local.a.coop_psqSid
+	local.n = 0
+	local.t[1] = NIL
+	if( level.coop_paraLzN[local.sid] != NIL ){
+		local.lz = level.coop_paraLz[local.sid][local.a.coop_psqK]
+		if( local.lz != NIL ){ local.n++; local.t[local.n] = local.lz }
+	}
+	for( local.k = 1; local.k <= 5; local.k++ ){
+		local.m = level.coop_psqM[local.sid][local.k]
+		if( local.m == NIL || local.m == NULL || local.m == local.a ){ continue }
+		if( !isAlive local.m ){ continue }
+		if( local.n < 3 ){ local.n++; local.t[local.n] = local.m.origin }
+	}
+	if( level.coop_psqApos[local.sid] != NIL ){ local.n++; local.t[local.n] = level.coop_psqApos[local.sid] }
+	local.r = 0
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		if( vector_length( local.t[local.i] - local.a.origin ) < 150 ){ continue }
+		local.a runto local.t[local.i]
+		wait 0.3
+		if( local.a == NULL ){ end 0 }
+		if( !isAlive local.a ){ end 0 }
+		if( local.a.pathdist > 0 ){ local.r = 1; break }
+	}
+	local.a runto local.a.origin
+}end local.r
 
 
 // (see the brain, FOLLOW) a straight walk toward local.to for a man the path graph cannot move: all
@@ -2024,8 +2590,24 @@ walkOut local.a local.to:{
 	if( isAlive local.a ){
 		local.a.enableEnemy = 1
 		local.a forceactivate
-		local.a resetleash
+		waitthread post local.a local.a.origin 200
 	}
 	local.a.coop_psqBusy = 0
-	waitthread dbg ( "walkout k=" + local.a.coop_psqK + " goal=" + ( local.goal != NIL ) + " left=" + local.left )
+	// no walkable line, or the walk went nowhere: twice in a row and he is LOST - there is no way out of where
+	// he stands that this script can find. paradrop.scr's last resort (coop_paradrop_landing_check) reads this.
+	if( local.goal == NIL || local.left > 200 ){
+		local.a.coop_psqWoFail++
+		if( local.a.coop_psqWoFail >= 2 ){
+			// ...unless it is the PLACE he was sent to that is off the network, not he
+			local.a.coop_psqBusy = 1
+			local.net = waitthread onNet local.a
+			if( local.a == NULL ){ end }
+			local.a.coop_psqBusy = 0
+			if( local.net == 1 ){ local.a.coop_psqWoFail = 0 } else { local.a.coop_psqLost = 1 }
+		}
+	} else {
+		local.a.coop_psqWoFail = 0
+		local.a.coop_psqLost = 0
+	}
+	waitthread dbg ( "walkout k=" + local.a.coop_psqK + " goal=" + ( local.goal != NIL ) + " left=" + local.left + " lost=" + local.a.coop_psqLost )
 }end
