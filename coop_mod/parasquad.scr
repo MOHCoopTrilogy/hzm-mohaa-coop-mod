@@ -327,6 +327,9 @@ brain local.sid:{
 				waitthread post local.a local.a.origin 180
 			}
 			waitthread dbg ( "tac contact thr=" + local.thr )
+			// ...and for the next 4s every man in view looks for cover at once (one a second is the rule after that),
+			// and nobody bounds
+			if( level.time >= local.shaken ){ local.shaken = level.time + 4 }
 		}
 		local.wasContact = local.inContact
 
@@ -1182,8 +1185,8 @@ enter local.a local.tgt:{
 // While he is on it (mgHold): the turret's own track / suppress cycle fires at what he sees and
 // at where he last saw it; an enemy only the squad knows is suppressed in bursts by script; he
 // holds fire while a player or a squad mate is in front of the muzzle; he packs up when the squad
-// moves on, when the support is gone, or when the enemy has been out of his arc or masked for 15s
-// (the next search then re-sites him).
+// moves on, when the support is gone, or when the enemy has been out of his arc or masked for 25s
+// and the gun has not fired for 20 (the next search then re-sites him).
 // The bags, the mount and the ammo can are NOT solid: nothing put down can block anyone.
 // Test hooks (never set by the game): level.coop_psqMgForce = "A" / "B" / "C" allows only that mode.
 // Content masks: a SUPPORT is solid world geometry (1). SPACE is free only if nothing is in it -
@@ -1894,6 +1897,12 @@ mgPlan local.a local.sid:{
 		}
 		if( local.bi == 0 ){ break }
 		level.coop_psqCd[local.bi] = 1
+		// the seat he set out for and did not reach in the last minute: not again
+		if( local.a.coop_psqMgBadSeatT != NIL ){
+			if( level.time < local.a.coop_psqMgBadSeatT ){
+				if( vector_length( level.coop_psqCt[local.bi] - local.a.coop_psqMgBadSeat ) < 48 ){ continue }
+			}
+		}
 		local.tried++
 		local.how = waitthread mgReach local.a level.coop_psqCt[local.bi]
 		if( local.a == NULL ){ level.coop_psqPlanBusy = 0; end 0 }
@@ -1971,7 +1980,7 @@ mgLeg local.a local.pos local.straight local.rad local.tmo:{
 	} else {
 		local.a runto local.pos
 	}
-	local.d0 = waitthread flatDist local.a.origin local.pos
+	local.o0 = local.a.origin
 	local.t = 0
 	local.stall = 0
 	while( local.t < local.tmo ){
@@ -1981,8 +1990,9 @@ mgLeg local.a local.pos local.straight local.rad local.tmo:{
 		if( !isAlive local.a ){ break }
 		local.d = waitthread flatDist local.a.origin local.pos
 		if( local.d < ( local.rad + 6 ) ){ break }
-		if( local.d < ( local.d0 - 4 ) ){ local.stall = 0 } else { local.stall = local.stall + 0.25 }
-		local.d0 = local.d
+		// stalled = he is not moving (NOT 'the straight distance is not shrinking': a path round a building grows it)
+		if( vector_length( local.a.origin - local.o0 ) > 5 ){ local.stall = 0 } else { local.stall = local.stall + 0.25 }
+		local.o0 = local.a.origin
 		if( local.stall >= 2.0 ){ break }
 	}
 	if( local.way != NIL && local.way != NULL ){ local.way remove }
@@ -2003,7 +2013,13 @@ mgWalk local.a local.pos local.how local.via:{
 	} else if( local.how == 2 ){
 		local.left = waitthread mgLeg local.a local.pos 1 10 10
 	} else {
-		local.left = waitthread mgLeg local.a local.pos 0 28 12
+		// by the path graph: 12s, or what the path's length needs at a run (pathdist is what mgReach read)
+		local.tmo = 12
+		if( level.coop_psqPd != NIL ){
+			if( ( level.coop_psqPd / 140 ) + 4 > local.tmo ){ local.tmo = ( level.coop_psqPd / 140 ) + 4 }
+		}
+		if( local.tmo > 30 ){ local.tmo = 30 }
+		local.left = waitthread mgLeg local.a local.pos 0 28 local.tmo
 	}
 	if( local.a == NULL ){ end 0 }
 	if( !isAlive local.a ){ end 0 }
@@ -2058,6 +2074,9 @@ mgSetup local.a local.sid:{
 	if( !isAlive local.a ){ end }
 	if( local.got != 1 ){
 		local.wd = waitthread flatDist local.a.origin local.a.coop_psqMgStand
+		// not planned again for a minute (mgPlan)
+		local.a.coop_psqMgBadSeat = local.a.coop_psqMgStand
+		local.a.coop_psqMgBadSeatT = level.time + 60
 		waitthread dbg ( "mg setup abort=not_reached left=" + local.wd )
 		end
 	}
@@ -2312,8 +2331,16 @@ mgTend local.a local.sid:{
 		local.a.coop_psqMgBad = 0
 		end "stay"
 	}
+	// (a gun that has fired in the last 20s is doing its work where it is: the squad's NEAREST enemy can be masked
+	// from it while it keeps another one's head down)
+	if( local.a.coop_psqMgFireT != NIL ){
+		if( ( level.time - local.a.coop_psqMgFireT ) < 20 ){
+			local.a.coop_psqMgBad = 0
+			end "stay"
+		}
+	}
 	local.a.coop_psqMgBad++
-	if( local.a.coop_psqMgBad >= 15 ){ end local.bad }
+	if( local.a.coop_psqMgBad >= 25 ){ end local.bad }
 }end "stay"
 
 
@@ -2388,7 +2415,10 @@ mgHold local.a local.gun local.sid:{
 		if( local.own == 1 ){
 			if( local.a cansee local.e ){ local.sees = 1 }
 		}
-		if( local.sees == 1 ){ local.lastSee = level.time }
+		if( local.sees == 1 ){
+			local.lastSee = level.time
+			local.a.coop_psqMgFireT = level.time
+		}
 		if( local.held != 1 && local.sees == 1 ){
 			// a target of his own in sight: the turret's own cycle tracks and fires (about 58% of the time)
 			if( local.watch == 1 ){
@@ -2449,6 +2479,7 @@ mgHold local.a local.gun local.sid:{
 						wait 0.5
 						if( local.gun == NULL ){ break }
 						local.gun startFiring
+						local.a.coop_psqMgFireT = level.time
 						waitthread dbg ( "mg suppress at=" + local.tgt.origin + " age=" + ( level.time - level.coop_psqLastThrT[local.sid] ) )
 						local.t = 0.6 + ( randomfloat 0.4 )
 						local.st = level.coop_psqSupT[local.sid]
@@ -2593,6 +2624,30 @@ walkOut local.a local.to:{
 				if( local.g == NIL ){ break }
 				if( !( waitthread mgLine local.a.origin local.g ) ){ break }
 				local.goal = local.g
+			}
+		}
+	}
+	if( local.goal == NIL ){
+		// no line toward where he was sent: back onto the path network on foot - the point he landed on (tested
+		// before the jump), else the nearest squad mate he can walk straight to
+		local.sid = local.a.coop_psqSid
+		if( level.coop_paraLzN[local.sid] != NIL ){
+			local.lz = level.coop_paraLz[local.sid][local.a.coop_psqK]
+			if( local.lz != NIL ){
+				local.ld = vector_length( local.lz - local.a.origin )
+				if( local.ld > 40 && local.ld < 700 ){
+					if( waitthread mgLine local.a.origin local.lz ){ local.goal = local.lz }
+				}
+			}
+		}
+		if( local.goal == NIL ){
+			for( local.k = 1; local.k <= 5; local.k++ ){
+				local.m = level.coop_psqM[local.sid][local.k]
+				if( local.m == NIL || local.m == NULL || local.m == local.a ){ continue }
+				if( !isAlive local.m ){ continue }
+				local.md = vector_length( local.m.origin - local.a.origin )
+				if( local.md < 80 || local.md > 600 ){ continue }
+				if( waitthread mgLine local.a.origin local.m.origin ){ local.goal = local.m.origin; break }
 			}
 		}
 	}

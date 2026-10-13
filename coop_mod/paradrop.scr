@@ -506,7 +506,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 //   - OPEN SKY over it and 44u round it (a man can only come down where the sky is open): nothing for 4000u up,
 //     or the first thing up there is a sky surface - not a roof, a ceiling, a tree;
 //   - level (four points round it within 20u), with room for his hull, and dry;
-//   - 110u from the other points;
+//   - out of the enemy's sight where that can be had (first round), 110u from the other points;
 //   - INSIDE THE PATH NETWORK AND CONNECTED: a scout - an actor nobody sees, not solid, ignored by the enemy,
 //     physics off - is stood on the point and ordered to the smoke's ground (and, if that fails, to the caller);
 //     his pathdist after 0.3s is the engine's own answer (PathSearch only starts and ends in a 256u map cell
@@ -550,12 +550,18 @@ coop_para_lz local.smoke local.base_z local.sid:{
 	local.who[3] = 2
 	local.who[4] = 4
 	local.who[5] = 5
+	// two rounds: first only points NO living German within 1600u has a line to (solid world between his eyes and a
+	// man standing there) - nobody jumps into the enemy's view if there is anywhere else; then the rest
+	for( local.rnd = 1; local.rnd <= 2; local.rnd++ ){
 	for( local.r = 120; local.r <= 840; local.r = local.r + 120 ){
 		for( local.j = 0; local.j < 10; local.j++ ){
 			if( local.n >= 5 || local.tests >= 22 ){ break }
 			local.c = local.smoke + ( vector_scale ( angles_toforward ( 0 ( ( local.j * 36 ) + ( local.r * 0.17 ) ) 0 ) ) local.r )
 			local.g = waitthread coop_para_lzGround local.c local.topz local.ref
 			if( local.g == NIL ){ continue }
+			local.sn = waitthread coop_para_lzSeen local.g
+			if( local.rnd == 1 && local.sn == 1 ){ continue }
+			if( local.rnd == 2 && local.sn != 1 ){ continue }		// (looked at in the first round)
 			local.far = 1
 			for( local.k = 1; local.k <= local.n; local.k++ ){
 				if( vector_length( local.g - local.pt[local.k] ) < 110 ){ local.far = 0; break }
@@ -610,9 +616,30 @@ coop_para_lz local.smoke local.base_z local.sid:{
 		if( local.n >= 5 || local.tests >= 22 ){ break }
 		waitframe
 	}
+	if( local.n >= 5 || local.tests >= 22 ){ break }
+	}
 	if( local.sc != NULL ){ local.sc remove }
 	waitthread coop_mod/parasquad.scr::dbg ( "lz plan n=" + local.n + " tests=" + local.tests + " secs=" + ( level.time - local.t0 ) + " ref=" + local.ref )
 }end
+
+
+// 1 when a living German within 1600u has a clear line (solid world only) to a man standing at local.g
+coop_para_lzSeen local.g:{
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL ){ end 0 }
+	local.t = local.g + ( 0 0 50 )
+	local.n = 0
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.e = local.arr[local.i]
+		if( local.e == NIL || local.e == NULL ){ continue }
+		if( !isAlive local.e ){ continue }
+		if( vector_length( local.e.origin - local.g ) > 1600 ){ continue }
+		local.tr = traced ( local.e.origin + ( 0 0 64 ) ) local.t 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] >= 1.0 ){ end 1 }
+		local.n++
+		if( local.n >= 40 ){ break }
+	}
+}end 0
 
 
 // the landing point of man local.k of squad local.sid, or NIL
@@ -748,7 +775,21 @@ coop_paradrop_landing_check local.actor local.wtype:{
 				local.actor runto local.np.origin
 				wait 0.3
 				if( local.actor == NULL ){ end }
-				if( local.actor.pathdist == 0 ){ local.stuck = local.stuck + 1 } else { local.stuck = 0 }
+				local.np2 = 0
+				if( local.actor.pathdist > 0 ){ local.np2 = 1 }
+				// ...and no path to a squad mate either (with one, he is with his squad: he stays)
+				for( local.si = 1; local.si <= 4; local.si++ ){
+					if( local.np2 == 1 ){ break }
+					local.sm = level.coop_paradrop_squad[local.si]
+					if( local.sm == NIL || local.sm == NULL ){ continue }
+					if( !isAlive local.sm ){ continue }
+					if( vector_length( local.sm.origin - local.actor.origin ) < 400 ){ local.np2 = 1; break }
+					local.actor runto local.sm.origin
+					wait 0.3
+					if( local.actor == NULL ){ end }
+					if( local.actor.pathdist > 0 ){ local.np2 = 1 }
+				}
+				if( local.np2 == 0 ){ local.stuck = local.stuck + 1 } else { local.stuck = 0 }
 			} else {
 				local.stuck = 0
 			}
