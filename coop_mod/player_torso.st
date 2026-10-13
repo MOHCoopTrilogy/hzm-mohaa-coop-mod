@@ -3144,6 +3144,8 @@ state RELOAD_SHOTGUN
 	states
 	{
 		STAND	 				: KILLED
+		RELOAD_SHOTGUN_BREAK_QUICK	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py]
+		RELOAD_SHOTGUN_SINGLE_CH	: ANIMDONE_TORSO HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] [quick break-off] rounds were in the gun when the reload began: the chambered chain
 		RELOAD_SHOTGUN_SINGLE		: ANIMDONE_TORSO
 		RELOAD_INTERUPTED			: NEW_WEAPON
 		
@@ -3176,7 +3178,7 @@ state RELOAD_SHOTGUN_SINGLE
 		RELOAD_INTERUPTED_CORRECT_ATTACHMENTS	: IS_USING_TURRET
 
 		// allow early out
-		RELOAD_SHOTGUN_END		: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand" !RELOAD
+		RELOAD_SHOTGUN_BREAK_END	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] the trigger breaks the reload off at any point of the loop
 		RELOAD_SHOTGUN_END		: PUTAWAYMAIN
 		
 		RELOAD_SHOTGUN_CHECK_CONTINUE		: ANIMDONE_TORSO
@@ -3224,6 +3226,118 @@ state RELOAD_SHOTGUN_END
 	{
 		STAND	 				: KILLED
 		STAND	 				: ANIMDONE_TORSO
+	}
+}
+
+// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] the reload broken off by the trigger: the end row (the gun comes back up; cgame racks it only if it was
+// empty), the "go on reloading" latch dropped, then the owed shot
+state RELOAD_SHOTGUN_BREAK_END
+{
+	movetype legs
+	entrycommands
+	{
+		weaponcommand mainhand donereloading
+		viewmodelanim reload_end
+	}
+	action
+	{
+		shotgun_reload_end	: default
+	}
+	states
+	{
+		STAND	: KILLED
+		RELOAD_INTERUPTED	: NEW_WEAPON
+		RELOAD_SHOTGUN_BREAK_FIRE	: ANIMDONE_TORSO
+	}
+}
+
+state RELOAD_SHOTGUN_BREAK_FIRE
+{
+	movetype legs
+	action
+	{
+		none	: default
+	}
+	states
+	{
+		STAND	: KILLED
+		ATTACK_SHOTGUN_PRIMARY_AIM	: COOP_ADS HAS_AMMO_IN_CLIP "mainhand"
+		ATTACK_SHOTGUN_PRIMARY	: HAS_AMMO_IN_CLIP "mainhand"
+		STAND	: default
+	}
+}
+
+// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] [quick break-off] a reload that began with rounds in the gun (one is chambered): the same loop, and the trigger
+// breaks it off through a SHORT end (hand back to the forend, no pump) - about 0.45 s from the press to the shot
+state RELOAD_SHOTGUN_SINGLE_CH
+{
+	movetype legs
+	
+	entrycommands
+	{
+		viewmodelanim reload_single 1
+	}
+	
+	action
+	{
+		shotgun_reload_loop		: default
+	}
+	
+	states
+	{
+		STAND	 				: KILLED
+		RELOAD_SHOTGUN_END		: NEW_WEAPON
+		
+		RELOAD_INTERUPTED_CORRECT_ATTACHMENTS	: IS_USING_VEHICLE
+		RELOAD_INTERUPTED_CORRECT_ATTACHMENTS	: IS_USING_TURRET
+
+		// allow early out
+		RELOAD_SHOTGUN_BREAK_QUICK	: +ATTACK_PRIMARY HAS_AMMO_IN_CLIP "mainhand"	// HZM coop [heavy lane 2026-10-13, patch_sgbreak.py] the trigger breaks the reload off at any point of the loop
+		RELOAD_SHOTGUN_END		: PUTAWAYMAIN
+		
+		RELOAD_SHOTGUN_CHECK_CONTINUE_CH		: ANIMDONE_TORSO
+	}
+}
+
+state RELOAD_SHOTGUN_CHECK_CONTINUE_CH
+{
+	movetype legs
+
+	entrycommands
+	{
+		reload // this makes the weapon want to continue reloading if it can
+	}
+	
+	action
+	{
+		none					: default
+	}
+	
+	states
+	{
+		RELOAD_SHOTGUN_SINGLE_CH	      : RELOAD		
+		RELOAD_SHOTGUN_END		: default
+	}
+}
+
+state RELOAD_SHOTGUN_BREAK_QUICK
+{
+	movetype legs
+	entrycommands
+	{
+		weaponcommand mainhand donereloading
+		viewmodelanim reload_end
+		viewmodelanim reload_end 1	// the second one is the signal: the change counter steps by two = the quick break row
+	}
+	action
+	{
+		shotgun_reload_break	: default
+	}
+	states
+	{
+		STAND	: KILLED
+		RELOAD_INTERUPTED	: NEW_WEAPON
+		RELOAD_SHOTGUN_BREAK_FIRE	: ANIMDONE_TORSO
 	}
 }
 
