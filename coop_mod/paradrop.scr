@@ -415,6 +415,13 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 		// Thompson restored: human_thompson.tik is now force-loaded unconditionally in
 		// new_generic_human.tik (which allied_airborne_soldier inherits), so the SMG anims exist.
 		local.actor gun "thompson"
+		//[user 2026-10-12] "sometimes the paratroopers should spawn in with grease guns too": in coop_paraGreaseChance
+		//percent of the drops (default 50, 0 = never) the squad's SMG man carries an M3 instead - never the BAR man
+		//or the man with the .30 cal. His body is the Thompson man's (built by the line above); the gun follows.
+		local.gc = getcvar( "coop_paraGreaseChance" )
+		local.gp = 50
+		if( local.gc != "" ){ local.gp = int( local.gc ) }
+		if( local.gp > 0 && ( randomint 100 ) < local.gp ){ thread coop_paradrop_grease local.actor }
 	} else if( local.wtype == 3 ){
 		local.actor gun "m1 garand"
 	} else if( local.wtype == 4 ){
@@ -494,7 +501,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 // The stick used to come down wherever the aircraft's speed left each man: on roofs (m5l1a), in a sunken lane with
 // no pathnodes (m3l2), thousands of units off (m4l3) - and the failsafe then teleported him. Now five points are
 // chosen while the C-47s are still inbound, nearest the smoke first, each one:
-//   - ground at the squad's level: looked for from 100u over the smoke's ground down to 200u under it - a roof
+//   - ground at the squad's level: looked for from 100u over the smoke's ground down to 320u under it - a roof
 //     is above that and is never found, a point inside a wall or a hill starts in solid;
 //   - OPEN SKY over it and 44u round it (a man can only come down where the sky is open): nothing for 4000u up,
 //     or the first thing up there is a sky surface - not a roof, a ceiling, a tree;
@@ -572,7 +579,28 @@ coop_para_lz local.smoke local.base_z local.sid:{
 				local.fd = vector_length( local.g - local.ref2 )
 				if( local.pd > 0 && local.pd < ( ( local.fd * 3 ) + 600 ) ){ local.ok = 1 }
 			}
-			if( local.ok != 1 ){ continue }
+			if( local.ok != 1 ){
+				// neither the smoke nor the caller can be reached from here - or they are themselves off the network
+				// (a room with no pathnodes). Two points with a path between them ARE on it: the first such point
+				// is kept as the seed, and a later one that reaches it is taken together with it.
+				if( local.seed == NIL ){
+					local.seed = local.g
+					continue
+				}
+				local.sc runto local.seed
+				wait 0.3
+				if( local.sc == NULL ){ end }
+				if( local.sc.pathdist <= 0 ){ continue }
+				if( local.seedIn != 1 ){
+					local.seedIn = 1
+					local.n++
+					local.pt[local.n] = local.seed
+					local.wk = local.who[local.n]
+					level.coop_paraLz[local.sid][local.wk] = local.seed
+					level.coop_paraLzN[local.sid] = local.n
+					if( local.n >= 5 ){ break }
+				}
+			}
 			local.n++
 			local.pt[local.n] = local.g
 			local.wk = local.who[local.n]
@@ -604,7 +632,7 @@ coop_para_lzGround local.c local.topz local.ref:{
 	local.s = local.c
 	local.s[2] = local.ref[2] + 100
 	local.e = local.c
-	local.e[2] = local.ref[2] - 200
+	local.e[2] = local.ref[2] - 320
 	local.tr = traced local.s local.e 1023 ( 0 0 0 ) ( 0 0 0 ) 1
 	if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 ){ end local.r }
 	if( local.tr["fraction"] >= 1.0 ){ end local.r }
@@ -638,6 +666,33 @@ coop_para_lzGround local.c local.topz local.ref:{
 	if( local.t2["fraction"] < 1.0 || local.t2["startSolid"] == 1 ){ end local.r }
 	local.r = local.g
 }end local.r
+
+
+// The M3 grease gun for the squad's SMG man: models/weapons/coop_greasegun_ai.tik is the players' M3 with the
+// Thompson's name stem and weapon group, so an actor has animations for it (the players' own tik has weapongroup
+// xw_greasegun: no AI animation set). Given the way every AI variant is (aihandler.scr: coop_actorArm, then
+// unholster; bug-3306: never `gun <tik>`); if the give leaves him with nothing he gets his Thompson back.
+coop_paradrop_grease local.actor:{
+	wait 0.2
+	if( local.actor == NULL ){ end }
+	if( !isAlive local.actor ){ end }
+	local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "models/weapons/coop_greasegun_ai.tik"
+	wait 0.1
+	if( local.actor == NULL ){ end }
+	if( !isAlive local.actor ){ end }
+	local.actor unholster
+	wait 0.1
+	if( local.actor == NULL ){ end }
+	if( !isAlive local.actor ){ end }
+	local.w = local.actor.weapon
+	if( local.w == NIL || local.w == "" ){
+		println "^~^~^ PARADROP grease gun give failed - Thompson restored"
+		local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "thompson"
+		local.actor unholster
+		local.w = "restored"
+	}
+	waitthread coop_mod/parasquad.scr::dbg ( "grease k=2 weapon=" + local.w )
+}end
 
 
 // Sync visual model to 70 units below chute during descent
@@ -686,8 +741,14 @@ coop_paradrop_landing_check local.actor local.wtype:{
 		if( local.actor.origin[2] < ( local.np.origin[2] - 1200 ) ){ local.why = "fell" }
 		if( local.why == "" && local.actor.coop_psqLost == 1 ){ local.why = "lost" }
 		if( local.why == "" && local.wtype == 5 ){
-			if( local.nd > 700 && local.actor.thinkstate != "attack" && local.nd >= ( local.last_nd - 64 ) && local.actor.pathdist == 0 ){
-				local.stuck = local.stuck + 1
+			if( local.nd > 700 && local.actor.thinkstate != "attack" && local.nd >= ( local.last_nd - 64 ) ){
+				// far, idle and not closing: he is ORDERED to the player (his own loop only follows inside 2000u),
+				// and only an order the engine finds no path for counts
+				local.actor.movedoneradius = 256
+				local.actor runto local.np.origin
+				wait 0.3
+				if( local.actor == NULL ){ end }
+				if( local.actor.pathdist == 0 ){ local.stuck = local.stuck + 1 } else { local.stuck = 0 }
 			} else {
 				local.stuck = 0
 			}
