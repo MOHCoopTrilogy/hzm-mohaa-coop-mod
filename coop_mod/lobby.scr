@@ -423,7 +423,10 @@ lobbyOnSpawn local.player:{
 	// usercmd and publishes self.coop_lobbyInput; lobbyInputPoll dispatches it. Works for host AND remote
 	// clients, and there is nothing to restore at launch. Also force the roster/help ihuddraw layer on.
 	local.player coop_lobbyinput 1
-	local.player stufftext "set cg_huddraw_force 1"
+	if( local.player.flags["coop_lobbyHudForce"] != 1 ){
+		local.player.flags["coop_lobbyHudForce"] = 1
+		local.player stufftext "set cg_huddraw_force 1"
+	}
 	if( local.player.flags["coop_lobbyInputPoll"] != 1 ){
 		local.player.flags["coop_lobbyInputPoll"] = 1
 		local.player thread lobbyInputPoll
@@ -546,7 +549,10 @@ lobbySkinCycle local.dir:{
 	// LOCK the choice as this player's default: seta dm_playermodel (CVAR_ARCHIVE|USERINFO) carries into the
 	// launched mission AND persists across sessions. Now reaches the client - dm_playermodel is whitelisted.
 	self model local.mdl
-	self stufftext ( "seta dm_playermodel " + local.skin )
+	if( self.flags["coop_lobbySkinSent"] != local.skin ){
+		self.flags["coop_lobbySkinSent"] = local.skin
+		self stufftext ( "seta dm_playermodel " + local.skin )
+	}
 
 	self iprint ( "Skin: " + local.skin ) 1
 }end
@@ -976,18 +982,33 @@ lobbyHideHud:{
 	// Coop draws its HUD across slots 20..72 (ammo/nade/objectives ~27-47, deployables/XP/rank ~62-72).
 	// Hide the WHOLE range and keep re-asserting while the lobby is active - the XP + item HUD threads
 	// re-draw their slots on update, so a one-shot (or 4s) hide leaks the icons back (bug-361).
+	//[bug-3909 2026-10-14] remote-join command flood: ONE loop per player (a new copy used to start on every lobby
+	//placement), and its reliable stufftexts every 5 s instead of every 0.5 s - each one is re-sent in every
+	//snapshot until the client acks it. The ihuddraw_alpha wipe is not a reliable command and keeps its 0.5 s.
+	if( self.flags["coop_lobbyHudLoop"] == 1 ){
+		end
+	}
+	self.flags["coop_lobbyHudLoop"] = 1
+	local.k = 10
 	while( level.coop_lobbyActive == 1 && self != NULL ){
 		for( local.s = 20; local.s <= 90; local.s++ ){
 			ihuddraw_alpha self local.s 0
 		}
 		// drawhud is a LEVEL script command (not a client cvar) - call it bare. Hides the vanilla HUD + compass.
 		drawhud 0
+		local.k++
+		if( local.k >= 10 ){
+		local.k = 0
 		self stufftext "ui_removehud hud_compass"
 		// The vanilla bottom-left STAR lives in the hud_health UI MENU (ui/hud_health.urc, faded via
 		// ui_hudAlpha) - drawhud 0 / PMF_NO_HUD does NOT remove UI menus, so remove them by name like compass.
 		self stufftext "ui_removehud hud_health"
 		self stufftext "ui_removehud hud_ammo"
+		}
 		wait 0.5
+	}
+	if( self != NULL ){
+		self.flags["coop_lobbyHudLoop"] = NIL
 	}
 }end
 
