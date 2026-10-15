@@ -1302,6 +1302,81 @@ loadout_finUnlocked local.player local.fid:{
 }end 0
 
 //=========================================================================
+//[loadout review 2026-10-15] ARMORY PICKS AS STATE. The cgame registers USERINFO cvars lp_s / lp_h / lp_g (uniform / helmet / glove
+//page), lp_w1..4 (gun id per slot) and lp_f1..4 (finish id per slot, 0-7); the armory cfgs `set` them when a pick is ACCEPTED
+//client-side (locked items never write them). player.scr runs this when the player's userinfo string changes. Unlike a name-bus
+//token (32 chars, ONE dispatched per ~0.75 s batch, the rest dropped) a value cannot be lost to a quick click: we converge on the
+//LAST value of every row. An old client has none of these keys and keeps using the name bus; both paths end in the same
+//idempotent setters (armory_skin_set / armory_helmet_set / armory_glove_set / loadout_set / loadout_finish), so a client that
+//sends both is applied once. A row is only marked done when the setter was really reachable (skin needs the player alive).
+//=========================================================================
+loadout_pickPoll local.player:{
+	if(local.player == NULL){ end }
+	if(local.player.flags["coop_lpBusy"] == 1){ end }
+	local.player.flags["coop_lpBusy"] = 1
+	local.again = 1
+	local.tries = 0
+	while(local.again == 1 && local.player != NULL){
+		local.again = 0
+		local.info = local.player.userinfo
+		//---- uniform / helmet / glove: pages
+		local.v = info_valueforkey local.info "lp_s"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_s"]){
+			if(isAlive local.player){
+				local.player.flags["coop_lpT_s"] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_s=" + local.v )
+				waitthread coop_mod/helmet.scr::armory_skin_set local.player local.v
+			} else { local.again = 1 }
+		}
+		if(local.player == NULL){ end }
+		local.v = info_valueforkey local.info "lp_h"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_h"]){
+			local.player.flags["coop_lpT_h"] = local.v
+			println ( "^~^~^ LPOLL " + local.player.netname + " lp_h=" + local.v )
+			waitthread coop_mod/helmet.scr::armory_helmet_set local.player local.v
+		}
+		if(local.player == NULL){ end }
+		local.v = info_valueforkey local.info "lp_g"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_g"]){
+			local.player.flags["coop_lpT_g"] = local.v
+			println ( "^~^~^ LPOLL " + local.player.netname + " lp_g=" + local.v )
+			waitthread coop_mod/gloves.scr::armory_glove_set local.player local.v
+		}
+		//---- guns, then finishes (a finish needs its slot's gun committed first)
+		for(local.sl = 1; local.sl <= 4; local.sl++){
+			if(local.player == NULL){ end }
+			local.v = info_valueforkey local.info ( "lp_w" + local.sl )
+			if(local.v == "" && local.player.flags["coop_lpT_w" + local.sl] != NIL){ local.player.flags["coop_lpT_w" + local.sl] = "" }	//cleared slot: the same gun can be picked again
+			if(local.v != "" && local.v != local.player.flags["coop_lpT_w" + local.sl]){
+				local.quiet = 0
+				if(local.player.flags["coop_lpT_w" + local.sl] == NIL){ local.quiet = 1 }	//first sight = the join delivery: no toast, no regive (the join resend does that)
+				local.player.flags["coop_lpT_w" + local.sl] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_w" + local.sl + "=" + local.v + " quiet=" + local.quiet )
+				waitthread loadout_set local.player local.sl local.v local.quiet
+			}
+		}
+		for(local.sl = 1; local.sl <= 4; local.sl++){
+			if(local.player == NULL){ end }
+			local.v = info_valueforkey local.info ( "lp_f" + local.sl )
+			if(local.v == "" && local.player.flags["coop_lpT_f" + local.sl] != NIL){ local.player.flags["coop_lpT_f" + local.sl] = "" }
+			if(local.v != "" && local.v != local.player.flags["coop_lpT_f" + local.sl]){
+				local.player.flags["coop_lpT_f" + local.sl] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_f" + local.sl + "=" + local.v )
+				waitthread loadout_finish local.player local.sl local.v
+			}
+		}
+		if(local.player == NULL){ end }
+		if(local.again == 0 && local.player.userinfo != local.info){ local.again = 1 }	//a newer pick landed while we were applying
+		if(local.again == 1){
+			local.tries++
+			if(local.tries > 90){ break }
+			wait 1
+		}
+	}
+	if(local.player != NULL){ local.player.flags["coop_lpBusy"] = NIL }
+}end
+
+//=========================================================================
 //[loadout review 2026-10-15] PER-SLOT LOCKS the client cannot compute: the finish chips are locked per FINISH globally
 //(coop_loLkF<fid>), but the server also refuses a finish on a gun that is not MASTERED (loadout_finMastered), and the VARIANT
 //button had no client lock at all. For each slot's gun we push, diff-only (flags coop_loSlkLast<n>), unquoted, one statement each:
