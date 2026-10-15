@@ -1,0 +1,903 @@
+//=========================================================================
+// reinf_mg.scr - THE OFFICER'S MG42 TEAM (2026-10-15)
+//=========================================================================
+// [user 2026-10-15] "Just like the paratroopers can deploy 30 cals now, I think the mg squad the officer calls should deploy an
+// mg42 covering the officer. Ideally they are more accurate and lethal than standard mg squads." and "should also be called in
+// even after the officer is killed and radio is active".
+//
+// WHAT IT IS. A 2-3 man team (gunner, assistant, optional spotter) that the officer's call - or, once he is dead, his radio's
+// call - brings in place of the Wehrmacht / Elite squad (coop_call_reinforcements, one hook). It walks to the officer (or, with him
+// dead, the radio: the thing the players must reach), looks for a place from which the MG42 COVERS HIM - cover or height, a traced
+// field of fire down the way the players come, never a wall in front of the barrel - and sets the gun up there with the SAME
+// emplacement code as the paratroopers' .30 cal (parasquad.scr: mgPlan / mgSetup / mgTend / mgHold / mgPackup / mgFlee, bug-3562).
+// That code is reused through a pseudo-squad (parasquad.scr::newSquad) whose enemies are the PLAYERS (level.coop_psqFoe[sid] ==
+// "player": no hold-fire for a player in front of the muzzle, no lane keeping), whose anchor is the officer / radio
+// (level.coop_psqApos, the search centre level.coop_psqCtr) and whose "line of advance" is the way the players come
+// (level.coop_psqAyaw, from where they have walked - parasquad.scr::trail - else the nearest player).
+//
+// THE GUN. models/statweapons/mg42_gun.tik (retail; no new asset), its own bipod / sandbags / ammo box, belt of 250 and one spare
+// (the engine's coopammo / coopaibelt, parasquad_gun.scr::belt42), the MG42's OWN barrel: the engine's default heat rates, so it
+// cooks as every MG42 does and the gunner stops at 45 of 100 and lets it bleed to 12 (parasquad.scr::mgHold).
+//
+// WHAT MAKES IT MORE ACCURATE AND LETHAL THAN A STANDARD NEST (all cvars, defaults below, all behind coop_reinfSmart):
+//   * A standard nest tracks whatever the gunner's engine enemy is, with the engine's aim wander (coop_mg42AiAimOff 100: +-100u at
+//     1000u), a spread of 150-450 and bursts at random. This one is fire-controlled from script (rmg_fire): it picks the player who
+//     THREATENS THE OFFICER (nearest to him, with a line to him; sticky), aims at the chest with the target's velocity added
+//     (coop_reinfMgLead s), no wander, and aibulletspread coop_reinfMgSpread (70).
+//   * FAIR: after picking a new target it takes coop_reinfMgSettle (0.7) s to bring the gun round before the first round; bursts of
+//     coop_reinfMgBurstMin..Max (0.6-1.1) s with a pause of coop_reinfMgPause (0.9) s + up to 0.7 between them; it stops at the
+//     barrel limit (parasquad.scr::mgHold); it unpacks in plain sight for coop_reinfMgSetup (2) s before the gun goes down (about
+//     5 s from arrival to the first round); the gunner has coop_reinfMgHp (140) health before player scaling; the gun can be
+//     suppressed, flanked, grenaded and killed.
+//   * If the gunner dies the assistant (then the spotter) takes the gun over; with the whole team dead the gun stays where it is,
+//     with what is left on its belt, for the players (parasquad.scr::mgLeft).
+//   * It RELOCATES: a player within 500u more than 62 degrees off the gun's line with a line to it (flanked), the anchor more than
+//     650u away, or no target for 20s while the players are near; a grenade within 300u makes the crew run and come back
+//     (parasquad.scr::nadeWatch / mgFlee).
+//
+// CVARS (read live; an unset cvar is the default): coop_reinfMg 1 (this team), coop_reinfMgChance 50 (percent of Wehrmacht /
+// Elite calls that bring it), coop_reinfMgSpotter 1, coop_reinfMgSpread 70, coop_reinfMgLead 0.25, coop_reinfMgSettle 0.7,
+// coop_reinfMgBurstMin 0.6, coop_reinfMgBurstMax 1.1, coop_reinfMgPause 0.9, coop_reinfMgSetup 2, coop_reinfMgHp 140,
+// coop_reinfDebug 1 (prints ^~^~^ RMG lines).
+//
+// WHAT THIS FILE DOES NOT TOUCH: the gun placement rules (parasquad.scr), the wave mask / feed / scaling (officer.scr), the radio
+// calls (reinf.scr). Hooks: officer.scr::coop_call_reinforcements (one call), reinf.scr::rnf_idle_check (one flag),
+// parasquad.scr (the [mgteam] lines), parasquad_gun.scr::belt42.
+// Script gotchas honoured: no bare negatives in parentheses, no wait in the spawn path before the pseudo-squad exists, NIL tests
+// before arithmetic, every cross-file call that yields is a waitthread.
+//=========================================================================
+
+// a cvar as a number, or the default when it is unset / empty
+rmg_cv local.n local.d:{
+	local.s = getcvar local.n
+	local.v = local.d
+	if( local.s != "" ){ local.v = float( local.s ) }
+}end local.v
+
+
+rmg_dbg local.s:{
+	if( getcvar( "coop_reinfDebug" ) == "1" ){ println( "^~^~^ RMG t=" + level.time + " " + local.s ) }
+}end
+
+
+rmg_on:{
+	if( getcvar( "coop_reinfSmart" ) == "0" ){ end 0 }
+	if( getcvar( "coop_reinfMg" ) == "0" ){ end 0 }
+}end 1
+
+
+rmg_ok local.a:{
+	if( local.a == NIL || local.a == NULL ){ end 0 }
+	if( !isAlive local.a ){ end 0 }
+}end 1
+
+
+// a player the gun may shoot: playing, alive, not down-but-not-out
+rmg_pl local.p:{
+	if( local.p == NIL || local.p == NULL ){ end 0 }
+	if( !isAlive local.p ){ end 0 }
+	if( local.p.dmteam == "spectator" ){ end 0 }
+	if( local.p.flags["coopDevNoclip"] != NIL ){ end 0 }
+	if( local.p.flags["coop_dbno_active"] == 1 ){ end 0 }
+}end 1
+
+
+// signed yaw difference folded to 0..180
+rmg_dyaw local.a local.b:{
+	local.d = local.a - local.b
+	while( local.d > 180 ){ local.d = local.d - 360 }
+	while( local.d < ( 0 - 180 ) ){ local.d = local.d + 360 }
+	if( local.d < 0 ){ local.d = 0 - local.d }
+}end local.d
+
+
+// what the team covers: the officer while he lives, else the radio the players must reach. NIL = nothing.
+rmg_anchor:{
+	local.r = NIL
+	level.coop_rmgKind = "none"
+	local.o = level.coop_officer
+	if( level.coop_officer_alive == 1 && local.o != NIL && local.o != NULL ){
+		if( isAlive local.o ){
+			level.coop_rmgKind = "officer"
+			local.r = local.o.origin
+			end local.r
+		}
+	}
+	local.rd = level.coop_radio
+	if( local.rd != NIL && local.rd != NULL && level.coop_radio_destroyed != 1 ){
+		level.coop_rmgKind = "radio"
+		local.r = local.rd.origin
+	}
+}end local.r
+
+
+//=========================================================================
+// THE CALL (officer.scr::coop_call_reinforcements, wave types 0 / 1, after the entry planner)
+// local.pos = where the wave forms. Returns 1 when the team took the call (the caller then spawns no squad of its own), else 0.
+//=========================================================================
+rmg_wave local.pos:{
+	if( ( waitthread rmg_on ) != 1 ){ end 0 }
+	if( level.coop_rmgBusy == 1 ){ end 0 }
+	local.roll = randomint 100
+	local.ch = waitthread rmg_cv "coop_reinfMgChance" 50
+	if( local.roll >= local.ch ){ end 0 }
+	local.ap = waitthread rmg_anchor
+	if( local.ap == NIL ){ end 0 }
+	if( local.pos == NIL ){ end 0 }
+	level.coop_rmgBusy = 1
+	local.kind = level.coop_rmgKind
+	local.sid = waitthread coop_mod/parasquad.scr::newSquad NIL
+	level.coop_psqFoe[local.sid] = "player"
+	level.coop_psqHolding[local.sid] = 1
+	level.coop_psqApos[local.sid] = local.ap
+	level.coop_psqCtr[local.sid] = local.ap
+	level.coop_psqAyaw[local.sid] = 0
+	level.coop_rmgOver[local.sid] = 0
+	level.coop_rmgReloc[local.sid] = ""
+	level.coop_rmgKills[local.sid] = 0
+	// the team: gunner, assistant, spotter (the section's count is the infantry squad's: these come out of it)
+	local.nt = 2
+	if( getcvar( "coop_reinfMgSpotter" ) != "0" ){ local.nt = 3 }
+	local.hp = waitthread rmg_cv "coop_reinfMgHp" 140
+	local.i = 0
+	local.cnt = 0
+	local.last = local.pos
+	while( local.i < local.nt ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
+		if( local.gnd != NIL ){
+			local.m = waitthread rmg_spawn local.gnd local.i local.hp local.sid
+			if( local.m != NIL ){
+				level.coop_psqM[local.sid][local.i + 1] = local.m
+				local.cnt++
+				local.last = local.gnd
+			}
+		}
+		waitframe	// one actor per server frame, as every wave does
+		local.i++
+	}
+	if( local.cnt < 1 ){
+		level.coop_rmgBusy = 0
+		level.coop_rmgOver[local.sid] = 1
+		end 0
+	}
+	local.g = level.coop_psqM[local.sid][1]
+	if( local.g == NIL || local.g == NULL ){
+		// no gunner came out (a spawn failed): the others are an ordinary section - hand them to the hunt
+		level.coop_rmgOver[local.sid] = 1
+		level.coop_rmgBusy = 0
+		for( local.k = 1; local.k <= 3; local.k++ ){
+			local.m = level.coop_psqM[local.sid][local.k]
+			if( waitthread rmg_ok local.m ){ thread coop_mod/officer.scr::coop_wave_hunt local.m }
+		}
+		end 1
+	}
+	level.coop_rmgCur[local.sid] = local.g
+	level.coop_rmgStage[local.sid] = local.ap
+	waitthread rmg_aim local.sid
+	waitthread rmg_stagepoint local.sid
+	if( local.kind == "radio" ){
+		waitthread coop_mod/feed.scr::feed_all 0 "w_mg" "Enemy wave: an MG42 team is setting up to cover the radio"
+	} else {
+		waitthread coop_mod/feed.scr::feed_all 0 "w_mg" "Enemy wave: an MG42 team is setting up to cover the officer"
+	}
+	local.m1 = level.coop_psqM[local.sid][1]
+	local.m2 = level.coop_psqM[local.sid][2]
+	local.m3 = level.coop_psqM[local.sid][3]
+	thread coop_mod/officer.scr::coop_squad_monitor local.m1 local.m2 local.m3 "MG42 Team"
+	thread coop_mod/parasquad.scr::nadeWatch local.sid
+	thread rmg_brain local.sid
+	thread rmg_crew local.sid
+	if( local.m2 != NIL ){ thread rmg_side local.m2 local.sid 2 }
+	if( local.m3 != NIL ){ thread rmg_side local.m3 local.sid 3 }
+	waitthread rmg_dbg ( "team sid=" + local.sid + " n=" + local.cnt + " anchor=" + local.kind + " at=" + local.ap + " from=" + local.last )
+}end 1
+
+
+// one man of the team. local.i: 0 gunner, 1 assistant, 2 spotter. NIL when the spawn failed.
+rmg_spawn local.gnd local.i local.hp local.sid:{
+	local.smodel = exec coop_mod/officer.scr::coop_model_for "infantry"
+	local.s = spawn local.smodel
+	if( local.s == NIL || local.s == NULL ){ end NIL }
+	local.s.coop_xpClass = "reinf"
+	local.s.origin = local.gnd
+	local.s droptofloor
+	local.s.health = local.hp
+	if( local.i != 0 ){ local.s.health = 120 }
+	local.s.flags["coop_actorStopPainHandler"] = 1
+	local.s.flags["coop_personality_set"] = 1
+	local.s.flags["coop_role"] = "mgteam"
+	local.s.flags["coop_squadSlot"] = local.i
+	local.s.accuracy = 70
+	local.s.leash = 600
+	local.s.enableEnemy = 1
+	local.s.nosurprise = 1
+	if( local.i == 2 ){
+		local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mauser kar 98k"
+	} else {
+		local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mp40"
+	}
+	exec coop_mod/officer.scr::coop_reinf_scale local.s
+	local.s exec coop_mod/replace.scr::attackplayer
+	local.s rendereffects "+coopboss"
+	local.s.coop_psqSid = local.sid
+	local.s.coop_psqK = local.i + 1
+	local.s.coop_psqBusy = 0
+	local.s.coop_psqMounted = 0
+	local.s.coop_psqNadeT = 0
+	local.s.coop_psqMgFails = 0
+	local.s.coop_rmgOn = 1
+	local.s.ammo_grenade = 0
+	local.s type_attack "cover"
+	thread coop_mod/officer.scr::coop_wave_glow local.s
+	// the level-wide wave roster (allied AI are handed these as enemies; coop_wave_hunt does this for the others)
+	if( level.coop_wave_count == NIL ){ level.coop_wave_count = 0 }
+	level.coop_wave_count++
+	level.coop_wave_actors[level.coop_wave_count] = local.s
+}end local.s
+
+
+// the gun on a man's back (the imported MG42's own carry model; hidden while it is set up, shown again at the pack-up)
+rmg_prop local.a:{
+	if( local.a.coop_psqProp != NIL && local.a.coop_psqProp != NULL ){ end }
+	local.prop = spawn script_model
+	local.prop model "models/weapons/mg42portable.tik"
+	local.prop notsolid
+	local.prop attach local.a "Bip01 Spine2" 1 ( 8 -7.75 6.5 )
+	local.prop.angles = ( 0 185 -25 )
+	local.a.coop_psqProp = local.prop
+}end
+
+
+//=========================================================================
+// WHERE THE PLAYERS COME FROM, and the point the team stages at
+//=========================================================================
+// level.coop_psqAyaw[sid] = the yaw from the anchor toward the lane the players use: the centroid of the marks of where they
+// walked (parasquad.scr::trail, 72u apart) 250-1500u from the anchor, else the nearest living player; unchanged if neither.
+rmg_aim local.sid:{
+	local.ap = level.coop_psqApos[local.sid]
+	if( local.ap == NIL ){ end }
+	local.sum = ( 0 0 0 )
+	local.n = 0
+	if( level.coop_psqTrN != NIL ){
+		for( local.i = 1; local.i <= level.coop_psqTrN; local.i++ ){
+			local.p = level.coop_psqTr[local.i]
+			if( local.p == NIL ){ continue }
+			local.v = local.p - local.ap
+			local.v[2] = 0
+			local.d = vector_length local.v
+			if( local.d > 250 && local.d < 1500 ){
+				local.sum = local.sum + local.p
+				local.n++
+			}
+		}
+	}
+	local.c = NIL
+	if( local.n >= 2 ){
+		local.c = vector_scale local.sum ( 1.0 / local.n )
+	} else {
+		local.bd = 999999
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.pl = $player[local.i]
+			if( !( waitthread rmg_pl local.pl ) ){ continue }
+			local.v = local.pl.origin - local.ap
+			local.v[2] = 0
+			local.d = vector_length local.v
+			if( local.d < local.bd && local.d > 120 ){ local.bd = local.d; local.c = local.pl.origin }
+		}
+	}
+	if( local.c == NIL ){ end }
+	local.v = local.c - local.ap
+	local.v[2] = 0
+	if( vector_length local.v < 60 ){ end }
+	local.va = vector_toangles local.v
+	level.coop_psqAyaw[local.sid] = local.va[1]
+}end
+
+
+// the staging point: ground 220u from the anchor on the side away from the players (the gunner walks here first, then plans round
+// the anchor)
+rmg_stagepoint local.sid:{
+	local.ap = level.coop_psqApos[local.sid]
+	local.yaw = level.coop_psqAyaw[local.sid]
+	local.st = local.ap
+	for( local.k = 0; local.k < 6; local.k++ ){
+		local.h = 0
+		if( local.k == 1 ){ local.h = 40 }
+		if( local.k == 2 ){ local.h = 0 - 40 }
+		if( local.k == 3 ){ local.h = 80 }
+		if( local.k == 4 ){ local.h = 0 - 80 }
+		if( local.k == 5 ){ local.h = 120 }
+		local.c = local.ap - ( vector_scale ( angles_toforward ( 0 ( local.yaw + local.h ) 0 ) ) 220 )
+		local.g = exec coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+		if( local.g == NIL ){ continue }
+		local.dz = local.g[2] - local.ap[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz > 100 ){ continue }
+		local.st = local.g
+		break
+	}
+	level.coop_rmgStage[local.sid] = local.st
+}end
+
+
+//=========================================================================
+// THE BRAIN: once every half second. Keeps the pseudo-squad's anchor, search centre and line of advance current, and asks the
+// gunner to relocate when his place is flanked or has gone useless.
+//=========================================================================
+rmg_brain local.sid:{
+	local.trT = 0
+	local.relT = level.time + 12
+	local.flank = 0
+	local.far = 0
+	local.t0 = level.time
+	while( level.coop_rmgOver[local.sid] != 1 ){
+		wait 0.5
+		local.alive = 0
+		for( local.k = 1; local.k <= 3; local.k++ ){
+			if( waitthread rmg_ok level.coop_psqM[local.sid][local.k] ){ local.alive++ }
+		}
+		if( local.alive < 1 ){ break }
+		local.ap = waitthread rmg_anchor
+		if( local.ap != NIL ){
+			level.coop_psqApos[local.sid] = local.ap
+			local.cg = exec coop_mod/officer.scr::coop_find_ground ( local.ap + ( 0 0 48 ) )
+			if( local.cg == NIL ){ local.cg = local.ap }
+			level.coop_psqCtr[local.sid] = local.cg
+			level.coop_psqOff[local.sid] = NIL
+			if( level.coop_rmgKind == "officer" ){ level.coop_psqOff[local.sid] = level.coop_officer }
+		}
+		if( level.time >= local.trT ){
+			local.trT = level.time + 2
+			waitthread coop_mod/parasquad.scr::trail
+			waitthread rmg_aim local.sid
+		}
+		// the gun is up and has been for a while: is the place still any good?
+		local.a = level.coop_rmgCur[local.sid]
+		local.gun = NIL
+		if( waitthread rmg_ok local.a ){ local.gun = local.a.coop_psqGun }
+		if( local.gun != NIL && local.gun != NULL && local.a.coop_psqMounted == 1 && local.a.coop_rmgMountT != NIL && local.ap != NIL ){
+			local.why = ""
+			local.up = level.time - local.a.coop_rmgMountT
+			if( local.up > 6 ){
+				// flanked
+				local.fl = waitthread rmg_flankers local.gun local.a.coop_psqMgYaw
+				if( local.fl > 0 ){ local.flank++ } else { local.flank = 0 }
+				if( local.flank >= 2 ){ local.why = "flanked" }
+				// the anchor has moved away from the gun
+				local.gd = waitthread coop_mod/parasquad.scr::flatDist local.gun.origin local.ap
+				if( local.gd > 650 ){ local.far++ } else { local.far = 0 }
+				if( local.far >= 6 && local.why == "" ){ local.why = "anchor_moved" }
+				// nothing to shoot at for 20s while the players are about
+				local.lt = local.a.coop_rmgTgtT
+				if( local.lt == NIL || local.lt < local.a.coop_rmgMountT ){ local.lt = local.a.coop_rmgMountT }
+				if( ( level.time - local.lt ) > 20 && local.why == "" ){
+					if( waitthread rmg_playersNear local.ap 1500 ){ local.why = "no_target" }
+				}
+			}
+			if( local.why != "" && level.time >= local.relT ){
+				level.coop_rmgReloc[local.sid] = local.why
+				local.relT = level.time + 20
+				local.flank = 0
+				local.far = 0
+				waitthread rmg_dbg ( "relocate why=" + local.why + " gun=" + local.gun.origin )
+			}
+		}
+	}
+	level.coop_rmgOver[local.sid] = 1
+	level.coop_psqEnd[local.sid] = 1
+	level.coop_rmgBusy = 0
+	waitthread rmg_dbg ( "brain end sid=" + local.sid + " secs=" + int( level.time - local.t0 ) )
+}end
+
+
+// players with a line to the gun from the side (more than 62 degrees off its line, 80-520u): how many
+rmg_flankers local.gun local.yaw:{
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( !( waitthread rmg_pl local.p ) ){ continue }
+		local.v = local.p.origin - local.gun.origin
+		local.v[2] = 0
+		local.d = vector_length local.v
+		if( local.d < 80 || local.d > 520 ){ continue }
+		local.va = vector_toangles local.v
+		if( ( waitthread rmg_dyaw local.va[1] local.yaw ) < 62 ){ continue }
+		local.tr = traced ( local.gun.origin + ( 0 0 30 ) ) ( local.p.origin + ( 0 0 40 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 270337
+		if( local.tr["fraction"] >= 0.95 ){ local.n++ }
+	}
+}end local.n
+
+
+rmg_playersNear local.pos local.r:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( !( waitthread rmg_pl local.p ) ){ continue }
+		if( ( vector_length( local.p.origin - local.pos ) ) < local.r ){ end 1 }
+	}
+}end 0
+
+
+//=========================================================================
+// THE CREW: the gunner's loop (parasquad.scr::gunner, driven for the team): stage, plan, set up, tend, pack up and move on;
+// when he is down the next man takes over.
+//=========================================================================
+rmg_crew local.sid:{
+	wait 1
+	local.a = level.coop_psqM[local.sid][1]
+	if( !( waitthread rmg_ok local.a ) ){ end }
+	waitthread rmg_prop local.a
+	local.a.coop_psqMgFired = 0
+	local.cool = level.time
+	local.staged = 0
+	local.fails = 0
+	local.gun = NIL
+	while( level.coop_rmgOver[local.sid] != 1 ){
+		if( !( waitthread rmg_ok local.a ) ){
+			// he is down: the gun he set up goes to the next man (or stays, for the players)
+			local.gun = local.a.coop_psqGun
+			local.n = waitthread rmg_succ local.sid local.a
+			if( local.n == NIL ){ break }
+			local.a = local.n
+			level.coop_rmgCur[local.sid] = local.a
+			local.cool = level.time + 1
+			local.fails = 0
+			continue
+		}
+		wait 1
+		if( !( waitthread rmg_ok local.a ) ){ continue }
+		if( local.a.coop_psqMounted != 1 ){
+			if( local.a.coop_psqBusy != 1 && level.time >= local.cool && local.a.coop_psqBeltOut != 1 ){
+				if( local.staged == 0 ){
+					local.staged = 1
+					waitthread rmg_stage local.a local.sid
+					continue
+				}
+				local.f = waitthread coop_mod/parasquad.scr::mgPlan local.a local.sid
+				if( !( waitthread rmg_ok local.a ) ){ continue }
+				if( local.f == 1 ){
+					local.fails = 0
+					waitthread coop_mod/parasquad.scr::mgSetup local.a local.sid
+					if( !( waitthread rmg_ok local.a ) ){ continue }
+					if( local.a.coop_psqMounted == 1 ){
+						local.a.coop_rmgMountT = level.time
+						local.a.coop_rmgTgtT = level.time
+						level.coop_rmgGun[local.sid] = local.a.coop_psqGun
+						level.coop_rmgYaw[local.sid] = local.a.coop_psqMgYaw
+						waitthread rmg_dbg ( "gun up gunner=" + local.a.coop_psqK + " at=" + local.a.coop_psqGun.origin + " yaw=" + local.a.coop_psqMgYaw + " mode=" + local.a.coop_psqMgMode )
+					} else {
+						local.cool = level.time + 8
+					}
+				} else {
+					local.fails++
+					local.cool = level.time + 6
+					waitthread rmg_dbg ( "no site fails=" + local.fails )
+					if( local.fails >= 4 ){
+						waitthread rmg_release local.sid "no_site"
+						break
+					}
+				}
+			}
+		} else {
+			local.why = waitthread coop_mod/parasquad.scr::mgTend local.a local.sid
+			if( !( waitthread rmg_ok local.a ) ){ continue }
+			local.rq = level.coop_rmgReloc[local.sid]
+			if( local.why == "stay" && local.rq != NIL && local.rq != "" ){ local.why = local.rq }
+			level.coop_rmgReloc[local.sid] = ""
+			if( local.why != "stay" ){
+				waitthread rmg_dbg ( "pack up why=" + local.why )
+				if( local.why == "belt_out" ){
+					local.a.coop_psqBeltOut = 1
+				} else {
+					// not the same seat again for a while
+					local.a.coop_psqMgBadSeat = local.a.coop_psqMgStand
+					local.a.coop_psqMgBadSeatT = level.time + 90
+				}
+				waitthread coop_mod/parasquad.scr::mgPackup local.a
+				level.coop_rmgGun[local.sid] = NIL
+				local.cool = level.time + 2
+				if( local.a.coop_psqBeltOut == 1 ){
+					// no rounds left in either belt: the team is riflemen from here on
+					waitthread rmg_release local.sid "belt_out"
+					break
+				}
+			}
+		}
+	}
+	// the gun of a dead team stays where it is, for the players
+	local.g = level.coop_rmgGun[local.sid]
+	if( level.coop_rmgOver[local.sid] != 1 || local.g != NIL ){
+		if( local.g != NIL && local.g != NULL ){
+			local.alive = 0
+			for( local.k = 1; local.k <= 3; local.k++ ){
+				if( waitthread rmg_ok level.coop_psqM[local.sid][local.k] ){ local.alive++ }
+			}
+			if( local.alive == 0 ){
+				waitthread coop_mod/parasquad.scr::mgLeft local.g 0
+				waitthread rmg_dbg "team down: gun left for the players"
+			}
+		}
+	}
+	level.coop_rmgOver[local.sid] = 1
+	level.coop_psqEnd[local.sid] = 1
+	level.coop_rmgBusy = 0
+	local.t = level.coop_rmgTgt[local.sid]
+	if( local.t != NIL && local.t != NULL ){ local.t remove }
+	level.coop_rmgTgt[local.sid] = NIL
+}end
+
+
+// the team could not make a gun position (no site, no rounds): they are an ordinary section
+rmg_release local.sid local.why:{
+	waitthread rmg_dbg ( "release why=" + local.why )
+	level.coop_rmgOver[local.sid] = 1
+	level.coop_psqEnd[local.sid] = 1
+	level.coop_rmgBusy = 0
+	for( local.k = 1; local.k <= 3; local.k++ ){
+		local.m = level.coop_psqM[local.sid][local.k]
+		if( !( waitthread rmg_ok local.m ) ){ continue }
+		local.m.coop_rmgOn = 0
+		local.m.flags["coop_rmgPost"] = NIL
+		local.m.coop_psqBusy = 0
+		local.m.enableEnemy = 1
+		local.m.leash = 4096
+		local.m resetleash
+		thread coop_mod/officer.scr::coop_wave_hunt local.m
+	}
+}end
+
+
+// walk the gunner to the staging point near the anchor (the path graph, 25s at most), then he plans round the anchor
+rmg_stage local.a local.sid:{
+	local.st = level.coop_rmgStage[local.sid]
+	if( local.st == NIL ){ end }
+	local.a.coop_psqBusy = 1
+	local.left = waitthread coop_mod/parasquad.scr::mgLeg local.a local.st 0 90 25
+	if( local.a == NULL ){ end }
+	local.a.coop_psqBusy = 0
+	waitthread rmg_dbg ( "staged left=" + int( local.left ) + " at=" + local.a.origin )
+}end
+
+
+// the gunner is down: the assistant (then the spotter) is the gunner. Returns him, or NIL when there is nobody (or he cannot
+// take the gun - then it stays for the players)
+rmg_succ local.sid local.old:{
+	local.gun = local.old.coop_psqGun
+	local.n = NIL
+	for( local.k = 2; local.k <= 3; local.k++ ){
+		local.m = level.coop_psqM[local.sid][local.k]
+		if( waitthread rmg_ok local.m ){ local.n = local.m; break }
+	}
+	if( local.n == NIL ){ end NIL }
+	local.n.flags["coop_rmgPost"] = NIL
+	local.n.coop_psqBusy = 1
+	local.n.enableEnemy = 0
+	local.n.coop_psqT1 = local.n.type_idle
+	local.n.coop_psqT2 = local.n.type_attack
+	local.n.coop_psqT3 = local.n.type_disguise
+	local.n.coop_psqT4 = local.n.type_grenade
+	waitthread rmg_dbg ( "gunner down, k=" + local.n.coop_psqK + " takes over, gun up=" + ( local.gun != NIL ) )
+	// the dead man's pieces: with no gun yet they are litter
+	if( local.gun == NIL || local.gun == NULL ){
+		if( local.old.coop_psqCrate != NIL && local.old.coop_psqCrate != NULL ){ local.old.coop_psqCrate remove }
+		if( local.old.coop_psqSup != NIL && local.old.coop_psqSup != NULL ){ local.old.coop_psqSup remove }
+		if( local.old.coop_psqBag != NIL && local.old.coop_psqBag != NULL ){ local.old.coop_psqBag remove }
+		local.n.coop_psqBusy = 0
+		local.n.enableEnemy = 1
+		waitthread rmg_swap local.sid local.old local.n
+		waitthread rmg_prop local.n
+		end local.n
+	}
+	// a player already on it keeps it
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL ){ continue }
+		if( local.p.turret == local.gun ){
+			local.n.coop_psqBusy = 0
+			local.n.enableEnemy = 1
+			end NIL
+		}
+	}
+	// his own gun fields = the dead gunner's
+	local.n.coop_psqGun = local.gun
+	local.n.coop_psqSup = local.old.coop_psqSup
+	local.n.coop_psqBag = local.old.coop_psqBag
+	local.n.coop_psqCrate = local.old.coop_psqCrate
+	local.n.coop_psqMgStand = local.old.coop_psqMgStand
+	local.n.coop_psqMgYaw = local.old.coop_psqMgYaw
+	local.n.coop_psqMgArc = local.old.coop_psqMgArc
+	local.n.coop_psqMgTop = local.old.coop_psqMgTop
+	local.n.coop_psqMgMode = local.old.coop_psqMgMode
+	local.n.coop_psqMgGun = local.old.coop_psqMgGun
+	local.n.coop_psqMgSup = local.old.coop_psqMgSup
+	local.n.coop_psqMgBag = local.old.coop_psqMgBag
+	local.n.coop_psqMgKind = local.old.coop_psqMgKind
+	local.n.coop_psqMgKeys = local.old.coop_psqMgKeys
+	local.n.coop_psqBelts = local.old.coop_psqBelts
+	local.am = waitthread coop_mod/parasquad_gun.scr::ammo local.gun
+	if( local.am != NIL ){ local.n.coop_psqBelt = local.am } else { local.n.coop_psqBelt = local.old.coop_psqBelt }
+	local.n.coop_psqReload = 0
+	local.n.coop_psqMgFails = 0
+	waitthread rmg_prop local.n
+	if( local.n.coop_psqProp != NIL && local.n.coop_psqProp != NULL ){ local.n.coop_psqProp hide }
+	waitthread rmg_swap local.sid local.old local.n
+	// out of whatever he was doing, onto the seat
+	local.stand = local.n.coop_psqMgStand
+	local.left = waitthread coop_mod/parasquad.scr::mgLeg local.n local.stand 0 28 12
+	if( !( waitthread rmg_ok local.n ) ){ end local.n }
+	if( local.left > 14 && local.left < 110 ){
+		if( waitthread coop_mod/parasquad.scr::mgLine local.n.origin local.stand ){
+			local.left = waitthread coop_mod/parasquad.scr::mgLeg local.n local.stand 1 10 4
+		}
+	}
+	if( !( waitthread rmg_ok local.n ) ){ end local.n }
+	if( local.left > 40 || local.gun == NULL ){
+		waitthread rmg_dbg ( "takeover failed: not at the seat left=" + int( local.left ) )
+		local.n.coop_psqGun = NIL
+		local.n.coop_psqBusy = 0
+		local.n.enableEnemy = 1
+		end NIL
+	}
+	waitthread coop_mod/parasquad.scr::mgRestSet local.gun 0
+	wait 0.7
+	if( !( waitthread rmg_ok local.n ) ){ end local.n }
+	local.ok = waitthread coop_mod/parasquad.scr::mgMount local.n local.gun local.sid
+	if( !( waitthread rmg_ok local.n ) ){ end local.n }
+	if( local.ok != 1 ){
+		waitthread coop_mod/parasquad.scr::mgOff local.n
+		local.n.coop_psqBusy = 0
+		local.n.enableEnemy = 1
+		waitthread rmg_dbg "takeover failed: not seated"
+		end NIL
+	}
+	local.n.coop_rmgMountT = level.time
+	local.n.coop_rmgTgtT = level.time
+	level.coop_rmgGun[local.sid] = local.gun
+	waitthread rmg_dbg ( "takeover done k=" + local.n.coop_psqK )
+}end local.n
+
+
+// the new gunner takes the dead man's place in the roster the pseudo-squad reads
+rmg_swap local.sid local.old local.n:{
+	level.coop_rmgSwapped[local.sid] = local.n
+}end
+
+
+//=========================================================================
+// THE ASSISTANT AND THE SPOTTER: stand near the gun as a rifleman until the gunner dies (rmg_succ), tethered to a post by
+// the gun (assistant behind and to the right, spotter out on the left flank), before it is up at the staging point.
+//=========================================================================
+rmg_side local.a local.sid local.k:{
+	wait 1.5
+	local.postAt = ( 0 0 0 )
+	local.has = 0
+	while( level.coop_rmgOver[local.sid] != 1 ){
+		wait 1.5
+		if( !( waitthread rmg_ok local.a ) ){ break }
+		if( local.a.coop_psqMounted == 1 || local.a.coop_psqBusy == 1 ){ continue }
+		if( level.coop_rmgCur[local.sid] == local.a ){ continue }
+		local.a.flags["coop_rmgPost"] = 1
+		local.gun = level.coop_rmgGun[local.sid]
+		local.pos = level.coop_rmgStage[local.sid]
+		local.leash = 320
+		if( local.gun != NIL && local.gun != NULL ){
+			local.yaw = level.coop_rmgYaw[local.sid]
+			local.f = angles_toforward ( 0 local.yaw 0 )
+			local.r = angles_toforward ( 0 ( local.yaw - 90 ) 0 )
+			local.gp = local.gun.origin
+			if( local.k == 2 ){
+				local.pos = local.gp - ( vector_scale local.f 75 ) + ( vector_scale local.r 55 )
+			} else {
+				local.pos = local.gp + ( vector_scale local.f 20 ) - ( vector_scale local.r 140 )
+			}
+			local.g = exec coop_mod/officer.scr::coop_find_ground ( local.pos + ( 0 0 48 ) )
+			if( local.g != NIL ){
+				local.dz = local.g[2] - local.gp[2]
+				if( local.dz < 0 ){ local.dz = 0 - local.dz }
+				if( local.dz < 70 ){ local.pos = local.g } else { local.pos = local.gp }
+			} else {
+				local.pos = local.gp
+			}
+			local.leash = 130
+		}
+		if( local.pos == NIL ){ continue }
+		waitthread coop_mod/parasquad.scr::post local.a local.pos local.leash
+		local.moved = vector_length( local.pos - local.postAt )
+		local.postAt = local.pos
+		local.d = waitthread coop_mod/parasquad.scr::flatDist local.a.origin local.pos
+		local.en = local.a.enemy
+		local.fight = 0
+		if( local.en != NIL && local.en != NULL ){ if( isAlive local.en ){ local.fight = 1 } }
+		if( local.d > ( local.leash + 60 ) && ( local.fight == 0 || local.moved > 200 ) ){
+			local.a.movedoneradius = 40
+			local.a runto local.pos
+		}
+	}
+}end
+
+
+//=========================================================================
+// SITE SCORE (parasquad.scr::mgSite hook; lower is better). The paratroopers' score is the gunner's walk; for the team it is how
+// well the place covers the anchor: near him (120-380u), HIGH over him, behind or beside him rather than out in front, with a
+// clear field of fire down the lane. Returned in place of the walk: mgKeep adds the field-of-fire term and the mode penalty.
+//=========================================================================
+rmg_score local.a local.sid local.seat local.gun local.fyaw local.fof:{
+	local.ap = level.coop_psqApos[local.sid]
+	if( local.ap == NIL ){ end 0 }
+	local.d = waitthread coop_mod/parasquad.scr::flatDist local.seat local.ap
+	local.s = local.d
+	if( local.d < 110 ){ local.s = local.s + 220 }
+	if( local.d > 380 ){ local.s = local.s + ( ( local.d - 380 ) * 1.5 ) }
+	// height over the anchor: each unit up (to 160) is worth 0.9u of distance; a gun below him is worth less
+	local.e = local.gun[2] - local.ap[2]
+	if( local.e > 160 ){ local.e = 160 }
+	if( local.e < ( 0 - 60 ) ){ local.e = 0 - 60 }
+	if( local.e >= 0 ){ local.s = local.s - ( local.e * 0.9 ) } else { local.s = local.s - ( local.e * 0.4 ) }
+	// out in front of him toward the players is exposed: the further past him along the lane, the worse
+	local.yaw = level.coop_psqAyaw[local.sid]
+	local.fwd = angles_toforward ( 0 local.yaw 0 )
+	local.v = local.seat - local.ap
+	local.v[2] = 0
+	local.along = vector_dot local.v local.fwd
+	if( local.along > 80 ){ local.s = local.s + ( ( local.along - 80 ) * 0.7 ) }
+	// the gun's line should run down the lane: a place that looks across it covers less
+	local.dy = waitthread rmg_dyaw local.fyaw local.yaw
+	if( local.dy > 35 ){ local.s = local.s + ( ( local.dy - 35 ) * 2.0 ) }
+	if( local.s < 0 ){ local.s = 0 }
+}end local.s
+
+
+//=========================================================================
+// THE UNPACK (parasquad.scr::mgSetup hook): he kneels at the seat and unpacks before anything goes down - a visible
+// window, coop_reinfMgSetup seconds (default 2), in which he is only a man with a gun on his back.
+//=========================================================================
+rmg_unpack local.a:{
+	local.t = waitthread rmg_cv "coop_reinfMgSetup" 2
+	if( local.t > 8 ){ local.t = 8 }
+	waitthread rmg_dbg ( "unpack secs=" + local.t + " at=" + local.a.origin )
+	local.n = int( local.t / 0.25 )
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		wait 0.25
+		if( !( waitthread rmg_ok local.a ) ){ end }
+	}
+}end
+
+
+// the gun's tuning (parasquad.scr::mgSetup hook, after the engine keys): spread and the engine's own cycle for the moments the
+// script lets go of it
+rmg_tune local.gun:{
+	local.sp = waitthread rmg_cv "coop_reinfMgSpread" 70
+	if( local.sp < 5 ){ local.sp = 5 }
+	local.gun aibulletspread local.sp local.sp
+	local.gun convergeTime 0.6
+	local.gun.coop_rmgNext = 0
+	local.gun.coop_rmgSince = 0
+	local.gun.coop_rmgBurst = 0
+}end
+
+
+//=========================================================================
+// FIRE CONTROL (parasquad.scr::mgHold hook, ~5 times a second while the gun is manned and not held): pick the player who
+// threatens the anchor, bring the gun onto him (settle), fire a burst on him, pause. All the hold-fire reasons of mgHold (a
+// mate or the officer in front of the muzzle, the barrel at its limit, a new belt) still apply and are re-tested inside the burst.
+//=========================================================================
+// the player to shoot, or NIL: in the gun's arc and pitch, a traced line to his chest, scored by how near he is to the anchor
+// (threatening it: a line to it counts for much more), sticky on the player already being shot
+rmg_pick local.a local.gun local.sid:{
+	local.ap = level.coop_psqApos[local.sid]
+	local.yaw = local.a.coop_psqMgYaw
+	local.arc = local.a.coop_psqMgArc
+	local.best = NIL
+	local.bs = 999999
+	local.q = local.gun.origin + ( 0 0 4 )
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( !( waitthread rmg_pl local.p ) ){ continue }
+		local.v = local.p.origin - local.gun.origin
+		local.dz = local.v[2] + 38
+		local.v[2] = 0
+		local.dist = vector_length local.v
+		if( local.dist < 100 || local.dist > 2000 ){ continue }
+		if( local.dz > ( local.dist * 0.40 ) ){ continue }
+		if( local.dz < ( 0 - ( local.dist * 0.21 ) ) ){ continue }
+		local.va = vector_toangles local.v
+		if( ( waitthread rmg_dyaw local.va[1] local.yaw ) > ( local.arc + 4 ) ){ continue }
+		local.tr = traced local.q ( local.p.origin + ( 0 0 38 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 270337
+		if( ( local.tr["fraction"] * local.dist ) < ( local.dist - 90 ) ){ continue }
+		local.sc = local.dist * 0.15
+		if( local.ap != NIL ){
+			local.sc = ( vector_length( local.p.origin - local.ap ) )
+			// a line from him to the anchor = he is shooting at it / about to
+			local.tr2 = traced ( local.p.origin + ( 0 0 60 ) ) ( local.ap + ( 0 0 40 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.tr2["fraction"] >= 0.97 ){ local.sc = local.sc - 250 }
+		}
+		if( local.p == local.gun.coop_rmgFocus ){ local.sc = local.sc - 120 }
+		if( local.sc < local.bs ){ local.bs = local.sc; local.best = local.p }
+	}
+}end local.best
+
+
+// the aim point on a player: chest, plus his velocity times coop_reinfMgLead (the turn of the gun takes time; the bullet does not)
+rmg_aimpt local.p:{
+	local.lead = waitthread rmg_cv "coop_reinfMgLead" 0.25
+	local.v = local.p.velocity
+	local.v[2] = 0
+	local.l = vector_length local.v
+	if( local.l > 320 ){ local.v = vector_scale local.v ( 320 / local.l ) }
+	local.r = local.p.origin + ( 0 0 38 ) + ( vector_scale local.v local.lead )
+}end local.r
+
+
+rmg_fire local.a local.gun local.sid:{
+	if( local.gun == NIL || local.gun == NULL ){ end }
+	local.t = level.coop_rmgTgt[local.sid]
+	if( local.t == NIL || local.t == NULL ){
+		local.t = spawn script_origin
+		level.coop_rmgTgt[local.sid] = local.t
+	}
+	local.p = waitthread rmg_pick local.a local.gun local.sid
+	if( local.gun == NULL || !( waitthread rmg_ok local.a ) ){ end }
+	local.gun targettype "none"
+	if( local.p == NIL ){
+		// nobody to shoot: the gun stays down the lane, ready
+		if( local.gun.coop_rmgBurst == 1 ){ local.gun stopFiring; local.gun.coop_rmgBurst = 0 }
+		local.gun.coop_rmgFocus = NIL
+		local.w = local.gun.origin + ( vector_scale ( angles_toforward ( 0 local.a.coop_psqMgYaw 0 ) ) 700 )
+		local.t.origin = local.w
+		local.gun setAimTarget local.t
+		level.coop_psqThreat[local.sid] = NIL
+		end
+	}
+	// a new target: the gun comes round, and the first round waits for it
+	if( local.gun.coop_rmgFocus != local.p ){
+		local.settle = waitthread rmg_cv "coop_reinfMgSettle" 0.7
+		local.gun.coop_rmgFocus = local.p
+		local.gun.coop_rmgSince = level.time + local.settle
+		waitthread rmg_dbg ( "target " + local.p.netname + " d=" + int( vector_length( local.p.origin - local.gun.origin ) ) + " fromAnchor=" + int( vector_length( local.p.origin - level.coop_psqApos[local.sid] ) ) + " settle=" + local.settle )
+	}
+	local.aim = waitthread rmg_aimpt local.p
+	local.t.origin = local.aim
+	local.gun setAimTarget local.t
+	level.coop_psqThreat[local.sid] = local.p.origin
+	level.coop_psqLastThr[local.sid] = local.p.origin
+	level.coop_psqLastThrT[local.sid] = level.time
+	local.a.coop_rmgTgtT = level.time
+	if( level.time < local.gun.coop_rmgSince ){ end }
+	if( level.time < local.gun.coop_rmgNext ){ end }
+	// the burst
+	local.bmin = waitthread rmg_cv "coop_reinfMgBurstMin" 0.6
+	local.bmax = waitthread rmg_cv "coop_reinfMgBurstMax" 1.1
+	if( local.bmax < local.bmin ){ local.bmax = local.bmin }
+	local.len = local.bmin + ( randomfloat ( local.bmax - local.bmin ) )
+	local.cap = 45
+	local.gun startFiring
+	local.gun.coop_rmgBurst = 1
+	local.a.coop_psqMgFireT = level.time
+	local.b0 = level.time
+	local.why = "done"
+	local.n = 0
+	while( ( level.time - local.b0 ) < local.len ){
+		wait 0.1
+		local.n++
+		if( local.gun == NULL || !( waitthread rmg_ok local.a ) ){ local.why = "gone"; break }
+		if( !( waitthread rmg_pl local.p ) ){ local.why = "target_gone"; break }
+		local.t.origin = waitthread rmg_aimpt local.p
+		if( ( local.n - ( int( local.n / 3 ) * 3 ) ) == 0 ){
+			local.dir = angles_toforward ( 0 local.gun.angles[1] 0 )
+			if( waitthread coop_mod/parasquad.scr::mateInFront local.gun.origin local.dir local.sid local.a ){ local.why = "friend_in_front"; break }
+			local.ht = waitthread coop_mod/parasquad_gun.scr::heat local.gun
+			if( local.ht != NIL ){ if( local.ht >= local.cap ){ local.why = "barrel"; break } }
+			if( local.a.coop_psqReload == 1 ){ local.why = "belt"; break }
+			local.tr = traced ( local.gun.origin + ( 0 0 4 ) ) ( local.p.origin + ( 0 0 38 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 270337
+			if( local.tr["fraction"] < 0.8 ){ local.why = "masked"; break }
+		}
+	}
+	if( local.gun != NULL ){
+		local.gun stopFiring
+		local.gun.coop_rmgBurst = 0
+		local.pm = waitthread rmg_cv "coop_reinfMgPause" 0.9
+		local.gun.coop_rmgNext = level.time + local.pm + ( randomfloat 0.7 )
+		if( level.coop_rmgBursts == NIL ){ level.coop_rmgBursts = 0 }
+		level.coop_rmgBursts = level.coop_rmgBursts + 1
+		waitthread rmg_dbg ( "burst " + local.why + " len=" + ( level.time - local.b0 ) + " at=" + local.p.netname + " hp=" + local.p.health + " ammo=" + ( waitthread coop_mod/parasquad_gun.scr::ammo local.gun ) + " heat=" + ( waitthread coop_mod/parasquad_gun.scr::heat local.gun ) )
+	}
+}end

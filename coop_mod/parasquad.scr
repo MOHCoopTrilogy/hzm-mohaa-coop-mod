@@ -1459,7 +1459,9 @@ mgSeatFree local.s:{
 
 
 // a player or a squad mate in front of a muzzle at local.pos pointing along local.dir
-playerInFront local.pos local.dir:{
+playerInFront local.pos local.dir local.sid:{
+	// [mgteam] the officer's MG42 team (reinf_mg.scr) fires AT the players: nobody of theirs to hold fire for
+	if( local.sid != NIL ){ if( level.coop_psqFoe[local.sid] == "player" ){ end 0 } }
 	for( local.i = 1; local.i <= $player.size; local.i++ ){
 		local.p = $player[local.i]
 		if( local.p == NULL ){ continue }
@@ -1481,8 +1483,9 @@ playerInFront local.pos local.dir:{
 
 
 mateInFront local.pos local.dir local.sid local.self:{
-	for( local.k = 1; local.k <= 5; local.k++ ){
+	for( local.k = 1; local.k <= 6; local.k++ ){
 		local.m = level.coop_psqM[local.sid][local.k]
+		if( local.k == 6 ){ local.m = level.coop_psqOff[local.sid] }	// [mgteam] the officer the MG42 team covers (NIL for a para squad)
 		if( local.m == NIL || local.m == NULL ){ continue }
 		if( local.m == local.self ){ continue }
 		if( !isAlive local.m ){ continue }
@@ -1521,6 +1524,7 @@ trail:{
 
 // 1 when local.g is on the way: where a player has walked, or straight ahead of the squad
 mgLane local.g local.sid:{
+	if( level.coop_psqFoe[local.sid] == "player" ){ end 0 }	// [mgteam]
 	if( level.coop_psqTrN != NIL ){
 		for( local.i = 1; local.i <= level.coop_psqTrN; local.i++ ){
 			local.v = local.g - level.coop_psqTr[local.i]
@@ -1682,9 +1686,10 @@ mgSite local.a local.sid local.mode local.g local.gun local.sup local.bag local.
 	if( local.mode == "C" ){ local.strict = 1 }
 	if( !( waitthread mgOpen local.seat local.fyaw local.strict ) ){ waitthread mgNo "gap" local.g; end 0 }
 	if( waitthread crowded local.seat local.a 72 ){ waitthread mgNo "crowded" local.g; end 0 }
-	if( waitthread playerInFront local.gun local.dir ){ waitthread mgNo "player_in_front" local.g; end 0 }
+	if( waitthread playerInFront local.gun local.dir local.sid ){ waitthread mgNo "player_in_front" local.g; end 0 }
 	if( waitthread mateInFront local.gun local.dir local.sid local.a ){ waitthread mgNo "squad_in_front" local.g; end 0 }
 	local.walk = waitthread flatDist local.a.origin local.seat
+	if( local.a.coop_rmgOn == 1 ){ local.walk = waitthread coop_mod/reinf_mg.scr::rmg_score local.a local.sid local.seat local.gun local.fyaw local.fof }	// [mgteam]
 	waitthread mgKeep local.mode local.gun local.sup local.bag local.seat local.fyaw local.arc local.top local.fof local.walk
 }end 1
 
@@ -1837,6 +1842,7 @@ mgPlan local.a local.sid:{
 		if( local.w != NULL ){ level.coop_psqWorldNum = local.w.entnum }
 	}
 	local.ctr = local.a.origin
+	if( level.coop_psqCtr[local.sid] != NIL ){ local.ctr = level.coop_psqCtr[local.sid] }	// [mgteam]
 	local.n = 0
 	for( local.r = 0; local.r <= 432; local.r = local.r + 72 ){
 		for( local.j = 0; local.j < 12; local.j++ ){
@@ -2093,7 +2099,7 @@ mgSetup local.a local.sid:{
 	}
 	local.yaw = local.a.coop_psqMgYaw
 	local.dir = angles_toforward ( 0 local.yaw 0 )
-	if( waitthread playerInFront local.a.coop_psqMgGun local.dir ){
+	if( waitthread playerInFront local.a.coop_psqMgGun local.dir local.sid ){
 		waitthread mgAbort local.a "player_in_front"
 		end
 	}
@@ -2111,6 +2117,12 @@ mgSetup local.a local.sid:{
 	local.look remove
 	if( local.a == NULL ){ end }
 	if( !isAlive local.a ){ waitthread mgAbort local.a "died"; end }
+	// [mgteam] the MG42 team unpacks in plain sight first (coop_reinfMgSetup seconds, a window to punish)
+	if( local.a.coop_rmgOn == 1 ){
+		waitthread coop_mod/reinf_mg.scr::rmg_unpack local.a
+		if( local.a == NULL ){ end }
+		if( !isAlive local.a ){ waitthread mgAbort local.a "died"; end }
+	}
 	// what the plan rests on is looked at once more, now that he is standing there: a surface that
 	// has gone (a door swung, a crate was pushed in) means no gun
 	local.chk = local.a.coop_psqMgSup
@@ -2161,6 +2173,7 @@ mgSetup local.a local.sid:{
 	local.rgt = angles_toforward ( 0 ( local.yaw - 90 ) 0 )
 	local.crate = spawn script_model
 	local.crate model "models/static/30cal_crate.tik"
+	if( local.a.coop_rmgOn == 1 ){ local.crate model "models/static/mg42ammoboxwbelt.tik" }	// [mgteam]
 	local.crate notsolid
 	local.cp = local.a.coop_psqMgGun - ( vector_scale local.dir 30 ) + ( vector_scale local.rgt 24 )
 	local.cp[2] = local.a.coop_psqMgStand[2]
@@ -2182,7 +2195,9 @@ mgSetup local.a local.sid:{
 	}
 	if( !isAlive local.a ){ waitthread mgAbort local.a "died"; end }
 	// 4. the gun, off his back and onto the mount
-	local.gun = spawn "models/statweapons/coop_30cal_para.tik"
+	local.gm = "models/statweapons/coop_30cal_para.tik"
+	if( local.a.coop_rmgOn == 1 ){ local.gm = "models/statweapons/mg42_gun.tik" }	// [mgteam] the German team's own gun
+	local.gun = spawn local.gm
 	if( local.gun == NIL || local.gun == NULL ){ waitthread mgAbort local.a "no_gun"; end }
 	if( local.a.coop_psqProp != NIL && local.a.coop_psqProp != NULL ){ local.a.coop_psqProp hide }
 	local.gun.origin = local.a.coop_psqMgGun + ( 0 0 10 )
@@ -2211,7 +2226,12 @@ mgSetup local.a local.sid:{
 	}
 	local.a.coop_psqMgKeys = 0
 	local.a.coop_psqReload = 0
-	local.kk = waitthread coop_mod/parasquad_gun.scr::belt local.gun local.a.coop_psqBelt
+	if( local.a.coop_rmgOn == 1 ){
+		// [mgteam] the MG42's own barrel (the engine's default heat rates apply), its own 20 rounds a second
+		local.kk = waitthread coop_mod/parasquad_gun.scr::belt42 local.gun local.a.coop_psqBelt
+	} else {
+		local.kk = waitthread coop_mod/parasquad_gun.scr::belt local.gun local.a.coop_psqBelt
+	}
 	if( local.kk == 1 ){
 		local.a.coop_psqMgKeys = 1
 		// with the keys he fires at the gun's own 10 rounds a second (without: one round a server frame, 40 a second,
@@ -2219,6 +2239,7 @@ mgSetup local.a local.sid:{
 		local.gun burstFireSettings 0.5 0.9 1.0 2.2
 		local.gun aibulletspread 150 150
 	}
+	if( local.a.coop_rmgOn == 1 ){ waitthread coop_mod/reinf_mg.scr::rmg_tune local.gun }	// [mgteam] the tuned spread
 	// where it will lie when nobody holds it (mgRest). Level while it is set down: he stands where its butt
 	// would come down
 	local.rp = waitthread mgRest local.a.coop_psqMgGun local.yaw
@@ -2363,7 +2384,7 @@ mgHold local.a local.gun local.sid:{
 		if( !isAlive local.a ){ break }
 		if( local.a.coop_psqMounted != 1 || local.a.coop_psqGun != local.gun ){ break }
 		local.dir = angles_toforward ( 0 local.gun.angles[1] 0 )
-		local.blk = waitthread playerInFront local.gun.origin local.dir
+		local.blk = waitthread playerInFront local.gun.origin local.dir local.sid
 		if( local.blk != 1 ){ local.blk = waitthread mateInFront local.gun.origin local.dir local.sid local.a }
 		local.hw = "friend_in_front"
 		if( local.blk != 1 && local.a.coop_psqReload == 1 ){ local.blk = 1; local.hw = "new_belt" }
@@ -2399,6 +2420,12 @@ mgHold local.a local.gun local.sid:{
 			local.held = 0
 			local.next = level.time + 1
 			waitthread dbg "mg hold fire=clear"
+		}
+		if( local.a.coop_rmgOn == 1 && local.held != 1 ){
+			// [mgteam] one fire-control step: pick the player threatening the officer, settle, burst, rest
+			waitthread coop_mod/reinf_mg.scr::rmg_fire local.a local.gun local.sid
+			wait 0.2
+			continue
 		}
 		local.e = local.a.enemy
 		local.own = 0
@@ -2454,7 +2481,7 @@ mgHold local.a local.gun local.sid:{
 					local.ok = 1
 					if( local.off > local.a.coop_psqMgArc || local.dist < 200 || local.tr["fraction"] < 1.0 ){ local.ok = 0 }
 					if( local.ok == 1 ){
-						if( waitthread playerInFront local.gun.origin local.fd ){ local.ok = 0 }
+						if( waitthread playerInFront local.gun.origin local.fd local.sid ){ local.ok = 0 }
 					}
 					if( local.ok == 1 ){
 						if( waitthread mateInFront local.gun.origin local.fd local.sid local.a ){ local.ok = 0 }
@@ -2485,7 +2512,7 @@ mgHold local.a local.gun local.sid:{
 							local.t = local.t - 0.25
 							if( local.gun == NULL || local.a == NULL ){ break }
 							local.dir = angles_toforward ( 0 local.gun.angles[1] 0 )
-							if( waitthread playerInFront local.gun.origin local.dir ){ break }
+							if( waitthread playerInFront local.gun.origin local.dir local.sid ){ break }
 							if( waitthread mateInFront local.gun.origin local.dir local.sid local.a ){ break }
 						}
 						if( local.gun == NULL ){ break }
