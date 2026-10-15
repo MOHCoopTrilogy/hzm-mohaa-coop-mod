@@ -692,6 +692,7 @@ loadout_menuCtl local.player local.data:{
 	//gating is now 100% client-side (ui/loadout/lktab<t>.cfg via the tab buttons + slot cards +
 	//init.cfg), so the ,w0t0..t5 tab tokens need no server work and coop_loTab is retired.
 	if(local.data == "o"){
+		local.player.flags["coop_loDnLast"] = NIL	//[done gate 2026-10-15] a fresh open re-asserts the DONE verdict
 		thread loadout_ui_exportUnlocks local.player
 		//[user 07-18 pre-release] SHOW-ALL-WITH-LOCK: also refresh the per-page cosmetic lock state
 		//(diff-only; re-asserts current truth for the freshly-opened menu - the pages' baked
@@ -1447,6 +1448,72 @@ loadout_slotLocksExport local.player:{
 	}
 	if(local.any == 1 && local.player != NULL){
 		local.player stufftext "vstr coop_loMastApply"
+	}
+	thread coop_mod/loadoutpick.scr::loadout_doneGateExport local.player	//[done gate 2026-10-15] a pick changed: refresh the DONE verdict
+}end
+
+//=========================================================================
+//[done gate 2026-10-15] DONE REFUSES TO CLOSE ON A LOCKED SELECTION. Everything the SERVER holds as a pick (gun per slot, finish /
+//variant per slot - the slot cards show them) is checked against the same unlock tests the tiles and the spawn path use; the
+//first offender becomes a client verdict:
+//  coop_loDnSv  = "set coop_loDnNop 0" (fine) | "exec ui/loadout/dnsv_bad.cfg" (ui/loadout/done.cfg runs it via vstr)
+//  coop_loDnSvA = "set coop_loDnM2 <item>"   coop_loDnSvB = "set coop_loDnM3 <what unlocks it>"   (dnsv_bad.cfg runs both)
+//Diff-only (flags coop_loDnLast; the menu-open token clears it so a fresh open always re-asserts).  The parked uniform / helmet /
+//glove PAGE is client-only state and is checked client-side (page cfgs bake coop_loDnS/H/G); a server-held cosmetic is not (the spawn path heals it).  bug-758 wire rules: unquoted, no ';'.
+//=========================================================================
+loadout_doneGateExport local.player:{
+	if(local.player == NULL){ end }
+	if(local.player.flags["coop_loDnGen"] == NIL){ local.player.flags["coop_loDnGen"] = 0 }
+	local.player.flags["coop_loDnGen"] = local.player.flags["coop_loDnGen"] + 1
+	local.gen = local.player.flags["coop_loDnGen"]
+	local.l2 = ""
+	local.l3 = ""
+	if(getcvar("coop_lockLoadout") != "0"){
+		waitthread coop_mod/challenges.scr::chal_ensure local.player
+		if(local.player == NULL){ end }
+		if(local.player.flags["coop_loDnGen"] != local.gen){ end }	//superseded while chal_ensure waited
+		waitthread coop_mod/loadoutskins.scr::skin_init
+		for(local.sl = 1; local.sl <= 4; local.sl++){
+			if(local.l2 != ""){ break }
+			local.sid = local.player.flags["coop_loSlotId" + local.sl]
+			if(local.sid == NIL || local.sid == ""){ continue }
+			local.r = waitthread coop_mod/loadoutroster.scr::roster_get local.sid
+			local.give = local.r["give"]
+			if(local.give == NIL || local.give == ""){ continue }
+			if(!(waitthread loadout_isUnlocked local.player local.give)){
+				local.l2 = "Slot " + local.sl + ": " + local.r["name"]
+				local.l3 = waitthread coop_mod/challenges.scr::chal_reqText local.give
+				continue
+			}
+			local.fid = local.player.flags["coop_loFin" + local.sl]
+			if(local.fid == NIL || local.fid == ""){ continue }
+			local.fid = int(local.fid)
+			if(local.fid < 1){ continue }
+			if(local.fid >= 8){
+				if(!(waitthread loadout_mvUnlocked local.player local.give local.fid)){
+					local.l2 = "Slot " + local.sl + " variant: " + local.r["name"]
+					local.l3 = "Variant not unlocked yet"
+				}
+			} else if(!(waitthread loadout_finUnlocked local.player local.fid)){
+				local.l2 = "Slot " + local.sl + " finish: " + level.coop_skinFinName[local.fid]
+				local.l3 = "Finish not unlocked yet"
+			} else if(!(waitthread loadout_finMastered local.player local.give)){
+				local.l2 = "Slot " + local.sl + " finish: " + level.coop_skinFinName[local.fid]
+				local.l3 = "Master " + local.r["name"] + " first"
+			}
+		}
+	}
+	if(local.player == NULL){ end }
+	if(local.player.flags["coop_loDnGen"] != local.gen){ end }
+	local.key = local.l2 + "|" + local.l3
+	if(local.player.flags["coop_loDnLast"] == local.key){ end }
+	local.player.flags["coop_loDnLast"] = local.key
+	if(local.l2 == ""){
+		local.player stufftext "set coop_loDnSv set coop_loDnNop 0"
+	} else {
+		local.player stufftext ( "set coop_loDnSvA set coop_loDnM2 " + local.l2 )
+		local.player stufftext ( "set coop_loDnSvB set coop_loDnM3 " + local.l3 )
+		local.player stufftext "set coop_loDnSv exec ui/loadout/dnsv_bad.cfg"
 	}
 }end
 
