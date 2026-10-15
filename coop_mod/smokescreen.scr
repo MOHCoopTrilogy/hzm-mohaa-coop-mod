@@ -1,0 +1,207 @@
+//=========================================================================
+// smokescreen.scr - enemy reinforcements' SMOKE SCREENS (2026-10-15, user: "when these reinforcements
+// throw their smoke grenades they usually dont work effectively or obstruct view, the point is to conceal").
+//
+// WHAT WAS WRONG (see docs/proposals/smoke_2026-10-15/README.md):
+//   - the elite squad dropped its smoke at its OWN spawn feet 10-18 s after landing (the squad was already
+//     walking at the players), the grenadier dropped it on the TARGET PLAYER's feet, and both used
+//     tehao_thickSmoke: a dark-grey 3/s soot wisp that rises at 60 u/s^2 and was removed after 16-20 s.
+//   - nothing waited for it: the men never stopped for the cloud.
+//
+// WHAT IT DOES NOW
+//   squad_screen  elite squad: as soon as the nearest player is inside ~1900u it picks a spot on the line
+//                 between the squad and that player (55% of the gap, 400..1100u out from the squad, never
+//                 within 300u of the player), holds the whole squad (enableEnemy 0 + runto self), drops a 3-canister wall ACROSS the line,
+//                 lets it build for 8 s and then releases them to advance through it.
+//   lob           grenadier: the same placement from the thrower to its target (replaces "smoke on the player").
+//   The canister is models/fx/coop_screensmoke.tik (fixes pak, docs/tools/assets/fixes): a real SmokeGrenade
+//   whose SERVER sprites make Actor::CanSee fail for AI inside/behind the cloud (fair both ways) and whose
+//   client emitter is a dense white-grey bank that holds ~60 s.
+// Hold flag: coop_wave_hunt (officer.scr) skips its push while flags["coop_smokeHold"] == 1.
+//=========================================================================
+
+// Dependencies are all in officer.scr (coop_find_ground) - this file adds no waits before any coop init.
+
+// the floor under local.pos, or local.pos itself when the trace finds none
+ss_ground local.pos:{
+	local.g = exec coop_mod/officer.scr::coop_find_ground ( local.pos + ( 0 0 48 ) )
+	if( local.g == NIL ){ end local.pos }
+}end local.g
+
+// first live member of the (up to six) squad slots, or NIL
+ss_lead local.a1 local.a2 local.a3 local.a4 local.a5 local.a6:{
+	if( local.a1 != NIL && local.a1 != NULL && isAlive local.a1 ){ end local.a1 }
+	if( local.a2 != NIL && local.a2 != NULL && isAlive local.a2 ){ end local.a2 }
+	if( local.a3 != NIL && local.a3 != NULL && isAlive local.a3 ){ end local.a3 }
+	if( local.a4 != NIL && local.a4 != NULL && isAlive local.a4 ){ end local.a4 }
+	if( local.a5 != NIL && local.a5 != NULL && isAlive local.a5 ){ end local.a5 }
+	if( local.a6 != NIL && local.a6 != NULL && isAlive local.a6 ){ end local.a6 }
+}end NIL
+
+// nearest alive, active player to local.o (an actor), or NIL
+ss_nearest local.o:{
+	local.best = NIL
+	local.bd = 999999
+	local.i = 1
+	while( local.i <= $player.size ){
+		local.p = $player[local.i]
+		if( local.p != NULL && local.p.health > 0 && local.p.dmteam != "spectator" && local.p.flags["coop_isActive"] == 1 ){
+			local.d = vector_length( local.p.origin - local.o.origin )
+			if( local.d < local.bd ){
+				local.bd = local.d
+				local.best = local.p
+			}
+		}
+		local.i++
+	}
+}end local.best
+
+// HOLD (v=1) / RELEASE (v=0) on every squad slot. enableEnemy = 0 is what actually STOPS a man: actor.cpp turns it into a forced
+// IDLE + SetEnemy(NULL), whereas just skipping coop_wave_hunt's push left the engine's own attack think running him at the players
+// (measured: 330u closed during a 5 s "hold"). Release puts the enemy switch back and re-aims him at the players.
+ss_hold1 local.a local.v:{
+	if( local.a == NIL || local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	local.a.flags["coop_smokeHold"] = local.v
+	if( local.v == 1 ){
+		local.a.enableEnemy = 0
+		//a run coop_wave_hunt already ordered survives enableEnemy 0 (measured: 650u closed in 8 s), so the man is also pinned in a
+		//scripted idle - the recipe wounded.scr and the prone shooter use; release cancels it with `anim "idle"`
+		local.a anim_scripted "idle"
+		//rnf_idle_watch (reinf.scr) kicks a man it finds idle after ~10 s and re-sends him; coop_aiDisabled is its (and the squad / maneuver
+		//layers') own "deliberate post, leave him" exemption
+		local.a.coop_aiDisabled = 1
+		//the overhead star (+coopboss, drawn by cgame) would mark the men THROUGH the cloud; off while they hide (coop_smokeMarker 1 keeps it)
+		if( getcvar( "coop_smokeMarker" ) != "1" ){ local.a rendereffects "-coopboss" }
+	} else {
+		local.a.coop_aiDisabled = 0
+		local.a anim "idle"
+		local.a.enableEnemy = 1
+		local.a forceactivate
+		local.a exec coop_mod/replace.scr::attackplayer
+		thread ss_marker_back local.a
+	}
+}end
+
+// the star returns once the man has crossed the bank (9 s after release)
+ss_marker_back local.a:{
+	wait 9
+	if( local.a == NIL || local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	if( local.a.flags["coop_smokeHold"] == 1 ){ end }
+	local.a rendereffects "+coopboss"
+}end
+
+ss_hold local.v local.a1 local.a2 local.a3 local.a4 local.a5 local.a6:{
+	waitthread ss_hold1 local.a1 local.v
+	waitthread ss_hold1 local.a2 local.v
+	waitthread ss_hold1 local.a3 local.v
+	waitthread ss_hold1 local.a4 local.v
+	waitthread ss_hold1 local.a5 local.v
+	waitthread ss_hold1 local.a6 local.v
+}end
+
+// Where the wall goes: a point on the line from local.from (squad) to local.to (player). NIL = no screen worth
+// throwing (already in each other's face).
+ss_place local.from local.to:{
+	local.gap = local.to - local.from
+	local.gap[2] = 0
+	local.dist = vector_length local.gap
+	if( local.dist < 700 ){ end NIL }
+	local.dir = vector_normalize local.gap
+	local.dc = local.dist * 0.55
+	if( local.dc > 1100 ){ local.dc = 1100 }
+	if( local.dc > local.dist - 300 ){ local.dc = local.dist - 300 }
+	if( local.dc < 400 ){ local.dc = 400 }
+	local.c = local.from + ( local.dir * local.dc )
+	local.c[2] = local.from[2]
+}end local.c
+
+// at most two screens alive at once and one new screen per 20 s level-wide (cost + readability)
+ss_budget:{
+	if( level.coop_smokeLive == NIL ){ level.coop_smokeLive = 0 }
+	if( level.coop_smokeLive >= 2 ){ end 0 }
+	if( level.coop_smokeNextT != NIL && level.time < level.coop_smokeNextT ){ end 0 }
+	level.coop_smokeNextT = level.time + 20
+}end 1
+
+ss_expire:{
+	wait 80
+	level.coop_smokeLive--
+}end
+
+// Drops the 3-canister wall centred on local.c, perpendicular to the line from..to. Returns the canister count.
+ss_spawn local.c local.from local.to:{
+	local.dir = local.to - local.from
+	local.dir[2] = 0
+	local.dir = vector_normalize local.dir
+	local.perp = ( 0 0 0 )
+	local.perp[0] = 0 - local.dir[1]
+	local.perp[1] = local.dir[0]
+	local.yaw = randomint 360
+	level.coop_smokeLive++
+	thread ss_expire
+	local.n = 0
+	local.k = 0
+	while( local.k < 3 ){
+		local.pos = local.c + ( local.perp * ( ( local.k - 1 ) * 380 ) )
+		local.g = waitthread ss_ground local.pos
+		local.s = spawn "models/fx/coop_screensmoke.tik"
+		if( local.s != NULL && local.s != NIL ){	//entity-pool guard
+			local.s.origin = local.g + ( 0 0 10 )
+			local.s.angles = ( 0 local.yaw 0 )
+			local.s notsolid
+			local.n++
+		}
+		waitframe	//one canister per server frame
+		local.k++
+	}
+	println ( "^~^~^ SMOKE screen n=" + local.n + " at=" + local.c + " from=" + local.from + " to=" + local.to + " t=" + level.time )
+}end local.n
+
+// ELITE SQUAD: throw between the squad and the nearest player, hold for the cloud, then advance through it.
+squad_screen local.a1 local.a2 local.a3 local.a4 local.a5 local.a6:{
+	local.t0 = level.time
+	local.lead = NIL
+	local.tg = NIL
+	wait 0.5	//before coop_wave_hunt's first push (1.5 s): the squad must not have started running yet
+	while( 1 ){
+		if( level.time - local.t0 > 45 ){ end }
+		local.lead = waitthread ss_lead local.a1 local.a2 local.a3 local.a4 local.a5 local.a6
+		if( local.lead == NIL ){ end }
+		local.tg = waitthread ss_nearest local.lead
+		if( local.tg != NIL ){
+			local.d = vector_length( local.tg.origin - local.lead.origin )
+			if( local.d < 700 ){ end }
+			if( local.d <= 1900 ){ break }
+		}
+		wait 1.5
+	}
+	local.c = waitthread ss_place local.lead.origin local.tg.origin
+	if( local.c == NIL ){ end }
+	local.ok = waitthread ss_budget
+	if( local.ok != 1 ){ end }
+	waitthread ss_hold 1 local.a1 local.a2 local.a3 local.a4 local.a5 local.a6
+	waitthread ss_spawn local.c local.lead.origin local.tg.origin
+	wait 8	//the bank needs ~8 s to close (probe: opaque ~+10 s)
+	waitthread ss_hold 0 local.a1 local.a2 local.a3 local.a4 local.a5 local.a6
+	println ( "^~^~^ SMOKE advance t=" + level.time )
+}end
+
+// GRENADIER: the same wall between the thrower and its target. Returns 1 when a screen went out, else 0.
+lob local.thrower local.target:{
+	if( local.thrower == NULL || local.target == NULL ){ end 0 }
+	local.c = waitthread ss_place local.thrower.origin local.target.origin
+	if( local.c == NIL ){ end 0 }
+	local.ok = waitthread ss_budget
+	if( local.ok != 1 ){ end 0 }
+	waitthread ss_hold 1 local.thrower
+	thread ss_release local.thrower 6
+	waitthread ss_spawn local.c local.thrower.origin local.target.origin
+}end 1
+
+// lets a lone thrower go again after local.s seconds (the caller must not block on it)
+ss_release local.who local.s:{
+	wait local.s
+	waitthread ss_hold 0 local.who
+}end
