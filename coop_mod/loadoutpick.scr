@@ -156,6 +156,7 @@ loadout_setBody local.player local.slot local.data local.quiet:{
 	local.player stufftext ( "seta coop_loS" + local.slot + "F 0" )
 
 	waitthread loadout_rebuild local.player
+	thread loadout_slotLocksExport local.player	//[loadout review] mastery / variant lock + EQUIPPED marker for the new gun
 
 	//[user 2026-08-10] QUIET COMMIT (loadout_seedDefaults). The state above is unconditional; only
 	//the player-facing tail below is skipped. A seed must not announce itself three times at spawn,
@@ -882,9 +883,11 @@ loadout_ui_exportUnlocks local.player:{
 			//deny beep. Archived so the DISCONNECTED main-menu armory enforces locks with NO server (the
 			//server-side gate in loadout_setBody can't run there). bug-758: unquoted on the wire (see above).
 			if(local.lk == 0){
-				local.player stufftext ( "seta coop_loCmt" + local.id + " vstr coop_loCcur" )
+				//[loadout review 2026-10-15] the click IS this command now (t<id>.cfg = `vstr coop_loCmt<id>`): earned = eq<id>.cfg
+				//(inspect + equip into the active slot), locked = lkw<id>.cfg (requirement + beep; nothing previewed or equipped).
+				local.player stufftext ( "seta coop_loCmt" + local.id + " exec ui/loadout/eq" + local.id + ".cfg" )
 			} else {
-				local.player stufftext ( "seta coop_loCmt" + local.id + " vstr coop_loDeny" )
+				local.player stufftext ( "seta coop_loCmt" + local.id + " exec ui/loadout/lkw" + local.id + ".cfg" )
 			}
 			local.w++	//count the 2nd stufftext so the reliable-command flush (below) stays under the ring
 			if(local.w >= 8){
@@ -935,13 +938,14 @@ loadout_ui_exportUnlocks local.player:{
 			if(local.flk == 0){
 				local.player stufftext ( "seta coop_loFcmtA" + local.f + " set coop_loFcmt" + local.f + " vstr coop_loFgo" + local.f )
 			} else {
-				local.player stufftext ( "seta coop_loFcmtA" + local.f + " set coop_loFcmt" + local.f + " vstr coop_loDeny" )
+				local.player stufftext ( "seta coop_loFcmtA" + local.f + " set coop_loFcmt" + local.f + " exec ui/loadout/fdeny" + local.f + ".cfg" )	//[loadout review] a locked chip click shows the requirement
 			}
 			//archived only: lkfin.cfg replays these when the strip appears (slot click), so lock
 			//state can never paint before the strip exists
 		}
 		local.f++
 	}
+	waitthread loadout_slotLocksExport local.player
 
 }end
 
@@ -1296,6 +1300,155 @@ loadout_finUnlocked local.player local.fid:{
 	local.hay = "|" + local.u + "|"
 	if(waitthread coop_mod/main.scr::containsText local.hay ("|" + level.coop_skinFinStat[local.fid] + "|") 0){ end 1 }
 }end 0
+
+//=========================================================================
+//[loadout review 2026-10-15] ARMORY PICKS AS STATE. The cgame registers USERINFO cvars lp_s / lp_h / lp_g (uniform / helmet / glove
+//page), lp_w1..4 (gun id per slot) and lp_f1..4 (finish id per slot, 0-7); the armory cfgs `set` them when a pick is ACCEPTED
+//client-side (locked items never write them). player.scr runs this when the player's userinfo string changes. Unlike a name-bus
+//token (32 chars, ONE dispatched per ~0.75 s batch, the rest dropped) a value cannot be lost to a quick click: we converge on the
+//LAST value of every row. An old client has none of these keys and keeps using the name bus; both paths end in the same
+//idempotent setters (armory_skin_set / armory_helmet_set / armory_glove_set / loadout_set / loadout_finish), so a client that
+//sends both is applied once. A row is only marked done when the setter was really reachable (skin needs the player alive).
+//=========================================================================
+loadout_pickPoll local.player:{
+	if(local.player == NULL){ end }
+	if(local.player.flags["coop_lpBusy"] == 1){ end }
+	local.player.flags["coop_lpBusy"] = 1
+	local.again = 1
+	local.tries = 0
+	while(local.again == 1 && local.player != NULL){
+		local.again = 0
+		local.info = local.player.userinfo
+		//---- uniform / helmet / glove: pages
+		local.v = info_valueforkey local.info "lp_s"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_s"]){
+			if(isAlive local.player){
+				local.player.flags["coop_lpT_s"] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_s=" + local.v )
+				waitthread coop_mod/helmet.scr::armory_skin_set local.player local.v
+			} else { local.again = 1 }
+		}
+		if(local.player == NULL){ end }
+		local.v = info_valueforkey local.info "lp_h"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_h"]){
+			local.player.flags["coop_lpT_h"] = local.v
+			println ( "^~^~^ LPOLL " + local.player.netname + " lp_h=" + local.v )
+			waitthread coop_mod/helmet.scr::armory_helmet_set local.player local.v
+		}
+		if(local.player == NULL){ end }
+		local.v = info_valueforkey local.info "lp_g"
+		if(local.v != "" && local.v != local.player.flags["coop_lpT_g"]){
+			local.player.flags["coop_lpT_g"] = local.v
+			println ( "^~^~^ LPOLL " + local.player.netname + " lp_g=" + local.v )
+			waitthread coop_mod/gloves.scr::armory_glove_set local.player local.v
+		}
+		//---- guns, then finishes (a finish needs its slot's gun committed first)
+		for(local.sl = 1; local.sl <= 4; local.sl++){
+			if(local.player == NULL){ end }
+			local.v = info_valueforkey local.info ( "lp_w" + local.sl )
+			if(local.v == "" && local.player.flags["coop_lpT_w" + local.sl] != NIL){ local.player.flags["coop_lpT_w" + local.sl] = "" }	//cleared slot: the same gun can be picked again
+			if(local.v != "" && local.v != local.player.flags["coop_lpT_w" + local.sl]){
+				local.quiet = 0	//same as the name-bus path: toasts are already suppressed inside the join window, and a deliberate pick must regive
+				local.player.flags["coop_lpT_w" + local.sl] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_w" + local.sl + "=" + local.v + " quiet=" + local.quiet )
+				waitthread loadout_set local.player local.sl local.v local.quiet
+			}
+		}
+		for(local.sl = 1; local.sl <= 4; local.sl++){
+			if(local.player == NULL){ end }
+			local.v = info_valueforkey local.info ( "lp_f" + local.sl )
+			if(local.v == "" && local.player.flags["coop_lpT_f" + local.sl] != NIL){ local.player.flags["coop_lpT_f" + local.sl] = "" }
+			if(local.v != "" && local.v != local.player.flags["coop_lpT_f" + local.sl]){
+				local.player.flags["coop_lpT_f" + local.sl] = local.v
+				println ( "^~^~^ LPOLL " + local.player.netname + " lp_f" + local.sl + "=" + local.v )
+				waitthread loadout_finish local.player local.sl local.v
+			}
+		}
+		if(local.player == NULL){ end }
+		if(local.again == 0 && local.player.userinfo != local.info){ local.again = 1 }	//a newer pick landed while we were applying
+		if(local.again == 1){
+			local.tries++
+			if(local.tries > 90){ break }
+			wait 1
+		}
+	}
+	if(local.player != NULL){ local.player.flags["coop_lpBusy"] = NIL }
+}end
+
+//=========================================================================
+//[loadout review 2026-10-15] PER-SLOT LOCKS the client cannot compute: the finish chips are locked per FINISH globally
+//(coop_loLkF<fid>), but the server also refuses a finish on a gun that is not MASTERED (loadout_finMastered), and the VARIANT
+//button had no client lock at all. For each slot's gun we push, diff-only (flags coop_loSlkLast<n>), unquoted, one statement each:
+//  coop_loMast<n>  = "set coop_loMastOk 1" | "exec ui/loadout/lkmast.cfg"   (all chips locked; s<n>sel.cfg replays it after lkfin)
+//  coop_loMastT<n> = "set coop_loReq2 <the gun's mastery challenge>"         (fdenym.cfg shows it under MASTER THIS GUN FIRST)
+//  coop_loMvLk<n>  = "set coop_loMvLkOk 1" | "exec ui/loadout/lkmv.cfg"      (VARIANT button locked + padlock)
+//  coop_loEqR<tab>_<n> = "set coop_loEqV<id> 1"  (EQUIPPED tile marker backfill for picks made before markers existed)
+//=========================================================================
+loadout_slotLocksExport local.player:{
+	if(local.player == NULL){ end }
+	waitthread coop_mod/loadoutskins.scr::skin_init
+	local.any = 0
+	for(local.sl = 1; local.sl <= 4; local.sl++){
+		if(local.player == NULL){ end }
+		local.sid = local.player.flags["coop_loSlotId" + local.sl]
+		if(local.sid == NIL){ local.sid = "" }
+		local.mast = 1
+		local.mvlk = 0
+		local.txt = ""
+		local.tab = ""
+		if(local.sid != ""){
+			local.r = waitthread coop_mod/loadoutroster.scr::roster_get local.sid
+			local.give = local.r["give"]
+			if(local.give != NIL && local.give != ""){
+				if(local.r["slot"] == "s"){ local.tab = "4" }
+				else if(local.r["slot"] == "g"){ local.tab = "5" }
+				else if(local.r["class"] == "rifle"){ local.tab = "0" }
+				else if(local.r["class"] == "sniper"){ local.tab = "1" }
+				else if(local.r["class"] == "smg"){ local.tab = "2" }
+				else if(local.r["class"] == "heavy"){ local.tab = "3" }
+				if(getcvar("coop_lockLoadout") != "0"){
+					if(!(waitthread loadout_finMastered local.player local.give)){
+						local.mast = 0
+						local.wid = waitthread coop_mod/challenges.scr::chal_widFromModel local.give
+						local.cid = "wpn_" + local.wid
+						local.i = 0
+						while(local.i < level.coop_chal_count){
+							if(level.coop_chal_id[local.i] == local.cid){ local.txt = level.coop_chal_desc[local.i]; break }
+							local.i++
+						}
+					}
+					if(level.coop_skinMvMax[local.give] != NIL){
+						if(local.mast == 0 || !(waitthread loadout_mvUnlocked local.player local.give 8)){ local.mvlk = 1 }
+					}
+				}
+			}
+		}
+		if(local.player == NULL){ end }
+		local.key = local.sid + "|" + local.mast + "|" + local.mvlk + "|" + local.txt
+		if(local.player.flags["coop_loSlkLast" + local.sl] != local.key){
+			local.player.flags["coop_loSlkLast" + local.sl] = local.key
+			local.any = 1
+			if(local.mast == 1){
+				local.player stufftext ( "seta coop_loMast" + local.sl + " set coop_loMastOk 1" )
+			} else {
+				local.player stufftext ( "seta coop_loMast" + local.sl + " exec ui/loadout/lkmast.cfg" )
+				local.player stufftext ( "seta coop_loMastT" + local.sl + " set coop_loReq2 " + local.txt )
+			}
+			if(local.mvlk == 1){
+				local.player stufftext ( "seta coop_loMvLk" + local.sl + " exec ui/loadout/lkmv.cfg" )
+			} else {
+				local.player stufftext ( "seta coop_loMvLk" + local.sl + " set coop_loMvLkOk 1" )
+			}
+			if(local.sid != "" && local.tab != ""){
+				local.player stufftext ( "seta coop_loEqR" + local.tab + "_" + local.sl + " set coop_loEqV" + local.sid + " 1" )
+			}
+			waitframe
+		}
+	}
+	if(local.any == 1 && local.player != NULL){
+		local.player stufftext "vstr coop_loMastApply"
+	}
+}end
 
 //=========================================================================
 // Mastered = the gun's base per-weapon challenge is COMPLETE (flags coop_chalD_wpn_<wid>).
