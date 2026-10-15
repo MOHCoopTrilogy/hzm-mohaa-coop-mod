@@ -550,12 +550,95 @@ rmg_release local.sid local.why:{
 rmg_stage local.a local.sid:{
 	local.st = level.coop_rmgStage[local.sid]
 	if( local.st == NIL ){ end }
+	// a long trek (the radio can be across the map): the move order is re-issued every 3s (the engine drops it when its think takes a
+	// path event), he does not stop to fight on the way, and only 8s without moving ends it (stuck); 75s at the most. Done within
+	// 300u of the point - mgPlan / mgReach take him the rest of the way to the seat.
 	local.a.coop_psqBusy = 1
-	local.left = waitthread coop_mod/parasquad.scr::mgLeg local.a local.st 0 90 25
+	local.a.enableEnemy = 0
+	local.a.movedoneradius = 120
+	local.t0 = level.time
+	local.last = local.a.origin
+	local.stall = 0
+	local.n = 0
+	while( ( level.time - local.t0 ) < 75 ){
+		if( !( waitthread rmg_ok local.a ) ){ break }
+		local.st = level.coop_rmgStage[local.sid]
+		if( ( waitthread coop_mod/parasquad.scr::flatDist local.a.origin local.st ) < 300 ){ break }
+		if( ( local.n - ( int( local.n / 3 ) * 3 ) ) == 0 ){
+			local.a forceactivate
+			local.a runto local.st
+			if( local.n == 0 ){
+				wait 0.3
+				if( local.a == NULL ){ end }
+				waitthread rmg_dbg ( "stage runto pathdist=" + local.a.pathdist + " think=" + local.a.thinkstate + " d=" + int( waitthread coop_mod/parasquad.scr::flatDist local.a.origin local.st ) )
+				if( local.a.pathdist == 0 ){
+					// the point is in a 256u cell with no pathnode (the engine can only path to a cell that has one): the nearest ground that has a path
+					local.pp = waitthread rmg_pathpoint local.a local.st
+					if( !( waitthread rmg_ok local.a ) ){ end }
+					if( local.pp != NIL ){
+						level.coop_rmgStage[local.sid] = local.pp
+						waitthread rmg_dbg ( "stage moved to " + local.pp + " (was " + local.st + ")" )
+					}
+				}
+			}
+		}
+		wait 1
+		local.n++
+		if( ( vector_length( local.a.origin - local.last ) ) < 8 ){ local.stall++ } else { local.stall = 0 }
+		local.last = local.a.origin
+		if( local.stall >= 8 ){ break }
+	}
 	if( local.a == NULL ){ end }
+	local.a.enableEnemy = 1
 	local.a.coop_psqBusy = 0
-	waitthread rmg_dbg ( "staged left=" + int( local.left ) + " at=" + local.a.origin )
+	waitthread rmg_dbg ( "staged secs=" + int( level.time - local.t0 ) + " stall=" + local.stall + " at=" + local.a.origin + " stage=" + local.st )
 }end
+
+
+// walk local.a to local.pos: the order is re-issued every 2s with forceactivate (the engine drops it when its think takes a path
+// event, and the default rifleman think holds its post), he does not stop to fight, only local.stall seconds without moving end it,
+// local.secs at the most. Returns how far (flat) he ended from local.pos.
+rmg_goto local.a local.pos local.secs local.rad local.stall:{
+	local.a.enableEnemy = 0
+	local.a.movedoneradius = local.rad
+	local.t0 = level.time
+	local.last = local.a.origin
+	local.still = 0
+	local.n = 0
+	while( ( level.time - local.t0 ) < local.secs ){
+		if( !( waitthread rmg_ok local.a ) ){ break }
+		if( ( waitthread coop_mod/parasquad.scr::flatDist local.a.origin local.pos ) < ( local.rad + 6 ) ){ break }
+		if( ( local.n - ( int( local.n / 2 ) * 2 ) ) == 0 ){
+			local.a forceactivate
+			local.a runto local.pos
+		}
+		wait 1
+		local.n++
+		if( ( vector_length( local.a.origin - local.last ) ) < 8 ){ local.still++ } else { local.still = 0 }
+		local.last = local.a.origin
+		if( local.still >= local.stall ){ break }
+	}
+	local.r = 99999
+	if( local.a != NULL ){ local.r = waitthread coop_mod/parasquad.scr::flatDist local.a.origin local.pos }
+}end local.r
+
+
+// the nearest ground to local.st (rings of 0-450u) that the path graph reaches from where local.a stands: each candidate is a move
+// order and a 0.3s look at pathdist (the length of the path the engine found; 0 = none). NIL = none found.
+rmg_pathpoint local.a local.st:{
+	for( local.r = 0; local.r <= 450; local.r = local.r + 150 ){
+		for( local.j = 0; local.j < 8; local.j++ ){
+			if( local.r == 0 && local.j > 0 ){ break }
+			local.c = local.st + ( vector_scale ( angles_toforward ( 0 ( local.j * 45 ) 0 ) ) local.r )
+			local.g = exec coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+			if( local.g == NIL ){ continue }
+			local.a runto local.g
+			wait 0.3
+			if( !( waitthread rmg_ok local.a ) ){ end NIL }
+			if( local.a.pathdist > 0 ){ end local.g }
+		}
+	}
+}end NIL
 
 
 // the gunner is down: the assistant (then the spotter) is the gunner. Returns him, or NIL when there is nobody (or he cannot
@@ -622,7 +705,7 @@ rmg_succ local.sid local.old:{
 	waitthread rmg_swap local.sid local.old local.n
 	// out of whatever he was doing, onto the seat
 	local.stand = local.n.coop_psqMgStand
-	local.left = waitthread coop_mod/parasquad.scr::mgLeg local.n local.stand 0 28 12
+	local.left = waitthread rmg_goto local.n local.stand 20 28 5
 	if( !( waitthread rmg_ok local.n ) ){ end local.n }
 	if( local.left > 14 && local.left < 110 ){
 		if( waitthread coop_mod/parasquad.scr::mgLine local.n.origin local.stand ){
