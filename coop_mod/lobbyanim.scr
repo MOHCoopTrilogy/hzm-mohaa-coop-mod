@@ -1,0 +1,348 @@
+//=========================================================================
+// coop_mod/lobbyanim.scr - LOBBY MANNEQUIN ANIMATION DIRECTOR   [lobbyanim 2026-10-15]
+//
+// WHY. The lobby soldier is a script_model. A script_model plays ONE animation slot, so `anim X` is a HARD
+// CUT: the alias `crossblend` value is ignored (scriptslave.cpp ScriptModel::SetAnimEvent -> Animate::NewAnim
+// slot 0; the client has no crossblend for world models - only players/actors blend). The old director picked
+// from a weighted pool (coop_lobbyselect) that mixed the Allied 00A1xx set with the Axis 00G1xx set and played
+// every clip in a random order, so most cuts jumped 17-36 degrees of mean bone rotation between unrelated stances.
+//
+// WHAT THIS DOES INSTEAD. Every clip's first/last frame was decoded from the .skc files (mean rotation over the
+// Bip01 bones) and the clips fall into POSE FAMILIES whose clips start and end in the same pose (cut = 0-1 degree,
+// invisible). The director only ever cuts inside a family, plays whole clips, plays multi-part activities in order,
+// and when it must change family it takes the smallest jump that exists (A-G 17, G-U 15, U-S 10, G-S 16 degrees of
+// mean bone rotation; the old pool jumped 17-36 every few seconds, A-U would be 20, A-S 28 so those never happen):
+//   A  Allied PT       00A100 idle / stretches / pushups / jumping jacks / salute      (all 0.0 to each other)
+//   G  Axis drill      00G100 idle, attention, lookaround, primping, pushup, milling   (all <0.4)
+//   U  standing/talk   weight-shift idles, chatter01-04 gesture cycle, arms-folded and hard-stance sequences with
+//                      their own intro/outtro clips                                    (every hop <= 8.5)
+//   S  smoking         lightup -> firstinhale x N -> buttout, the SP recipe incl. the cigarette
+//                      prop and the breath puff (new_generic_human.tik smoking01-05)  (all 0.0-0.7)
+// NOT USED: the SP "mood" idles (misc/neutralidle01/02, determinedidle, smileidle, curiousidle) and smoking/inhale + throwaway. The idles sit closest to every
+// family (9-13 degrees); all of these carry no 'Bip01 pos' channel, so as the only slot of a script_model they sink the body
+// through the floor (check_anim_rootless.py; seen in the lobbyanim harness run: the soldier vanishes for the whole clip).
+// A clip is ALWAYS played to its end, no clip repeats back to back, and each mannequin runs its own random walk
+// (staggered start, random first family), so the squad never moves in step.
+//
+// A clip's length is waited out with `wait` (exact seconds from the .skc: (frames-1) x frametime), never with
+// `waittill animdone`: a missing alias would park that wait forever (TRAPS T16) and a looping clip only fires it once.
+// A skin change swaps the mannequin's tik (a pose in flight is lost), so the wait watches .model and restarts the clip.
+// NB: never name a script variable local.owner - `owner` is a reserved word and the whole label silently never runs.
+//
+// Optional A/B for the family change: cvar coop_lobbyAnimDip 1 fades the mannequin out/in (0.2 s each) around the
+// first clip of a chapter, 2 does it for client slot 1 only. Off by default (not yet judged on screen).
+//=========================================================================
+
+//=========================================================================
+// self = the player thread that spawned the mannequin (not used). local.m = the mannequin, local.pl = its player.
+// Runs until the lobby ends or either entity is gone.
+//=========================================================================
+lobbyanim_run local.m local.pl:{
+//=========================================================================
+	if( local.m == NULL || local.pl == NULL ){ end }
+	wait ( randomfloat 3 )
+
+	local.dip = 0
+	local.dc = getcvar "coop_lobbyAnimDip"
+	if( local.dc == "1" ){ local.dip = 1 }
+	if( local.dc == "2" && local.pl.entnum == 1 ){ local.dip = 1 }
+
+	// first family: any (there is no previous pose to match); each mannequin rolls its own
+	local.r0 = (randomint 4)
+	local.fam = "A"
+	if( local.r0 == 1 ){ local.fam = "G" }
+	if( local.r0 == 2 ){ local.fam = "U" }
+	if( local.r0 == 3 ){ local.fam = "S" }
+	local.from = ""
+	while( level.coop_lobbyActive == 1 && local.m != NULL && local.pl != NULL ){
+		local.nxt = waitthread lbNext local.fam local.from
+		println( "^~^~^ LOBBYANIM chapter p=" + local.pl.entnum + " " + local.from + ">" + local.fam + ">" + local.nxt )
+		if( local.fam == "A" ){ waitthread lbChapA local.m local.pl local.from local.dip }
+		else if( local.fam == "G" ){ waitthread lbChapG local.m local.pl local.from local.dip }
+		else if( local.fam == "U" ){ waitthread lbChapU local.m local.pl local.from local.dip }
+		else{ waitthread lbChapS local.m local.pl local.dip }
+		local.from = local.fam
+		local.fam = local.nxt
+		waitframe
+	}
+}end
+
+//=========================================================================
+// Which family follows `local.fam` (local.from = the one before it). Only the small jumps are allowed: A -> G, G -> A/U/S,
+// U -> G/S, S -> U. G is the crossroads, never straight back to where it came from.
+//=========================================================================
+lbNext local.fam local.from:{
+//=========================================================================
+	if( local.fam == "A" ){ end "G" }
+	if( local.fam == "S" ){ end "U" }
+	if( local.fam == "U" ){
+		if( local.from == "S" ){ end "G" }
+		if( local.from == "G" ){ end "S" }
+		if( (randomint 2) == 1 ){ end "S" }
+		end "G"
+	}
+	// from G: A 2, U 3, S 1
+	local.tries = 0
+	while( local.tries < 8 ){
+		local.r = (randomint 6)
+		local.pick = "A"
+		if( local.r >= 2 ){ local.pick = "U" }
+		if( local.r >= 5 ){ local.pick = "S" }
+		if( local.pick != local.from ){ end local.pick }
+		local.tries++
+	}
+	end "U"
+}end
+
+//=========================================================================
+// PLAY one clip to its end. local.dip 1 = fade out, start the clip, fade in (counts toward the clip's time).
+//=========================================================================
+lbPlay local.m local.pl local.alias local.dur local.dip:{
+//=========================================================================
+	if( local.m == NULL || local.pl == NULL || level.coop_lobbyActive != 1 ){ end }
+	println( "^~^~^ LOBBYANIM clip p=" + local.pl.entnum + " " + local.alias + " " + local.dur + " t=" + level.time )
+	local.rem = local.dur
+	if( local.dip == 1 ){
+		waitthread lbFade local.m 0
+		local.m anim local.alias
+		waitthread lbFade local.m 1
+		local.rem = local.rem - 0.4
+	}
+	else{
+		local.m anim local.alias
+	}
+	local.mdl = local.m.model
+	while( local.rem > 0.3 ){
+		wait 0.25
+		local.rem = local.rem - 0.25
+		if( local.m == NULL || local.pl == NULL || level.coop_lobbyActive != 1 ){ end }
+		if( local.m.model != local.mdl ){
+			// a new skin / helmet swap rebuilt the tik and lost the pose: restart this clip (the swap hides the pop)
+			local.mdl = local.m.model
+			local.m anim local.alias
+			local.rem = local.dur
+		}
+	}
+	if( local.rem > 0 ){ wait local.rem }
+}end
+
+//=========================================================================
+// HOLD the last frame of the clip just played (a beat between two puffs) - watches the skin like lbPlay.
+//=========================================================================
+lbHold local.m local.pl local.secs:{
+//=========================================================================
+	if( local.m == NULL || local.pl == NULL || level.coop_lobbyActive != 1 ){ end }
+	wait local.secs
+}end
+
+//=========================================================================
+// local.dir 0 = fade out, 1 = fade in (4 steps of 0.05 s).
+//=========================================================================
+lbFade local.m local.dir:{
+//=========================================================================
+	for( local.i = 1; local.i <= 4; local.i++ ){
+		if( local.m == NULL ){ end }
+		if( local.dir == 1 ){ local.a = local.i * 0.25 }
+		else{ local.a = 1 - ( local.i * 0.25 ) }
+		local.m alpha local.a
+		wait 0.05
+	}
+	if( local.m != NULL && local.dir == 1 ){ local.m alpha 1 }
+}end
+
+//=========================================================================
+// A - allied physical training. Every clip starts and ends in the 00A100 stance, so any order is a seamless cut.
+// 2-3 exercises (never the same one twice), now and then the plain idle between them.
+//=========================================================================
+lbChapA local.m local.pl local.from local.dip:{
+//=========================================================================
+	local.n = 2 + (randomint 3)
+	local.last = 0
+	local.fd = local.dip
+	for( local.k = 1; local.k <= local.n; local.k++ ){
+		local.i = 2 + (randomint 4)
+		if( local.i == local.last ){
+			local.i++
+			if( local.i > 5 ){ local.i = 2 }
+		}
+		local.last = local.i
+		if( local.i == 2 ){ waitthread lbPlay local.m local.pl "coop_act_stretch" 27.1 local.fd }
+		else if( local.i == 3 ){ waitthread lbPlay local.m local.pl "coop_act_pushups" 23.0 local.fd }
+		else if( local.i == 4 ){ waitthread lbPlay local.m local.pl "coop_act_jacks" 23.9 local.fd }
+		else{ waitthread lbPlay local.m local.pl "coop_lb_salute" 17.2 local.fd }
+		local.fd = 0
+		if( local.k < local.n && (randomint 100) < 40 ){
+			waitthread lbPlay local.m local.pl "coop_pose_a100" 11.9 0
+		}
+	}
+}end
+
+//=========================================================================
+// G - Axis drill / downtime. All 00G1xx clips share one stance (<0.4 degrees apart): idle, attention, look around,
+// primping, pushups, milling about. Entered on the idle, then four distinct picks.
+//=========================================================================
+lbChapG local.m local.pl local.from local.dip:{
+//=========================================================================
+	local.used1 = 0
+	local.used2 = 0
+	local.used3 = 0
+	local.used4 = 0
+	local.used5 = 0
+	local.used6 = 0
+	local.used7 = 0
+	local.fd = local.dip
+	if( local.from != "" ){
+		// every family change enters on the short idle (all G clips share its stance)
+		waitthread lbPlay local.m local.pl "coop_pose_g100" 2.3 local.fd
+		local.fd = 0
+		local.used1 = 1
+	}
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.i = 1 + (randomint 7)
+		local.guard = 0
+		while( local.guard < 7 ){
+			local.hit = 0
+			if( local.i == 1 && local.used1 == 1 ){ local.hit = 1 }
+			if( local.i == 2 && local.used2 == 1 ){ local.hit = 1 }
+			if( local.i == 3 && local.used3 == 1 ){ local.hit = 1 }
+			if( local.i == 4 && local.used4 == 1 ){ local.hit = 1 }
+			if( local.i == 5 && local.used5 == 1 ){ local.hit = 1 }
+			if( local.i == 6 && local.used6 == 1 ){ local.hit = 1 }
+			if( local.i == 7 && local.used7 == 1 ){ local.hit = 1 }
+			if( local.hit == 0 ){ break }
+			local.i++
+			if( local.i > 7 ){ local.i = 1 }
+			local.guard++
+		}
+		if( local.i == 1 ){
+			local.used1 = 1
+			waitthread lbPlay local.m local.pl "coop_pose_g100" 2.3 local.fd
+		}
+		else if( local.i == 2 ){
+			local.used2 = 1
+			waitthread lbPlay local.m local.pl "coop_pose_g101" 6.6 local.fd
+		}
+		else if( local.i == 3 ){
+			local.used3 = 1
+			waitthread lbPlay local.m local.pl "coop_act_lookaround" 7.6 local.fd
+		}
+		else if( local.i == 4 ){
+			local.used4 = 1
+			waitthread lbPlay local.m local.pl "coop_act_primping" 11.6 local.fd
+		}
+		else if( local.i == 5 ){
+			local.used5 = 1
+			waitthread lbPlay local.m local.pl "coop_lb_g_pushup" 17.4 local.fd
+		}
+		else if( local.i == 6 ){
+			local.used6 = 1
+			waitthread lbPlay local.m local.pl "coop_act_milling" 22.0 local.fd
+		}
+		else{
+			local.used7 = 1
+			waitthread lbPlay local.m local.pl "coop_lb_g_milling2" 23.5 local.fd
+		}
+		local.fd = 0
+	}
+}end
+
+//=========================================================================
+// U - standing around. Rests in one of two stand idles (a: weight-shift idles a01/a02, b: generic_idle_b; 6.4 apart)
+// and takes 1-2 activities that start and end on a stand: the chatter gesture cycle (ends on chatter04, which is
+// 7.0 from a01 and 8.5 from b), the arms-folded sequence (in -> hold -> out, from/to a) and the hard-stance
+// sequence (in -> hold -> twitch -> out, from/to b). It is entered on the chatter cycle when it follows G or S
+// (talk1 is 10.2 from the butt-out and ~15 from the Axis idle) and left on the chatter cycle (talk4 -> lighter 10.0).
+//=========================================================================
+lbChapU local.m local.pl local.from local.dip:{
+//=========================================================================
+	local.fd = local.dip
+	local.st = "a"
+	if( local.from != "" ){
+		waitthread lbChat local.m local.pl local.fd
+		local.fd = 0
+		local.st = "c"
+	}
+	else{
+		waitthread lbPlay local.m local.pl "coop_act_idle" 6.0 local.fd
+		local.fd = 0
+	}
+	local.n = 1 + (randomint 2)
+	local.lastT = 9
+	if( local.from != "" ){ local.lastT = 1 }
+	for( local.k = 1; local.k <= local.n; local.k++ ){
+		local.t = (randomint 5)
+		if( local.t == 2 ){ local.t = 1 }
+		if( local.t == 1 && local.lastT == 1 ){ local.t = 0 }
+		local.lastT = local.t
+		if( local.t == 0 ){
+			// a stand idle (weight shift), alternating the two stances
+			if( local.st == "b" ){
+				waitthread lbPlay local.m local.pl "coop_act_idle" 6.0 0
+				local.st = "a"
+			}
+			else{
+				waitthread lbPlay local.m local.pl "coop_act_idle2" 8.0 0
+				local.st = "b"
+			}
+		}
+		else if( local.t == 1 || local.t == 2 ){
+			// gesture cycle; it ends 7-8.5 degrees from either stand
+			waitthread lbChat local.m local.pl 0
+			local.st = "c"
+		}
+		else if( local.t == 3 ){
+			// arms folded: needs stance a
+			if( local.st != "a" ){
+				waitthread lbPlay local.m local.pl "coop_act_weightshift" 6.0 0
+			}
+			waitthread lbPlay local.m local.pl "coop_lb_tough_a_in" 1.0 0
+			waitthread lbPlay local.m local.pl "coop_lb_tough_a" 9.6 0
+			waitthread lbPlay local.m local.pl "coop_lb_tough_a_out" 3.4 0
+			local.st = "a"
+		}
+		else{
+			// hard stance: needs stance b
+			if( local.st != "b" ){
+				waitthread lbPlay local.m local.pl "coop_act_idle2" 8.0 0
+			}
+			waitthread lbPlay local.m local.pl "coop_lb_tough_b_in" 1.6 0
+			waitthread lbPlay local.m local.pl "coop_lb_tough_b" 4.4 0
+			waitthread lbPlay local.m local.pl "coop_lb_tough_b_twitch" 4.0 0
+			waitthread lbPlay local.m local.pl "coop_lb_tough_b_out" 1.4 0
+			local.st = "b"
+		}
+	}
+	// every way out of U (to G or S) starts from the end of the chatter cycle (10.0 to the lighter, 14.9 to the idle G)
+	if( local.st != "c" ){ waitthread lbChat local.m local.pl 0 }
+}end
+
+//=========================================================================
+// The chatter gesture cycle: 01 -> (02 or 03) -> 04 (each hop 0.1-1.4 degrees; 04 -> 01 is 0.1 too).
+//=========================================================================
+lbChat local.m local.pl local.dip:{
+//=========================================================================
+	waitthread lbPlay local.m local.pl "coop_act_talk1" 2.6 local.dip
+	if( (randomint 2) == 1 ){ waitthread lbPlay local.m local.pl "coop_act_talk2" 2.3 0 }
+	else{ waitthread lbPlay local.m local.pl "coop_act_talk3" 6.8 0 }
+	waitthread lbPlay local.m local.pl "coop_act_talk4" 1.2 0
+}end
+
+//=========================================================================
+// S - a whole cigarette, the SP recipe (new_generic_human.tik smoking01-05): light up (the cigarette appears in the
+// left fingers at frame 16), then 2-4 slow drags with a beat between them (each drag ends with the breath puff), then the
+// butt is dropped and ground out (frame 21 removes the cigarette and a client tagspawn drops a real butt). Only the three
+// clips that carry a root channel are used (SP plays the rootless inhale/throwaway as an upper-body action over an idle,
+// which a script_model cannot do - the body sinks into the floor). lightup, firstinhale and buttout start/end within 0.7
+// degrees of each other, so the whole cycle is one continuous motion.
+//=========================================================================
+lbChapS local.m local.pl local.dip:{
+//=========================================================================
+	waitthread lbPlay local.m local.pl "coop_lb_smoke_light" 3.3 local.dip
+	local.n = 2 + (randomint 3)
+	for( local.k = 1; local.k <= local.n; local.k++ ){
+		waitthread lbPlay local.m local.pl "coop_lb_smoke_first" 2.6 0
+		if( local.k < local.n ){ waitthread lbHold local.m local.pl ( 0.8 + (randomfloat 1.2) ) }
+	}
+	waitthread lbHold local.m local.pl 1.0
+	waitthread lbPlay local.m local.pl "coop_lb_smoke_butt" 4.6 0
+}end
