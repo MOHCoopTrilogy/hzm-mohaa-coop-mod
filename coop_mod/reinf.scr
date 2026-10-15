@@ -1,0 +1,599 @@
+//=========================================================================
+// reinf.scr - HZM coop OFFICER REINFORCEMENT REALISM (2026-10-15, docs/proposals/ai_realism_2026-10-15)
+//
+//   rnf_entry   S1  where a wave forms up: a planned point nobody can see, nobody stands near and that a
+//                   man can walk from to the players (coop_reinfEntry; coop_reinfSmart is the master)
+//   rnf_speak   R1  one event-driven German line for the officer's men, on top of the aivoice.scr layer
+//   rnf_face_for R1  the face that goes with a spoken line (SayManager facial_idle_*, coop_aiFace)
+//   rnf_face    R1  a face for a reaction that has no line (hit, officer down, panic)
+//   rnf_officerHit R1  the officer was just hurt: the nearest guard / section man reacts
+//
+// Every public label is a no-op when its switch is "0" - the unset value counts as on (cfg seeds 1).
+// Debug: coop_reinfDebug 1 prints ^~^~^ RNF lines.
+//=========================================================================
+
+// dot product of the horizontal parts of two vectors
+rnf_dot2 local.a local.b:{
+	end ( ( local.a[0] * local.b[0] ) + ( local.a[1] * local.b[1] ) )
+}end
+
+
+// A point to form a wave up on, or NIL (caller keeps the authored zone).
+// Candidates: the authored zone, every $enemyspawner / $alarmspawner, 12 points on a ring 1000-1800u round the
+// living players' centre. A point passes when it has ground and room for a man, no player within 900u, no
+// player's eye has a line to it (solid world only, as coop_para_lzSeen), and a scout standing on it finds a path to
+// the nearest player (paradrop.scr::coop_para_lz recipe: runto + pathdist after 0.3s). Points in the direction of
+// the previous wave are tried last. At most 14 candidates and 8 path tests per call.
+rnf_entry local.zone:{
+	if( $player == NULL ){ end NIL }
+	local.pn = 0
+	local.cx = 0
+	local.cy = 0
+	local.cz = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( !isAlive local.p ){ continue }
+		local.pn++
+		local.pl[local.pn] = local.p
+		local.cx = local.cx + local.p.origin[0]
+		local.cy = local.cy + local.p.origin[1]
+		local.cz = local.cz + local.p.origin[2]
+	}
+	if( local.pn < 1 ){ end NIL }
+	local.cen = ( 0 0 0 )
+	local.cen[0] = local.cx / local.pn
+	local.cen[1] = local.cy / local.pn
+	local.cen[2] = local.cz / local.pn
+
+	// candidate list
+	local.n = 0
+	if( local.zone != NIL ){
+		local.n++
+		local.cand[local.n] = local.zone
+	}
+	if( $enemyspawner != NULL ){
+		for( local.i = 1; local.i <= $enemyspawner.size; local.i++ ){
+			if( $enemyspawner[local.i] == NULL ){ continue }
+			if( local.n >= 40 ){ break }
+			local.n++
+			local.cand[local.n] = $enemyspawner[local.i].origin
+		}
+	}
+	if( $alarmspawner != NULL ){
+		for( local.i = 1; local.i <= $alarmspawner.size; local.i++ ){
+			if( $alarmspawner[local.i] == NULL ){ continue }
+			if( local.n >= 40 ){ break }
+			local.n++
+			local.cand[local.n] = $alarmspawner[local.i].origin
+		}
+	}
+	local.a0 = randomint 20
+	for( local.i = 0; local.i < 18; local.i++ ){
+		local.dir = angles_toforward ( 0 ( local.a0 + ( local.i * 20 ) ) 0 )
+		local.rr = 1000 + ( randomint 1300 )
+		local.n++
+		local.cand[local.n] = local.cen + ( vector_scale local.dir local.rr ) + ( 0 0 48 )
+	}
+	local.total = local.n
+
+	local.res = NIL
+	local.defer = 0
+	local.probes = 0
+	local.paths = 0
+	local.sc = NIL
+	local.why = "none"
+	local.rj_g = 0
+	local.rj_h = 0
+	local.rj_n = 0
+	local.rj_l = 0
+	local.rj_p = 0
+	while( local.n > 0 && local.probes < 18 && local.res == NIL ){
+		// draw a random remaining candidate
+		local.k = 1 + ( randomint local.n )
+		local.c = local.cand[local.k]
+		local.cand[local.k] = local.cand[local.n]
+		local.n = local.n - 1
+		local.probes++
+		local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 48 ) )
+		if( local.g == NIL ){ local.rj_g++; continue }
+		local.q = local.g + ( 0 0 2 )
+		local.tr = traced local.q ( local.q + ( 0 0 1 ) ) 1023 ( -16 -16 0 ) ( 16 16 92 ) 466945
+		if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 || local.tr["fraction"] < 1.0 ){ local.rj_h++; continue }
+		local.ok = 1
+		local.near = NIL
+		local.neard = 999999
+		for( local.j = 1; local.j <= local.pn; local.j++ ){
+			local.pp = local.pl[local.j]
+			if( local.pp == NULL ){ continue }
+			if( !isAlive local.pp ){ continue }
+			local.d = vector_length( local.pp.origin - local.g )
+			if( local.d < 900 ){ local.ok = 0; local.rj_n++; break }
+			if( local.d < local.neard ){ local.neard = local.d; local.near = local.pp }
+			local.ltr = traced ( local.pp.origin + ( 0 0 60 ) ) ( local.g + ( 0 0 50 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.ltr["fraction"] >= 1.0 ){ local.ok = 0; local.rj_l++; break }
+		}
+		if( local.ok != 1 ){ continue }
+		if( local.near == NIL ){ continue }
+		// not in the direction of the previous wave (tried last)
+		local.bad = 0
+		if( level.coop_reinfLastDir != NIL ){
+			local.dv = local.g - local.cen
+			local.dv[2] = 0
+			if( ( vector_length local.dv ) > 1 ){
+				local.dv = vector_normalize local.dv
+				local.dt = waitthread rnf_dot2 local.dv level.coop_reinfLastDir
+				if( local.dt > 0.77 ){ local.bad = 1 }
+			}
+		}
+		if( local.bad == 1 ){
+			local.defer++
+			local.dpt[local.defer] = local.g
+			continue
+		}
+		local.g2 = local.g
+		// reachable on foot? a hidden scout stands there and asks the engine
+		if( local.paths >= 8 ){ continue }
+		if( local.sc == NIL ){
+			local.sc = spawn "models/human/allied_airborne_soldier.tik"
+			if( local.sc == NIL || local.sc == NULL ){ local.sc = NIL; break }
+			local.sc hide
+			local.sc notsolid
+			local.sc nodamage
+			local.sc.enableEnemy = 0
+			local.sc threatbias ignoreme
+			local.sc.team = "american"
+			local.sc.flags["coop_sceneActor"] = 1
+			local.sc.flags["coop_personality_set"] = 1
+			local.sc physics_off
+			local.sc forceactivate
+		}
+		local.paths++
+		local.sc.origin = local.g2
+		local.sc runto local.near.origin
+		wait 0.3
+		if( local.sc == NULL ){ break }
+		local.pd = local.sc.pathdist
+		local.fd = vector_length( local.g2 - local.near.origin )
+		if( local.pd > 0 && local.pd < ( ( local.fd * 3 ) + 600 ) ){
+			local.res = local.g2
+			local.why = "path"
+		} else {
+			local.rj_p++
+		}
+	}
+	// only points in the previous wave's direction were left: take the first that has a path
+	if( local.res == NIL && local.defer > 0 && local.sc != NIL && local.sc != NULL ){
+		for( local.i = 1; local.i <= local.defer; local.i++ ){
+			if( local.paths >= 8 ){ break }
+			local.paths++
+			local.sc.origin = local.dpt[local.i]
+			local.sc runto local.cen
+			wait 0.3
+			if( local.sc == NULL ){ break }
+			local.pd = local.sc.pathdist
+			local.fd = vector_length( local.dpt[local.i] - local.cen )
+			if( local.pd > 0 && local.pd < ( ( local.fd * 3 ) + 600 ) ){
+				local.res = local.dpt[local.i]
+				local.why = "path-lastdir"
+				break
+			}
+		}
+	}
+	if( local.sc != NIL && local.sc != NULL ){ local.sc remove }
+
+	if( local.res != NIL ){
+		local.dv = local.res - local.cen
+		local.dv[2] = 0
+		if( ( vector_length local.dv ) > 1 ){ level.coop_reinfLastDir = vector_normalize local.dv }
+	}
+	if( getcvar( "coop_reinfDebug" ) == "1" ){
+		local.rtxt = "none"
+		if( local.res != NIL ){ local.rtxt = "" + local.res }
+		local.ztxt = "none"
+		if( local.zone != NIL ){ local.ztxt = "" + local.zone }
+		println( "^~^~^ RNF entry pick=" + local.rtxt + " why=" + local.why + " cand=" + local.total + " probes=" + local.probes + " paths=" + local.paths + " zone=" + local.ztxt + " players=" + local.pn + " rej(ground,hull,near,los,path)=" + local.rj_g + "," + local.rj_h + "," + local.rj_n + "," + local.rj_l + "," + local.rj_p + " deferred=" + local.defer )
+	}
+}end local.res
+
+
+// the facial expression that goes with a situation, or "" for none
+rnf_face_name local.sit:{
+	local.f = ""
+	if( local.sit == "attack" || local.sit == "handsup" ){ local.f = "facial_idle_anger" }
+	if( local.sit == "taunt" || local.sit == "kill" || local.sit == "banter" ){ local.f = "facial_idle_smile" }
+	if( local.sit == "contact" || local.sit == "spot" ){ local.f = "facial_idle_alert" }
+	if( local.sit == "reload" ){ local.f = "facial_idle_determined" }
+	if( local.sit == "cover" || local.sit == "backup" || local.sit == "mandown" || local.sit == "grenade" || local.sit == "fear" ){ local.f = "facial_idle_fear" }
+	if( local.sit == "fallback" || local.sit == "panic" || local.sit == "wounded" ){ local.f = "facial_idle_panic" }
+}end local.f
+
+
+// R1: put a face on a man for local.secs seconds. SayManager is the retail facial manager (runto_inopen.scr and
+// officer.scr::coop_suppress_flavor call it the same way); it assumes its fields were initialised by an attack
+// context, so they are seeded when missing (comparing a NIL sayimportance threw 38 script errors per boot).
+rnf_face local.actor local.anim local.secs:{
+	if( getcvar( "coop_aiFace" ) == "0" ){ end }
+	if( local.actor == NULL || local.actor == NIL ){ end }
+	if( !( isAlive local.actor ) ){ end }
+	if( local.actor.no_idle == 1 ){ end }
+	if( local.actor.sayimportance == NIL ){
+		local.actor.saying = 0
+		local.actor.sayimportance = 0
+		local.actor.silent = 0
+	}
+	local.actor thread anim/SayManager.scr::SayManager local.anim local.secs
+	if( getcvar( "coop_reinfDebug" ) == "1" ){ println( "^~^~^ RNF face " + local.anim + " model " + local.actor.model ) }
+}end
+
+
+// R1: the face for a line that was just spoken (called by aivoice.scr::aivoice_say). German and US only.
+rnf_face_for local.actor local.sit:{
+	if( local.actor == NULL || local.actor == NIL ){ end }
+	if( local.actor.coop_avNat != "de" && local.actor.coop_avNat != "us" ){ end }
+	local.f = waitthread rnf_face_name local.sit
+	if( local.f == "" ){ end }
+	waitthread rnf_face local.actor local.f 3
+}end
+
+
+// R1: a line from the officer's men that the generic aivoice layer would not make at this moment. Same alias
+// pools (ubersound/coop_aivoice.scr), no new files. Own limits (plan Q8): one line per 4s map-wide, three per
+// minute across the map, never within 1s of an aivoice.scr line, never over a scripted scene.
+rnf_speak local.a local.sit local.cd:{
+	if( getcvar( "coop_aiVoice" ) == "0" || getcvar( "coop_aiVoiceEvents" ) == "0" ){ end }
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !( isAlive local.a ) ){ end }
+	if( local.a.no_idle == 1 || local.a.coop_noChatter == 1 ){ end }
+	if( local.a.coop_avNat == NIL || local.a.coop_avNat == "" ){ end }
+	if( local.a.coop_avNext != NIL && level.time < local.a.coop_avNext ){ end }
+	if( level.coop_rnfLast != NIL && ( level.time - level.coop_rnfLast ) < 4 ){ end }
+	if( level.coop_avLastSay != NIL && ( level.time - level.coop_avLastSay ) < 1 ){ end }
+	if( level.coop_rnfVi == NIL ){
+		level.coop_rnfVi = 0
+		level.coop_rnfVT[0] = 0 - 1000
+		level.coop_rnfVT[1] = 0 - 1000
+		level.coop_rnfVT[2] = 0 - 1000
+	}
+	local.oi = level.coop_rnfVi - ( int( level.coop_rnfVi / 3 ) * 3 )
+	if( ( level.time - level.coop_rnfVT[local.oi] ) < 60 ){ end }
+	local.near = waitthread coop_mod/aivoice.scr::aivoice_nearPlayer local.a
+	if( local.near != 1 ){ end }
+	local.alias = waitthread coop_mod/aivoice.scr::aivoice_alias local.a.coop_avNat local.sit
+	if( local.alias == "" ){ end }
+	level.coop_rnfLast = level.time
+	level.coop_avLastSay = level.time
+	level.coop_rnfVT[local.oi] = level.time
+	level.coop_rnfVi = level.coop_rnfVi + 1
+	local.a.coop_avNext = level.time + local.cd
+	local.a playsound local.alias
+	thread rnf_face_for local.a local.sit
+	if( getcvar( "coop_aiVoiceDebug" ) == "1" || getcvar( "coop_reinfDebug" ) == "1" ){
+		println( "^~^~^ RNF voice sit " + local.sit + " alias " + local.alias + " model " + local.a.model )
+	}
+}end
+
+
+// R1: a 0.7s flinch (the <weapon>_stand_shock random group - loaded on every actor, unused by retail and by the
+// mod until now), then the man is handed back to his own think. Rifle / SMG / BAR groups only.
+rnf_shock local.a:{
+	if( getcvar( "coop_aiReact" ) == "0" ){ end }
+	if( local.a == NULL || local.a == NIL ){ end }
+	if( !( isAlive local.a ) ){ end }
+	if( local.a.no_idle == 1 || local.a.turret != NULL ){ end }
+	if( local.a.flags["coop_retreating"] == 1 || local.a.flags["coop_limping"] == 1 || local.a.flags["coop_role"] == "prone" ){ end }
+	if( local.a.coop_aiDisabled == 1 || local.a.flags["coop_surrendered"] == 1 ){ end }
+	local.wg = local.a.weapongroup
+	if( local.wg != "rifle" && local.wg != "mp40" && local.wg != "mp44" && local.wg != "bar" ){ end }
+	local.a anim_scripted ( local.wg + "_stand_shock" )
+	if( getcvar( "coop_reinfDebug" ) == "1" ){ println( "^~^~^ RNF shock " + local.wg + " model " + local.a.model ) }
+	wait 0.9
+	if( local.a == NULL || !( isAlive local.a ) ){ end }
+	local.a anim "idle"
+	local.a forceactivate
+}end
+
+
+// R1: the officer just lost a chunk of health (called from the officer brain tick). The nearest bodyguard - else the
+// nearest section man within 1500u - flinches, shouts for backup and puts on a frightened face; at most once per 8s.
+rnf_officerHit local.officer:{
+	if( getcvar( "coop_reinfSmart" ) == "0" || getcvar( "coop_aiVoiceEvents" ) == "0" ){ end }
+	if( local.officer == NULL || local.officer == NIL ){ end }
+	if( level.coop_rnfHitNext != NIL && level.time < level.coop_rnfHitNext ){ end }
+	level.coop_rnfHitNext = level.time + 8
+	local.best = NIL
+	local.bd = 1500
+	local.isg = 0
+	for( local.i = 1; local.i <= 4; local.i++ ){
+		local.g = level.coop_bodyguards[local.i]
+		if( local.g == NULL || local.g == NIL ){ continue }
+		if( !( isAlive local.g ) ){ continue }
+		local.d = vector_length( local.g.origin - local.officer.origin )
+		if( local.d < local.bd ){ local.bd = local.d; local.best = local.g; local.isg = 1 }
+	}
+	if( local.best == NIL && level.coop_wave_count != NIL ){
+		for( local.i = 1; local.i <= level.coop_wave_count; local.i++ ){
+			local.w = level.coop_wave_actors[local.i]
+			if( local.w == NULL || local.w == NIL ){ continue }
+			if( !( isAlive local.w ) ){ continue }
+			local.d = vector_length( local.w.origin - local.officer.origin )
+			if( local.d < local.bd ){ local.bd = local.d; local.best = local.w }
+		}
+	}
+	if( local.best == NIL ){ end }
+	if( getcvar( "coop_reinfDebug" ) == "1" ){ println( "^~^~^ RNF officer-hit reacts guard=" + local.isg + " d=" + int( local.bd ) ) }
+	thread rnf_speak local.best "backup" 6
+	waitthread rnf_face local.best "facial_idle_fear" 3
+	if( local.isg == 1 ){
+		waitthread rnf_shock local.best
+		if( local.best != NULL && ( isAlive local.best ) && level.coop_officer_contact == 1 ){
+			local.best exec coop_mod/replace.scr::attackplayer
+		}
+	}
+}end
+
+
+//=========================================================================
+// STEP 4 - THE OFFICER'S RADIO (user 2026-10-15): once the officer is dead, his men keep calling reinforcements over
+// his radio until the set is destroyed (planted charge - the existing objective - or gunfire / grenades, below).
+// Switch: coop_reinfSmart + coop_reinfRadio (default on). Numbers:
+//   first call 30-50s after his death, then one every 50-90s (coop_reinfRadioGap overrides the base: first = gap-20..gap,
+//   next = gap..gap+40), at most coop_reinfRadioMax (10) calls a mission, and none while coop_reinfRadioLive (8) or
+//   more of the officer's men are still alive (re-checked every 10s). Each call is a normal wave through
+//   coop_call_reinforcements (its 45s cooldown, wave types, player scaling, entry planner), announced by the radio's
+//   own German alarm line (coop_radio_german_reinf1..9, the one the officer's calls use) after the retail radio squelch.
+//=========================================================================
+
+// the officer's men still alive
+rnf_live_reinf:{
+	local.n = 0
+	if( level.coop_wave_count == NIL ){ end 0 }
+	for( local.i = 1; local.i <= level.coop_wave_count; local.i++ ){
+		local.w = level.coop_wave_actors[local.i]
+		if( local.w == NULL || local.w == NIL ){ continue }
+		if( isAlive local.w ){ local.n++ }
+	}
+}end local.n
+
+
+// the radio is gone (destroyed or never published)
+rnf_radio_gone:{
+	if( level.coop_radio_destroyed == 1 ){ end 1 }
+	if( level.coop_radio == NIL || level.coop_radio == NULL ){ end 1 }
+}end 0
+
+
+// started once from coop_officer_death_monitor
+rnf_radio_calls:{
+	if( getcvar( "coop_reinfSmart" ) == "0" || getcvar( "coop_reinfRadio" ) == "0" ){ end }
+	if( level.coop_rnfRadioRun == 1 ){ end }
+	level.coop_rnfRadioRun = 1
+	local.base = 50
+	local.gv = getcvar( "coop_reinfRadioGap" )
+	if( local.gv != "" ){ local.base = int( local.gv ) }
+	if( local.base < 4 ){ local.base = 4 }
+	local.mx = 10
+	if( getcvar( "coop_reinfRadioMax" ) != "" ){ local.mx = int( getcvar( "coop_reinfRadioMax" ) ) }
+	local.live = 8
+	if( getcvar( "coop_reinfRadioLive" ) != "" ){ local.live = int( getcvar( "coop_reinfRadioLive" ) ) }
+	local.calls = 0
+	local.wait = local.base - 20
+	if( local.wait < 3 ){ local.wait = 3 }
+	local.wait = local.wait + ( randomint 20 )
+	local.first = 1
+	while( local.calls < local.mx ){
+		// wait, one second at a time, so a destroyed set cuts the call off at once
+		while( local.wait > 0 ){
+			if( ( waitthread rnf_radio_gone ) == 1 ){ break }
+			wait 1
+			local.wait = local.wait - 1
+		}
+		if( ( waitthread rnf_radio_gone ) == 1 ){ break }
+		if( ( waitthread rnf_live_reinf ) >= local.live ){
+			local.wait = 10
+			continue
+		}
+		local.calls++
+		level.coop_rnfRadioCalls = local.calls
+		if( local.first == 1 ){
+			local.first = 0
+			waitthread coop_mod/feed.scr::feed_all 1 "radio_call" "His men are calling for reinforcements over the radio - destroy it"
+		}
+		// radio squelch, then the German alarm line from the set itself
+		level.coop_radio playsound coop_radio_on
+		wait 1.2
+		if( ( waitthread rnf_radio_gone ) == 1 ){ break }
+		local.rsnd = "coop_radio_german_reinf" + ( ( randomint 9 ) + 1 )
+		level.coop_radio playsound local.rsnd
+		println( "^~^~^ RNF radio call n=" + local.calls + " snd=" + local.rsnd + " live=" + ( waitthread rnf_live_reinf ) )
+		level.coop_officer_lastWaveTime = NIL
+		thread coop_mod/officer.scr::coop_call_reinforcements
+		local.wait = local.base + ( randomint 40 )
+	}
+	println( "^~^~^ RNF radio calls end n=" + local.calls + " gone=" + ( waitthread rnf_radio_gone ) )
+	level.coop_rnfRadioRun = 0
+}end
+
+
+// gunfire / grenades destroy the set: it is given health and a small hull, and watched (polled - the damage is read
+// off its health, nothing relies on a kill event for a script_model)
+rnf_radio_shootable local.radio:{
+	if( getcvar( "coop_reinfSmart" ) == "0" || getcvar( "coop_reinfRadio" ) == "0" ){ end }
+	if( local.radio == NULL || local.radio == NIL ){ end }
+	local.radio.health = 1000
+	local.radio setsize ( -14 -14 0 ) ( 14 14 22 )
+	local.radio solid
+	local.radio takedamage
+	while( ( waitthread rnf_radio_gone ) == 0 && level.coop_radio == local.radio ){
+		wait 0.4
+		if( local.radio == NULL ){ break }
+		if( local.radio.health < 700 ){
+			println( "^~^~^ RNF radio shot down hp=" + local.radio.health )
+			waitthread rnf_radio_destroy
+			break
+		}
+	}
+}end
+
+
+// the set goes up (same wreck as the planted charge in officer.scr::coop_radio_bomb_countdown)
+rnf_radio_destroy:{
+	if( level.coop_radio_destroyed == 1 ){ end }
+	local.radio = level.coop_radio
+	if( local.radio == NIL || local.radio == NULL ){ end }
+	level.coop_radio_destroyed = 1
+	level.coop_radio_planting = 0
+	local.rpos = local.radio.origin
+	local.radio stopsound
+	local.radio playsound coop_radio_blast
+	local.e1 = spawn "models/emitters/explosion_bombwall.tik"
+	local.e1.origin = local.rpos
+	local.e1 notsolid
+	local.e1 anim start
+	radiusdamage local.rpos 150 200
+	level.coop_radio = NULL
+	local.rubblepos = local.rpos
+	if( level.coop_radio_table != NULL && level.coop_radio_table != NIL ){
+		local.rubblepos = level.coop_radio_table.origin
+		level.coop_radio_table remove
+		level.coop_radio_table = NULL
+	}
+	local.radio remove
+	local.fire = spawn "models/emitters/firegood.tik"
+	local.fire.origin = local.rubblepos + ( 0 0 8 )
+	local.fire notsolid
+	local.fire anim start
+	local.fire loopsound fire_med
+	local.smoke = spawn "models/emitters/linger_smoke.tik"
+	local.smoke.origin = local.rubblepos + ( 0 0 12 )
+	local.smoke anim start
+	if( level.coop_radio_pulse != NULL && level.coop_radio_pulse != NIL ){ level.coop_radio_pulse delete; level.coop_radio_pulse = NULL }
+	if( level.coop_radio_charge != NULL && level.coop_radio_charge != NIL ){ level.coop_radio_charge delete }
+	if( level.coop_radio_tuse != NULL && level.coop_radio_tuse != NIL ){ level.coop_radio_tuse remove }
+	waitthread coop_mod/feed.scr::feed_all 1 "radio" "Radio destroyed - no more reinforcements"
+	thread coop_mod/objectives.scr::coop_obj_radio_done
+}end
+
+
+//=========================================================================
+// IDLE WATCHDOG (user 2026-10-15: "sometimes the officer would just stand there and do nothing, same with
+// bodyguards/reinforcements"). Causes found by reading officer.scr (see BUILD.md): (1) coop_wave_hunt stops at the
+// stand-off distance and hands the man to the engine's attack think - with no line to the player (wall, floor above)
+// he then stands there for ever; (2) a released bodyguard is handed to the engine with a single attackplayer and has
+// no hunt loop at all; (3) the officer holds the radio until "real contact" and nothing re-issues him when contact
+// stalls; (4) anything a map or another system left with AI off / no enemy. (1) is fixed in coop_wave_hunt itself
+// (blind counter: keep closing while he cannot see the player). This watchdog catches the rest.
+// Every 2s over the officer, his bodyguards and his wave men: a man who has not moved 24u or lost health for 9s while a
+// living player is within 1500u and he neither sees an enemy nor holds a deliberate post (turret, MG, prone, retreat,
+// surrendered, scripted scene) is kicked - AI on, enemy acquisition on, attack the nearest targetable player; a second
+// kick in a row sends him running at the player. Each kick logs ^~^~^ RNF idle kick (cause, think state, distances).
+// Switch: coop_reinfSmart + coop_reinfIdle (default on); coop_reinfIdleSecs overrides the 9s limit.
+//=========================================================================
+
+rnf_idle_watch:{
+	if( level.coop_rnfWatchRun == 1 ){ end }
+	level.coop_rnfWatchRun = 1
+	level.coop_rnfIdleKicks = 0
+	level.coop_rnfIdleMax = 0
+	while( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfIdle" ) != "0" ){
+		wait 2
+		if( $player == NULL || $player.size < 1 ){ continue }
+		if( level.coop_officer != NIL && level.coop_officer != NULL ){
+			waitthread rnf_idle_check level.coop_officer "officer" 0
+		}
+		for( local.i = 1; local.i <= 4; local.i++ ){
+			local.g = level.coop_bodyguards[local.i]
+			if( local.g == NIL || local.g == NULL ){ continue }
+			waitthread rnf_idle_check local.g "guard" local.i
+		}
+		if( level.coop_wave_count != NIL ){
+			for( local.i = 1; local.i <= level.coop_wave_count; local.i++ ){
+				local.w = level.coop_wave_actors[local.i]
+				if( local.w == NIL || local.w == NULL ){ continue }
+				waitthread rnf_idle_check local.w "wave" local.i
+			}
+		}
+	}
+	level.coop_rnfWatchRun = 0
+}end
+
+
+rnf_idle_check local.a local.kind local.idx:{
+	if( local.a == NIL || local.a == NULL ){ end }
+	if( !( isAlive local.a ) ){ end }
+	if( local.a.model == "models/animal/german_shepherd.tik" ){ end }
+	// deliberate posts and other systems' men
+	if( local.a.turret != NULL || local.a.no_idle == 1 || local.a.coop_aiDisabled == 1 ){ end }
+	if( local.a.flags["coop_surrendered"] == 1 || local.a.flags["coop_retreating"] == 1 || local.a.flags["coop_limping"] == 1 ){ end }
+	if( local.a.flags["coop_role"] == "prone" ){ end }
+	if( waitthread coop_mod/officer.scr::coop_isMannedGunner local.a ){ end }
+	// the officer / his guards hold the radio until the fight starts, and the officer is left alone while he heals
+	if( local.kind == "officer" || local.kind == "guard" ){
+		if( level.coop_officer_contact != 1 ){ end }
+		if( level.coop_officer_busy == 1 ){ end }
+		if( level.coop_officer_alive != 1 && local.kind == "officer" ){ end }
+	}
+	// nearest living player and his distance
+	local.np = NIL
+	local.nd = 999999
+	for( local.j = 1; local.j <= $player.size; local.j++ ){
+		local.p = $player[local.j]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( !( isAlive local.p ) ){ continue }
+		local.d = vector_length( local.p.origin - local.a.origin )
+		if( local.d < local.nd ){ local.nd = local.d; local.np = local.p }
+	}
+	if( local.np == NIL || local.nd > 1500 ){ local.a.coop_rnfT = NIL; end }
+	// moved, hurt or fresh: restart the clock
+	if( local.a.coop_rnfT == NIL || local.a.coop_rnfPos == NIL || ( vector_length( local.a.origin - local.a.coop_rnfPos ) ) > 24 || local.a.health != local.a.coop_rnfHp ){
+		local.a.coop_rnfPos = local.a.origin
+		local.a.coop_rnfHp = local.a.health
+		local.a.coop_rnfT = level.time
+		local.a.coop_rnfKicks = 0
+		end
+	}
+	// shooting at something he can see is not idle, however still he stands
+	local.en = local.a.enemy
+	local.cause = "no_enemy"
+	local.soft = 0
+	if( local.en != NIL && local.en != NULL ){
+		if( isAlive local.en ){
+			local.cause = "blind"
+			if( ( local.a cansee local.en ) ){ local.cause = "sees_enemy_silent"; local.soft = 1 }
+		} else {
+			local.cause = "enemy_dead"
+		}
+	}
+	local.lim = 9
+	if( getcvar( "coop_reinfIdleSecs" ) != "" ){ local.lim = int( getcvar( "coop_reinfIdleSecs" ) ) }
+	if( local.lim < 3 ){ local.lim = 3 }
+	// a man who SEES his enemy may be firing from a post for a long time (cover fight): he gets 2.5x the limit and only the
+	// soft kick (AI on / re-target, never a run order) - this is also what catches a man left with AI off in plain view
+	if( local.soft == 1 ){ local.lim = local.lim * 2.5 }
+	local.idle = level.time - local.a.coop_rnfT
+	if( local.idle > level.coop_rnfIdleMax ){ level.coop_rnfIdleMax = local.idle }
+	if( local.idle < local.lim ){ end }
+	// KICK
+	if( local.a.pathdist == 0 && local.nd > 250 ){ local.cause = local.cause + "+nopath" }
+	local.k = local.a.coop_rnfKicks
+	if( local.k == NIL ){ local.k = 0 }
+	local.a.coop_rnfKicks = local.k + 1
+	if( local.a.coop_rnfKickTotal == NIL ){ local.a.coop_rnfKickTotal = 0 }
+	local.a.coop_rnfKickTotal = local.a.coop_rnfKickTotal + 1
+	level.coop_rnfIdleKicks = level.coop_rnfIdleKicks + 1
+	println( "^~^~^ RNF idle kick who=" + local.kind + local.idx + " cause=" + local.cause + " idle=" + int( local.idle ) + " d=" + int( local.nd ) + " think=" + local.a.thinkstate + " kicks=" + local.a.coop_rnfKicks + " total=" + level.coop_rnfIdleKicks )
+	local.a ai_on
+	local.a.enableEnemy = 1
+	local.a forceactivate
+	local.tp = waitthread coop_mod/replace.scr::player_closestTargetable local.a
+	if( local.tp == NULL || local.tp == NIL ){ local.tp = local.np }
+	local.a thread coop_mod/aihandler.scr::attackPlayer local.tp
+	if( local.k >= 1 && local.soft != 1 ){
+		local.a.movedoneradius = 200
+		local.a runto local.tp.origin
+	}
+	local.a.coop_rnfT = level.time
+	// a man three kicks deep who still does not move cannot be helped by orders (no route to the player): stop re-kicking
+	// him every 10s, look again in 30s
+	if( local.a.coop_rnfKicks >= 3 ){ local.a.coop_rnfT = level.time + 20 }
+}end

@@ -807,6 +807,12 @@ coop_officer_brain local.officer:{
 				local.retreat_rolled = 0
 			}
 			local.unseen = level.time - level.coop_officer_lastseen
+			//[airealism R1] the officer lost a real chunk this tick (canteen / heal only raise health, so a drop is damage)
+			local.ohp = local.officer.health
+			if( local.ohpPrev != NIL && level.coop_officerMaxHp != NIL && level.coop_officerMaxHp > 0 ){
+				if( ( local.ohpPrev - local.ohp ) >= ( level.coop_officerMaxHp * 0.06 ) ){ thread coop_mod/reinf.scr::rnf_officerHit local.officer }
+			}
+			local.ohpPrev = local.ohp
 
 			if( level.coop_officer_busy != 1 ){
 				// Under 40% HP and out of contact: retreat to a health post (full heal + back to radio).
@@ -1396,8 +1402,16 @@ coop_wave_glow local.actor:{
 	// Overhead swastika is drawn by cgame CG_ActorOverheadIcon (RT_SPRITE) off the
 	// "+coopboss" flag the wave spawners set -- no script-side billboard needed.
 
+	//[airealism idle watchdog] one global thread watches the officer, his guards and his wave men
+	if( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfIdle" ) != "0" ){ thread coop_mod/reinf.scr::rnf_idle_watch }
 	// Occasional situational German combat barks (skips dogs).
-	thread coop_german_bark_loop local.actor
+	//[airealism R1] coop_aiVoiceEvents (default on): the officer's men speak from EVENTS through aivoice.scr (under fire,
+	//reload, man down, contact, officer hit, retreat) instead of the random 12s bark; 0 = the old loop.
+	if( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_aiVoiceEvents" ) != "0" ){
+		if( local.actor != NULL && local.actor.coop_avNat == NIL ){ local.actor thread coop_mod/aivoice.scr::aivoice_register }
+	}else{
+		thread coop_german_bark_loop local.actor
+	}
 
 	// (Red test glow removed -- the overhead swastika icon marks reinforcements now.)
 }end
@@ -1474,6 +1488,7 @@ coop_wave_hunt local.actor:{
 	local.offdir = angles_toforward local.offang
 	wait 1
 	if( local.actor == NULL || !isAlive local.actor ){ end }
+	local.blind = 0
 	while( local.actor != NULL && isAlive local.actor ){
 		//[airealism step1] a morale fall-back (wounded.scr::coop_checkTacticalRetreat) owns the legs until it ends
 		if( local.actor.flags["coop_retreating"] == 1 ){ wait 1.5; continue }
@@ -1484,10 +1499,21 @@ coop_wave_hunt local.actor:{
 				// advance toward an OFFSET point around the player (fan out) - wall-safe + anti-stuck
 				waitthread coop_push_toward local.actor local.np local.offdir 220
 			} else {
-				// in engagement range: let the actor's own think (cover / turret) fight from here
-				local.actor exec coop_mod/replace.scr::attackplayer
-				local.actor.coop_stuckcount = 0
-				local.actor.coop_lastpos = local.actor.origin
+				//[airealism idle fix] at the stand-off but unable to see the player (wall, floor above, cover): the engine's attack
+				//think has nothing to shoot at and the man stood there for ever. After 3 blind polls keep closing on him.
+				local.vis = 1
+				if( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfIdle" ) != "0" ){
+					if( !( local.actor cansee local.np ) ){ local.vis = 0 }
+				}
+				if( local.vis == 0 ){ local.blind++ } else { local.blind = 0 }
+				if( local.blind >= 3 ){
+					waitthread coop_push_toward local.actor local.np local.offdir 100
+				} else {
+					// in engagement range: let the actor's own think (cover / turret) fight from here
+					local.actor exec coop_mod/replace.scr::attackplayer
+					local.actor.coop_stuckcount = 0
+					local.actor.coop_lastpos = local.actor.origin
+				}
 			}
 		}
 		// POLL + re-issue (never `waittill movedone` - pain interruption under fire hangs it)
@@ -1626,6 +1652,14 @@ coop_call_reinforcements:{
 		local.fdi++
 	}
 
+	//[airealism S1] plan an entry nobody can see and a man can walk from (reinf.scr). Types 0/1/3/6 only: the sniper,
+	//dogs and the air strikes place themselves. Maps that force the authored zone keep it. NIL = authored zone, as before.
+	if( local.r == 0 || local.r == 1 || local.r == 3 || local.r == 6 ){
+		if( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfEntry" ) != "0" && level.coop_officer_waves_at_zone != 1 ){
+			local.rnfEnt = waitthread coop_mod/reinf.scr::rnf_entry local.spawn_pos
+			if( local.rnfEnt != NIL ){ local.spawn_pos = local.rnfEnt }
+		}
+	}
 	if( local.r == 0 ){
 		waitthread coop_mod/feed.scr::feed_all 0 "w_elite" "Enemy wave: an Elite Squad is hunting you"
 		thread coop_spawn_elite_squad local.spawn_pos
@@ -3844,6 +3878,7 @@ coop_officer_death_monitor local.officer:{
 	thread coop_officer_death_reaction local.dead_pos	// ME2: nearby survivors panic/revenge (coop_deathReact)
 	thread coop_replacement_officer_watch
 	thread coop_radio_bomb_enable
+	thread coop_mod/reinf.scr::rnf_radio_calls	//[airealism step 4] his men keep calling in waves over the set until it is destroyed
 	// HZM COOP: per-map avenging battalion (set in officer_positions.scr). Spawns at a fixed
 	// point and rushes the players to engage. Off (NIL) on maps that don't set it.
 	if( level.coop_officer_death_battalion_pos != NIL ){
@@ -4169,7 +4204,9 @@ coop_radio_init local.pos:{
 	local.table droptofloor
 	local.table notsolid
 	level.coop_radio_table = local.table
-	local.radio = spawn script_model
+	//[airealism step 4] script_model_realdamage = the retail script_model that really takes damage (a plain script_model's
+	//EV_Damage is a no-op: health never moved in the harness). Same class family, so every consumer below is unaffected.
+	local.radio = spawn script_model_realdamage
 	//[user 2026-08-15, bug-1816] PUBLISH THE RADIO. This spawned the model and then dropped the
 	//reference on the floor - level.coop_radio was read in a dozen places and assigned in NONE, so
 	//it was NIL for the whole map. Every consumer guards on `!= NIL && != NULL` and therefore did
@@ -4185,7 +4222,8 @@ coop_radio_init local.pos:{
 	//hindsight: the clear was written, the assign was not.
 	level.coop_radio = local.radio
 	local.radio model "models/miscobj/radio_military.tik"
-	local.radio.origin = local.table_gnd + (26 0 50)	//[user 2026-08-07] Occasional German traffic over the set. Rebuilt after the first version
+	local.radio.origin = local.table_gnd + (26 0 50)
+	thread coop_mod/reinf.scr::rnf_radio_shootable local.radio	//[airealism step 4] gunfire / grenades can destroy the set	//[user 2026-08-07] Occasional German traffic over the set. Rebuilt after the first version
 	//flooded the console - three separate faults, all mine:
 	//  1. den_scripted_M3L1_* aliases are DEFINED but their wavs are in no pak, so every line was
 	//     "Can't read sound file". Now uses coop_av_de_* - our own shipped German VO.
