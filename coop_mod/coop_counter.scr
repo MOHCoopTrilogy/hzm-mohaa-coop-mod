@@ -1,0 +1,280 @@
+//=========================================================================
+// coop_counter.scr - HZM coop FINAL COUNTER-ATTACK (2026-10-15, docs/proposals/alarm_counterattack_2026-10-15)
+//
+// Hooked at the top of missioncomplete.scr::main. When the main objectives are done and the mission is about to end, the
+// enemy throws a last series of waves at the squad for coop_counterSecs seconds (default 150) and only then does the mission
+// complete exactly as before. Waves form up through reinf.scr::rnf_entry (never from a sight line).
+//
+//   coop_counter 0/1        master switch, DEFAULT 0 (off until the playtest proves it)
+//   coop_counterForce 1     debug: acts as coop_counter 1 AND ignores the map exclusions (stealth / noCounter / denied)
+//   coop_counterSecs 150    length of the wave window, after the 15 s grace
+//   coop_counterWaveGap 30  seconds between waves (+0..10 random)
+//   coop_counterCap 14      most counter-attack men alive at once
+//   coop_counterDebug 1     greppable ^~^~^ COUNTER lines
+//
+// Never fires on: briefings / lobbies / map-tester runs, stealth + disguise maps (level.coop_stealthMap,
+// level.coop_enableDisguises), maps that set level.coop_noCounter 1, maps in counter_denied (ride / cutscene endings),
+// MP arena runs (level.coop_mpRun), or when nobody is alive.
+//=========================================================================
+
+counter_log local.txt:{
+	if( getcvar( "coop_counterDebug" ) == "1" ){ println( "^~^~^ COUNTER " + local.txt ) }
+}end
+
+
+// living, active players
+counter_players:{
+	local.n = 0
+	if( $player == NULL || $player == NIL ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.flags["coop_isActive"] != 1 ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( !isAlive local.p ){ continue }
+		local.n++
+	}
+}end local.n
+
+
+// wave men still alive: local.src "counter" (default) = the final counter-attack, "alarm" = alarm.scr waves
+counter_alive local.src:{
+	local.n = 0
+	local.want = "counter"
+	if( local.src != NIL ){ local.want = local.src }
+	if( level.coop_counterN == NIL ){ end 0 }
+	for( local.i = 1; local.i <= level.coop_counterN; local.i++ ){
+		local.a = level.coop_counterActors[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !( isAlive local.a ) ){ continue }
+		if( local.a.flags["coop_waveSrc"] == local.want ){ local.n++ }
+	}
+}end local.n
+
+
+// 1 = this map ends in a ride / cutscene / scripted sequence (or is Omaha, or owns a stealth ending) that a fight would break.
+// Audited 2026-10-15 from each map's mission-end call site (BUILD.md step 3). A map not listed here is a plain walk-to-the-trigger ending.
+//   ride / vehicle / tank ending : e1l1 (jeep), e2l2 (FinalJeep), e2l3 (tank), e3l3 (K5 train jump), m1l3a m1l3b (jeep),
+//                                  m1l3c (truck escape), m2l3 (train leaves), m5l1b m5l2a m5l2b (tank), t3l2 (tank)
+//   cutscene / outro ending      : e1l2 (DoOutro), t2l2 (cuecamera), m6l3a (scene7), training
+//   stealth / disguise / own alarm: e1l4, m2l2a, m6l1c, m6l2a (also level.coop_stealthMap / coop_enableDisguises)
+//   Omaha (never touched)        : m3l1a, m3l1b
+counter_denied local.m:{
+	if( local.m == "e1l1" || local.m == "e1l2" || local.m == "e1l4" || local.m == "e2l2" || local.m == "e2l3" || local.m == "e3l3" ){ end 1 }
+	if( local.m == "m1l3a" || local.m == "m1l3b" || local.m == "m1l3c" || local.m == "m2l2a" || local.m == "m2l3" ){ end 1 }
+	if( local.m == "m3l1a" || local.m == "m3l1b" || local.m == "m5l1b" || local.m == "m5l2a" || local.m == "m5l2b" ){ end 1 }
+	if( local.m == "m6l1c" || local.m == "m6l2a" || local.m == "m6l3a" || local.m == "t2l2" || local.m == "t3l2" || local.m == "training" ){ end 1 }
+}end 0
+
+
+// "ok" when the counter-attack may run, otherwise the reason it may not
+counter_gate local.m local.next:{
+	local.force = 0
+	if( getcvar( "coop_counterForce" ) == "1" ){ local.force = 1 }
+	if( getcvar( "coop_counter" ) != "1" && local.force == 0 ){ end "off" }
+	if( level.coop_counterDone == 1 ){ end "done" }
+	if( level.coop_mpRun == 1 ){ end "mp" }
+	local.mt = getcvar( "coop_maptest" )
+	if( local.mt != "0" && local.mt != "" ){ end "maptest" }
+	if( level.coop_lobbyMap == 1 ){ end "lobby" }
+	if( local.m == NIL ){ end "nomap" }
+	// a restart after a failure (m5l3 "bridge destroyed" -> missioncomplete on the SAME map) or a void hop is not a victory
+	if( local.next == local.m || local.next == "void" ){ end "restart" }
+	if( waitthread coop_mod/main.scr::containsText local.m "briefing" 0 ){ end "briefing" }
+	if( waitthread coop_mod/main.scr::containsText local.m "lobby" 0 ){ end "lobby" }
+	if( local.force == 0 ){
+		if( level.coop_noCounter == 1 ){ end "noCounter" }
+		if( level.coop_stealthMap == 1 ){ end "stealth" }
+		if( level.coop_enableDisguises ){ end "disguise" }
+		if( waitthread counter_denied local.m ){ end "denied" }
+	}
+	if( ( waitthread counter_players ) < 1 ){ end "noplayers" }
+}end "ok"
+
+
+// players in the squad -> men per wave: 1-2: 4, 3-4: 6, 5+: 8
+counter_wavesize local.pc:{
+	local.n = 4
+	if( local.pc >= 3 ){ local.n = 6 }
+	if( local.pc >= 5 ){ local.n = 8 }
+}end local.n
+
+
+// fallback when rnf_entry finds nothing: a ring point 1100-1900u from the living players' centre that has ground
+counter_fallback:{
+	local.pn = 0
+	local.cen = ( 0 0 0 )
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.pn++
+		local.cen = local.cen + local.p.origin
+	}
+	if( local.pn < 1 ){ end NIL }
+	local.cen = vector_scale local.cen ( 1.0 / local.pn )
+	local.a0 = randomint 360
+	for( local.t = 0; local.t < 8; local.t++ ){
+		local.dir = angles_toforward ( 0 ( local.a0 + ( local.t * 45 ) ) 0 )
+		local.rr = 1100 + ( randomint 800 )
+		local.c = local.cen + ( vector_scale local.dir local.rr ) + ( 0 0 48 )
+		local.g = waitthread coop_mod/officer.scr::coop_find_ground local.c
+		if( local.g != NIL ){ end local.g }
+	}
+}end NIL
+
+
+// one wave of local.n men at local.pos. Same recipe as officer.scr::coop_spawn_infantry_squad (xp class, arm, scale,
+// attackplayer, coop_wave_hunt), tracked in level.coop_counterActors so the cap and the early finish can count them.
+counter_squad local.pos local.n local.wave local.src:{
+	local.made = 0
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.pos local.i
+		if( local.gnd == NIL ){ waitframe; continue }
+		local.role = "infantry"
+		if( local.wave >= 3 && local.i == 0 && local.src == "counter" ){ local.role = "officer" }
+		local.smodel = exec coop_mod/officer.scr::coop_model_for local.role
+		local.s = spawn local.smodel
+		if( local.s == NULL || local.s == NIL ){ waitframe; continue }
+		local.s.coop_xpClass = "reinf"
+		local.s.flags["coop_waveSrc"] = local.src
+		local.s.origin = local.gnd
+		local.s droptofloor
+		local.s.health = 120
+		local.s.flags["coop_actorStopPainHandler"] = 1
+		local.s.accuracy = 65
+		local.s.leash = 4096
+		local.s.enableEnemy = 1
+		local.k = local.i - ( int( local.i / 3 ) * 3 )
+		if( local.k == 0 ){
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mp40"
+		} else if( local.k == 1 ){
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mauser kar 98k"
+		} else {
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "stg44"
+		}
+		exec coop_mod/officer.scr::coop_reinf_scale local.s
+		local.s exec coop_mod/replace.scr::attackplayer
+		local.s rendereffects "+coopboss"
+		local.s.flags["coop_squadSlot"] = local.i
+		waitthread coop_mod/officer.scr::coop_apply_personality local.s
+		thread coop_mod/officer.scr::coop_wave_hunt local.s
+		thread coop_mod/officer.scr::coop_wave_glow local.s
+		if( level.coop_counterN == NIL ){ level.coop_counterN = 0 }
+		level.coop_counterN++
+		level.coop_counterActors[level.coop_counterN] = local.s
+		local.made++
+		waitframe
+	}
+}end local.made
+
+
+// one wave: size by players, capped by what is still alive, from a planned entry
+counter_wave local.wave:{
+	local.pc = waitthread counter_players
+	if( local.pc < 1 ){ end 0 }
+	local.n = waitthread counter_wavesize local.pc
+	local.cap = 14
+	if( getcvar( "coop_counterCap" ) != "" ){ local.cap = int( getcvar( "coop_counterCap" ) ) }
+	if( local.cap < 1 ){ local.cap = 14 }
+	local.alive = waitthread counter_alive
+	if( ( local.alive + local.n ) > local.cap ){ local.n = local.cap - local.alive }
+	if( local.n < 1 ){
+		waitthread counter_log ( "wave " + local.wave + " skipped: cap " + local.cap + " alive " + local.alive )
+		end 0
+	}
+	local.pos = NIL
+	if( getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfEntry" ) != "0" ){
+		local.pos = waitthread coop_mod/reinf.scr::rnf_entry NIL
+	}
+	local.why = "entry"
+	if( local.pos == NIL ){
+		local.pos = waitthread counter_fallback
+		local.why = "fallback"
+	}
+	if( local.pos == NIL ){
+		waitthread counter_log ( "wave " + local.wave + " skipped: no entry" )
+		end 0
+	}
+	local.made = waitthread counter_squad local.pos local.n local.wave "counter"
+	waitthread counter_log ( "wave " + local.wave + " players=" + local.pc + " want=" + local.n + " made=" + local.made + " alive=" + ( waitthread counter_alive ) + " via=" + local.why + " at=" + local.pos )
+}end local.made
+
+
+// the whole event. Returns when the window is over; the caller (missioncomplete.scr) carries on to the debrief.
+counter_run local.nextlevel:{
+	local.gate = waitthread counter_gate level.coop_mapname local.nextlevel
+	if( local.gate != "ok" ){
+		if( local.gate != "off" ){ waitthread counter_log ( "skip " + level.coop_mapname + ": " + local.gate ) }
+		end
+	}
+	level.coop_counterDone = 1
+	level.coop_counterActive = 1
+	local.secs = 150
+	if( getcvar( "coop_counterSecs" ) != "" ){ local.secs = int( getcvar( "coop_counterSecs" ) ) }
+	if( local.secs < 10 ){ local.secs = 10 }
+	local.gap = 30
+	if( getcvar( "coop_counterWaveGap" ) != "" ){ local.gap = int( getcvar( "coop_counterWaveGap" ) ) }
+	if( local.gap < 5 ){ local.gap = 5 }
+	local.grace = 15
+	println( "^~^~^ COUNTER start map=" + level.coop_mapname + " secs=" + local.secs + " gap=" + local.gap + " players=" + ( waitthread counter_players ) )
+
+	waitthread coop_mod/feed.scr::feed_all 0 "counter" "Hold the position - counter-attack incoming"
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		local.p playsound coop_radio_on
+	}
+	wait 1.2
+	local.rsnd = "coop_radio_german_reinf" + ( ( randomint 9 ) + 1 )
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		local.p playsound local.rsnd
+	}
+	exec coop_mod/replace.scr::stopwatch ( local.secs + local.grace )
+
+	// grace, one second at a time so a wiped squad ends the event
+	local.t = 0
+	local.wave = 0
+	local.nextwave = local.grace
+	local.total = local.secs + local.grace
+	local.dead = 0
+	while( local.t < local.total ){
+		if( local.t >= local.nextwave && local.t < ( local.total - 10 ) ){
+			local.wave++
+			waitthread counter_wave local.wave
+			local.nextwave = local.t + local.gap + ( randomint 11 )
+		}
+		wait 1
+		local.t++
+		if( ( waitthread counter_players ) < 1 ){
+			local.dead++
+			if( local.dead >= 5 ){
+				waitthread counter_log "squad down, ending early"
+				break
+			}
+		} else {
+			local.dead = 0
+		}
+		// early finish: after wave 4, 80 percent of the men sent are dead
+		if( local.wave >= 4 && level.coop_counterN > 0 ){
+			local.al = waitthread counter_alive
+			local.al5 = local.al * 5
+			if( local.al5 <= level.coop_counterN ){
+				waitthread counter_log ( "early finish: alive " + local.al + " of " + level.coop_counterN )
+				break
+			}
+		}
+	}
+	exec coop_mod/replace.scr::stopwatch 0
+	// the squad is frozen for the debrief that follows: whoever is left stands down (alive, but no longer hunting)
+	for( local.i = 1; local.i <= level.coop_counterN; local.i++ ){
+		local.a = level.coop_counterActors[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( isAlive local.a ){ local.a.enableEnemy = 0 }
+	}
+	println( "^~^~^ COUNTER end waves=" + local.wave + " sent=" + level.coop_counterN + " alive=" + ( waitthread counter_alive ) + " t=" + local.t )
+	level.coop_counterActive = 0
+}end
