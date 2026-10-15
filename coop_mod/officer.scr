@@ -1492,6 +1492,8 @@ coop_wave_hunt local.actor:{
 	while( local.actor != NULL && isAlive local.actor ){
 		//[airealism step1] a morale fall-back (wounded.scr::coop_checkTacticalRetreat) owns the legs until it ends
 		if( local.actor.flags["coop_retreating"] == 1 ){ wait 1.5; continue }
+		//[smoke 2026-10-15] the squad waits for its smoke screen to build (smokescreen.scr sets/clears this, 5 s)
+		if( local.actor.flags["coop_smokeHold"] == 1 ){ wait 0.5; continue }
 		local.np = waitthread coop_mod/replace.scr::player_closestTargetable local.actor
 		if( local.np != NULL ){
 			local.nd = vector_length( local.actor.origin - local.np.origin )
@@ -2773,7 +2775,7 @@ coop_spawn_elite_squad local.pos:{
 		local.i++
 	}
 	if( local.count > 0 ){
-		thread coop_elite_smoke_barrage local.last_pos
+		thread coop_mod/smokescreen.scr::squad_screen local.sq1 local.sq2 local.sq3 local.sq4 local.sq5 local.sq6	//[smoke 2026-10-15] screen BETWEEN squad and players, squad holds for it
 		thread coop_squad_monitor local.sq1 local.sq2 local.sq3 "Elite Squad" local.sq4 local.sq5 local.sq6
 	}
 	if(level.cMTE_coop_officer){ iprintlnbold ("REINF: wave elite squad spawned " + local.count + " at " + int(local.last_pos[0]) + " " + int(local.last_pos[1])) }
@@ -2803,35 +2805,6 @@ coop_squad_monitor local.a1 local.a2 local.a3 local.label local.a4 local.a5 loca
 		level.coop_wave_recalls++
 		waitthread coop_mod/feed.scr::feed_all 1 "w_recall" "The Officer is calling another wave"
 		thread coop_reinf_call_wave_gated level.coop_officer
-	}
-}end
-
-
-coop_elite_smoke_barrage local.pos:{
-	local.j = 0
-	while( local.j < 2 ){
-		wait (10 + randomint 8)
-
-		local.xoff = randomint 160 - 80
-		local.yoff = randomint 160 - 80
-		local.spos = local.pos
-		local.spos[0] = local.pos[0] + local.xoff
-		local.spos[1] = local.pos[1] + local.yoff
-
-		local.pop = spawn "models/fx/M18_Smoke_GrenadeExplosion.tik"
-		local.pop.origin = local.spos
-		local.pop anim start
-		local.pop notsolid
-
-		local.cloud = spawn "models/emitters/tehao_thickSmoke.tik"
-		local.cloud.origin = local.spos
-		local.cloud anim start
-		local.cloud notsolid
-
-		wait 20
-		if( local.cloud != NULL ){ local.cloud remove }
-
-		local.j++
 	}
 }end
 
@@ -3614,26 +3587,18 @@ coop_grenade_lob_loop local.thrower:{
 		}
 		if( local.canthrow == 1 ){
 			local.tcount++
+			local.sm = 0
 			if( local.tcount >= 4 ){
-				// every 4th throw is a smoke grenade -- guaranteed visible cloud at the target
-				local.tcount = 0
-				local.spos = local.target.origin
-				local.pop = spawn "models/fx/M18_Smoke_GrenadeExplosion.tik"
-				local.pop.origin = local.spos
-				local.pop anim start
-				local.pop notsolid
-				local.cloud = spawn "models/emitters/tehao_thickSmoke.tik"
-				local.cloud.origin = local.spos
-				local.cloud anim start
-				local.cloud notsolid
-				thread coop_smoke_cleanup local.pop local.cloud
-				wait 5
-			} else {
+				//[smoke 2026-10-15] every 4th throw is a SMOKE SCREEN between the thrower and its target (it used to land on the target's feet)
+				local.sm = waitthread coop_mod/smokescreen.scr::lob local.thrower local.target
+				if( local.sm == 1 ){ local.tcount = 0 } else { local.tcount = 3 }
+			}
+			if( local.sm != 1 ){
 				local.gun aimtarget local.target
 				local.gun off
 				local.gun fire
-				wait 5
 			}
+			wait 5
 		} else {
 			local.gun off
 			wait 1
@@ -3641,14 +3606,6 @@ coop_grenade_lob_loop local.thrower:{
 	}
 	local.gun off
 	local.gun remove
-}end
-
-
-// Removes a thrown smoke cloud after it has lingered.
-coop_smoke_cleanup local.pop local.cloud:{
-	wait 16
-	if( local.pop != NULL ){ local.pop remove }
-	if( local.cloud != NULL ){ local.cloud remove }
 }end
 
 
