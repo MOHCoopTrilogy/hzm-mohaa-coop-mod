@@ -4392,12 +4392,20 @@ coop_binoc_wait_pickup local.binoc local.binoc_vis:{
 	if( local.binoc_vis != NULL ){ local.binoc_vis delete }
 	local.binoc remove
 	if( level.coop_binoc_beacon != NULL ){ level.coop_binoc_beacon delete }	// remove the red under-glow
-	// First-ever pickup grants 3 strikes; a re-pickup (dropped, carried over) keeps the remaining
-	// count - coop_binoc_uses is a global that persists, so only initialize it when still NIL.
+	waitthread coop_binoc_grant local.player
+}end
+
+
+// [bug-4003 rewards] The ONE place the binoculars are handed to a player: used by the officer's Use pickup
+// above AND by the walk-over re-drop (coop_reward_redrop_wait). ONE bombing run per binoculars: the first-ever
+// pickup sets coop_binoc_uses = 1; coop_binoc_uses is a level global that survives a drop/recover cycle, so a
+// re-pickup after a death keeps the remaining count (still 1 if the strike was never called, never refilled).
+coop_binoc_grant local.player:{
+	if( local.player == NULL ){ end }
 	local.firstPickup = 0
 	if( level.coop_binoc_uses == NIL ){
 		local.firstPickup = 1
-		level.coop_binoc_uses = 3
+		level.coop_binoc_uses = 1
 	}
 	level.coop_binoc_given = 1
 	level.coop_binoc_owner = local.player
@@ -4415,10 +4423,10 @@ coop_binoc_wait_pickup local.binoc local.binoc_vis:{
 			}
 			waitthread coop_mod/feed.scr::feed_hint local.player "binoc_tut" local.btxt
 		} else {
-			waitthread coop_mod/feed.scr::feed_hint local.player "binoc" "Binoculars: equip from the pistol slot, aim and fire to call a bombing run (3 strikes)"
+			waitthread coop_mod/feed.scr::feed_hint local.player "binoc" "Binoculars: equip from the pistol slot, aim and fire to call a bombing run (ONE use - make it count)"
 		}
 	} else {
-		waitthread coop_mod/feed.scr::feed_all 1 "binoc" (local.player.netname + " recovered the Binoculars - " + level.coop_binoc_uses + " strikes left")
+		waitthread coop_mod/feed.scr::feed_all 1 "binoc" (local.player.netname + " recovered the Binoculars - one bombing run left")
 	}
 	// Support checks in: "Give me a target / Awaiting coordinates, over." (heard by ALL players)
 	thread coop_radio_all "coop_radio_standby"
@@ -4486,6 +4494,9 @@ binoculars_fired local.player local.target:{
 		waitthread coop_mod/feed.scr::feed_player local.player 0 "strike_deny" "Negative - no clear sky above target coordinates. Strike request denied."	//[user 2026-10-05] caller only (was a broadcast); [bug-3952] event feed
 		end
 	}
+	// [bug-4003 rewards] ONE strike per binoculars: re-test right at the point of use (the sky check above is
+	// the only place that can yield), so two fire events can never both pass the entry test and both fire.
+	if( level.coop_binoc_uses <= 0 ){ end }
 	level.coop_binoc_laststrike = level.time
 	// [user 08-07] radiusdamage (what the bomb blast uses) hardcodes its attacker to `world` at
 	// the ENGINE level (scriptthread.cpp EventRadiusDamage) - there is no script-side way to make
@@ -4813,9 +4824,12 @@ coop_reward_hud_start:{
 coop_binoc_owner_watch local.player:{
 	if( local.player == NULL ){ end }
 	local.lastpos = local.player.origin
+	local.lastgood = exec coop_mod/officer.scr::coop_reward_validate local.lastpos
 	while( level.coop_binoc_given == 1 && level.coop_binoc_owner == local.player ){
 		if( local.player == NULL || !(isAlive local.player) ){ break }
 		local.lastpos = local.player.origin
+		local.v = exec coop_mod/officer.scr::coop_reward_validate local.lastpos
+		if( local.v != NIL ){ local.lastgood = local.v }
 		wait 0.5
 	}
 	// Only drop if HE died while still the owner with strikes remaining (NOT the normal expended
@@ -4825,8 +4839,11 @@ coop_binoc_owner_watch local.player:{
 	level.coop_binoc_given = 0
 	level.coop_binoc_owner = NULL
 	thread coop_binoc_clear_hud NULL
-	thread coop_binoc_spawn_pickup local.lastpos
-	waitthread coop_mod/feed.scr::feed_all 1 "binoc_drop" ("The Binoculars were dropped (" + level.coop_binoc_uses + " strikes left) - a teammate can recover them")
+	local.dp = exec coop_mod/officer.scr::coop_reward_dropspot local.player local.lastpos local.lastgood
+	if( local.lastgood == NIL ){ local.lastgood = local.dp }
+	println( "^~^~^ REWARD_DROP kind=binoc spot=" + local.dp + " lastpos=" + local.lastpos )
+	thread coop_reward_spawn_drop "binoc" local.dp local.lastgood
+	waitthread coop_mod/feed.scr::feed_all 1 "binoc_drop" "The Binoculars were dropped - walk over them to recover the bombing run"
 }end
 
 // RED under-glow beacon for a dropped binoculars pickup (mirrors the smoke's glow so the binocs
@@ -4842,31 +4859,195 @@ coop_spawn_binoc_glow local.pos:{
 	level.coop_binoc_beacon = local.glow
 }end
 
-// Spawns a fresh binoculars trigger_use pickup at a position (death re-drop).
+// [bug-4003 rewards] A dropped reward (binoculars / signal smoke) can no longer be lost. The old re-drop spawned a
+// SOLID trigger_use at coop_find_ground(lastpos) -- which returns NIL when the carrier died on a ledge / mid-air /
+// in a tight spot, and then fell back to the RAW position (floating, inside geometry, or over the void) -- and the
+// pickup thread was single-shot (a non-player or someone-already-holds touch deleted it). Now:
+//   coop_reward_validate  -> a traced ground spot that is not embedded in solid, has headroom and is above the void
+//   coop_reward_dropspot  -> death spot, else last in-world sample, else the carrier's last VALID spot
+//   coop_reward_spawn_drop-> walk-over trigger_multiple (never solid to players, same recipe as keyitems.scr
+//                            coop_key_dropWeapon) + model + glow, with a keepalive that relocates it to the
+//                            carrier's last valid spot if it ever ends up in the void / geometry / over air
+// It stays until a living, non-downed player walks over it, or the mission ends.
+
+// Returns a pickup-safe point (ground + 6u) for any position, or NIL if the position has no valid ground.
+coop_reward_validate local.pos:{
+	if( local.pos == NIL ){ end NIL }
+	local.found = 0
+	local.g = local.pos
+	local.off = 8
+	while( local.off <= 40 && local.found == 0 ){
+		local.from = local.pos
+		local.from[2] = local.from[2] + local.off
+		local.to = local.pos
+		local.to[2] = local.to[2] - 400
+		local.tr = traced ( local.from ) ( local.to ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["startSolid"] != 1 && local.tr["allSolid"] != 1 && local.tr["fraction"] < 1.0 ){
+			local.found = 1
+			local.g = local.tr["endpos"]
+		}
+		local.off = local.off + 32
+	}
+	if( local.found == 0 ){ end NIL }
+	if( (local.pos[2] - local.g[2]) > 300 ){ end NIL }
+	if( level.coop_voidZ != NIL && level.coop_voidZ < 999999 && local.g[2] < level.coop_voidZ ){ end NIL }
+	local.hi = local.g
+	local.hi[2] = local.hi[2] + 6
+	local.top = local.g
+	local.top[2] = local.top[2] + 56
+	local.h = traced ( local.hi ) ( local.top ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.h["startSolid"] == 1 || local.h["allSolid"] == 1 ){ end NIL }
+	if( local.h["fraction"] < 0.4 ){ end NIL }
+	end local.hi
+}end
+
+
+// Where a dead / disconnected carrier's reward goes: the spot he fell (if it is close to his last sample - a corpse
+// can be flung or the entity gone), else his last in-world sample, else the last spot validated while he lived.
+coop_reward_dropspot local.player local.lastpos local.lastgood:{
+	local.sp = NIL
+	if( local.player != NULL ){
+		local.d = vector_length ( local.player.origin - local.lastpos )
+		if( local.d < 200 ){ local.sp = exec coop_mod/officer.scr::coop_reward_validate local.player.origin }
+	}
+	if( local.sp == NIL ){ local.sp = exec coop_mod/officer.scr::coop_reward_validate local.lastpos }
+	if( local.sp == NIL ){ local.sp = local.lastgood }
+	if( local.sp == NIL ){ local.sp = local.lastpos }
+	end local.sp
+}end
+
+
+// Spawns the persistent walk-over pickup for kind "binoc" or "smoke" at pos; fb = fallback (last valid) position.
+coop_reward_spawn_drop local.kind local.pos local.fb:{
+	local.model = "models/items/binoculars.tik"
+	local.gcol = ( 1 0 0 )
+	if( local.kind == "smoke" ){
+		local.model = "models/weapons/coop_smoke_grenade.tik"
+		local.gcol = ( 1 0.9 0.2 )
+	}
+	local.trig = spawn trigger_multiple
+	if( local.trig == NULL ){ end }	// entity pool exhausted
+	local.trig.origin = local.pos
+	local.trig setsize ( -24 -24 0) (24 24 56)
+	local.vis = spawn script_model
+	if( local.vis != NULL ){
+		local.vis model local.model
+		local.vis.origin = local.pos
+		local.vis notsolid
+		local.vis rendereffects "+fullbright"
+		local.trig.rvis = local.vis
+	}
+	local.glow = spawn script_model
+	if( local.glow != NULL ){
+		local.glow model "models/fx/dummy.tik"
+		local.glow.origin = local.pos + (0 0 8)
+		local.glow light local.gcol
+		local.glow lightRadius 150
+		local.glow lightOn
+		local.glow notsolid
+		local.trig.rglow = local.glow
+		if( local.kind == "smoke" ){ level.coop_smoke_beacon = local.glow } else { level.coop_binoc_beacon = local.glow }
+	}
+	level.coop_rewardTrig[local.kind] = local.trig
+	println( "^~^~^ REWARD_SPAWN kind=" + local.kind + " pos=" + local.pos + " fb=" + local.fb )
+	thread coop_reward_redrop_wait local.kind local.trig
+	thread coop_reward_keepalive local.trig local.fb local.model
+}end
+
+
+// Pickup: loops until an ALIVE, non-downed player touches (a corpse / dead owner / actor never consumes it).
+coop_reward_redrop_wait local.kind local.trig:{
+	local.player = NULL
+	while( local.trig != NULL ){
+		local.trig waittill trigger
+		local.who = parm.other
+		if( local.who != NULL && local.who.classname == "Player" && isAlive local.who && local.who.flags["coop_dbno_active"] != 1 ){
+			local.player = local.who
+			break
+		}
+	}
+	if( local.trig == NULL || local.player == NULL ){ end }
+	local.vis = local.trig.rvis
+	local.glow = local.trig.rglow
+	if( local.kind == "smoke" ){
+		if( level.coop_smoke_player != NULL ){ end }	// already recovered by someone else
+	} else {
+		if( level.coop_binoc_given == 1 ){ end }	// someone already holds the binoculars: this is a duplicate
+	}
+	local.trig remove
+	if( local.vis != NULL ){ local.vis delete }
+	if( local.glow != NULL ){ local.glow delete }
+	println( "^~^~^ REWARD_PICKUP kind=" + local.kind + " by=" + local.player.netname )
+	if( local.kind == "smoke" ){
+		local.player item models/weapons/coop_smoke_grenade.tik
+		level.coop_paradrop_armed = 1
+		level.coop_smoke_player = local.player
+		waitthread coop_mod/feed.scr::feed_all 1 "smoke" (local.player.netname + " recovered the Signal Smoke")
+		thread coop_smoke_hud_show
+		thread coop_smoke_owner_watch local.player
+	} else {
+		waitthread coop_binoc_grant local.player
+	}
+}end
+
+
+// Keeps a dropped reward alive: re-creates a deleted model, and if the pickup ever sits in the void / inside
+// geometry / over open air (carrier died on a vehicle, a ledge that crumbled, water-edge physics...) puts it back at
+// the carrier's last valid spot. Ends when the trigger is gone (picked up) -- the mission ending frees everything.
+coop_reward_keepalive local.trig local.fb local.model:{
+	while( local.trig != NULL ){
+		wait 1
+		if( local.trig == NULL ){ end }
+		local.vis = local.trig.rvis
+		if( local.vis == NULL ){
+			local.vis = spawn script_model
+			if( local.vis == NULL ){ continue }
+			local.vis model local.model
+			local.vis notsolid
+			local.vis rendereffects "+fullbright"
+			local.vis.origin = local.trig.origin
+			local.trig.rvis = local.vis
+		}
+		local.p = local.trig.origin
+		local.bad = 0
+		if( level.coop_voidZ != NIL && level.coop_voidZ < 999999 && local.p[2] < level.coop_voidZ ){ local.bad = 1 }
+		if( local.bad == 0 ){
+			local.from = local.p
+			local.from[2] = local.from[2] + 6
+			local.to = local.p
+			local.to[2] = local.to[2] - 48
+			local.tr = traced ( local.from ) ( local.to ) 0 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 || local.tr["fraction"] >= 1.0 ){ local.bad = 1 }
+		}
+		if( local.bad == 1 ){
+			local.n = exec coop_mod/officer.scr::coop_reward_validate local.fb
+			if( local.n == NIL ){ local.n = local.fb }
+			local.trig.origin = local.n
+			local.vis.origin = local.n
+			local.g = local.trig.rglow
+			if( local.g != NULL ){ local.g.origin = local.n + (0 0 8) }
+			println( "^~^~^ REWARD_RELOCATE kind=" + local.model + " from=" + local.p + " to=" + local.n )
+		}
+	}
+}end
+
+// Kept for callers: spawn a fresh binoculars pickup at a position (death re-drop).
 coop_binoc_spawn_pickup local.pos:{
-	local.bpos = exec coop_mod/officer.scr::coop_find_ground local.pos
-	if( local.bpos == NIL ){ local.bpos = local.pos }
-	local.binoc_vis = spawn script_model
-	local.binoc_vis model "models/items/binoculars.tik"
-	local.binoc_vis.origin = local.bpos
-	local.binoc_vis droptofloor
-	local.binoc_vis notsolid
-	local.binoc_vis rendereffects "+fullbright"
-	local.binoc = spawn trigger_use
-	local.binoc.origin = local.binoc_vis.origin
-	local.binoc solid
-	local.binoc setsize ( -16 -16 0) (16 16 48)
-	thread coop_spawn_binoc_glow local.binoc_vis.origin
-	thread coop_binoc_wait_pickup local.binoc local.binoc_vis
+	local.sp = exec coop_mod/officer.scr::coop_reward_validate local.pos
+	if( local.sp == NIL ){ local.sp = local.pos }
+	thread coop_reward_spawn_drop "binoc" local.sp local.sp
 }end
 
 // Watches the smoke owner; drop the smoke again if he dies BEFORE throwing it (paradrop armed).
 coop_smoke_owner_watch local.player:{
 	if( local.player == NULL ){ end }
 	local.lastpos = local.player.origin
+	local.lastgood = exec coop_mod/officer.scr::coop_reward_validate local.lastpos
 	while( level.coop_paradrop_armed == 1 && level.coop_smoke_player == local.player ){
 		if( local.player == NULL || !(isAlive local.player) ){ break }
 		local.lastpos = local.player.origin
+		local.v = exec coop_mod/officer.scr::coop_reward_validate local.lastpos
+		if( local.v != NIL ){ local.lastgood = local.v }
 		wait 0.5
 	}
 	// Thrown (armed -> 0) or owner changed -> no drop. Only drop if he died still holding it.
@@ -4874,7 +5055,10 @@ coop_smoke_owner_watch local.player:{
 	if( level.coop_paradrop_armed != 1 ){ end }
 	level.coop_smoke_player = NULL
 	thread coop_smoke_hud_clear
-	thread coop_smoke_spawn_pickup local.lastpos
+	local.dp = exec coop_mod/officer.scr::coop_reward_dropspot local.player local.lastpos local.lastgood
+	if( local.lastgood == NIL ){ local.lastgood = local.dp }
+	println( "^~^~^ REWARD_DROP kind=smoke spot=" + local.dp + " lastpos=" + local.lastpos )
+	thread coop_reward_spawn_drop "smoke" local.dp local.lastgood
 	waitthread coop_mod/feed.scr::feed_all 1 "smoke_drop" "The Signal Smoke was dropped - a teammate can recover it"
 }end
 
