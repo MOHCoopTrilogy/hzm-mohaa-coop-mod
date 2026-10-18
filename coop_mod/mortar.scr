@@ -783,7 +783,7 @@ mz_g_brain local.g local.l local.s local.site:{
 			local.rounds--
 			local.fired++
 			level.coop_mzRoundsG = level.coop_mzRoundsG + 1
-			waitthread mz_dbg ( "round " + level.coop_mzRoundsG + " at=" + local.aim + " target_d=" + int( vector_length( local.base - local.aim ) ) + " rng=" + local.rng + " left=" + local.rounds + " warn=" + local.warn )
+			waitthread mz_dbg ( "round " + level.coop_mzRoundsG + " rule=" + level.coop_mzRule + " at=" + local.aim + " target_d=" + int( vector_length( local.base - local.aim ) ) + " rng=" + local.rng + " left=" + local.rounds + " warn=" + local.warn )
 			thread mz_round "g" local.tube local.aim local.warn local.dmg local.cp local.rad NIL
 			local.lastP = local.tp
 			local.lastAim = local.aim
@@ -799,6 +799,52 @@ mz_g_brain local.g local.l local.s local.site:{
 }end
 
 
+// RULE A (the AI already knows him): 1 when local.sp or any man of local.arr within local.rad of him has local.who as his enemy
+mz_knows local.sp local.arr local.who local.rad:{
+	if( ( waitthread mz_ok local.sp ) != 1 ){ end 0 }
+	if( local.sp.enemy == local.who ){ end 1 }
+	if( local.arr == NIL || local.arr == NULL ){ end 0 }
+	for( local.i = 1; local.i <= local.arr.size; local.i++ ){
+		local.m = local.arr[local.i]
+		if( local.m == NIL || local.m == NULL ){ continue }
+		if( !isAlive local.m ){ continue }
+		if( vector_length( local.m.origin - local.sp.origin ) > local.rad ){ continue }
+		if( local.m.enemy == local.who ){ end 1 }
+	}
+}end 0
+
+
+// RULE B (fallback): 1 when local.pos is within 3000u of the spotter and inside his forward 120 degree cone
+mz_cone local.sp local.pos:{
+	local.d = local.pos - local.sp.origin
+	if( vector_length( local.d ) > 3000 ){ end 0 }
+	local.ba = vector_toangles local.d
+	local.y1 = local.ba[1]
+	local.y2 = local.sp.angles[1]
+	local.df = waitthread mz_dyaw local.y1 local.y2
+	if( local.df <= 60 ){ end 1 }
+}end 0
+
+
+mz_dyaw local.a local.b:{
+	local.d = local.a - local.b
+	while( local.d > 180 ){ local.d = local.d - 360 }
+	while( local.d < ( 0 - 180 ) ){ local.d = local.d + 360 }
+	if( local.d < 0 ){ local.d = 0 - local.d }
+}end local.d
+
+
+// the spotter turns toward a contact for a moment
+mz_turn local.sp local.pos:{
+	if( ( waitthread mz_ok local.sp ) != 1 ){ end }
+	local.lk = spawn script_origin
+	if( local.lk == NIL || local.lk == NULL ){ end }
+	local.lk.origin = local.pos
+	local.sp turnto local.lk
+	thread mz_kill local.lk 1.5
+}end
+
+
 // the player the spotter picks: outdoors, in the tube's range band, in view for >= 2 s; never the same man twice in a row
 // when another is eligible. NIL = none.
 mz_g_pick local.tube local.spot local.lastP:{
@@ -806,6 +852,7 @@ mz_g_pick local.tube local.spot local.lastP:{
 	local.maxr = waitthread mz_cv "coop_mortarMaxRange" 1900
 	local.n = 0
 	local.spotOk = waitthread mz_ok local.spot
+	local.gar = level.coop_actorArray["german"]
 	if( $player == NULL ){ end NIL }
 	for( local.i = 1; local.i <= $player.size; local.i++ ){
 		local.p = $player[local.i]
@@ -816,9 +863,18 @@ mz_g_pick local.tube local.spot local.lastP:{
 		if( local.sky != 1 ){ local.p.flags["mz_seen"] = NIL; level.coop_mzWhy = "roof"; continue }
 		local.vis = 0
 		if( local.spotOk == 1 ){
-			// the spotter's eye to the player's chest through the solid world (the AI cansee is FOV- and vision-range-limited)
+			// the aim point must be in the spotter's solid-world line of sight, AND the target is known: RULE A the spotter or any German
+			// within 1500u has this player as his enemy (the AI already knows him); RULE B fallback within 3000u and the spotter's forward cone
 			local.lc = sighttrace ( local.spot.origin + ( 0 0 60 ) ) ( local.p.origin + ( 0 0 48 ) ) 1
-			if( local.lc == 1 ){ local.vis = 1 }
+			if( local.lc == 1 ){
+				if( ( waitthread mz_knows local.spot local.gar local.p 1500 ) == 1 ){
+					local.vis = 1
+					local.p.flags["mz_rule"] = "A"
+				} else if( ( waitthread mz_cone local.spot local.p.origin ) == 1 ){
+					local.vis = 1
+					local.p.flags["mz_rule"] = "B"
+				}
+			}
 		}
 		if( local.vis == 1 ){
 			if( local.p.flags["mz_seen"] == NIL ){ local.p.flags["mz_seen"] = level.time }
@@ -840,6 +896,9 @@ mz_g_pick local.tube local.spot local.lastP:{
 			if( local.el[local.i] != local.lastP ){ local.pick = local.el[local.i]; break }
 		}
 	}
+	level.coop_mzRule = local.pick.flags["mz_rule"]
+	waitthread mz_turn local.spot local.pick.origin
+	end local.pick
 }end local.pick
 
 
@@ -895,6 +954,20 @@ mz_a_pick local.tube local.spot:{
 		if( local.spotOk != 1 ){ continue }
 		local.lc = sighttrace ( local.spot.origin + ( 0 0 60 ) ) ( local.a.origin + ( 0 0 48 ) ) 1
 		if( local.lc != 1 ){ continue }
+		// RULE A: the spotter or an allied man within 1500u has this German as his enemy; RULE B: within 3000u and the spotter's cone
+		local.rule = "A"
+		local.kn = 0
+		if( local.spot.enemy == local.a ){ local.kn = 1 }
+		for( local.j = 1; local.j <= 7 && local.kn == 0; local.j++ ){
+			local.m = level.coop_paradrop_squad[local.j]
+			if( ( waitthread mz_ok local.m ) != 1 ){ continue }
+			if( vector_length( local.m.origin - local.spot.origin ) > 1500 ){ continue }
+			if( local.m.enemy == local.a ){ local.kn = 1 }
+		}
+		if( local.kn == 0 ){
+			local.rule = "B"
+			if( ( waitthread mz_cone local.spot local.a.origin ) != 1 ){ continue }
+		}
 		local.nn++
 		if( local.nn > 24 ){ break }
 		// no friend near the aim point
@@ -920,7 +993,7 @@ mz_a_pick local.tube local.spot:{
 			if( ( waitthread mz_ok local.b ) != 1 ){ continue }
 			if( vector_length( local.b.origin - local.a.origin ) < 250 ){ local.sc++ }
 		}
-		if( local.sc > local.bs ){ local.bs = local.sc; local.best = local.a }
+		if( local.sc > local.bs ){ local.bs = local.sc; local.best = local.a; level.coop_mzRuleA = local.rule }
 	}
 }end local.best
 
@@ -1027,6 +1100,7 @@ mz_para_team local.sid local.owner:{
 		if( level.time < local.nextT ){ continue }
 		local.tg = waitthread mz_a_pick local.tube local.s
 		if( local.tg == NIL ){ continue }
+		waitthread mz_turn local.s local.tg.origin
 		local.cap = waitthread mz_cv "coop_paraMortarMaxRpm" 5
 		local.nr = 1
 		if( ( randomint 3 ) == 0 ){ local.nr = 2 }
@@ -1044,7 +1118,7 @@ mz_para_team local.sid local.owner:{
 			waitthread mz_rpm_note "a"
 			local.rounds--
 			level.coop_mzRoundsA = level.coop_mzRoundsA + 1
-			waitthread mz_dbg ( "allied round " + level.coop_mzRoundsA + " at=" + local.aim + " left=" + local.rounds )
+			waitthread mz_dbg ( "allied round " + level.coop_mzRoundsA + " rule=" + level.coop_mzRuleA + " at=" + local.aim + " left=" + local.rounds )
 			thread mz_round "a" local.tube local.aim 1.6 local.dmg 160 260 local.owner
 			wait 3
 		}
