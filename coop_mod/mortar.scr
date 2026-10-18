@@ -477,24 +477,20 @@ mz_site_g local.entry:{
 				if( vector_length( local.pl[local.j].origin - local.g ) < 900 ){ local.near = 1 }
 			}
 			if( local.near == 1 ){ continue }
+			// the tube spot must be out of every player's sight (rule: the crew never appears in view)
 			local.sn = waitthread mz_seen local.g
-			if( local.sn == 1 && local.vis != NIL ){ continue }
+			if( local.sn == 1 ){ continue }
 			if( local.paths >= 6 ){ continue }
 			if( local.sc == NIL ){ local.sc = waitthread mz_scout_new }
 			if( local.sc == NIL ){ break }
 			local.paths++
 			local.walk = waitthread mz_scout local.sc local.g local.pl[1].origin
 			if( local.walk != 1 ){ continue }
-			if( local.sn == 1 ){
-				local.vis = local.g
-			} else {
-				local.res = local.g
-			}
+			local.res = local.g
 		}
 		if( local.res != NIL ){ break }
 	}
 	if( local.sc != NIL && local.sc != NULL ){ local.sc remove }
-	if( local.res == NIL ){ local.res = local.vis }
 	waitthread mz_dbg ( "site_g pick=" + local.res + " paths=" + local.paths + " players=" + local.pn )
 }end local.res
 
@@ -546,17 +542,42 @@ mz_g_wave local.pos local.target:{
 	if( ( randomint 100 ) >= local.ch ){ end 0 }
 	if( local.pos == NIL ){ end 0 }
 	level.coop_mzBusyG = 1
-	local.entry = waitthread coop_mod/reinf.scr::rnf_entry local.pos
-	if( local.entry == NIL ){ level.coop_mzBusyG = 0; waitthread mz_dbg "no hidden entry"; end 0 }
-	local.site = waitthread mz_site_g local.entry
-	if( local.site == NIL ){ level.coop_mzBusyG = 0; waitthread mz_dbg "no site"; end 0 }
+	// THE CREW NEVER SPAWNS IN VIEW: the entry (planned hidden entry, else the wave's authored zone), the three spots the men appear
+	// on and the tube site must all be out of every living player's sight, and 700u+ from them; if not, wait a few seconds and look
+	// again (3 tries, 4s apart) - then no mortar crew this time (the caller fires the barrage).
+	local.entry = NIL
+	local.site = NIL
+	for( local.try = 0; local.try < 3; local.try++ ){
+		if( local.try > 0 ){ wait 4 }
+		local.entry = waitthread coop_mod/reinf.scr::rnf_entry local.pos
+		if( local.entry == NIL ){ local.entry = local.pos }
+		local.bad = 0
+		if( $player != NULL ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				if( ( waitthread mz_pl $player[local.i] ) != 1 ){ continue }
+				if( vector_length( $player[local.i].origin - local.entry ) < 700 ){ local.bad = 1 }
+			}
+		}
+		if( local.bad == 0 && ( waitthread mz_seen local.entry ) == 1 ){ local.bad = 1 }
+		for( local.i = 0; local.i < 3 && local.bad == 0; local.i++ ){
+			local.sp[local.i + 1] = exec coop_mod/officer.scr::coop_spread_pos local.entry local.i
+			if( local.sp[local.i + 1] != NIL ){
+				if( ( waitthread mz_seen local.sp[local.i + 1] ) == 1 ){ local.bad = 1 }
+			}
+		}
+		if( local.bad == 1 ){ waitthread mz_dbg ( "entry in view or too close, try " + local.try ); continue }
+		local.site = waitthread mz_site_g local.entry
+		if( local.site != NIL ){ break }
+		waitthread mz_dbg ( "no hidden site, try " + local.try )
+	}
+	if( local.site == NIL ){ level.coop_mzBusyG = 0; waitthread mz_dbg "no legal entry/site: barrage instead"; end 0 }
 	local.hp = waitthread mz_cv "coop_mortarHp" 140
 	local.hp = waitthread mz_hp local.hp
 	local.hp2 = waitthread mz_hp 120
 	local.i = 0
 	local.cnt = 0
 	while( local.i < 3 ){
-		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.entry local.i
+		local.gnd = local.sp[local.i + 1]
 		if( local.gnd != NIL ){
 			local.h = local.hp2
 			if( local.i == 0 ){ local.h = local.hp }
