@@ -1,0 +1,175 @@
+//=========================================================================
+// carry.scr - a LOST defend zone makes the NEXT mission's reinforcements heavier (2026-10-18, alarmplace-next)
+//
+// Carry-over recipe: server CVARS set on the loss and read + cleared by the next map's init (the same mechanism as coop_campaignNext /
+// coop_prevMapList: cvars outlive a map change, the persistant archive is never involved - no bsptransition / levelchange archive
+// is added by this file).
+//
+//   coop_counterPenalty 1     master switch (0 = never carry, never apply)
+//   coop_carryReinf <0-2>     losses carried to the next map (state)
+//   coop_carryFrom <map>      the map the loss happened on; reloading THAT map (a clean mission restart) clears the state
+//   coop_carryPlace <text>    the zone's place name for the message
+//
+// While it applies (level.coop_carryPen = 1 or 2, this map only):
+//   * every counted wave/squad is pen men bigger, cap +2 per loss (officer.scr::coop_reinf_count, counter + alarm waves)
+//   * the gap between waves is 20 % shorter per loss (officer cooldown, counter wave gap, alarm wave gap)
+//   * the officer's MG-team chance (coop_reinfMgChance) is +25 points per loss
+// Skipped (the state is carried on to the next real mission): stealth / disguise maps, briefings, the lobby. Never applied in MP.
+// CHAPTER RULE: the state only crosses LEVELS of the same mission (same prefix letter + mission number: m1l1 -> m1l2a). Any other next
+// map (m1l3c -> m2l1, e1l3 -> e2l1, AA -> SH -> BT) clears it - also while it is being carried past a stealth map.
+// ALARM ON START (whitelist carry_alarm_ok): on open combat maps with alarm points the next map ALSO starts with the alarm already
+// sounding (alarm.scr::alm_start, shootable as usual) once the squad has control, in addition to the heavier waves.
+//=========================================================================
+
+carry_log local.txt:{
+	if( getcvar( "coop_counterDebug" ) == "1" || getcvar( "coop_alarmDebug" ) == "1" ){ println( "^~^~^ CARRY " + local.txt ) }
+}end
+
+
+// penalty switch: 0 = off
+carry_on:{
+	if( getcvar( "coop_counterPenalty" ) == "0" ){ end 0 }
+}end 1
+
+
+// 0, 1 or 2: the losses applying to THIS map
+carry_pen:{
+	if( level.coop_carryPen == NIL ){ end 0 }
+}end level.coop_carryPen
+
+
+// factor on a wave GAP / cooldown: 1, 0.8 or 0.64
+carry_gap:{
+	if( level.coop_carryPen == 1 ){ end 0.8 }
+	if( level.coop_carryPen == 2 ){ end 0.64 }
+}end 1
+
+
+// called on a LOST zone (coop_counter.scr): one more loss carried to the next map, at most 2
+carry_set local.place:{
+	if( ( waitthread carry_on ) != 1 ){ end }
+	local.n = 0
+	if( getcvar( "coop_carryReinf" ) != "" ){ local.n = int( getcvar( "coop_carryReinf" ) ) }
+	local.n++
+	if( local.n > 2 ){ local.n = 2 }
+	setcvar "coop_carryReinf" ( "" + local.n )
+	setcvar "coop_carryFrom" level.coop_mapname
+	setcvar "coop_carryPlace" local.place
+	waitthread carry_log ( "set " + local.n + " from " + level.coop_mapname + " place=" + local.place )
+}end
+
+
+// "m1" for m1l1 / m1l2a / m1l3c, "e2" for e2l4, "t3" for t3l1; "" for anything else (training, dm/...)
+carry_chapter local.m:{
+	if( local.m == NIL ){ end "" }
+	if( local.m.size < 4 ){ end "" }
+	local.p = local.m[0]
+	if( local.p != "m" && local.p != "e" && local.p != "t" ){ end "" }
+	local.out = local.p
+	for( local.i = 1; local.i < local.m.size; local.i++ ){
+		local.ch = local.m[local.i]
+		if( local.ch == "l" ){ break }
+		local.out = local.out + local.ch
+	}
+}end local.out
+
+
+// maps that also start with the alarm on: open combat maps with alarm points whose siren logically covers the start area, and no
+// scripted intro / vehicle ride the alarm would break (m1l1 truck ride, e3l1 jeep ride, t1l1 paradrop stay heavier-waves only)
+carry_alarm_ok local.m:{
+	if( local.m == "m3l2" || local.m == "m4l1" || local.m == "m4l2" || local.m == "e3l2" || local.m == "t3l1" ){ end 1 }
+}end 0
+
+
+// the garrison is on alert: raise the alarm once the squad has control (never twice, never if one is already live)
+carry_alarm:{
+	local.w = 0
+	while( level.coop_alarmMap != 1 && local.w < 30 ){
+		wait 1
+		local.w++
+	}
+	if( level.coop_alarmMap != 1 ){ waitthread carry_log "alarm-on-start skipped: no alarm points armed"; end }
+	if( getcvar( "coop_alarm" ) != "1" ){ end }
+	if( ( waitthread coop_mod/alarm.scr::alm_blocked ) != "" ){ end }
+	local.w = 0
+	while( ( waitthread coop_mod/coop_counter.scr::counter_players ) < 1 && local.w < 60 ){
+		wait 1
+		local.w++
+	}
+	wait 6
+	if( level.coop_alarmLive == 1 ){ end }
+	local.sw = NIL
+	for( local.i = 1; local.i <= level.coop_alarmSwN; local.i++ ){
+		local.e = level.coop_alarmSw[local.i]
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.coop_almDead == 1 ){ continue }
+		local.sw = local.e
+		break
+	}
+	if( local.sw == NIL ){ end }
+	waitthread coop_mod/alarm.scr::alm_start local.sw
+	waitthread coop_mod/feed.scr::feed_all 0 "carry_alarm" "The garrison is on alert - the alarm is already sounding"
+	waitthread carry_log ( "ALARM ON START on " + level.coop_mapname + " t=" + level.time )
+}end
+
+
+carry_clear:{
+	setcvar "coop_carryReinf" "0"
+	setcvar "coop_carryFrom" ""
+	setcvar "coop_carryPlace" ""
+}end
+
+
+// every map: read + clear the state, arm the penalty for this map, announce it
+carry_init:{
+	if( level.coop_carryInit == 1 ){ end }
+	level.coop_carryInit = 1
+	level.coop_carryPen = 0
+	local.n = 0
+	if( getcvar( "coop_carryReinf" ) != "" ){ local.n = int( getcvar( "coop_carryReinf" ) ) }
+	if( local.n < 1 ){ end }
+	if( level.coop_mpRun == 1 ){ end }
+	if( level.coop_lobbyMap == 1 ){ end }
+	if( waitthread coop_mod/main.scr::containsText level.coop_mapname "briefing" 0 ){ end }
+	if( waitthread coop_mod/main.scr::containsText level.coop_mapname "lobby" 0 ){ end }
+	if( ( waitthread carry_on ) != 1 ){
+		waitthread carry_clear
+		end
+	}
+	// a clean restart of the SAME mission is not progress: clear it
+	if( getcvar( "coop_carryFrom" ) == level.coop_mapname ){
+		waitthread carry_log ( "cleared: same map reloaded (" + level.coop_mapname + ")" )
+		waitthread carry_clear
+		end
+	}
+	// chapter boundary: only levels of the SAME mission inherit it
+	local.cf = waitthread carry_chapter ( getcvar( "coop_carryFrom" ) )
+	local.cc = waitthread carry_chapter level.coop_mapname
+	if( local.cf == "" || local.cf != local.cc ){
+		waitthread carry_log ( "cleared: chapter boundary " + getcvar( "coop_carryFrom" ) + " (" + local.cf + ") -> " + level.coop_mapname + " (" + local.cc + ")" )
+		waitthread carry_clear
+		end
+	}
+	// stealth / disguise maps: the map scripts set their flags a little after main.scr::main - look again, and carry the state on
+	wait 3
+	if( level.coop_stealthMap == 1 || level.coop_enableDisguises ){
+		waitthread carry_log ( "carried past stealth map " + level.coop_mapname )
+		end
+	}
+	local.place = getcvar( "coop_carryPlace" )
+	waitthread carry_clear
+	level.coop_carryPen = local.n
+	waitthread carry_log ( "ACTIVE pen=" + local.n + " on " + level.coop_mapname + " (state cleared)" )
+	// the message, once the squad is in
+	local.w = 0
+	while( ( waitthread coop_mod/coop_counter.scr::counter_players ) < 1 && local.w < 40 ){
+		wait 1
+		local.w++
+	}
+	wait 4
+	local.msg = "The Germans regrouped after you lost " + local.place + " - expect heavier resistance"
+	if( local.n >= 2 ){ local.msg = "The Germans regrouped again after you lost " + local.place + " twice - expect much heavier resistance" }
+	waitthread coop_mod/feed.scr::feed_all 0 "carry" local.msg
+	waitthread carry_log ( "message sent: " + local.msg )
+	if( ( waitthread carry_alarm_ok level.coop_mapname ) == 1 ){ thread carry_alarm }
+}end
