@@ -2496,7 +2496,7 @@ chal_toast_pump local.player:{
 //had to fight the full mix instead of sitting on top of it. Same treatment here: duck before
 //the first stroke, stepped/guarded restore after the return - mirrors xp_ping_unduck exactly.
 //=========================================================================
-chal_typewriter local.player:{
+chal_typewriter local.player local.title:{
 //=========================================================================
 	if( local.player == NULL ){ end }
 	local.player stufftext "s_sfxduck 0.25"
@@ -2519,6 +2519,11 @@ chal_typewriter local.player:{
 		else if( local.k == 5 ){ local.player playlocalsound coop_type_key5 }
 		else { local.player playlocalsound coop_type_key6 }
 		local.n++
+		//[bug-4005] the title is TYPED in step with the strokes: 7 strokes, each one reveals its share of the characters,
+		//the seventh completes it (the banner came back in v1.10.32 after the feed had replaced it)
+		local.cnt = int( ( local.title.size * local.n + 6 ) / 7 )
+		local.shown = waitthread chal_typed local.title local.cnt
+		if( local.player != NULL ){ ihuddraw_string local.player 77 local.shown }
 		//[user 2026-08-04] round 3 - SLOWER. 0.055-0.14s read as a machine-gun; a person typing
 		//a service-record entry is deliberate. 0.13-0.26s, with a 1-in-4 longer pause.
 		local.gap = 0.13 + randomfloat( 0.13 )
@@ -2544,13 +2549,22 @@ chal_typewriter local.player:{
 	local.player stufftext "s_sfxduck 1"
 }end
 
+// the first <n> characters of <s> (no engine substring helper) - the typewriter reveal
+chal_typed local.s local.n:{
+	local.out = ""
+	for( local.i = 0; local.i < local.n && local.i < local.s.size; local.i++ ){
+		local.out = local.out + local.s[local.i]
+	}
+	end local.out
+}end
+
 chal_toast_show local.player local.title:{
 	if( local.player == NULL ){ end }
-	//[user 2026-10-05] HUD declutter: mid-mission a completion is ONE quiet feed line (no toast, no typewriter); the
-	//title is listed on the debrief card. An older cgame keeps the toast below.
+	//[user 2026-10-18, bug-4005] the CHALLENGE COMPLETE banner and its typewriter are BACK, smaller than they ever were
+	//(two lines, no third). The 2026-10-05 declutter had replaced them with one quiet feed line; a feed-capable client
+	//now gets the banner and only the debrief list entry (the feed line would say the same thing twice).
 	if( waitthread coop_mod/feed.scr::feed_capable local.player ){
-		waitthread coop_mod/feed.scr::feed_chalDone local.player local.title
-		end
+		waitthread coop_mod/feed.scr::feed_chalList local.player local.title
 	}
 
 	//[user 07-12] shrunk (was facfont-20 / handle-23 - too big) + honest subtitle: rewards/loadouts
@@ -2559,37 +2573,32 @@ chal_toast_show local.player local.title:{
 	//CHALLENGE COMPLETE + title + subtitle all drop a tier; rects tightened to keep them stacked.
 	//[2026-09-25, bug-2906] claim on show, re-send the hide (coop_mod/hudresend.scr, TRAPS T8). The pump
 	//draws the NEXT queued toast in the same frame as this one's teardown; its claim stops the re-send.
+	//[bug-4005] smaller still: two lines (the "Recorded in your Service Record" line is gone - the debrief lists it) at
+	//the top centre, well away from the bottom-left feed and the subtitles. Slot 78 stays claimed so the re-send
+	//covers the range the pump has always used.
 	waitthread coop_mod/hudresend.scr::claim local.player 76 78
 	ihuddraw_virtualsize local.player 76 1
 	ihuddraw_align       local.player 76 center top
 	ihuddraw_font        local.player 76 "verdana-10"
 	ihuddraw_color       local.player 76 1 0.85 0.3
-	ihuddraw_rect        local.player 76 0 100 0 0
+	ihuddraw_rect        local.player 76 0 78 0 0
 	ihuddraw_string      local.player 76 "CHALLENGE COMPLETE"
 	ihuddraw_alpha       local.player 76 1
 
 	ihuddraw_virtualsize local.player 77 1
 	ihuddraw_align       local.player 77 center top
-	ihuddraw_font        local.player 77 "verdana-12"
+	ihuddraw_font        local.player 77 "verdana-10"
 	ihuddraw_color       local.player 77 1 1 1
-	ihuddraw_rect        local.player 77 0 112 0 0
-	ihuddraw_string      local.player 77 local.title
+	ihuddraw_rect        local.player 77 0 90 0 0
+	ihuddraw_string      local.player 77 ""
 	ihuddraw_alpha       local.player 77 1
-
-	ihuddraw_virtualsize local.player 78 1
-	ihuddraw_align       local.player 78 center top
-	ihuddraw_font        local.player 78 "verdana-10"
-	ihuddraw_color       local.player 78 0.8 0.85 0.95
-	ihuddraw_rect        local.player 78 0 126 0 0
-	ihuddraw_string      local.player 78 "Recorded in your Service Record"
-	ihuddraw_alpha       local.player 78 1
 
 	//[user 08-02] Completing a challenge used the same generic coop_ui_click as menu paging and the
 	//Service Record panel, so the moment had no payoff of its own. Give it a distinct cue: a short
 	//typewriter burst that lands on "Recorded in your Service Record" above. Threaded so the ~0.7s
 	//sequence does not eat into the 4s toast hold below. coop_ui_click stays on the menu paths, so
 	//the completion sound remains unique to completion.
-	thread chal_typewriter local.player
+	thread chal_typewriter local.player local.title
 
 	wait 4
 
@@ -2598,17 +2607,14 @@ chal_toast_show local.player local.title:{
 		local.f = local.a * 0.1
 		ihuddraw_alpha local.player 76 local.f
 		ihuddraw_alpha local.player 77 local.f
-		ihuddraw_alpha local.player 78 local.f
 		local.a--
 		wait 0.05
 	}
 	if( local.player != NULL ){
 		ihuddraw_alpha  local.player 76 0
 		ihuddraw_alpha  local.player 77 0
-		ihuddraw_alpha  local.player 78 0
 		ihuddraw_string local.player 76 ""
 		ihuddraw_string local.player 77 ""
-		ihuddraw_string local.player 78 ""
 		thread coop_mod/hudresend.scr::resend local.player 76 78 1
 	}
 }end
