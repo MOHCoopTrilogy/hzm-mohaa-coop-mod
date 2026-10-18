@@ -711,6 +711,7 @@ mz_g_brain local.g local.l local.s local.site:{
 	local.rounds = 18
 	local.missions = 0
 	local.blindN = 0
+	local.owT = 0
 	local.lastP = NIL
 	local.rng = 0
 	local.lastAim = NIL
@@ -742,6 +743,15 @@ mz_g_brain local.g local.l local.s local.site:{
 		if( local.pick == NIL ){
 			local.blindN++
 			if( ( local.blindN - ( int( local.blindN / 5 ) * 5 ) ) == 1 ){ waitthread mz_dbg ( "wait: no target (" + level.coop_mzWhy + ")" ) }
+			// blind for 8s+: the spotter walks to an overwatch point with a line to the nearest player (once per 12s)
+			if( local.blindN >= 8 && level.time > local.owT && ( waitthread mz_ok local.s ) == 1 ){
+				local.owT = level.time + 12
+				local.ow = waitthread mz_overwatch local.tube local.s
+				if( local.ow != NIL ){
+					waitthread mz_dbg ( "spotter to overwatch " + local.ow )
+					thread mz_walk local.s local.ow 25 60
+				}
+			}
 			continue
 		}
 		// MISSION: rounds by player count, a hard cap on rounds a minute
@@ -793,6 +803,7 @@ mz_g_brain local.g local.l local.s local.site:{
 		local.missions++
 		local.nextT = level.time + 20 + ( randomint 11 )
 		if( local.fired == 0 ){ local.nextT = level.time + 5 }
+		local.blindN = 0
 	}
 	// spent or dead: whoever lives is an ordinary section; the tube stays as cover
 	waitthread mz_g_release local.g local.l local.s
@@ -843,6 +854,52 @@ mz_turn local.sp local.pos:{
 	local.sp turnto local.lk
 	thread mz_kill local.lk 1.5
 }end
+
+
+// walk a man to a point (reinf_mg.scr::rmg_goto), post him there, and let him fight again
+mz_walk local.a local.pos local.secs local.rad:{
+	if( ( waitthread mz_ok local.a ) != 1 ){ end }
+	waitthread coop_mod/reinf_mg.scr::rmg_goto local.a local.pos local.secs local.rad 4
+	if( ( waitthread mz_ok local.a ) != 1 ){ end }
+	waitthread mz_post local.a local.pos 300
+	local.a.enableEnemy = 1
+}end
+
+
+// OVERWATCH: the tube sits out of the players' sight, so the spotter 170u from it is blind in broken country. When no target has been
+// found for a while he walks to a point within 150-450u of the tube from which his eye has a clear line to the nearest player (inside
+// the tube's range band). He is then a man in the open that the players can shoot - killing him stops the fire (remembered-point
+// fire is not used). Returns the point or NIL.
+mz_overwatch local.tube local.spot:{
+	if( $player == NULL ){ end NIL }
+	local.np = NIL
+	local.nd = 999999
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( ( waitthread mz_pl local.p ) != 1 ){ continue }
+		local.d = vector_length( local.p.origin - local.tube.origin )
+		if( local.d < local.nd ){ local.nd = local.d; local.np = local.p }
+	}
+	if( local.np == NIL ){ end NIL }
+	local.bear = vector_toangles( local.np.origin - local.tube.origin )
+	local.by = local.bear[1]
+	local.res = NIL
+	for( local.ri = 1; local.ri <= 3; local.ri++ ){
+		for( local.oi = 0; local.oi < 12; local.oi++ ){
+			if( local.res != NIL ){ break }
+			local.ang = ( 0 0 0 )
+			local.ang[1] = local.by + ( local.oi * 30 )
+			local.c = local.tube.origin + ( vector_scale ( angles_toforward local.ang ) ( 100 + ( local.ri * 120 ) ) )
+			local.g = exec coop_mod/officer.scr::coop_find_ground ( local.c + ( 0 0 96 ) )
+			if( local.g == NIL ){ continue }
+			local.dd = vector_length( local.np.origin - local.g )
+			if( local.dd < 600 || local.dd > 1800 ){ continue }
+			local.lc = sighttrace ( local.g + ( 0 0 60 ) ) ( local.np.origin + ( 0 0 48 ) ) 1
+			if( local.lc == 1 ){ local.res = local.g }
+		}
+		if( local.res != NIL ){ break }
+	}
+}end local.res
 
 
 // the player the spotter picks: outdoors, in the tube's range band, in view for >= 2 s; never the same man twice in a row
