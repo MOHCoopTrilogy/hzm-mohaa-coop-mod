@@ -862,6 +862,7 @@ loadout_ui_exportUnlocks local.player:{
 	if(local.n == NIL){ end }
 	local.i = 0
 	local.w = 0
+	local.chg = 0	//[armory B] anything pushed -> ask the client to refill its card grid at the end
 	while(local.i < local.n){
 		//raw locked-ness only - the tab-AND is applied client-side by the lktab cfgs.
 		local.lk = 0
@@ -890,7 +891,17 @@ loadout_ui_exportUnlocks local.player:{
 			} else {
 				local.player stufftext ( "seta coop_loCmt" + local.id + " exec ui/loadout/lkw" + local.id + ".cfg" )
 			}
-			local.w++	//count the 2nd stufftext so the reliable-command flush (below) stays under the ring
+			//[armory B 2026-10-18] the SORT command the client's card chain walks: ui/loadout/sru<id>.cfg places the gun among the unlocked
+			//ones, srl<id>.cfg among the locked ones (gen_armory.py). Archived like the commands above; the fail-locked default is
+			//ui/loadout/armory_defaults.cfg.
+			if(local.lk == 0){
+				local.player stufftext ( "seta coop_loSrt" + local.id + " exec ui/loadout/sru" + local.id + ".cfg" )
+			} else {
+				local.player stufftext ( "seta coop_loSrt" + local.id + " exec ui/loadout/srl" + local.id + ".cfg" )
+			}
+			local.chg = 1
+			local.w++
+			local.w++	//count the 2nd and 3rd stufftext so the reliable-command flush (below) stays under the ring
 			if(local.w >= 8){
 				local.w = 0
 				waitframe
@@ -913,6 +924,7 @@ loadout_ui_exportUnlocks local.player:{
 		local.sid = local.player.flags["coop_loSlotId" + local.sl]
 		if(local.sid != NIL){
 			local.player stufftext ( "seta coop_loInspectS" + local.sl + " exec ui/loadout/p" + local.sid + ".cfg" )
+			local.player stufftext ( "seta coop_loPubS" + local.sl + " exec ui/loadout/pubgun" + local.sid + ".cfg" )	//[armory B] the slot's gun = the EQUIPPED side of the compare
 		}
 		local.sl++
 	}
@@ -947,7 +959,81 @@ loadout_ui_exportUnlocks local.player:{
 		local.f++
 	}
 	waitthread loadout_slotLocksExport local.player
+	//[armory B 2026-10-18] unlock progress for the locked cards, then one refill ping when anything changed (sort order or progress)
+	local.pc = ( waitthread loadout_ui_exportProgress local.player )
+	if(local.player == NULL){ end }
+	if(local.pc == 1){ local.chg = 1 }
+	if(local.chg){ local.player stufftext ( "vstr coop_loRefill" ) }
 
+}end
+
+//=========================================================================
+// [armory B 2026-10-18] UNLOCK PROGRESS for the Armory's locked cards and hero panel. The client cannot count (a cfg cannot divide), so
+// the server pushes, per locked gun, how close the player is to the unlock the hover text names (docs/tools/gen_armory.py writes
+// coop_mod/unlockprog_gen.scr: rank R = the XP threshold, or the first rewarding challenge + its target):
+//   coop_loPgA<id> = "vstr coop_loPgX<lv>"            lights step <lv> (0..10) of that card's progress bar (the card join, pgpub<c>.cfg)
+//   coop_loPgH<id> = "exec ui/loadout/hpg<lv>.cfg"    the hero panel's bar
+//   coop_loPgT<id> = "set coop_loReqPg <cur> / <need>[ XP]"   the hero panel's text
+// Same rules as the lock export above: archived `seta` (a cold menu keeps the last values), unquoted on the wire (bug-758), DIFF-ONLY
+// (flags coop_loPgLast<id>), paced to stay under the reliable-command ring. Returns 1 when anything was pushed (the caller then asks the
+// client to refill its card grid so the bars repaint).
+//=========================================================================
+loadout_ui_exportProgress local.player:{
+	if(local.player == NULL){ end 0 }
+	if(local.player.flags["coop_xp_total"] == NIL){ end 0 }
+	waitthread coop_mod/unlockprog_gen.scr::main
+	waitthread coop_mod/loadoutroster.scr::roster_ids
+	local.n = level.coop_loRosterN
+	if(local.n == NIL){ end 0 }
+	local.gen = local.player.flags["coop_loLkGen"]
+	local.chg = 0
+	local.w = 0
+	local.i = 0
+	while(local.i < local.n){
+		local.tik = level.coop_loRosterGive[local.i]
+		local.kind = level.coop_unlockProgKind[local.tik]
+		if(local.kind != NIL){
+			local.id = level.coop_loRosterId[local.i]
+			local.cur = 0
+			local.need = 1
+			local.unit = ""
+			local.key = level.coop_unlockProgKey[local.tik]
+			if(local.kind == "R"){
+				local.cur = local.player.flags["coop_xp_total"]
+				local.need = level.coop_xp_rankXP[local.key]
+				local.unit = " XP"
+			} else {
+				local.cur = local.player.flags["coop_chalP_" + local.key]
+				local.need = level.coop_unlockProgNeed[local.tik]
+			}
+			if(local.cur == NIL){ local.cur = 0 }
+			if(local.need == NIL){ local.need = 1 }
+			if(local.need < 1){ local.need = 1 }
+			if(local.cur > local.need){ local.cur = local.need }
+			local.cur = int( local.cur )
+			local.lv = int( ( local.cur * 10 ) / local.need )
+			local.txt = "" + local.cur + " / " + local.need + local.unit
+			local.sig = "" + local.lv + "|" + local.txt
+			if(local.player.flags["coop_loPgLast" + local.id] != local.sig){
+				local.player.flags["coop_loPgLast" + local.id] = local.sig
+				local.player stufftext ( "seta coop_loPgA" + local.id + " vstr coop_loPgX" + local.lv )
+				local.player stufftext ( "seta coop_loPgH" + local.id + " exec ui/loadout/hpg" + local.lv + ".cfg" )
+				local.player stufftext ( "seta coop_loPgT" + local.id + " set coop_loReqPg " + local.txt )
+				local.chg = 1
+				local.w++
+				local.w++
+				local.w++
+				if(local.w >= 9){
+					local.w = 0
+					waitframe
+					if(local.player == NULL){ end 0 }
+					if(local.player.flags["coop_loLkGen"] != local.gen){ end local.chg }	//a newer export took over
+				}
+			}
+		}
+		local.i++
+	}
+	end local.chg
 }end
 
 loadout_isUnlocked local.player local.tik:{
@@ -1425,7 +1511,21 @@ loadout_slotLocksExport local.player:{
 			}
 		}
 		if(local.player == NULL){ end }
-		local.key = local.sid + "|" + local.mast + "|" + local.mvlk + "|" + local.txt
+		//[armory B 2026-10-18] which finishes are open for this slot's gun (finish unlocked AND the gun mastered): the client sorts its chips
+		//unlocked first from coop_loFsrt<slot>_<fid> (ui/loadout/fsu<fid>.cfg | fsl<fid>.cfg, gen_armory.py)
+		local.fk = ""
+		local.f = 1
+		while(local.f <= 7){
+			local.flk = 0
+			if(getcvar("coop_lockLoadout") != "0"){
+				if(local.mast == 0){ local.flk = 1 }
+				else if(!(waitthread loadout_finUnlocked local.player local.f)){ local.flk = 1 }
+			}
+			local.fk = local.fk + local.flk
+			local.f++
+		}
+		if(local.player == NULL){ end }
+		local.key = local.sid + "|" + local.mast + "|" + local.mvlk + "|" + local.txt + "|" + local.fk
 		if(local.player.flags["coop_loSlkLast" + local.sl] != local.key){
 			local.player.flags["coop_loSlkLast" + local.sl] = local.key
 			local.any = 1
@@ -1441,7 +1541,21 @@ loadout_slotLocksExport local.player:{
 				local.player stufftext ( "seta coop_loMvLk" + local.sl + " set coop_loMvLkOk 1" )
 			}
 			if(local.sid != "" && local.tab != ""){
-				local.player stufftext ( "seta coop_loEqR" + local.tab + "_" + local.sl + " set coop_loEqV" + local.sid + " 1" )
+				local.player stufftext ( "seta coop_loEqR" + local.tab + "_" + local.sl + " vstr coop_loEqOn" + local.sid )	//[armory B] the marker is a card flag now
+			}
+			local.f = 1
+			while(local.f <= 7){
+				local.fi = local.f - 1
+				if(local.fk[local.fi] == "1"){
+					local.player stufftext ( "seta coop_loFsrt" + local.sl + "_" + local.f + " exec ui/loadout/fsl" + local.f + ".cfg" )
+				} else {
+					local.player stufftext ( "seta coop_loFsrt" + local.sl + "_" + local.f + " exec ui/loadout/fsu" + local.f + ".cfg" )
+				}
+				local.f++
+				if(local.f == 5){
+					waitframe
+					if(local.player == NULL){ end }
+				}
 			}
 			waitframe
 		}
