@@ -39,7 +39,11 @@ asn_cvar local.name local.def:{
 
 
 // ---- the hard floor rule. "" when the spot is good, else the reason. Sets level.coop_asnFloor to the floor height.
-asn_floor local.p:{
+asn_floor local.p local.plat:{
+	if( local.plat == 1 ){
+		local.r = waitthread asn_floor_deck local.p
+		end local.r
+	}
 	if( level.coop_asnWorldNum == NIL ){
 		local.w = $world
 		if( local.w == NULL ){ end "no world" }
@@ -89,6 +93,75 @@ asn_floor local.p:{
 	if( local.head < 72 ){ end ( "headroom " + int( local.head ) ) }
 	level.coop_asnFloor = local.fz
 }end ""
+
+
+// ---- a ROOF DECK spot: local.p is the TOP of the deck. The roof under it (base = top - 24) must be a world surface (the deck is not there yet), not sky,
+// within 0..17 u of the base (the generator put the deck's bottom on the lowest corner of a flush roof patch), and the deck top needs 72 u of headroom.
+asn_floor_deck local.p:{
+	if( level.coop_asnWorldNum == NIL ){
+		local.w = $world
+		if( local.w == NULL ){ end "no world" }
+		level.coop_asnWorldNum = local.w.entnum
+	}
+	local.b = local.p
+	local.b[2] = local.p[2] - 24
+	local.tr = traced ( local.b + ( 0 0 40 ) ) ( local.b - ( 0 0 40 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 ){ end "roof: start solid" }
+	if( local.tr["fraction"] >= 1.0 ){ end "roof: none under the deck" }
+	if( local.tr["entityNum"] != level.coop_asnWorldNum ){ end "roof is an entity" }
+	local.h = local.tr["endpos"]
+	local.dz = local.h[2] - local.b[2]
+	local.lo = 0 - 2
+	if( local.dz < local.lo || local.dz > 17 ){ end ( "roof " + local.dz + "u off the deck base" ) }
+	local.sf = local.tr["surfaceFlags"]
+	if( local.sf != NIL ){
+		local.q = int( local.sf / 4 )
+		if( local.q - int( local.q / 2 ) * 2 == 1 ){ end "roof is sky" }
+	}
+	local.hb = local.p
+	local.hb[2] = local.p[2] + 0.25
+	local.hb2 = local.hb
+	local.hb2[2] = local.hb[2] + 0.5
+	local.bb = traced local.hb local.hb2 1023 ( -15 -15 0 ) ( 15 15 72 ) 1
+	if( local.bb["startSolid"] == 1 || local.bb["allSolid"] == 1 ){ end "no headroom over the deck" }
+	level.coop_asnFloor = local.p[2]
+}end ""
+
+
+// spawn the deck: two stock nazi_crate props side by side (64 x 64 x 24), SOLID with an explicit hull (build-mode recipe: solid + setsize; the stock tik ships no
+// collision), the long axis facing the route. Left standing for the rest of the map (consistent rule: a deck is never removed).
+asn_platform local.i:{
+	if( level.coop_asnPfDone[local.i] == 1 ){ end }
+	level.coop_asnPfDone[local.i] = 1
+	local.top = level.coop_asnSpot[local.i]
+	local.yaw = level.coop_asnYaw[local.i]
+	local.base = local.top
+	local.base[2] = local.top[2] - 24
+	for( local.k = 0; local.k < 2; local.k++ ){
+		local.off = 16
+		if( local.k == 1 ){ local.off = 0 - 16 }
+		local.pos = local.base
+		local.mn = ( -16 -32 0 )
+		local.mx = ( 16 32 24 )
+		if( local.yaw == 90 || local.yaw == 270 ){
+			local.pos[1] = local.base[1] + local.off
+			local.mn = ( -32 -16 0 )
+			local.mx = ( 32 16 24 )
+		} else {
+			local.pos[0] = local.base[0] + local.off
+		}
+		local.c = spawn script_model
+		local.c model "models/static/nazi_crate.tik"
+		local.c.origin = local.pos
+		local.c.angles = ( 0 local.yaw 0 )
+		local.c solid
+		local.c setsize local.mn local.mx
+		level.coop_asnPfN++
+		level.coop_asnPf[level.coop_asnPfN] = local.c
+	}
+	waitthread asn_log ( "deck spot " + local.i + " base " + local.base + " yaw " + local.yaw )
+}end
+
 
 
 // ---- living players: fills local.pl[1..n] and returns n
@@ -193,7 +266,8 @@ asn_pick:{
 		if( local.nd > local.dmax ){ local.rj_far++; continue }
 		if( local.los == 0 ){ local.rj_los++; continue }
 		if( local.seen == 1 ){ local.rj_seen++; continue }
-		local.why = waitthread asn_floor local.pos
+		local.why = ""
+		if( level.coop_asnPfDone[local.i] != 1 ){ local.why = waitthread asn_floor local.pos level.coop_asnPlat[local.i] }
 		if( local.why != "" ){
 			level.coop_asnBad[local.i] = 1
 			local.rj_floor++
@@ -233,13 +307,19 @@ asn_cue local.s:{
 // stand a sniper on spot i (floor already proven by asn_pick; asn_floor is re-run here anyway, the rule is hard)
 asn_spawn local.i:{
 	local.pos = level.coop_asnSpot[local.i]
-	local.why = waitthread asn_floor local.pos
+	local.why = ""
+	if( level.coop_asnPfDone[local.i] != 1 ){ local.why = waitthread asn_floor local.pos level.coop_asnPlat[local.i] }
 	if( local.why != "" ){
 		level.coop_asnBad[local.i] = 1
 		waitthread asn_log ( "skip spot " + local.i + " " + local.pos + " at spawn: " + local.why )
 		end NIL
 	}
 	local.fz = level.coop_asnFloor
+	if( level.coop_asnPlat[local.i] == 1 ){
+		waitthread asn_platform local.i
+		local.fz = local.pos[2]
+		wait 0.1
+	}
 	local.org = local.pos
 	local.org[2] = local.fz
 	local.mdl = exec coop_mod/officer.scr::coop_model_for "sniper"
@@ -336,6 +416,7 @@ asn_want:{
 asn_load:{
 	if( level.coop_asnLoaded == 1 ){ end level.coop_asnN }
 	level.coop_asnLoaded = 1
+	level.coop_asnPfN = 0
 	level.coop_asnN = waitthread coop_mod/alarmsnipers_spots.scr::spots level.coop_mapname
 	level.coop_asnN2 = 0
 }end level.coop_asnN
