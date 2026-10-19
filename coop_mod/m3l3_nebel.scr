@@ -46,6 +46,86 @@ nb_nebpos local.k:{
 
 
 // ---------------------------------------------------------------------------------------------------------------------
+// SOLID-FLOOR AUDIT (the alarm-sniper rule, alarmsnipers.scr::asn_floor): "" when the spot stands on a world-brush floor within 4 u (not a
+// tree / prop entity, not sky), the four corners +-12 u find the same floor within 3 u, the AI box is not start-solid and there is
+// 72 u of headroom. Anything else is a floater (a man "standing in a tree") and is moved.
+// ---------------------------------------------------------------------------------------------------------------------
+nb_floor local.p:{
+	if( level.coop_nbWorldNum == NIL ){
+		local.w = $world
+		if( local.w == NULL ){ end "no world" }
+		level.coop_nbWorldNum = local.w.entnum
+	}
+	local.tr = traced ( local.p + ( 0 0 16 ) ) ( local.p - ( 0 0 16 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 ){ end "start solid" }
+	if( local.tr["fraction"] >= 1.0 ){ end "air" }
+	if( local.tr["entityNum"] != level.coop_nbWorldNum ){ end "floor is an entity" }
+	local.h = local.tr["endpos"]
+	local.dz = local.h[2] - local.p[2]
+	if( local.dz < 0 ){ local.dz = 0 - local.dz }
+	if( local.dz > 4 ){ end "drop or air over 4 u" }
+	local.sf = local.tr["surfaceFlags"]
+	if( local.sf != NIL ){
+		local.q = int( local.sf / 4 )
+		if( local.q - int( local.q / 2 ) * 2 == 1 ){ end "sky" }
+	}
+	local.fz = local.h[2]
+	for( local.k = 0; local.k < 4; local.k++ ){
+		local.ox = 12
+		local.oy = 12
+		if( local.k == 1 || local.k == 3 ){ local.ox = 0 - 12 }
+		if( local.k == 2 || local.k == 3 ){ local.oy = 0 - 12 }
+		local.cp = local.p + ( local.ox local.oy 0 )
+		local.ct2 = traced ( local.cp + ( 0 0 16 ) ) ( local.cp - ( 0 0 16 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.ct2["fraction"] >= 1.0 || local.ct2["startSolid"] == 1 ){ end "corner unsupported" }
+		local.ch = local.ct2["endpos"]
+		local.cd = local.ch[2] - local.fz
+		if( local.cd < 0 ){ local.cd = 0 - local.cd }
+		if( local.cd > 3 ){ end "corner unsupported" }
+	}
+	local.bp = local.p
+	local.bp[2] = local.fz + 0.25
+	local.bb = traced local.bp ( local.bp + ( 0 0 0.5 ) ) 1023 ( -15 -15 0 ) ( 15 15 72 ) 1
+	if( local.bb["startSolid"] == 1 || local.bb["allSolid"] == 1 ){ end "bbox start solid" }
+	local.hr = traced ( local.bp + ( 0 0 0.75 ) ) ( local.bp + ( 0 0 128 ) ) 1023 ( -15 -15 0 ) ( 15 15 1 ) 1
+	if( ( local.hr["fraction"] * 127.25 ) < 72 ){ end "headroom" }
+	level.coop_nbFloorZ = local.fz
+}end ""
+
+
+// a floor-audited spot near local.c (step 60 within local.rad): the nearest that passes; NIL when none
+nb_good_spot local.c local.rad:{
+	local.best = NIL
+	local.bd = 999999
+	local.per = 0
+	for( local.ox = 0 - local.rad; local.ox <= local.rad; local.ox = local.ox + 60 ){
+		for( local.oy = 0 - local.rad; local.oy <= local.rad; local.oy = local.oy + 60 ){
+			local.dv = ( local.ox local.oy 0 )
+			local.d = vector_length local.dv
+			if( local.d > local.rad ){ continue }
+			local.per++
+			if( local.per >= 6 ){
+				local.per = 0
+				waitframe
+			}
+			local.zt = local.c[2] + 120
+			local.zb = local.c[2] - 200
+			local.cx = local.c[0] + local.ox
+			local.cy = local.c[1] + local.oy
+			local.g = traced ( local.cx local.cy local.zt ) ( local.cx local.cy local.zb ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.g["startSolid"] == 1 || local.g["fraction"] >= 1.0 ){ continue }
+			local.gp = local.g["endpos"]
+			if( ( waitthread nb_floor local.gp ) != "" ){ continue }
+			if( local.d < local.bd ){
+				local.bd = local.d
+				local.best = local.gp
+			}
+		}
+	}
+}end local.best
+
+
+// ---------------------------------------------------------------------------------------------------------------------
 // the hook
 // ---------------------------------------------------------------------------------------------------------------------
 nb_hold_done:{
@@ -178,12 +258,69 @@ nb_defenders:{
 	if( local.pc >= 3 ){ local.ns = 1 }
 	if( local.pc >= 5 ){ local.ns = 2 }
 	for( local.i = 1; local.i <= local.ns; local.i++ ){
-		local.np = waitthread nb_nebpos ( local.i + 1 )
-		if( local.np != NIL ){
-			thread coop_mod/officer.scr::coop_spawn_sniper local.np
-			waitthread nb_log ( "sniper " + local.i + " sent to Nebelwerfer " + ( local.i + 1 ) )
+		thread nb_sniper local.i ( local.i + 1 )
+	}
+}end
+
+
+// a sniper that stands on an AUDITED world floor 300-700 u from Nebelwerfer local.k (the highest such spot with a line to the approach);
+// never a tree / prop top; no audited spot = no sniper (logged)
+nb_sniper local.i local.k:{
+	local.np = waitthread nb_nebpos local.k
+	if( local.np == NIL ){ end }
+	local.best = NIL
+	local.bs = 0 - 99999
+	local.per = 0
+	local.ch = ( 1551 -2370 -255 )
+	local.ap = local.ch + ( ( local.np - local.ch ) * 0.4 )
+	for( local.a = 0; local.a < 360; local.a = local.a + 30 ){
+		for( local.r = 300; local.r <= 700; local.r = local.r + 200 ){
+			local.dv = angles_toforward ( 0 local.a 0 )
+			local.cx = local.np[0] + ( local.dv[0] * local.r )
+			local.cy = local.np[1] + ( local.dv[1] * local.r )
+			local.zt = local.np[2] + 200
+			local.zb = local.np[2] - 250
+			local.g = traced ( local.cx local.cy local.zt ) ( local.cx local.cy local.zb ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.g["startSolid"] == 1 || local.g["fraction"] >= 1.0 ){ continue }
+			local.gp = local.g["endpos"]
+			if( ( waitthread nb_floor local.gp ) != "" ){ continue }
+			local.t = traced ( local.gp + ( 0 0 56 ) ) ( local.ap + ( 0 0 56 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			local.sc = local.gp[2]
+			if( local.t["fraction"] >= 1.0 ){ local.sc = local.sc + 500 }
+			local.per++
+			if( local.per >= 3 ){
+				local.per = 0
+				waitframe
+			}
+			if( local.sc > local.bs ){
+				local.bs = local.sc
+				local.best = local.gp
+			}
 		}
 	}
+	if( local.best == NIL ){
+		waitthread nb_log ( "sniper " + local.i + ": no audited floor spot near Nebelwerfer " + local.k + " - none placed" )
+		end
+	}
+	local.w = 0
+	while( ( waitthread nb_seen ( local.best + ( 0 0 50 ) ) ) == 1 && local.w < 30 ){
+		wait 1
+		local.w++
+	}
+	local.m = exec coop_mod/officer.scr::coop_model_for "sniper"
+	local.s = spawn local.m
+	if( local.s == NULL || local.s == NIL ){ end }
+	local.s.coop_xpClass = "reinf"
+	local.s.flags["coop_waveSrc"] = "nebel"
+	local.s.origin = local.best + ( 0 0 2 )
+	local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mauser kar 98d sniper"
+	local.s.accuracy = 80
+	local.s.health = 90
+	local.s.leash = 500
+	local.s.enableEnemy = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.s
+	local.s type_attack cover
+	waitthread nb_log ( "sniper " + local.i + " placed at " + local.best + " world-brush floor within 4 u, near Nebelwerfer " + local.k )
 }end
 
 
@@ -195,9 +332,22 @@ nb_defend_one local.k local.np local.n:{
 		local.w++
 	}
 	local.made = 0
+	local.moved = 0
+	local.moved_fail = 0
 	for( local.i = 0; local.i < local.n; local.i++ ){
 		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.np local.i
 		if( local.gnd == NIL ){ continue }
+		// floor audit: a scatter point over a tree / prop / air moves to the nearest audited floor within 260 u, else the man is not placed
+		local.fl = waitthread nb_floor local.gnd
+		if( local.fl != "" ){
+			local.gnd2 = waitthread nb_good_spot local.gnd 260
+			if( local.gnd2 == NIL ){
+				local.moved_fail++
+				continue
+			}
+			local.gnd = local.gnd2
+			local.moved++
+		}
 		local.m = exec coop_mod/officer.scr::coop_model_for "infantry"
 		local.s = spawn local.m
 		if( local.s == NULL || local.s == NIL ){ continue }
@@ -225,7 +375,7 @@ nb_defend_one local.k local.np local.n:{
 		local.made++
 		waitframe
 	}
-	waitthread nb_log ( "defenders at Nebelwerfer " + local.k + ": " + local.made + " of " + local.n + " (waited " + local.w + " s for them to be out of sight)" )
+	waitthread nb_log ( "defenders at Nebelwerfer " + local.k + ": " + local.made + " of " + local.n + " (waited " + local.w + " s, floor audit moved " + local.moved + " dropped " + local.moved_fail + ")" )
 }end
 
 
