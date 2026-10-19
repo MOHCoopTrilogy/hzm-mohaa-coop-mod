@@ -44,35 +44,29 @@ recruitable local.actor:{
 			//[2026-09-25, bug-2906] every hide below is re-sent and every show claims first: a
 			//one-shot hide lost to a REMOTE client strands the prompt (coop_mod/hudresend.scr, TRAPS T8)
 			if( local.shownTo != NULL ){
-				ihuddraw_alpha local.shownTo 152 0
-				thread coop_mod/hudresend.scr::resend local.shownTo 152 152 0
+				waitthread coop_mod/actprompt.scr::hide local.shownTo "convert"
 			}
-			waitthread coop_mod/hudresend.scr::claim local.p 152 152
-			ihuddraw_virtualsize local.p 152 1
-			ihuddraw_align       local.p 152 center center
-			ihuddraw_font        local.p 152 "verdana-12"
-			ihuddraw_color       local.p 152 1 1 1
-			ihuddraw_rect        local.p 152 0 -58 0 0
-			ihuddraw_string      local.p 152 "Hold [USE] to convert enemy"
-			ihuddraw_alpha       local.p 152 1
+			waitthread coop_mod/actprompt.scr::show local.p "convert" "recruit:hold"
 			local.shownTo = local.p
 		}
 		if( local.inRange != 1 && local.shownTo != NULL ){
-			ihuddraw_alpha local.shownTo 152 0
-			thread coop_mod/hudresend.scr::resend local.shownTo 152 152 0
+			waitthread coop_mod/actprompt.scr::hide local.shownTo "convert"
 			local.shownTo = NULL
 		}
 		local.near = 0
 		if( local.inRange == 1 && local.p.useheld == 1 ){ local.near = 1 }
 		if( local.near == 1 ){
 			local.held = local.held + 1
+			if( local.held == 1 ){ waitthread coop_mod/actprompt.scr::hold local.shownTo 900 }
 		} else {
-			if( local.held > 0 ){ local.held = local.held - 1 }
+			if( local.held > 0 ){
+				local.held = local.held - 1
+				if( local.held == 0 ){ waitthread coop_mod/actprompt.scr::holdend local.shownTo }
+			}
 		}
 		if( local.held >= 6 ){
 			if( local.shownTo != NULL ){
-				ihuddraw_alpha local.shownTo 152 0
-				thread coop_mod/hudresend.scr::resend local.shownTo 152 152 0
+				waitthread coop_mod/actprompt.scr::hide local.shownTo "convert"
 			}
 			waitthread convert local.actor local.p
 			end
@@ -81,8 +75,7 @@ recruitable local.actor:{
 	}
 	//teardown: actor died or converted elsewhere while the prompt was up
 	if( local.shownTo != NULL ){
-		ihuddraw_alpha local.shownTo 152 0
-		thread coop_mod/hudresend.scr::resend local.shownTo 152 152 0
+		waitthread coop_mod/actprompt.scr::hide local.shownTo "convert"
 	}
 }end
 
@@ -92,6 +85,13 @@ convert local.actor local.player:{
 	if( local.actor == NULL || !(isAlive local.actor) ){ end }
 	if( local.actor.coop_converted == 1 ){ end }
 	local.actor.coop_converted = 1
+	//[user 2026-10-18, surrender-next] A CONVERT IS ALIVE AND ON YOUR SIDE: lift every surrender marker.
+	//flags[coop_surrendered] used to stay 1 for life, and aimaneuver/aisquad/reinf/aihandler all refuse to
+	//touch (or to RESTORE enableEnemy on) a surrendered man - so whenever any other thread switched his
+	//acquisition off he never got it back and stood there doing nothing. The readers that wanted him
+	//counted as out of the fight (m3l1b gate) also test coop_converted, so clearing is safe.
+	local.actor.flags["coop_surrendered"] = 0
+	local.actor threatbias 0
 
 	//release the scripted surrender pose - proven poser SAFE EXIT (officer.scr)
 	local.actor anim "idle"
@@ -151,6 +151,14 @@ convert local.actor local.player:{
 		local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "models/weapons/mp40.tik"
 		local.actor unholster
 	}
+	//[user 2026-10-18, surrender-next] NO USABLE GUN = NO FIGHT. A recruit whose weapongroup is still "unarmed"
+	//(binoculars, empty hand, a re-give that did not take) gets the engine armed-attack think with nothing to fire, which
+	//logs "unknown animation unarmed_shoot" and leaves him standing. Give him a Kar98k (his own stored gun failed).
+	if( local.actor.weapongroup == "unarmed" || local.actor.weapongroup == NIL || local.actor.weapongroup == "" ){
+		local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "models/weapons/kar98.tik"
+		local.actor unholster
+		println( "^~^~^ CONVERT_KICK ent=" + local.actor.entnum + " why=unarmed-at-convert" )
+	}
 	//[user 2026-08-20] he stood around doing nothing after conversion. The bounce at the top of
 	//this label runs BEFORE the team swap and the gun re-give, so he re-entered his think with
 	//no weapon and on the wrong side, and officer.scr's surrender loop had left him in a
@@ -168,6 +176,8 @@ convert local.actor local.player:{
 	if( level.coop_convertedAlive == NIL ){ level.coop_convertedAlive = 0 }
 	level.coop_convertedAlive = level.coop_convertedAlive + 1
 	thread convertedWatch local.actor
+	thread convertedKick local.actor
+	println( "^~^~^ CONVERT_DONE ent=" + local.actor.entnum + " team=" + local.actor.team + " weapon=" + local.actor.weapon )
 
 	thread coop_mod/aibehav.scr::behav_bump "convert"
 	if( local.player != NULL ){ waitthread coop_mod/feed.scr::feed_player local.player 2 "recruit" "Recruited - he fights for you now" }
@@ -188,3 +198,92 @@ convertedWatch local.actor:{
 	level.coop_convertedAlive = level.coop_convertedAlive - 1
 	if( level.coop_convertedAlive < 0 ){ level.coop_convertedAlive = 0 }
 }end
+
+//=========================================================================
+// convertedKick <actor> - [user 2026-10-18, surrender-next] WATCHDOG for "converted soldiers sometimes just
+// stand there". If a recruit has not moved and has no enemy for coop_surrenderIdleSecs while a fight is on
+// near him (a living german with an enemy within 1500u), re-kick his AI the proven way: drop any scripted
+// anim, re-give a gun if his hand is empty, bounce enableEnemy, forceactivate. Every kick logs its reason.
+//=========================================================================
+convertedKick local.actor:{
+	local.lim = waitthread srvCvar "coop_surrenderIdleSecs" 5
+	if( local.lim <= 0 ){ local.lim = 5 }
+	local.lastOrg = local.actor.origin
+	local.idle = 0
+	local.maxent = int(getcvar "maxentities")
+	if( local.maxent <= 0 ){ local.maxent = 1024 }
+	while( local.actor != NULL && isAlive local.actor ){
+		wait 1
+		if( local.actor == NULL || !isAlive local.actor ){ end }
+		local.moved = vector_length( local.actor.origin - local.lastOrg )
+		local.lastOrg = local.actor.origin
+		local.hasEnemy = 0
+		if( local.actor.enemy != NULL && local.actor.enemy != NIL ){ local.hasEnemy = 1 }
+		//an unarmed recruit is re-armed at once, whatever the idle clock says
+		if( local.actor.weapongroup == "unarmed" ){
+			local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "models/weapons/kar98.tik"
+			local.actor unholster
+			println( "^~^~^ CONVERT_KICK ent=" + local.actor.entnum + " why=unarmed-watchdog" )
+		}
+		if( local.moved < 24 && local.hasEnemy == 0 ){ local.idle++ } else { local.idle = 0 }
+		if( local.idle >= local.lim ){
+			local.fight = 0
+			local.ei = 0
+			while( local.ei < local.maxent && local.fight == 0 ){
+				local.e = getentbyentnum local.ei
+				if( local.e != NULL && local.e != local.actor ){
+					if( local.e.classname == "Actor" && isAlive local.e && local.e.team == "german" ){
+						if( local.e.enemy != NULL && local.e.enemy != NIL ){
+							if( vector_length( local.e.origin - local.actor.origin ) < 1500 ){ local.fight = 1 }
+						}
+					}
+				}
+				local.ei++
+			}
+			if( local.fight == 1 ){
+				local.why = ( "idle" + local.idle + "s" )
+				if( local.actor.weapon == NIL || local.actor.weapon == "" ){
+					local.why = ( local.why + "+nogun" )
+					local.actor waitthread coop_mod/aihandler.scr::coop_actorArm "models/weapons/mp40.tik"
+				}
+				if( local.actor.team != "american" ){
+					local.why = ( local.why + "+team=" + local.actor.team )
+					local.actor american
+				}
+				local.actor.flags["coop_surrendered"] = 0
+				local.actor threatbias 0
+				local.actor unholster
+				local.actor anim "idle"
+				local.actor.position = "stand"
+				//no fight of his own and the squad is far: walk to the nearest player first (a recruit follows his side)
+				local.fp = waitthread coop_mod/replace.scr::player_closestTo local.actor
+				if( local.actor == NULL || !isAlive local.actor ){ end }
+				if( local.fp != NULL && local.fp != NIL ){
+					if( vector_length( local.fp.origin - local.actor.origin ) > 350 ){
+						local.why = ( local.why + "+follow" )
+						local.actor.enableEnemy = 0
+						local.actor.movedoneradius = 128
+						local.actor runto local.fp.origin
+						wait 4
+						if( local.actor == NULL || !isAlive local.actor ){ end }
+					}
+				}
+				local.actor.enableEnemy = 0
+				local.actor.enableEnemy = 1
+				local.actor forceactivate
+				println( "^~^~^ CONVERT_KICK ent=" + local.actor.entnum + " why=" + local.why )
+				local.idle = 0
+			}
+		}
+	}
+}end
+
+//=========================================================================
+// srvCvar <name> <default> - integer cvar with a default for an UNSET cvar (a stale autoexec/cfg that predates the
+// cvar reads "" which int() makes 0 - for a cap that would silently switch the feature off).
+//=========================================================================
+srvCvar local.name local.def:{
+	local.r = local.def
+	local.v = getcvar( local.name )
+	if( local.v != "" ){ local.r = int( local.v ) }
+}end local.r

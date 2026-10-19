@@ -1,0 +1,461 @@
+//=========================================================================
+// alarmsnipers.scr - ALARM SNIPERS (2026-10-18, docs/proposals/alarm_snipers_2026-10-18)
+//
+// When an alarm goes live (alarm.scr::alm_start threads asn_alarm) random enemy snipers take position on validated HIGH
+// spots (roofs, upper floors, balconies, ledges) found offline by docs/tools/gen_sniper_spots.py (BSP trace) and listed in
+// alarmsnipers_spots.scr. The alarm module owns every gate (stealth / disguise / own-alarm / Omaha / mp / lobby / maptest),
+// so this file only runs where alarm.scr runs.
+//
+//   coop_alarmSnipers 1        master switch (the alarm itself is coop_alarm)
+//   coop_alarmSnipersBase 2    snipers with one player
+//   coop_alarmSnipersPer 1     more per extra player
+//   coop_alarmSnipersMax 5     most alive at once (a second pull only tops up to the want)
+//   coop_alarmSnipersAcc 55    base accuracy before the usual coop_reinf_scale player-count scaling
+//   coop_alarmSnipersMin 600   nearest a spot may be to a player (u)
+//   coop_alarmSnipersSim 0     TEST ONLY: pretend this many players (0 = the real count)
+//   coop_alarmSnipersRange 2300 farthest a spot may be from the nearest player (u)
+//
+// Recipes copied, not invented: the sniper man = officer.scr::coop_spawn_sniper (model, "mauser kar 98d sniper", accuracy,
+// coop_reinf_scale); the world-floor trace = parasquad.scr::mgSurf (traced + $world.entnum); the sky test = aircraft.scr;
+// the arrival rule = reinf.scr::rnf_entry (never in view of a player: a spot is used only when no living player with a
+// line to it is looking toward it); the arrival voice = the coop_av_de_backup* German shouts (coop_aivoice.scr).
+// A smoke puff is NOT used on arrival: smoke blocks Actor::CanSee both ways, it would blind the sniper too.
+//
+// SOLID GROUND, hard rule (re-run for every spot at spawn time; a failing spot is skipped and logged):
+//   world-brush floor within 2u of the spot on a trace from spot+16 down, not sky / water, flat (the four corners +-12u
+//   find the same floor within 3u), the AI bbox (-15 -15 0)..(15 15 72) not start-solid, >= 72u of headroom.
+//=========================================================================
+
+asn_log local.txt:{
+	if( getcvar( "coop_alarmDebug" ) == "1" ){ println( "^~^~^ ASNIPER " + local.txt ) }
+}end
+
+
+asn_cvar local.name local.def:{
+	local.v = getcvar local.name
+	if( local.v == "" ){ end local.def }
+	local.n = int( local.v )
+}end local.n
+
+
+// ---- the hard floor rule. "" when the spot is good, else the reason. Sets level.coop_asnFloor to the floor height.
+asn_floor local.p local.plat:{
+	if( local.plat == 1 ){
+		local.r = waitthread asn_floor_deck local.p
+		end local.r
+	}
+	if( level.coop_asnWorldNum == NIL ){
+		local.w = $world
+		if( local.w == NULL ){ end "no world" }
+		level.coop_asnWorldNum = local.w.entnum
+	}
+	local.tr = traced ( local.p + ( 0 0 16 ) ) ( local.p - ( 0 0 16 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 ){ end "start solid" }
+	if( local.tr["fraction"] >= 1.0 ){ end "no floor" }
+	if( local.tr["entityNum"] != level.coop_asnWorldNum ){ end "floor is an entity" }
+	local.h = local.tr["endpos"]
+	local.dz = local.h[2] - local.p[2]
+	local.adz = local.dz
+	if( local.dz < 0 ){ local.adz = 0 - local.dz }
+	if( local.adz > 2 ){ end ( "floor " + local.dz + "u off" ) }
+	local.sf = local.tr["surfaceFlags"]
+	if( local.sf != NIL ){
+		local.q = int( local.sf / 4 )
+		if( local.q - int( local.q / 2 ) * 2 == 1 ){ end "sky" }
+	}
+	local.ct = local.tr["contents"]
+	if( local.ct != NIL ){
+		local.w2 = int( local.ct / 32 )
+		if( local.w2 - int( local.w2 / 2 ) * 2 == 1 ){ end "water" }
+	}
+	local.fz = local.h[2]
+	// (an actor-movement-mask floor test was tried here and is WRONG: roofs carry monsterclip volumes, the trace starts inside them and reports no floor;
+	//  the 0.7 s settle check in asn_spawn is the real actor test - engine-scan roofs on m2l1 / m3l2 let a sniper fall 189 u)
+	for( local.k = 0; local.k < 4; local.k++ ){
+		local.ox = 12
+		local.oy = 12
+		if( local.k == 1 || local.k == 3 ){ local.ox = 0 - 12 }
+		if( local.k == 2 || local.k == 3 ){ local.oy = 0 - 12 }
+		local.cp = local.p + ( local.ox local.oy 0 )
+		local.ct2 = traced ( local.cp + ( 0 0 16 ) ) ( local.cp - ( 0 0 16 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.ct2["fraction"] >= 1.0 || local.ct2["startSolid"] == 1 ){ end ( "corner " + local.k + " has no floor" ) }
+		local.ch = local.ct2["endpos"]
+		local.cd = local.ch[2] - local.fz
+		if( local.cd < 0 ){ local.cd = 0 - local.cd }
+		if( local.cd > 3 ){ end ( "corner " + local.k + " unsupported" ) }
+	}
+	local.bp = local.p
+	local.bp[2] = local.fz + 0.25
+	local.bb = traced local.bp ( local.bp + ( 0 0 0.5 ) ) 1023 ( -15 -15 0 ) ( 15 15 72 ) 1
+	if( local.bb["startSolid"] == 1 || local.bb["allSolid"] == 1 ){ end "bbox start solid" }
+	local.hr = traced ( local.bp + ( 0 0 0.75 ) ) ( local.bp + ( 0 0 128 ) ) 1023 ( -15 -15 0 ) ( 15 15 1 ) 1
+	local.head = local.hr["fraction"] * 127.25
+	if( local.head < 72 ){ end ( "headroom " + int( local.head ) ) }
+	level.coop_asnFloor = local.fz
+}end ""
+
+
+// ---- a ROOF DECK spot: local.p is the TOP of the deck. The roof under it (base = top - 24) must be a world surface (the deck is not there yet), not sky,
+// within 0..17 u of the base (the generator put the deck's bottom on the lowest corner of a flush roof patch), and the deck top needs 72 u of headroom.
+asn_floor_deck local.p:{
+	if( level.coop_asnWorldNum == NIL ){
+		local.w = $world
+		if( local.w == NULL ){ end "no world" }
+		level.coop_asnWorldNum = local.w.entnum
+	}
+	local.b = local.p
+	local.b[2] = local.p[2] - 24
+	local.tr = traced ( local.b + ( 0 0 40 ) ) ( local.b - ( 0 0 40 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.tr["startSolid"] == 1 || local.tr["allSolid"] == 1 ){ end "roof: start solid" }
+	if( local.tr["fraction"] >= 1.0 ){ end "roof: none under the deck" }
+	if( local.tr["entityNum"] != level.coop_asnWorldNum ){ end "roof is an entity" }
+	local.h = local.tr["endpos"]
+	local.dz = local.h[2] - local.b[2]
+	local.lo = 0 - 2
+	if( local.dz < local.lo || local.dz > 17 ){ end ( "roof " + local.dz + "u off the deck base" ) }
+	local.sf = local.tr["surfaceFlags"]
+	if( local.sf != NIL ){
+		local.q = int( local.sf / 4 )
+		if( local.q - int( local.q / 2 ) * 2 == 1 ){ end "roof is sky" }
+	}
+	local.hb = local.p
+	local.hb[2] = local.p[2] + 0.25
+	local.hb2 = local.hb
+	local.hb2[2] = local.hb[2] + 0.5
+	local.bb = traced local.hb local.hb2 1023 ( -15 -15 0 ) ( 15 15 72 ) 1
+	if( local.bb["startSolid"] == 1 || local.bb["allSolid"] == 1 ){ end "no headroom over the deck" }
+	level.coop_asnFloor = local.p[2]
+}end ""
+
+
+// spawn the deck: two stock nazi_crate props side by side (64 x 64 x 24), SOLID with an explicit hull (build-mode recipe: solid + setsize; the stock tik ships no
+// collision), the long axis facing the route. Left standing for the rest of the map (consistent rule: a deck is never removed).
+asn_platform local.i:{
+	if( level.coop_asnPfDone[local.i] == 1 ){ end }
+	level.coop_asnPfDone[local.i] = 1
+	local.top = level.coop_asnSpot[local.i]
+	local.yaw = level.coop_asnYaw[local.i]
+	local.base = local.top
+	local.base[2] = local.top[2] - 24
+	for( local.k = 0; local.k < 2; local.k++ ){
+		local.off = 16
+		if( local.k == 1 ){ local.off = 0 - 16 }
+		local.pos = local.base
+		local.mn = ( -16 -32 0 )
+		local.mx = ( 16 32 24 )
+		if( local.yaw == 90 || local.yaw == 270 ){
+			local.pos[1] = local.base[1] + local.off
+			local.mn = ( -32 -16 0 )
+			local.mx = ( 32 16 24 )
+		} else {
+			local.pos[0] = local.base[0] + local.off
+		}
+		local.c = spawn script_model
+		local.c model "models/static/nazi_crate.tik"
+		local.c.origin = local.pos
+		local.c.angles = ( 0 local.yaw 0 )
+		local.c solid
+		local.c setsize local.mn local.mx
+		level.coop_asnPfN++
+		level.coop_asnPf[level.coop_asnPfN] = local.c
+	}
+	waitthread asn_log ( "deck spot " + local.i + " base " + local.base + " yaw " + local.yaw )
+}end
+
+
+
+// ---- living players: fills local.pl[1..n] and returns n
+asn_players:{
+	local.n = 0
+	if( $player == NULL ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( !isAlive local.p ){ continue }
+		if( local.p.flags["coop_isActive"] != 1 ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		local.n++
+		level.coop_asnPl[local.n] = local.p
+	}
+}end local.n
+
+
+// snipers alive now (compacts the list)
+asn_alive:{
+	local.n = 0
+	if( level.coop_asnN2 == NIL ){ level.coop_asnN2 = 0 }
+	for( local.i = 1; local.i <= level.coop_asnN2; local.i++ ){
+		local.a = level.coop_asnAct[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.n++
+	}
+}end local.n
+
+
+// is spot i held by a living sniper, or does a living sniper stand within 350u of it
+asn_taken local.i:{
+	local.pos = level.coop_asnSpot[local.i]
+	for( local.j = 1; local.j <= level.coop_asnN2; local.j++ ){
+		local.a = level.coop_asnAct[local.j]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !isAlive local.a ){ continue }
+		if( vector_length( local.a.origin - local.pos ) < 350 ){ end 1 }
+	}
+}end 0
+
+
+// does a living sniper already use this cluster (building) / side
+asn_used local.key local.val:{
+	for( local.j = 1; local.j <= level.coop_asnN2; local.j++ ){
+		local.a = level.coop_asnAct[local.j]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !isAlive local.a ){ continue }
+		if( local.a.flags[local.key] == local.val ){ end 1 }
+	}
+}end 0
+
+
+// best free spot for the next sniper, or 0. Rules: not held, floor rule passes, 600..2300u from the nearest player,
+// a line from some player's eye to the sniper's head (so the players can shoot back), and NO player with a line to it is
+// looking toward it (it must not pop in in view). Prefers a building and a side no live sniper uses.
+asn_pick:{
+	local.pn = waitthread asn_players
+	if( local.pn < 1 ){ end 0 }
+	local.dmin = waitthread asn_cvar "coop_alarmSnipersMin" 600
+	local.dmax = waitthread asn_cvar "coop_alarmSnipersRange" 2300
+	local.best = 0
+	local.bs = 0 - 1
+	local.cnt = 0
+	local.minnd = 999999
+	local.rj_far = 0
+	local.rj_near = 0
+	local.rj_los = 0
+	local.rj_seen = 0
+	local.rj_floor = 0
+	for( local.i = 1; local.i <= level.coop_asnN; local.i++ ){
+		if( level.coop_asnBad[local.i] == 1 ){ continue }
+		if( ( waitthread asn_taken local.i ) == 1 ){ continue }
+		local.pos = level.coop_asnSpot[local.i]
+		local.head = local.pos + ( 0 0 60 )
+		local.nd = 999999
+		local.los = 0
+		local.seen = 0
+		for( local.j = 1; local.j <= local.pn; local.j++ ){
+			local.p = level.coop_asnPl[local.j]
+			local.d = vector_length( local.p.origin - local.pos )
+			if( local.d < local.nd ){ local.nd = local.d }
+			if( local.d > 3000 ){ continue }
+			local.eye = local.p.origin + ( 0 0 56 )
+			local.ltr = traced local.eye local.head 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.ltr["fraction"] < 1.0 ){ continue }
+			if( local.d < local.dmax ){ local.los = 1 }
+			local.dir = local.head - local.eye
+			local.dir[2] = 0
+			if( ( vector_length local.dir ) < 1 ){ continue }
+			local.dir = vector_normalize local.dir
+			local.fwd = angles_toforward local.p.viewangles
+			local.fwd[2] = 0
+			if( ( vector_length local.fwd ) < 0.05 ){ continue }
+			local.fwd = vector_normalize local.fwd
+			local.dt = waitthread coop_mod/reinf.scr::rnf_dot2 local.dir local.fwd
+			if( local.dt > 0.3 ){ local.seen = 1 }
+		}
+		if( local.nd < local.minnd ){ local.minnd = local.nd }
+		if( local.nd < local.dmin ){ local.rj_near++; continue }
+		if( local.nd > local.dmax ){ local.rj_far++; continue }
+		if( local.los == 0 ){ local.rj_los++; continue }
+		if( local.seen == 1 ){ local.rj_seen++; continue }
+		local.why = ""
+		if( level.coop_asnPfDone[local.i] != 1 ){ local.why = waitthread asn_floor local.pos level.coop_asnPlat[local.i] }
+		if( local.why != "" ){
+			level.coop_asnBad[local.i] = 1
+			local.rj_floor++
+			waitthread asn_log ( "skip spot " + local.i + " " + local.pos + ": floor rule failed (" + local.why + ")" )
+			continue
+		}
+		local.cnt++
+		local.sc = randomint 40
+		if( ( waitthread asn_used "coop_asnCl" level.coop_asnCl[local.i] ) == 0 ){ local.sc = local.sc + 60 }
+		if( ( waitthread asn_used "coop_asnSide" level.coop_asnSide[local.i] ) == 0 ){ local.sc = local.sc + 30 }
+		if( local.sc > local.bs ){
+			local.bs = local.sc
+			local.best = local.i
+		}
+	}
+	local.p1 = level.coop_asnPl[1]
+	local.po = local.p1.origin
+	level.coop_asnRj = "pn=" + local.pn + " p1=" + local.po + " dmin=" + local.dmin + " dmax=" + local.dmax + " nearest=" + int( local.minnd ) + " free=" + local.cnt + " near=" + local.rj_near + " far=" + local.rj_far + " nolos=" + local.rj_los + " seen=" + local.rj_seen + " floor=" + local.rj_floor
+}end local.best
+
+
+// the arrival cue: a short scope glint and a German shout, so a player who is not looking is still warned
+asn_cue local.s:{
+	local.sh = 1 + ( randomint 6 )
+	local.al = "coop_av_de_backup" + local.sh
+	local.s playsound local.al
+	for( local.k = 0; local.k < 3; local.k++ ){
+		if( local.s == NULL || local.s == NIL || !isAlive local.s ){ break }
+		local.s light 1 1 0.8 110
+		wait 0.12
+		local.s light 0 0 0 0
+		wait 0.25
+	}
+}end
+
+
+// stand a sniper on spot i (floor already proven by asn_pick; asn_floor is re-run here anyway, the rule is hard)
+asn_spawn local.i:{
+	local.pos = level.coop_asnSpot[local.i]
+	local.why = ""
+	if( level.coop_asnPfDone[local.i] != 1 ){ local.why = waitthread asn_floor local.pos level.coop_asnPlat[local.i] }
+	if( local.why != "" ){
+		level.coop_asnBad[local.i] = 1
+		waitthread asn_log ( "skip spot " + local.i + " " + local.pos + " at spawn: " + local.why )
+		end NIL
+	}
+	local.fz = level.coop_asnFloor
+	if( level.coop_asnPlat[local.i] == 1 ){
+		waitthread asn_platform local.i
+		local.fz = local.pos[2]
+		wait 0.1
+	}
+	local.org = local.pos
+	local.org[2] = local.fz
+	local.mdl = exec coop_mod/officer.scr::coop_model_for "sniper"
+	local.s = spawn local.mdl
+	if( local.s == NULL || local.s == NIL ){ end NIL }
+	local.s.coop_xpClass = "reinf"
+	local.s.flags["coop_waveSrc"] = "alarmsniper"
+	local.s.flags["coop_asnSpotI"] = local.i
+	local.s.flags["coop_asnCl"] = level.coop_asnCl[local.i]
+	local.s.flags["coop_asnSide"] = level.coop_asnSide[local.i]
+	local.s.flags["coop_sceneActor"] = 1
+	local.s.flags["coop_personality_set"] = 1
+	local.s.flags["coop_reinfSquad"] = 1
+	local.s.origin = local.org
+	local.s.health = 100
+	local.acc = waitthread asn_cvar "coop_alarmSnipersAcc" 55
+	local.s.accuracy = local.acc
+	local.s.flags["coop_actorStopPainHandler"] = 1
+	local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mauser kar 98d sniper"
+	local.s.mindist = 0
+	local.s.maxdist = 3500
+	local.s.leash = 24
+	local.s.noticescale = 100
+	local.s.nosurprise = 1
+	local.s.movedoneradius = 48
+	local.s.enableEnemy = 1
+	exec coop_mod/officer.scr::coop_reinf_scale local.s
+	local.s forceactivate
+	local.s exec coop_mod/replace.scr::attackplayer
+	local.s rendereffects "+coopboss"
+	local.s german
+	// settle check: he must still be on his floor after 0.7 s (no fall, no lift); otherwise remove him, drop the spot, let the caller pick another
+	wait 0.7
+	if( local.s == NULL || local.s == NIL ){ end NIL }
+	local.so = local.s.origin
+	local.sdz = local.so[2] - local.fz
+	if( local.sdz < 0 ){ local.sdz = 0 - local.sdz }
+	if( local.sdz > 4 ){
+		level.coop_asnBad[local.i] = 1
+		waitthread asn_log ( "skip spot " + local.i + " " + local.pos + ": sniper did not settle (" + int( local.sdz ) + "u off after 0.7 s), removed" )
+		local.s remove
+		end NIL
+	}
+	if( level.coop_asnN2 == NIL ){ level.coop_asnN2 = 0 }
+	level.coop_asnN2++
+	level.coop_asnAct[level.coop_asnN2] = local.s
+	thread asn_cue local.s
+	thread asn_hold local.s local.org
+}end local.s
+
+
+// a sniper stays where he was put: log any drift, and put him back (the leash and a standing floor do the work,
+// this only reports and corrects, it never walks him)
+asn_hold local.s local.org:{
+	local.n = 0
+	while( local.s != NULL && local.s != NIL && isAlive local.s ){
+		wait 2
+		if( local.s == NULL || local.s == NIL || !isAlive local.s ){ break }
+		local.so = local.s.origin
+		local.dz = local.so[2] - local.org[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz > 6 ){
+			waitthread asn_log ( "sniper moved " + int( local.dz ) + "u off his floor (a mover took him): removed, spot dropped" )
+			level.coop_asnBad[local.s.flags["coop_asnSpotI"]] = 1
+			local.s remove
+			break
+		}
+		local.d = vector_length( local.s.origin - local.org )
+		if( local.d > 40 ){
+			local.n++
+			waitthread asn_log ( "sniper drifted " + int( local.d ) + "u from " + local.org + " now " + local.s.origin )
+			if( local.n <= 3 ){ local.s.origin = local.org }
+		}
+	}
+}end
+
+
+// how many snipers for this player count
+asn_want:{
+	local.pc = waitthread asn_players
+	local.base = waitthread asn_cvar "coop_alarmSnipersBase" 2
+	local.per = waitthread asn_cvar "coop_alarmSnipersPer" 1
+	local.max = waitthread asn_cvar "coop_alarmSnipersMax" 5
+	local.sim = waitthread asn_cvar "coop_alarmSnipersSim" 0
+	if( local.sim > 0 ){ local.pc = local.sim }
+	if( local.pc < 1 ){ local.pc = 1 }
+	local.n = local.base + ( local.per * ( local.pc - 1 ) )
+	if( local.n > local.max ){ local.n = local.max }
+	if( local.n < 0 ){ local.n = 0 }
+}end local.n
+
+
+// load this map's spots once; returns the count
+asn_load:{
+	if( level.coop_asnLoaded == 1 ){ end level.coop_asnN }
+	level.coop_asnLoaded = 1
+	level.coop_asnPfN = 0
+	level.coop_asnN = waitthread coop_mod/alarmsnipers_spots.scr::spots level.coop_mapname
+	level.coop_asnN2 = 0
+}end level.coop_asnN
+
+
+// thread from alarm.scr::alm_start. One run per pull; tops the live snipers up to the wanted number.
+asn_alarm local.pull:{
+	if( getcvar( "coop_alarmSnipers" ) == "0" ){ end }
+	local.n = waitthread asn_load
+	if( local.n < 1 ){
+		waitthread asn_log ( "no validated spots on " + level.coop_mapname )
+		end
+	}
+	local.want = waitthread asn_want
+	local.have = waitthread asn_alive
+	waitthread asn_log ( "pull " + local.pull + " players=" + ( waitthread asn_players ) + " want=" + local.want + " alive=" + local.have + " spots=" + local.n )
+	wait 4
+	local.made = 0
+	local.tries = 0
+	while( local.tries < 15 ){
+		if( level.coop_alarmPulls != local.pull ){ break }
+		local.need = local.want - ( waitthread asn_alive )
+		if( local.need <= 0 ){ break }
+		if( ( waitthread asn_players ) < 1 ){ break }
+		local.i = waitthread asn_pick
+		if( local.i == 0 ){
+			local.tries++
+			waitthread asn_log ( "no spot yet (try " + local.tries + "): " + level.coop_asnRj )
+			wait 2
+			continue
+		}
+		local.s = waitthread asn_spawn local.i
+		if( local.s != NIL && local.s != NULL ){
+			local.made++
+			waitthread asn_log ( "SNIPER " + local.made + " spot=" + local.i + " at=" + local.s.origin + " floorz=" + level.coop_asnFloor + " cluster=" + level.coop_asnCl[local.i] + " side=" + level.coop_asnSide[local.i] + " alive=" + ( waitthread asn_alive ) )
+			waitthread coop_mod/feed.scr::feed_all 0 "alarm_sniper" "ALARM - a sniper has taken a high position"
+			local.gap = 2 + ( randomint 3 )
+			wait local.gap
+		}
+	}
+	waitthread asn_log ( "pull " + local.pull + " done made=" + local.made + " alive=" + ( waitthread asn_alive ) + " tries=" + local.tries )
+}end

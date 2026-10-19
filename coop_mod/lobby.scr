@@ -158,6 +158,7 @@ lobbyMapMain:{
 	thread lobbyRoster
 	thread lobbyUnlockList
 	thread lobbyReadyWatch
+	thread lobbyBriefDraw
 
 	// staging music. Precedence: the coop_lobbyMusic cvar (live override) wins; else a per-lobby track the
 	// lobby declared in its own .scr as level.coop_lobbyMusicTrack (e.g. every Operation Overlord lobby sets
@@ -627,7 +628,32 @@ lobbyAllReady:{
 lobbyReadyWatch:{
 //=========================================================================
 	level.coop_lobbyLaunching = 0
+	//[user 2026-10-18] ready-up TIMEOUT for lobbies that sit between ordinary levels (coop_lobbyAlways): after
+	//coop_lobbyTimeout seconds (default 300, 0 = never) with at least one player connected the lobby launches
+	//anyway, so a server cannot stall forever. Applies in campaign mode too (public servers must not stall).
+	local.tmo = getcvar "coop_lobbyTimeout"
+	if( local.tmo == "" ){ local.tmo = "300" }
+	local.tmoSecs = int( local.tmo )
+	local.tStart = level.time
 	while( level.coop_lobbyActive == 1 && level.coop_lobbyLaunching == 0 ){
+		//[user 2026-10-18] EMPTY lobby between ordinary levels (dedicated server whose squad left during the hop):
+		//never stall - launch the stashed map after 15 s with nobody connected. Applies in campaign mode too.
+		if( local.tmoSecs > 0 ){
+			if( $player.size > 0 ){ local.emptySince = 0 }
+			else if( local.emptySince == 0 || local.emptySince == NIL ){ local.emptySince = level.time }
+			else if( ( level.time - local.emptySince ) > 15 ){
+				println( "^~^~^ COOP_LOBBY_EMPTY_SKIP" )
+				level.coop_lobbyLaunching = 1
+				waitthread lobbyLaunch
+				end
+			}
+		}
+		if( local.tmoSecs > 0 && $player.size > 0 && ( level.time - local.tStart ) > local.tmoSecs ){
+			println( "^~^~^ COOP_LOBBY_TIMEOUT" )
+			level.coop_lobbyLaunching = 1
+			waitthread lobbyLaunch
+			end
+		}
 		local.ready = waitthread lobbyAllReady
 		if( local.ready == 1 ){
 			local.secs = getcvar "coop_lobbyCountdown"
@@ -739,6 +765,7 @@ lobbyLaunch:{
 		waitthread coop_mod/challenges.scr::chal_pend_clear local.pl
 	}
 	waitthread lobbyCountdownClear
+	waitthread lobbyBriefClear
 	level.coop_lobbyActive = 0		// stops the roster/help/input loops; lobbyRoster wipes slots 100-114 on exit
 	wait 0.25
 
@@ -767,6 +794,13 @@ lobbyLaunch:{
 		local.next = local.camp
 		setcvar "coop_campaignNext" ""
 	}
+	//[user 2026-10-18] lobby between levels: a map that OPENS a chapter has a briefing (the slide system in
+	//maps/briefing/*, ready-gated by readygate.scr), shown after the lobby ready-up exactly as campaign mode does
+	//for briefing1. Every other level has none and goes straight on. Campaign mode already routes its own briefings.
+	if( getcvar( "coop_campaign" ) != "1" ){
+		local.brief = waitthread lobbyBriefingFor local.next
+		if( local.brief != "" ){ local.next = local.brief }
+	}
 	if( local.next == NIL || local.next == "" ){ local.next = "briefing/briefing1" }
 	// HZM coop [user 08-02]: RESTORE the cvars the lobby stashed on entry. Both stash vars
 	// (level.coop_lobbyPrevInactiveSpec at lobby.scr:21, level.coop_lobbyPrevForceRespawn at
@@ -794,6 +828,89 @@ lobbyLaunch:{
 	println( "^~^~^ COOP_CAMPAIGN_LAUNCH " + local.next )
 	stuffsrv ( "map " + local.next )
 }end
+
+//=========================================================================
+// LOBBY BRIEFING PANEL [user 2026-10-19]. TOP-RIGHT, its own reserved column (nothing else draws there): the NEXT level's own vanilla
+// objective list (coop_mod/lobbybrief.scr, generated from the map scripts by docs/tools/gen_lobby_briefs.py).
+// Levels without objective text show nothing; a launch that goes to a chapter briefing map shows nothing (the real
+// briefing follows). Slots 116-125 (header + up to 9 lines) sit above the fade band like the roster (100-115).
+// Redrawn every 2 s for every viewer so late joiners get it. Same font and hi-res scale as the help lines, so it
+// stays legible at 720p, 1080p and 4:3.
+//=========================================================================
+lobbyBriefDraw:{
+//=========================================================================
+	while( level.coop_lobbyActive == 1 ){
+		local.t = getcvar( "coop_campaignNext" )
+		if( local.t == "" || local.t == NIL ){ local.t = level.coop_lobbyNextMap }
+		if( local.t != NIL && local.t != "" ){
+			local.isBrief = waitthread coop_mod/main.scr::containsText local.t "briefing" 0
+			if( local.isBrief != 1 ){
+				waitthread coop_mod/lobbybrief.scr::briefLines local.t
+			} else {
+				level.coop_briefN = 0
+			}
+		} else {
+			level.coop_briefN = 0
+		}
+		local.n = level.coop_briefN
+		if( local.n == NIL ){ local.n = 0 }
+		if( local.n > 8 ){ local.n = 8 }
+		for( local.v = 1; local.v <= $player.size; local.v++ ){
+			local.viewer = $player[local.v]
+			if( local.viewer == NULL ){ continue }
+			for( local.i = 0; local.i <= 8; local.i++ ){
+				local.slot = 128 + local.i
+				if( local.n < 1 || local.i > local.n ){
+					ihuddraw_alpha local.viewer local.slot 0
+					continue
+				}
+				ihuddraw_virtualsize local.viewer local.slot 0
+				ihuddraw_align local.viewer local.slot right top
+				ihuddraw_rect local.viewer local.slot -240 ( 12 + ( local.i * 22 ) ) 0 0
+				ihuddraw_font local.viewer local.slot "facfont-20"
+				if( local.i == 0 ){
+					ihuddraw_string local.viewer local.slot "NEXT MISSION - OBJECTIVES"
+					ihuddraw_color local.viewer local.slot 1 0.85 0.4
+				} else {
+					ihuddraw_string local.viewer local.slot level.coop_briefT[local.i]
+					ihuddraw_color local.viewer local.slot 0.92 0.92 0.92
+				}
+				ihuddraw_alpha local.viewer local.slot 1
+			}
+		}
+		wait 2
+	}
+}end
+
+lobbyBriefClear:{
+	for( local.v = 1; local.v <= $player.size; local.v++ ){
+		if( $player[local.v] == NULL ){ continue }
+		for( local.i = 0; local.i <= 8; local.i++ ){
+			ihuddraw_alpha $player[local.v] ( 128 + local.i ) 0
+		}
+	}
+}end
+
+//=========================================================================
+// lobbyBriefingFor <map> - the chapter briefing map that precedes <map>, or "" when the level has none.
+// Mirrors level.coopNextMap in maps/briefing/briefing*.scr.
+//=========================================================================
+lobbyBriefingFor local.m:{
+//=========================================================================
+	local.r = ""
+	if( local.m == "m1l1" ){ local.r = "briefing/briefing1" }
+	else if( local.m == "m2l1" ){ local.r = "briefing/briefing2" }
+	else if( local.m == "m3l1a" ){ local.r = "briefing/briefing3" }
+	else if( local.m == "m4l1" ){ local.r = "briefing/briefing4" }
+	else if( local.m == "m5l1a" ){ local.r = "briefing/briefing5" }
+	else if( local.m == "m6l1a" ){ local.r = "briefing/briefing6" }
+	else if( local.m == "e1l1" ){ local.r = "briefing/briefinge1" }
+	else if( local.m == "e2l1" ){ local.r = "briefing/briefinge2" }
+	else if( local.m == "e3l1" ){ local.r = "briefing/briefinge3" }
+	else if( local.m == "t1l1" ){ local.r = "briefing/briefingt1" }
+	else if( local.m == "t2l1" ){ local.r = "briefing/briefingt2" }
+	else if( local.m == "t3l1" ){ local.r = "briefing/briefingt3" }
+}end local.r
 
 //=========================================================================
 // self = player. Per-frame watchdog: re-assert the movement/look lock (freezecontrols - m_bFrozen resets
@@ -836,7 +953,9 @@ lobbyRoster:{
 			ihuddraw_align local.viewer 113 left top
 			ihuddraw_rect local.viewer 113 12 26 0 0
 			ihuddraw_font local.viewer 113 "verdana-12"
-			ihuddraw_string local.viewer 113 "F   Ready Up"
+			ihuddraw_string local.viewer 113 ""
+			if( local.viewer.flags["coop_lobbyReady"] == 1 ){ waitthread coop_mod/actprompt.scr::hide local.viewer "ready" }
+			else{ waitthread coop_mod/actprompt.scr::show local.viewer "ready" "tick" }
 			ihuddraw_color local.viewer 113 1 1 1
 			ihuddraw_alpha local.viewer 113 1
 		}
@@ -917,6 +1036,7 @@ lobbyRoster:{
 		wait 0.5
 	}
 
+	for( local.hq = 1; local.hq <= $player.size; local.hq++ ){ if( $player[local.hq] != NULL ){ waitthread coop_mod/actprompt.scr::hide $player[local.hq] "ready" } }
 	// lobby ended - wipe the roster + help + countdown (slots 100-114) so nothing bleeds into the launched mission
 	for( local.p = 1; local.p <= $player.size; local.p++ ){
 		if( $player[local.p] == NULL ){ continue }
