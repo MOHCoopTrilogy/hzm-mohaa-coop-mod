@@ -13,8 +13,8 @@ The generated label  lobbybrief.scr::briefLines <map>  fills level.coop_briefN /
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-WRAP = 40
-MAXLINES = 6
+WRAP = 34
+MAXLINES = 8
 CALL = re.compile(r'(?:add_objectives|addobjective|exec\s+global/obj\.scr)\s+(\S+)\s+(\S+)\s+("([^"]*)"|level\.\w+)')
 ASSIGN = re.compile(r'level\.(\w+)\s*=\s*"([^"]*)"')
 
@@ -79,10 +79,12 @@ def main():
         for i, t in enumerate(texts):
             w = wrap(t)
             w[0] = "- " + w[0]
-            for extra in w[1:]:
-                pass
-            lines += [w[0]] + ["  " + x for x in w[1:]]
-        lines = lines[:MAXLINES]
+            block = [w[0]] + ["  " + x for x in w[1:]]
+            if len(lines) + len(block) > MAXLINES:
+                break          # whole objectives only - never a half-cut one
+            lines += block
+        if not lines:
+            continue
         n_maps += 1
         body = "\n".join('\t\tlevel.coop_briefT[%d] = "%s"' % (i + 1, l.replace('"', "'")) for i, l in enumerate(lines))
         blocks.append('\tif( local.m == "%s" ){\n\t\tlevel.coop_briefN = %d\n%s\n\t\tend\n\t}\n' % (m, len(lines), body))
