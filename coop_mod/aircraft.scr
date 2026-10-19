@@ -654,6 +654,8 @@ bomb_run local.target local.fwd local.kind local.leadin local.wide:{
 		println ( "^~^~^ AIR kind=" + local.kind + " map=" + level.coop_mapname + " cls=" + local.cls + " top=" + int( local.hb ) + " rel=" + int( local.hrel ) + " bottom=" + int( local.zb ) + " floor=" + int( local.floor ) + " s=" + local.s + " vd=" + int( local.vd ) + " fall=" + local.tf + " fog=" + int( local.F ) + " in=" + int( local.Lb ) + " out=" + int( local.L ) + " trel=" + ( local.dRel / local.vlev ) )
 	}
 	thread drive local.path local.planes local.offs local.F
+	// the binocular strike (allied P-47 pair) can be hit by off-map flak; the Stuka is German and is not
+	if( local.kind == "p47" ){ thread flakStrike local.planes local.np local.dDive local.dRel }
 	// per plane: dive scream at the push-over, MG burst (Stuka), bombs at its own release distance
 	for( local.k = 1; local.k <= local.np; local.k++ ){
 		thread releaseWatch local.planes[local.k] local.dDive local.dRel local.kind local.s local.wide local.aim local.target
@@ -700,6 +702,7 @@ releaseWatch local.e local.dDive local.dRel local.kind local.s local.wide local.
 releaseBombs local.e local.kind local.s local.wide local.aim:{
 	local.n = 4
 	if( local.kind == "stuka" ){ local.n = 5 }
+	if( local.e.ac_bombs != NIL ){ local.n = local.e.ac_bombs }		// flak-hit P-47: fewer bombs (flakPlan)
 	for( local.i = 1; local.i <= local.n; local.i++ ){
 		if( local.e == NULL ){ end }
 		local.p = local.e.origin
@@ -710,7 +713,11 @@ releaseBombs local.e local.kind local.s local.wide local.aim:{
 		thread bomb local.p local.e.ac_vel local.s local.big
 		wait 0.07
 	}
-	thread coop_mod/officer.scr::coop_bomb_aftermath local.aim
+	if( level.ac_debug == 1 && local.kind == "p47" ){ println ( "^~^~^ FLAK released bombs=" + local.n ) }
+	if( local.n > 0 ){ thread coop_mod/officer.scr::coop_bomb_aftermath local.aim }
+	if( local.e != NULL ){
+		if( local.e.ac_flak == 2 ){ local.e thread stricken }		// the crippled plane drops what it has left, then goes down / limps off
+	}
 }end
 
 
@@ -1049,13 +1056,10 @@ stricken:{
 	local.e playsound coop_ac_sputter
 	// smoke trail glued to the plane (the retail bomber.scr glue recipe) with our own per-puff emitter: retail
 	// plane_smoke / planesmokefly drew as one solid black rope under VSS (captures 2026-10-05).
-	local.trail = spawn "models/emitters/coop_planesmoke_trail.tik"
-	if( local.trail != NULL ){
-		local.trail notsolid
-		local.trail svflags "+broadcast"
-		local.trail.origin = local.e.origin
-		local.trail glue local.e
-		local.trail anim start
+	local.trail = local.e.ac_trail
+	if( local.trail == NIL ){
+		waitthread flakSmoke local.e 0
+		local.trail = local.e.ac_trail
 	}
 	// away from the players: turn toward the side of the track with fewer players, keep turning gently
 	local.h = local.v
@@ -1144,6 +1148,7 @@ stricken:{
 	if( local.e == NULL ){ end }
 	if( local.hit != NIL ){
 		if( local.trail != NULL ){ local.trail thread removeLater 2 }
+		if( local.e.ac_fire != NIL && local.e.ac_fire != NULL ){ local.e.ac_fire thread removeLater 30 }		// the wreck keeps burning
 		local.vv = vector_scale local.dir local.sp
 		local.vv[2] = local.vz
 		if( level.ac_debug == 1 ){ println ( "^~^~^ AIR c47 crash map=" + level.coop_mapname + " at=" + local.hit ) }
@@ -1174,6 +1179,7 @@ stricken:{
 	}
 	if( level.ac_debug == 1 ){ println ( "^~^~^ AIR c47 lost map=" + level.coop_mapname + " at=" + local.p ) }
 	if( local.trail != NULL ){ local.trail thread removeLater 3 }
+	if( local.e.ac_fire != NIL && local.e.ac_fire != NULL ){ local.e.ac_fire thread removeLater 1 }
 	local.e stoploopsound
 	local.e delete
 }end
@@ -1220,6 +1226,179 @@ flakBursts local.e:{
 			local.f thread removeLater 5
 		}
 		wait 0.35
+	}
+}end
+
+
+// ------------------------------------------------------------------------------- flak vs. the binocular strike
+// [user 2026-10-19] the officer-reward bombing run is too reliable: each P-47 of the pair has a small chance
+// (coop_airstrikeFlakChance, percent per plane, default 15, 0 = never) of being hit by off-map flak before the release.
+//   fate 1 = shot down: smoke + fire, no bombs, crashes ON the map (stricken: crashPointOk, never on the squad) or limps off
+//   fate 2 = crippled: smoke + fire, drops 1-2 of its 4 bombs on the run, then goes down / limps off
+// coop_airstrikeFlakFate 1|2 forces the fate of a hit (proof harness); coop_airstrikeFlakChance 100 forces the hit.
+// The bomb damage rules (bomb, radiusdamage numbers, aim) are untouched.
+
+// The dice: plan["f"][k] = fate (0 none), plan["b"][k] = bombs that plane will drop, plan["hits"], plan["tot"].
+flakPlan local.np:{
+	local.chance = 15
+	local.ch = getcvar( "coop_airstrikeFlakChance" )
+	if( local.ch != "" ){ local.chance = int( local.ch ) }
+	local.force = 0
+	local.fc = getcvar( "coop_airstrikeFlakFate" )
+	if( local.fc != "" ){ local.force = int( local.fc ) }
+	local.hits = 0
+	local.tot = 0
+	for( local.k = 1; local.k <= local.np; local.k++ ){
+		local.fa[local.k] = 0
+		local.ba[local.k] = 4
+		if( local.chance > 0 && ( randomint 100 ) < local.chance ){
+			local.hits++
+			local.fa[local.k] = 1 + ( randomint 2 )
+			if( local.force > 0 ){ local.fa[local.k] = local.force }
+			if( local.fa[local.k] == 1 ){ local.ba[local.k] = 0 } else { local.ba[local.k] = 1 + ( randomint 2 ) }
+		}
+		local.tot = local.tot + local.ba[local.k]
+	}
+	local.o["f"] = local.fa
+	local.o["b"] = local.ba
+	local.o["hits"] = local.hits
+	local.o["chance"] = local.chance
+	local.o["tot"] = local.tot
+}end local.o
+
+
+// Dev: N rolls of the dice for a pair of planes, one machine-readable line each (no flight).
+flak_selftest local.n:{
+	local.h = 0
+	local.bt = 0
+	for( local.i = 1; local.i <= local.n; local.i++ ){
+		local.pl = waitthread flakPlan 2
+		local.h = local.h + local.pl["hits"]
+		local.bt = local.bt + local.pl["tot"]
+		println ( "^~^~^ FLAKROLL " + local.i + " fate1=" + local.pl["f"][1] + " fate2=" + local.pl["f"][2] + " bombs1=" + local.pl["b"][1] + " bombs2=" + local.pl["b"][2] + " bombs=" + local.pl["tot"] + "/8" )
+	}
+	println ( "^~^~^ FLAKROLL summary rolls=" + local.n + " planes=" + ( local.n * 2 ) + " hit=" + local.h + " bombs=" + local.bt + "/" + ( local.n * 8 ) )
+}end
+
+
+// Per strike: roll, put flak in the sky, and (for a hit) schedule the hit on the approach.
+flakStrike local.planes local.np local.dDive local.dRel:{
+	local.plan = waitthread flakPlan local.np
+	if( level.ac_debug == 1 ){
+		println ( "^~^~^ FLAK strike map=" + level.coop_mapname + " hits=" + local.plan["hits"] + " fate1=" + local.plan["f"][1] + " fate2=" + local.plan["f"][2] + " bombs=" + local.plan["tot"] + "/8" )
+	}
+	if( local.plan["chance"] <= 0 ){ end }		// 0 = flak off entirely, no sky bursts either
+	thread flakSky local.planes local.np local.dRel
+	if( local.plan["hits"] == 0 ){ end }
+	// one short feed line for the whole outcome, said when the first hit lands
+	local.msg = ""
+	if( local.plan["hits"] == 2 ){
+		if( local.plan["tot"] == 0 ){ local.msg = "Flak downed both bombers - strike failed" } else { local.msg = "Flak hit both bombers - weak strike" }
+	} else {
+		local.who = "the lead bomber"
+		if( local.plan["f"][1] == 0 ){ local.who = "the second bomber" }
+		local.fk = 1
+		if( local.plan["f"][1] == 0 ){ local.fk = 2 }
+		if( local.plan["f"][local.fk] == 1 ){ local.msg = ( "Flak downed " + local.who + " - partial strike" ) } else { local.msg = ( "Flak hit " + local.who + " - partial strike" ) }
+	}
+	for( local.k = 1; local.k <= local.np; local.k++ ){
+		if( local.plan["f"][local.k] > 0 ){
+			thread flakHit local.planes[local.k] local.plan["f"][local.k] local.plan["b"][local.k] local.dDive local.msg
+			local.msg = ""
+		}
+	}
+}end
+
+
+// The hit, about halfway along the approach so it is seen: burst on the plane, smoke + fire, then its fate.
+flakHit local.e local.fate local.nb local.dDive local.msg:{
+	local.trig = local.dDive * 0.5
+	while( local.e != NULL ){
+		if( local.e.ac_dead == 1 ){ end }
+		if( local.e.ac_d != NIL ){
+			if( local.e.ac_d >= local.trig ){ break }
+		}
+		waitframe
+	}
+	if( local.e == NULL ){ end }
+	local.e.ac_bombs = local.nb
+	local.e.ac_flak = local.fate
+	waitthread flakSmoke local.e 1
+	if( level.ac_debug == 1 ){ println ( "^~^~^ FLAK hit fate=" + local.fate + " bombs=" + local.nb + " at=" + local.e.origin ) }
+	if( local.msg != "" ){
+		waitthread coop_mod/feed.scr::feed_all 1 "air_flak" local.msg
+	}
+	if( local.fate == 1 ){
+		local.e thread stricken		// does its own bursts + sputter
+	} else {
+		thread flakBursts local.e
+		local.e playsound coop_ac_sputter
+	}
+}end
+
+
+// Smoke trail (and with local.fire = 1 a fire) glued to the plane, remembered on it so stricken can reuse them.
+flakSmoke local.e local.fire:{
+	if( local.e == NULL ){ end }
+	if( local.e.ac_trail == NIL ){
+		local.trail = spawn "models/emitters/coop_planesmoke_trail.tik"
+		if( local.trail != NULL ){
+			local.trail notsolid
+			local.trail svflags "+broadcast"
+			local.trail.origin = local.e.origin
+			local.trail glue local.e
+			local.trail anim start
+			local.e.ac_trail = local.trail
+		}
+	}
+	if( local.fire == 1 && local.e.ac_fire == NIL ){
+		local.fx = spawn "models/emitters/firegood.tik"
+		if( local.fx != NULL ){
+			local.fx notsolid
+			local.fx svflags "+broadcast"
+			local.fx.origin = local.e.origin
+			local.fx glue local.e
+			local.fx anim start
+			local.e.ac_fire = local.fx
+		}
+	}
+}end
+
+
+// Flak bursts in the sky around the pair as they come in (stock exp_flak_near + coop_ac_flak), until the release.
+flakSky local.planes local.np local.dRel:{
+	wait 1
+	for( local.n = 0; local.n < 10; local.n++ ){
+		local.ref = NIL
+		local.ra = 1 + ( randomint local.np )
+		for( local.k = 1; local.k <= local.np; local.k++ ){
+			local.c = local.planes[local.k]
+			if( local.c != NULL && local.c != NIL ){
+				if( local.c.ac_dead != 1 && ( local.ref == NIL || local.k == local.ra ) ){ local.ref = local.c }
+			}
+		}
+		if( local.ref == NIL ){ end }
+		if( local.ref.ac_d != NIL ){
+			if( local.ref.ac_d >= local.dRel ){ end }
+		}
+		local.s = local.ref.ac_s
+		local.l = angles_toleft local.ref.angles
+		local.f = angles_toforward local.ref.angles
+		local.side = ( randomint 1600 ) - 800
+		local.ahead = 300 + ( randomint 700 )
+		local.up = ( randomint 500 ) - 150
+		local.p = local.ref.origin + ( vector_scale local.l ( local.s * local.side ) ) + ( vector_scale local.f ( local.s * local.ahead ) ) + ( 0 0 ( local.s * local.up ) )
+		local.b = spawn script_model model "models/fx/exp_flak_near.tik"
+		if( local.b != NIL && local.b != NULL ){
+			local.b.origin = local.p
+			local.b notsolid
+			local.b scale ( local.s * 1.4 )
+			local.b svflags "+broadcast"
+			local.b anim start
+			local.b playsound coop_ac_flak
+			local.b thread removeLater 5
+		}
+		wait ( 0.5 + randomfloat 0.7 )
 	}
 }end
 
