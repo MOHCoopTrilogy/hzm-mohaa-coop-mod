@@ -162,7 +162,9 @@ main:{
 	//fog and challenge systems: holdout_init only arms the authoring bus and loads a saved
 	//profile. Nothing spawns until the host runs 'coop_holdout_cmd start', so a normal coop
 	//mission is completely unaffected.
+	thread coop_mod/carry.scr::carry_init	//[alarmplace 2026-10-18] a lost defend zone carries heavier reinforcements into this map (cvar carry-over, no archive)
 	thread coop_mod/alarm.scr::alarm_init	//[alarm 2026-10-15] enemy alarm state; returns at once unless coop_alarm 1 and the map has switches
+	thread coop_mod/objx.scr::objx_init	//[objx 2026-10-18] extra chapter 1-3 objectives (objx_points.scr); returns at once unless coop_objx 1 and the map has an entry
 	thread coop_mod/holdout.scr::holdout_init
 	//[user 2026-08-04] bug-1378 - invisible barrier tool. Like holdout_init this only arms the
 	//command bus and reloads this map's saved barriers; nothing is spawned unless a walls_<map>.dat
@@ -365,6 +367,10 @@ main:{
 
 	//[200] Smithy - used by waitForMainScript to check if main has loaded
 	level.coop_mainScriptLoaded = game.true
+
+	//[user 2026-10-18] LOBBY FOR EVERY MISSION. The menu Apply button (cfg/mission_start.cfg) sets the one-shot
+	//coop_lobbyFresh before start_server.cfg; the first map it loads routes through co_lobby1 here.
+	thread coop_mod/main.scr::lobbyAlwaysRedirect
 
 	//[200] Smithy - created funcs for events
 	if (thread coop_mod/eventsystem.scr::isEventActive "mainScriptLoaded"){									
@@ -2123,6 +2129,44 @@ if(level.cMTE_coop_main){if(!level.cMTE){level.cMTE=0}; level.cMTE++; println( "
 
 	println( "^~^~^ COOP_MISSION_RESET " + local.mapname )
 	stuffsrv ( "map " + local.mapname )
+}end
+
+//=========================================================================
+// Session start on a single mission -> pre-mission lobby first (coop_lobbyAlways, default 1).
+// ONE-SHOT: cfg/mission_start.cfg (the coop start screen's Apply button) sets coop_lobbyFresh 1 right before
+// start_server.cfg; the map that loads consumes it here. Dedicated servers, campaign_start.cfg, arena and test
+// cfgs never set it, so they are untouched. The chosen map is stashed in coop_campaignNext, which
+// lobby.scr::lobbyLaunch already honours (campaign mid-chain recipe), and co_lobby1 is entered by the same raw
+// stuffsrv "map" the campaign transitions use. coop_campaign stays 0: only the START goes through the lobby,
+// level-to-level transitions are unchanged.
+//=========================================================================
+lobbyAlwaysRedirect:{
+//=========================================================================
+	if( getcvar( "coop_lobbyFresh" ) != "1" ){ end }
+	setcvar "coop_lobbyFresh" "0"
+	if( getcvar( "coop_lobbyAlways" ) == "0" ){ end }
+	if( getcvar( "coop_campaign" ) == "1" ){ end }
+	if( level.coop_lobbyMap == 1 || level.coop_mpRun == 1 ){ end }
+	if( getcvar( "coop_maptest" ) != "0" && getcvar( "coop_maptest" ) != "" ){ end }
+	local.map = waitthread getCleanMapname ( getcvar "mapname" )
+	if( local.map == "" ){ local.map = getcvar "mapname" }
+	if( local.map == "" ){ end }
+	if( waitthread containsText local.map "co_lobby" 0 ){ end }
+	if( waitthread containsText local.map "briefing" 0 ){ end }
+
+	setcvar "coop_campaignNext" local.map
+	//mirror the safe-reload housekeeping of resetMission / missioncomplete (no archive, no gametype flip)
+	setcvar "g_scriptcheck" "0"
+	exec coop_mod/replace.scr::stopwatch 0
+	setcvar "coop_prevMapList" ( getcvar "sv_maplist" )
+	setcvar "sv_maplist" ""
+	level.coop_preventGameTypeChanges = game.true
+	if( level.coop_changeGameTypeThread ){
+		level.coop_changeGameTypeThread end
+	}
+	game.loadout = false
+	println( "^~^~^ COOP_LOBBYALL_ENTER " + local.map )
+	stuffsrv "map co_lobby1"
 }end
 
 //[200] Smithy - load a map

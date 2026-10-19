@@ -10,6 +10,7 @@
 //   coop_alarmWaveGap 40      seconds between alarm waves (first one 10 s after the pull)
 //   coop_alarmCap 8           most alarm-wave men alive at once
 //   coop_alarmDebug 1         greppable ^~^~^ ALARM lines
+//   coop_alarmMg 1            each pull also brings ONE MG42 team (reinf_mg.scr, hidden entry) in wave 1 or 2; 0 = off
 //
 // Two sources of switches:
 //   placed  : coop_mod/alarmpoints.scr::place <map> spawns the switch (+ siren bell) models authored with coop_build
@@ -278,6 +279,7 @@ alm_start local.sw:{
 		local.es = level.coop_alarmBell[local.i]
 		waitthread alm_shootable local.es
 	}
+	thread coop_mod/alarmsnipers.scr::asn_alarm level.coop_alarmPulls	//[alarm snipers 2026-10-18] high-position snipers for this pull (gated by coop_alarmSnipers)
 	thread alm_wake local.sw
 	thread alm_waves
 	thread coop_mod/alarmveh.scr::av_pull
@@ -312,12 +314,14 @@ alm_waves:{
 	local.gap = 40
 	if( getcvar( "coop_alarmWaveGap" ) != "" ){ local.gap = int( getcvar( "coop_alarmWaveGap" ) ) }
 	if( local.gap < 5 ){ local.gap = 5 }
+	local.gap = int( local.gap * ( waitthread coop_mod/carry.scr::carry_gap ) )	//[alarmplace] carried loss: gaps 20 percent shorter
 	local.cap = 8
 	if( getcvar( "coop_alarmCap" ) != "" ){ local.cap = int( getcvar( "coop_alarmCap" ) ) }
 	if( local.cap < 1 ){ local.cap = 8 }
 	local.pull = level.coop_alarmPulls
 	local.wait = 10
 	local.n = 0
+	local.mgDone = 0
 	while( level.coop_alarmLive == 1 && level.coop_alarmPulls == local.pull ){
 		while( local.wait > 0 && level.coop_alarmLive == 1 ){
 			wait 1
@@ -329,6 +333,7 @@ alm_waves:{
 		local.sz = 3
 		if( local.pc >= 3 ){ local.sz = 4 }
 		if( local.pc >= 5 ){ local.sz = 5 }
+		local.sz = local.sz + ( waitthread coop_mod/carry.scr::carry_pen )	//[alarmplace] carried loss: +1 man per wave
 		local.alive = waitthread coop_mod/coop_counter.scr::counter_alive "alarm"
 		if( ( local.alive + local.sz ) > local.cap ){ local.sz = local.cap - local.alive }
 		if( local.sz >= 1 ){
@@ -342,12 +347,47 @@ alm_waves:{
 				local.made = waitthread coop_mod/coop_counter.scr::counter_squad local.pos local.sz local.n "alarm"
 				waitthread alm_log ( "wave " + local.n + " players=" + local.pc + " made=" + local.made + " alive=" + ( waitthread coop_mod/coop_counter.scr::counter_alive "alarm" ) + " at=" + local.pos )
 			}
+			// ONE MG42 team per pull, in the first or second wave: the officer's team (reinf_mg.scr::rmg_wave, same player scaling
+			// and coop_reinfMg* cvars) at its own hidden entry (rnf_entry), never in the open in front of a player. Wave 1 tries;
+			// if the team could not take the call (busy / no anchor) wave 2 tries once more; then no more this pull.
+			if( local.mgDone == 0 && local.n >= 1 && local.n <= 2 && getcvar( "coop_alarmMg" ) != "0" && getcvar( "coop_reinfSmart" ) != "0" && getcvar( "coop_reinfMg" ) != "0" ){
+				local.mgpos = waitthread coop_mod/reinf.scr::rnf_entry NIL
+				if( local.mgpos == NIL ){ local.mgpos = waitthread coop_mod/coop_counter.scr::counter_fallback }
+				if( local.mgpos == NIL ){
+					waitthread alm_log ( "MG team: no hidden entry on wave " + local.n )
+				} else {
+					local.mgcover = waitthread alm_liveswitch
+					local.mgr = waitthread coop_mod/reinf_mg.scr::rmg_wave local.mgpos 1 local.mgcover
+					if( local.mgr == 1 ){
+						local.mgDone = 1
+						if( level.coop_alarmMgN == NIL ){ level.coop_alarmMgN = 0 }
+						level.coop_alarmMgN++
+						waitthread alm_log ( "MG team called pull=" + local.pull + " wave=" + local.n + " total=" + level.coop_alarmMgN + " entry=" + local.mgpos + " covers=" + local.mgcover )
+					} else {
+						waitthread alm_log ( "MG team not taken on wave " + local.n + " (busy / no anchor / off)" )
+						if( local.n >= 2 ){ local.mgDone = 2 }
+					}
+				}
+			}
 		} else {
 			waitthread alm_log ( "wave skipped: cap " + local.cap + " alive " + local.alive )
 		}
 		local.wait = local.gap + ( randomint 10 )
 	}
 }end
+
+
+// origin of a still-standing switch (what an alarm MG team covers), else NIL
+alm_liveswitch:{
+	local.o = NIL
+	for( local.i = 1; local.i <= level.coop_alarmSwN; local.i++ ){
+		local.e = level.coop_alarmSw[local.i]
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.coop_almDead == 1 ){ continue }
+		local.o = local.e.origin
+		break
+	}
+}end local.o
 
 
 // shut-off: a shot switch / bell, 90 s with no guard seeing a player, or no one left alive
