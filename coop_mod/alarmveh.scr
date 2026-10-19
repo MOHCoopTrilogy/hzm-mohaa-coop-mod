@@ -105,86 +105,140 @@ av_entry_ok local.ri:{
 }end ""
 
 
-// crate for route local.ri, once per map. The stored spot is a standing point that may not take a 40x40 item volume (it is
-// often flush to a wall), so the nearest clear floor within 480 u is used: it must be 250+ u from the stop and have solid cover
-// between it and the stop (never in the vehicle's line of fire). Returns 1 when a crate stands (or already stood).
+// distance (2D) from point local.p to the segment a-b; the nearest point on it is left in level.av_segq
+av_seg2d local.p local.a local.b:{
+	local.ab = local.b - local.a
+	local.ab[2] = 0
+	local.ap = local.p - local.a
+	local.ap[2] = 0
+	local.l2 = ( local.ab[0] * local.ab[0] ) + ( local.ab[1] * local.ab[1] )
+	local.t = 0
+	if( local.l2 > 1 ){ local.t = ( ( local.ap[0] * local.ab[0] ) + ( local.ap[1] * local.ab[1] ) ) / local.l2 }
+	if( local.t < 0 ){ local.t = 0 }
+	if( local.t > 1 ){ local.t = 1 }
+	level.av_segq = local.a + ( local.ab * local.t )
+	local.dd = local.p - level.av_segq
+	local.dd[2] = 0
+}end ( vector_length local.dd )
+
+
+// foot-reachable: a straight 64 u walk from local.a to local.b over ground (no step above 40 u, a 28x28 body box clear all the way)
+av_walk local.a local.b:{
+	local.len = vector_length ( local.b - local.a )
+	local.n = int( local.len / 64 ) + 1
+	local.lastz = NIL
+	for( local.i = 0; local.i <= local.n; local.i++ ){
+		local.pt = local.a + ( ( local.b - local.a ) * ( local.i / local.n ) )
+		local.g = traced ( local.pt + ( 0 0 56 ) ) ( local.pt + ( 0 0 -90 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.g["startSolid"] == 1 || local.g["fraction"] >= 1.0 ){ end 0 }
+		local.gz = local.g["endpos"][2]
+		if( local.lastz != NIL ){
+			local.dz = local.gz - local.lastz
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			if( local.dz > 40 ){ end 0 }
+		}
+		local.lastz = local.gz
+		local.bp = local.g["endpos"] + ( 0 0 26 )
+		local.bx = traced local.bp ( local.bp + ( 0 0 1 ) ) 1023 ( -14 -14 0 ) ( 14 14 40 ) 466945
+		if( local.bx["startSolid"] == 1 ){ end 0 }
+	}
+}end 1
+
+
+// 1 when no line from the vehicle (cab / gunner / MG heights) reaches the crate spot at standing or crouching height
+av_hidden local.stop local.c:{
+	for( local.k = 0; local.k < 3; local.k++ ){
+		local.h = 45 + ( local.k * 30 )
+		local.t1 = traced ( local.stop + ( 0 0 local.h ) ) ( local.c + ( 0 0 56 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.t1["fraction"] >= 1.0 ){ end 0 }
+	}
+	local.t2 = traced ( local.stop + ( 0 0 75 ) ) ( local.c + ( 0 0 20 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.t2["fraction"] >= 1.0 ){ end 0 }
+}end 1
+
+
+// The anti-vehicle crate for route local.ri, once per map. Rules (user 2026-10-19): ON the squad's way (within 700 u of the segment
+// anchor -> stop, foot-reachable), within 1200 u of the stop (and 350+), and HIDDEN from the vehicle: no line from the cab / gunner /
+// MG heights over the stop to the crate (the man picking it up is shielded by a wall, building, sandbags or terrain). Candidates are a
+// 100 u grid round the stop; the best (closest to the squad's way) that atsupply (or the small-volume path) accepts is used.
+// Returns 1 when a crate stands (or already stood).
 av_crate local.ri:{
 	if( level.av_crateOk[local.ri] == 1 ){ end 1 }
 	if( level.av_crateTried[local.ri] == 1 ){ end 0 }
 	level.av_crateTried[local.ri] = 1
 	local.kind = "bazooka"
 	if( level.coop_mapname == "m3l3" ){ local.kind = "panzerschreck" }
-	local.pos0 = level.av_crate[local.ri]
 	local.stop = level.av_p[( local.ri * 100 ) + level.av_n[local.ri]]
-	local.found = NIL
-	local.nog = 0
-	local.noc = 0
-	for( local.ring = 0; local.ring <= 6; local.ring++ ){
-		local.cnt = 8
-		if( local.ring == 0 ){ local.cnt = 1 }
-		for( local.a = 0; local.a < local.cnt; local.a++ ){
-			local.cand = local.pos0 + ( ( angles_toforward ( 0 ( local.a * 45 ) 0 ) ) * ( local.ring * 80 ) )
-			if( vector_length( local.cand - local.stop ) < 250 ){ continue }
-			local.gp = waitthread coop_mod/atsupply.scr::coop_atSupply_ground local.cand
-			if( local.gp == NIL ){ local.nog++; continue }
-			// cover from the stop is only demanded within 1200 u; beyond that the crate is out of the fight's line of fire
-			if( vector_length( local.cand - local.stop ) < 1200 ){
-				local.tr = traced ( local.gp + ( 0 0 48 ) ) ( local.stop + ( 0 0 60 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
-				if( local.tr["fraction"] >= 1.0 ){ local.noc++; continue }
+	local.anc = level.av_squad[local.ri]
+	if( local.anc == NIL ){ local.anc = level.av_crate[local.ri] }
+	if( local.anc == NIL ){ local.anc = level.av_p[( local.ri * 100 ) + 1] }
+	local.nc = 0
+	local.per = 0
+	local.rj = 0
+	for( local.ox = -1200; local.ox <= 1200; local.ox = local.ox + 100 ){
+		for( local.oy = -1200; local.oy <= 1200; local.oy = local.oy + 100 ){
+			local.cx = local.stop[0] + local.ox
+			local.cy = local.stop[1] + local.oy
+			local.dv0 = ( local.ox local.oy 0 )
+			local.d2 = vector_length local.dv0
+			if( local.d2 < 350 || local.d2 > 1200 ){ continue }
+			local.sz = local.stop[2]
+			local.cp = ( local.cx local.cy local.sz )
+			local.lat = waitthread av_seg2d local.cp local.anc local.stop
+			if( local.lat > 700 ){ continue }
+			local.per++
+			if( local.per >= 4 ){
+				local.per = 0
+				waitframe
 			}
-			local.found = local.cand
-			break
+			local.zt = local.sz + 250
+			local.zb = local.sz - 250
+			local.g = traced ( local.cx local.cy local.zt ) ( local.cx local.cy local.zb ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.g["startSolid"] == 1 || local.g["fraction"] >= 1.0 ){ continue }
+			local.gp = local.g["endpos"]
+			local.dz = local.gp[2] - local.stop[2]
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			if( local.dz > 160 ){ continue }
+			local.b = traced ( local.gp + ( 0 0 4 ) ) ( local.gp + ( 0 0 50 ) ) 0 ( -12 -12 0 ) ( 12 12 12 )
+			if( local.b["startSolid"] == 1 || local.b["fraction"] < 1.0 ){ continue }
+			if( ( waitthread av_hidden local.stop local.gp ) != 1 ){ local.rj++; continue }
+			local.q = level.av_segq
+			local.qq = ( 0 0 0 )
+			local.qq[0] = local.q[0]
+			local.qq[1] = local.q[1]
+			local.qq[2] = local.gp[2]
+			if( ( waitthread av_walk local.gp local.qq ) != 1 ){ local.rj++; continue }
+			local.nc++
+			level.avc_p[local.nc] = local.gp
+			level.avc_s[local.nc] = local.lat + ( ( local.d2 - 800 ) * ( local.d2 - 800 ) ) / 1000
+			level.avc_lat[local.nc] = local.lat
+			level.avc_d[local.nc] = local.d2
 		}
-		if( local.found != NIL ){ break }
 	}
-	if( local.found == NIL ){
-		// atsupply's 40x40 item volume refuses sloped ground (m3l3): lay the same items with a small volume instead
-		for( local.ring = 0; local.ring <= 6 && local.found == NIL; local.ring++ ){
-			local.cnt = 8
-			if( local.ring == 0 ){ local.cnt = 1 }
-			for( local.a = 0; local.a < local.cnt; local.a++ ){
-				local.cand = local.pos0 + ( ( angles_toforward ( 0 ( local.a * 45 ) 0 ) ) * ( local.ring * 80 ) )
-				if( vector_length( local.cand - local.stop ) < 250 ){ continue }
-				if( vector_length( local.cand - local.stop ) < 1200 ){
-					local.tr = traced ( local.cand + ( 0 0 48 ) ) ( local.stop + ( 0 0 60 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
-					if( local.tr["fraction"] >= 1.0 ){ continue }
-				}
-				local.ok = waitthread av_crate_raw local.cand level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri )
-				if( local.ok == 1 ){
-					level.av_crateOk[local.ri] = 1
-					waitthread av_log ( "crate ok route " + local.ri + " kind=" + local.kind + " at=" + local.cand + " (small-volume path)" )
-					end 1
-				}
-			}
+	waitthread av_log ( "crate scan route " + local.ri + ": " + local.nc + " hidden+reachable candidates, " + local.rj + " rejected on sight/walk, anchor " + local.anc + " stop " + local.stop )
+	for( local.try = 0; local.try < 6 && local.nc > 0; local.try++ ){
+		local.bi = 1
+		for( local.i = 2; local.i <= local.nc; local.i++ ){
+			if( level.avc_s[local.i] < level.avc_s[local.bi] ){ local.bi = local.i }
 		}
-		// last resort: open ground with no cover (snow field): the crate still stands so the squad always has a rocket
-		for( local.ring = 3; local.ring <= 6 && local.found == NIL; local.ring++ ){
-			for( local.a = 0; local.a < 8; local.a++ ){
-				local.cand = local.pos0 + ( ( angles_toforward ( 0 ( local.a * 45 ) 0 ) ) * ( local.ring * 80 ) )
-				if( vector_length( local.cand - local.stop ) < 250 ){ continue }
-				local.ok = waitthread av_crate_raw local.cand level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri )
-				if( local.ok == 1 ){
-					level.av_crateOk[local.ri] = 1
-					waitthread av_log ( "crate ok route " + local.ri + " kind=" + local.kind + " at=" + local.cand + " (no cover)" )
-					end 1
-				}
-			}
+		local.cand = level.avc_p[local.bi]
+		local.lat = level.avc_lat[local.bi]
+		local.dd = level.avc_d[local.bi]
+		level.avc_s[local.bi] = 999999999
+		local.n0 = level.coop_atSupplyN
+		if( local.n0 == NIL ){ local.n0 = 0 }
+		waitthread coop_mod/atsupply.scr::coop_atSupply_place local.cand level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri ) 3
+		local.ok = 0
+		if( level.coop_atSupplyN > local.n0 ){ local.ok = 1 }
+		if( local.ok == 0 ){ local.ok = waitthread av_crate_raw local.cand level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri ) }
+		if( local.ok == 1 ){
+			level.av_crateOk[local.ri] = 1
+			level.av_crateAt[local.ri] = local.cand
+			waitthread av_log ( "CRATE route " + local.ri + " kind=" + local.kind + " at=" + local.cand + " dist_to_stop=" + int( local.dd ) + " lateral_to_squad_way=" + int( local.lat ) + " hidden_from_cab_gunner_mg=3/3+crouch walk_to_way=ok" )
+			end 1
 		}
-		local.dt = traced ( local.pos0 + ( 0 0 36 ) ) ( local.pos0 + ( 0 0 -512 ) )
-		waitthread av_log ( "crate probe pos0: startSolid=" + local.dt["startSolid"] + " allSolid=" + local.dt["allSolid"] + " fraction=" + local.dt["fraction"] + " end=" + local.dt["endpos"] )
-		waitthread av_log ( "crate FAILED route " + local.ri + ": no clear covered floor within 480 u of " + local.pos0 + " nofloor=" + local.nog + " nocover=" + local.noc )
-		end 0
 	}
-	local.n0 = level.coop_atSupplyN
-	if( local.n0 == NIL ){ local.n0 = 0 }
-	waitthread coop_mod/atsupply.scr::coop_atSupply_place local.found level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri ) 3
-	if( level.coop_atSupplyN > local.n0 ){
-		level.av_crateOk[local.ri] = 1
-		level.av_crateAt[local.ri] = local.found
-		waitthread av_log ( "crate ok route " + local.ri + " kind=" + local.kind + " at=" + local.found + " stored=" + local.pos0 )
-		end 1
-	}
-	waitthread av_log ( "crate FAILED route " + local.ri + ": atsupply refused " + local.found )
+	waitthread av_log ( "crate FAILED route " + local.ri + ": no hidden, reachable, in-range spot (candidates " + local.nc + ")" )
 }end 0
 
 
@@ -266,11 +320,11 @@ av_pull:{
 	}
 	// the mission's own halftrack owns this road until it is dead (m3l3 ambush, t2l3 halftrack1): two hulls on one road crush each other
 	// (measured on m3l3: 320 hp per frame, mine at the same position as the map's halftrack once my hull crossed its scene1 trigger)
-	if( level.coop_mapname == "m3l3" && level.halftrack_alive != 0 ){
+	if( level.coop_mapname == "m3l3" && level.halftrack_alive != 0 && getcvar( "coop_alarmVehIgnoreMission" ) != "1" ){
 		waitthread av_log "skip: the mission halftrack is still alive on m3l3"
 		end
 	}
-	if( level.coop_mapname == "t2l3" && $halftrack1 != NULL && isAlive $halftrack1 ){
+	if( level.coop_mapname == "t2l3" && $halftrack1 != NULL && isAlive $halftrack1 && getcvar( "coop_alarmVehIgnoreMission" ) != "1" ){
 		waitthread av_log "skip: the mission halftrack1 is still alive on t2l3"
 		end
 	}
@@ -289,7 +343,13 @@ av_pull:{
 		if( ( waitthread av_crate local.ri ) == 1 ){ local.marked = 1 }
 	}
 	if( local.marked == 1 ){
-		waitthread coop_mod/feed.scr::feed_all 0 "av_crate" "Rocket crate marked - a vehicle is coming"
+		waitthread coop_mod/feed.scr::feed_all 0 "av_crate" "Rocket crate marked on the compass - a vehicle is coming"
+		for( local.ri = 1; local.ri <= level.av_rn; local.ri++ ){
+			if( level.av_crateAt[local.ri] != NIL ){
+				set_objective_pos level.av_crateAt[local.ri]
+				break
+			}
+		}
 	}
 	if( level.av_live == 1 ){
 		waitthread av_log "skip: a vehicle is still out"
