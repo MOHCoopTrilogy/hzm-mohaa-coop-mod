@@ -1,0 +1,431 @@
+//=========================================================================
+// coop_mod/m3l3_nebel.scr - M3L3 NEBELWERFER FIGHT, HARDER BUT FAIR (user 2026-10-19: "the MGs don't seem to work well and there isn't
+// enough defence"). Started by ONE call from maps/M3L3.scr::coop_churchObjectives right after "CHOBJ 7 complete" (the church hold is
+// finished, the church barrage is over). Vanilla is untouched: scene7 still runs, the objectives still complete from the same flags.
+//
+//   1. NESTS. The five scene7 MG42 nests were only manned by gunners that a vanilla detector trigger spawned while a player stood in it
+//      (one gunner per nest, 6 s to walk up, 3 in all), so a squad that skirted a trigger met empty guns. They are now manned from the
+//      start by gunners placed on the gun, tuned with the MG-team recipe (reinf_mg.scr::rmg_tune), replaced when they die (3 + players
+//      deaths per nest), and a state line per nest is logged every 3 s (^~^~^ NEB nest ...). The vanilla spawners are switched off.
+//   2. DEFENDERS scaled by players: 2 + players riflemen at every Nebelwerfer (leashed, cover AI), a sniper from 3 players (2 from 5).
+//   3. EVENTS: a short DEFEND wave while a charge burns (planted -> 4 s -> blast), a COUNTER-PUSH (2 squads + grenadiers) when the first
+//      Nebelwerfer blows, and a German mortar crew (mortar.scr) once the first charge is planted. Every wave enters from
+//      reinf.scr::rnf_entry (hidden, 900+ u from the squad).
+//   4. HALFTRACKS: 1 MG halftrack (1-2 players) or 2 (3+) drive in from a hidden entry and park with a view over the approach to the
+//      Nebelwerfers (alarmveh.scr, routes event "guard"); only after the mission halftrack is dead.
+//   5. ROCKETS at the church: a bazooka + shells (atsupply.scr items, infinite) near where the hold ends, hidden from both stops, marked
+//      on the compass and in the feed: "Halftracks guarding the Nebelwerfers - rockets at the church".
+// cvars: coop_nebelHard 1 (0 = vanilla), coop_nebelHt 1 (halftracks), coop_nebelDebug 1 (extra ^~^~^ NEB lines).
+//=========================================================================
+
+nb_log local.t:{
+	println ( "^~^~^ NEB t=" + level.time + " " + local.t )
+}end
+
+
+nb_pc:{
+	local.n = waitthread coop_mod/coop_counter.scr::counter_players
+	if( local.n < 1 ){ local.n = 1 }
+}end local.n
+
+
+// 1 when any living player has a solid-world line to local.pt
+nb_seen local.pt:{
+	local.r = waitthread coop_mod/alarmveh.scr::av_seen local.pt
+}end local.r
+
+
+nb_nebpos local.k:{
+	local.e = $( "scene7_nebelwerfer" + local.k )
+	if( local.e == NULL ){ end NIL }
+	local.r = local.e.origin
+}end local.r
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the hook
+// ---------------------------------------------------------------------------------------------------------------------
+nb_hold_done:{
+	if( getcvar( "coop_nebelHard" ) == "0" ){ end }
+	if( level.coop_nbStarted == 1 ){ end }
+	level.coop_nbStarted = 1
+	level.coop_nbT0 = level.time
+	waitthread nb_log ( "church hold complete: players=" + ( waitthread nb_pc ) + " - the Nebelwerfer fight starts" )
+	thread nb_nests
+	thread nb_defenders
+	thread nb_rockets_and_halftracks
+	thread nb_monitor
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// NESTS
+// ---------------------------------------------------------------------------------------------------------------------
+nb_nests:{
+	// the vanilla detector spawners stay off: ours man the guns
+	level.scene7_mgspawn1_deactivator = 1
+	level.scene7_mgspawn2_deactivator = 1
+	level.scene7_mgspawn3_deactivator = 1
+	level.scene7_mgspawn4_deactivator = 1
+	level.scene7_mgspawn5_deactivator = 1
+	for( local.k = 1; local.k <= 5; local.k++ ){
+		thread nb_nest local.k
+	}
+}end
+
+
+nb_nest local.k:{
+	local.gun = $( "scene7_mg" + local.k )
+	if( local.gun == NULL ){
+		waitthread nb_log ( "nest " + local.k + " has no gun entity - skipped" )
+		end
+	}
+	waitthread coop_mod/reinf_mg.scr::rmg_tune local.gun
+	local.gun targettype "auto"
+	local.pc = waitthread nb_pc
+	local.maxd = 3 + local.pc
+	if( local.maxd > 7 ){ local.maxd = 7 }
+	level.coop_nbNestDeaths[local.k] = 0
+	local.g = NIL
+	local.tick = 0
+	while( level.scene7_bombcount != 0 && ( level.time - level.coop_nbT0 ) < 1800 ){
+		if( local.g == NIL || local.g == NULL || !isAlive local.g ){
+			if( local.g != NIL && local.g != NULL ){
+				level.coop_nbNestDeaths[local.k]++
+				waitthread nb_log ( "nest " + local.k + " gunner DIED (deaths " + level.coop_nbNestDeaths[local.k] + " of " + local.maxd + ")" )
+				local.g = NIL
+				wait 8
+			}
+			if( level.coop_nbNestDeaths[local.k] >= local.maxd ){
+				waitthread nb_log ( "nest " + local.k + " has no more gunners - the gun stays empty" )
+				end
+			}
+			local.g = waitthread nb_gunner local.k local.gun
+		}
+		local.tick++
+		if( local.tick >= 3 ){
+			local.tick = 0
+			waitthread nb_nest_state local.k local.gun local.g
+		}
+		wait 1
+	}
+}end
+
+
+nb_gunner local.k local.gun:{
+	local.fw = angles_toforward local.gun.angles
+	local.p = local.gun.origin - ( local.fw * 40 )
+	local.t = traced ( local.p + ( 0 0 60 ) ) ( local.p + ( 0 0 -200 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.t["startSolid"] != 1 && local.t["fraction"] < 1.0 ){ local.p = local.t["endpos"] }
+	local.m = exec coop_mod/officer.scr::coop_model_for "infantry"
+	local.g = spawn local.m
+	if( local.g == NULL || local.g == NIL ){ end NIL }
+	local.g.origin = local.p
+	local.g exec global/disable_ai.scr
+	local.g.coop_xpClass = "reinf"
+	local.g.flags["coop_waveSrc"] = "nebel"
+	local.g.health = 110
+	exec coop_mod/officer.scr::coop_reinf_scale local.g
+	local.g type_idle machinegunner
+	local.g type_attack machinegunner
+	local.g type_disguise machinegunner
+	local.g type_grenade machinegunner
+	local.g turret local.gun
+	local.g threatbias 300
+	local.g.flags["coopMG42_gunner"] = 1
+	local.g exec global/enable_ai.scr
+	waitthread nb_log ( "nest " + local.k + " gunner placed at " + local.p + " gun at " + local.gun.origin )
+}end local.g
+
+
+nb_nest_state local.k local.gun local.g:{
+	local.al = 0
+	local.d = 99999
+	local.en = "none"
+	if( local.g != NIL && local.g != NULL ){
+		if( isAlive local.g ){
+			local.al = 1
+			local.d = int( vector_length ( local.g.origin - local.gun.origin ) )
+			local.e = local.g.enemy
+			if( local.e != NULL && local.e != NIL ){ local.en = local.e.classname }
+		}
+	}
+	waitthread nb_log ( "nest " + local.k + " gunner_alive=" + local.al + " dist_to_gun=" + local.d + " enemy=" + local.en + " deaths=" + level.coop_nbNestDeaths[local.k] )
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// DEFENDERS (2 + players riflemen per Nebelwerfer, leashed, cover AI) + snipers
+// ---------------------------------------------------------------------------------------------------------------------
+nb_defenders:{
+	wait 2
+	local.pc = waitthread nb_pc
+	local.n = 2 + local.pc
+	if( local.n > 6 ){ local.n = 6 }
+	for( local.k = 1; local.k <= 4; local.k++ ){
+		local.np = waitthread nb_nebpos local.k
+		if( local.np == NIL ){ continue }
+		thread nb_defend_one local.k local.np local.n
+	}
+	local.ns = 0
+	if( local.pc >= 3 ){ local.ns = 1 }
+	if( local.pc >= 5 ){ local.ns = 2 }
+	for( local.i = 1; local.i <= local.ns; local.i++ ){
+		local.np = waitthread nb_nebpos ( local.i + 1 )
+		if( local.np != NIL ){
+			thread coop_mod/officer.scr::coop_spawn_sniper local.np
+			waitthread nb_log ( "sniper " + local.i + " sent to Nebelwerfer " + ( local.i + 1 ) )
+		}
+	}
+}end
+
+
+nb_defend_one local.k local.np local.n:{
+	// never in view: wait (max 30 s) until the spot is out of every living player's sight
+	local.w = 0
+	while( ( waitthread nb_seen ( local.np + ( 0 0 50 ) ) ) == 1 && local.w < 30 ){
+		wait 1
+		local.w++
+	}
+	local.made = 0
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		local.gnd = exec coop_mod/officer.scr::coop_spread_pos local.np local.i
+		if( local.gnd == NIL ){ continue }
+		local.m = exec coop_mod/officer.scr::coop_model_for "infantry"
+		local.s = spawn local.m
+		if( local.s == NULL || local.s == NIL ){ continue }
+		local.s.coop_xpClass = "reinf"
+		local.s.flags["coop_waveSrc"] = "nebel"
+		local.s.origin = local.gnd
+		local.s droptofloor
+		local.s.health = 120
+		local.s.accuracy = 65
+		local.s.leash = 900
+		local.s.enableEnemy = 1
+		local.k3 = local.i - ( int( local.i / 3 ) * 3 )
+		if( local.k3 == 0 ){
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mp40"
+		} else if( local.k3 == 1 ){
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "mauser kar 98k"
+		} else {
+			local.s waitthread coop_mod/aihandler.scr::coop_actorArm "stg44"
+		}
+		exec coop_mod/officer.scr::coop_reinf_scale local.s
+		local.s type_attack cover
+		if( level.coop_counterN == NIL ){ level.coop_counterN = 0 }
+		level.coop_counterN++
+		level.coop_counterActors[level.coop_counterN] = local.s
+		local.made++
+		waitframe
+	}
+	waitthread nb_log ( "defenders at Nebelwerfer " + local.k + ": " + local.made + " of " + local.n + " (waited " + local.w + " s for them to be out of sight)" )
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// MONITOR: plants -> defend wave, first blast -> counter-push, mortar, state summary
+// ---------------------------------------------------------------------------------------------------------------------
+nb_wave local.what local.n:{
+	// a hidden entry first (900+ u from every player, no eye line); no entry = no wave this time (never spawn in view)
+	local.pos = waitthread coop_mod/reinf.scr::rnf_entry NIL
+	if( local.pos == NIL ){
+		waitthread nb_log ( local.what + ": no hidden entry - wave skipped" )
+		end 0
+	}
+	local.k = 0
+	while( local.k < local.n ){
+		thread coop_mod/officer.scr::coop_spawn_infantry_squad local.pos
+		local.k++
+		wait 2
+	}
+	waitthread nb_log ( local.what + ": " + local.n + " squad(s) sent from " + local.pos )
+}end 1
+
+
+nb_monitor:{
+	local.planted[1] = 0
+	local.planted[2] = 0
+	local.planted[3] = 0
+	local.planted[4] = 0
+	local.blown[1] = 0
+	local.blown[2] = 0
+	local.blown[3] = 0
+	local.blown[4] = 0
+	local.firstblast = 0
+	local.mortar = 0
+	local.tick = 0
+	while( level.scene7_bombcount != 0 && ( level.time - level.coop_nbT0 ) < 1800 ){
+		wait 1
+		local.tick++
+		for( local.n = 1; local.n <= 4; local.n++ ){
+			if( local.planted[local.n] == 0 && level.coop_threadCalled["scene7_bombplant"][local.n] == game.true ){
+				local.planted[local.n] = 1
+				waitthread nb_log ( "charge planted on Nebelwerfer " + local.n + " - 4 s fuse: DEFEND" )
+				waitthread coop_mod/feed.scr::feed_all 0 "nb_def" "Charge set - defend it until it blows"
+				thread nb_wave ( "defend wave " + local.n ) 1
+				if( local.mortar == 0 ){
+					local.mortar = 1
+					thread nb_mortar
+				}
+			}
+			local.st = level.scene7_bombpoint1_status
+			if( local.n == 2 ){ local.st = level.scene7_bombpoint2_status }
+			if( local.n == 3 ){ local.st = level.scene7_bombpoint3_status }
+			if( local.n == 4 ){ local.st = level.scene7_bombpoint4_status }
+			if( local.blown[local.n] == 0 && local.st == 1 ){
+				local.blown[local.n] = 1
+				waitthread nb_log ( "Nebelwerfer " + local.n + " destroyed, remaining " + level.scene7_bombcount )
+				if( local.firstblast == 0 ){
+					local.firstblast = 1
+					waitthread coop_mod/feed.scr::feed_all 0 "nb_ctr" "Counter-attack - they are coming for the other guns"
+					local.pc = waitthread nb_pc
+					local.sq = 1
+					if( local.pc >= 3 ){ local.sq = 2 }
+					thread nb_wave "COUNTER-PUSH" local.sq
+				}
+			}
+		}
+		if( local.tick >= 10 ){
+			local.tick = 0
+			local.al = waitthread coop_mod/coop_counter.scr::counter_alive "nebel"
+			waitthread nb_log ( "summary: nebel men alive=" + local.al + " bombcount=" + level.scene7_bombcount + " elapsed=" + int( level.time - level.coop_nbT0 ) + " s" )
+		}
+	}
+	waitthread nb_log "monitor ends: all Nebelwerfers destroyed or time limit"
+}end
+
+
+nb_mortar:{
+	wait 15
+	for( local.try = 0; local.try < 3; local.try++ ){
+		local.pos = waitthread coop_mod/reinf.scr::rnf_entry NIL
+		local.pl = NIL
+		for( local.i = 1; local.i <= $player.size && local.pl == NIL; local.i++ ){
+			local.q = $player[local.i]
+			if( local.q != NULL && local.q != NIL && isAlive local.q && local.q.dmteam != "spectator" ){ local.pl = local.q }
+		}
+		if( local.pos != NIL && local.pl != NIL ){
+			level.coop_nbMortarOk = 1
+			local.r = waitthread coop_mod/mortar.scr::mz_g_wave local.pos local.pl.origin
+			if( local.r == 1 ){
+				waitthread nb_log "German mortar crew deployed"
+				end
+			}
+		}
+		wait 25
+	}
+	waitthread nb_log "no German mortar crew this time (chance / sites)"
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ROCKETS at the church + HALFTRACKS
+// ---------------------------------------------------------------------------------------------------------------------
+// how many of the approach points (church -> Nebelwerfer 1, 30..95 %) the stop sees from gunner height
+nb_overlook local.stop:{
+	local.a = ( 1551 -2370 -255 )
+	local.b = waitthread nb_nebpos 1
+	if( local.b == NIL ){ end 0 }
+	local.n = 0
+	for( local.i = 3; local.i <= 9; local.i++ ){
+		local.pt = local.a + ( ( local.b - local.a ) * ( local.i / 10 ) )
+		local.t = traced ( local.stop + ( 0 0 90 ) ) ( local.pt + ( 0 0 56 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.t["fraction"] >= 1.0 ){ local.n++ }
+	}
+}end local.n
+
+
+nb_rockets_and_halftracks:{
+	wait 1
+	local.pc = waitthread nb_pc
+	waitthread coop_mod/alarmveh_routes.scr::av_data "m3l3"
+	local.nht = 0
+	if( level.av_rn != NIL && level.av_rn > 0 && getcvar( "coop_nebelHt" ) != "0" ){
+		local.nht = 1
+		if( local.pc >= 3 ){ local.nht = 2 }
+		if( local.nht > level.av_rn ){ local.nht = level.av_rn }
+	}
+	// the mission halftrack must be dead first (two hulls on one road crush each other)
+	if( local.nht > 0 && level.halftrack_alive != 0 ){
+		waitthread nb_log "the mission halftrack is still alive - no guard halftracks"
+		local.nht = 0
+	}
+	// the rocket resupply first (stops of the routes we will use decide where it may stand)
+	waitthread nb_crate local.nht
+	for( local.r = 1; local.r <= local.nht; local.r++ ){
+		local.stop = level.av_p[( local.r * 100 ) + level.av_n[local.r]]
+		local.ov = waitthread nb_overlook local.stop
+		waitthread nb_log ( "halftrack " + local.r + " stop " + local.stop + " overlooks " + local.ov + " of 7 approach points" )
+		local.okk = 0
+		for( local.try = 0; local.try < 15 && local.okk == 0; local.try++ ){
+			local.why = waitthread coop_mod/alarmveh.scr::av_entry_ok local.r
+			if( local.why == "" ){ local.okk = 1 } else { wait 2 }
+		}
+		if( local.okk == 0 ){
+			waitthread nb_log ( "halftrack " + local.r + " SKIPPED: no hidden entry, reason " + local.why )
+			continue
+		}
+		waitthread coop_mod/alarmveh.scr::av_launch local.r ( 0 - 7 )
+		wait 8
+	}
+}end
+
+
+// the rocket crate: within 700 u of where the hold ends, hidden from every halftrack stop (3 heights) and their MGs, reachable
+nb_crate local.nht:{
+	local.c = ( 1551 -2370 -255 )
+	local.nc = 0
+	local.best = NIL
+	local.bd = 999999
+	local.per = 0
+	for( local.ox = -700; local.ox <= 700; local.ox = local.ox + 50 ){
+		for( local.oy = -700; local.oy <= 700; local.oy = local.oy + 50 ){
+			local.d = vector_length ( local.ox local.oy 0 )
+			if( local.d > 700 ){ continue }
+			local.per++
+			if( local.per >= 5 ){
+				local.per = 0
+				waitframe
+			}
+			local.cx = local.c[0] + local.ox
+			local.cy = local.c[1] + local.oy
+			local.zt = local.c[2] + 250
+			local.zb = local.c[2] - 250
+			local.g = traced ( local.cx local.cy local.zt ) ( local.cx local.cy local.zb ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.g["startSolid"] == 1 || local.g["fraction"] >= 1.0 ){ continue }
+			local.gp = local.g["endpos"]
+			local.dz = local.gp[2] - local.c[2]
+			if( local.dz < 0 ){ local.dz = 0 - local.dz }
+			if( local.dz > 120 ){ continue }
+			local.b = traced ( local.gp + ( 0 0 4 ) ) ( local.gp + ( 0 0 50 ) ) 0 ( -12 -12 0 ) ( 12 12 12 )
+			if( local.b["startSolid"] == 1 || local.b["fraction"] < 1.0 ){ continue }
+			local.hid = 1
+			for( local.r = 1; local.r <= local.nht; local.r++ ){
+				local.stop = level.av_p[( local.r * 100 ) + level.av_n[local.r]]
+				if( ( waitthread coop_mod/alarmveh.scr::av_hidden local.stop local.gp ) != 1 ){ local.hid = 0 }
+			}
+			if( local.hid != 1 ){ continue }
+			if( local.d < local.bd ){
+				local.bd = local.d
+				local.best = local.gp
+			}
+		}
+	}
+	if( local.best == NIL ){
+		waitthread nb_log "rocket crate: no hidden spot within 700 u of the church - none placed"
+		end 0
+	}
+	local.ok = 0
+	local.n0 = level.coop_atSupplyN
+	if( local.n0 == NIL ){ local.n0 = 0 }
+	waitthread coop_mod/atsupply.scr::coop_atSupply_place local.best 200 "bazooka" "nebel_church" 3
+	if( level.coop_atSupplyN > local.n0 ){ local.ok = 1 }
+	if( local.ok == 0 ){ local.ok = waitthread coop_mod/alarmveh.scr::av_crate_raw local.best 200 "bazooka" "nebel_church" }
+	if( local.ok == 1 ){
+		set_objective_pos local.best
+		waitthread coop_mod/feed.scr::feed_all 0 "nb_rocket" "Halftracks guarding the Nebelwerfers - rockets at the church"
+		waitthread nb_log ( "ROCKET CRATE at " + local.best + " dist_to_church=" + int( local.bd ) + " hidden from " + local.nht + " halftrack stop(s), launcher bazooka + 3 shells (infinite respawn)" )
+	} else {
+		waitthread nb_log ( "rocket crate: placement refused at " + local.best )
+	}
+}end local.ok
