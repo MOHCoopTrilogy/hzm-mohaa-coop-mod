@@ -184,6 +184,10 @@ main:{
 
 	//[200] chrissstrahl - fixed scripts abborting if player dies in coop
 	while ( level.gametype != 0 || isalive $player ){
+		//[bug-4011] coop: every light now owns its target (self.spottgt, spot_pick). The old single sticky
+		//level.spottarget (nearest player to the LAST light, at one instant) is what pinned every beam on one
+		//far-away player, so this SP-only keeper loop must not run in coop.
+		if( level.gametype != 0 ){ wait 5; continue }
 		//[200] chrissstrahl - if we have a spot target there is nothing to worry
 		//changed wait time from 3 to 1 sec, this should be better for coop
 		if (level.spottarget != NIL && isalive level.spottarget){
@@ -308,10 +312,10 @@ spotowner:{
 		if( local.gun == NULL ){ end }
 		if ((level.spotplayer[self.parent.set] == 1) && (self.parent.on_target == 1)){
 			//[200] chrissstrahl - don't fire if there is no target
-			if(level.spottarget != NULL){
-				//[200] chrissstrahl - fixed level.spottarget
-println "::spotowner targeting 1: level.spottarget"
-				local.gun setAimTarget level.spottarget
+			if(self.parent.spottgt != NULL){
+				//[bug-4011] aim at the player THIS light is holding
+println "::spotowner targeting 1: parent.spottgt"
+				local.gun setAimTarget self.parent.spottgt
 				local.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
 				local.gun startFiring
 				local.shooting = 1
@@ -337,9 +341,9 @@ println "::spotowner clearaimtarget 1"
 
 		if (self.visible == 1){
 			//[200] chrissstrahl - fixed level.spottarget
-			if (level.spottarget != NULL && self cansee level.spottarget){
-println "::spotowner targeting 2: level.spottarget"
-				local.gun setAimTarget level.spottarget
+			if (self.parent.spottgt != NULL && self cansee self.parent.spottgt){
+println "::spotowner targeting 2: parent.spottgt"
+				local.gun setAimTarget self.parent.spottgt
 				local.gun burstFireSettings level.spot_burstmin level.spot_burstmax level.spot_burstdownmin level.spot_burstdownmax
 				local.gun startFiring
 				local.shooting = 1
@@ -496,6 +500,10 @@ spotwatch:{
 	
 	self thread spotpath
 	self thread spotdamage
+	self.spottgt = NULL
+	self.coopHunt = 0
+	self.coopStepT = level.time
+	self thread spot_pick
 	
 	self.spotter.health = 1
 	self.spotter.parent = self
@@ -546,6 +554,7 @@ spotwatch:{
 		}
 		else if (level.time > local.threadtimer){
 			self.spotlight.origin = trace self.bulb.origin self.currentaim.origin 0
+			if (self.coopHunt == 1 && self.spottgt != NULL){ self.spotlight.origin = self.currentaim.origin + ( 0 0 6 ) }
 			self waitthread aimspot
 
 			if (self.fastcheck == 0){
@@ -689,17 +698,13 @@ aimspot:{
 	self.bulb.angles = local.angles
 
 
-	//[200] chrissstrahl - function does now exit as it should, rather than
-	//waiting for a player to become valid and making all the other scripts wait
-	//[200] chrissstrahl - fixed level.spottarget and 
-	if(level.spottarget == NULL){
-		//println("::aimspot NULL") //[200] chrissstrahl - debug
+	//[bug-4011] the light's own target (spot_pick), not one shared level var
+	if(self.spottgt == NULL){
 		end
 	}
-	//[200] chrissstrahl - fixed using wrong entity
-	local.spottarget = level.spottarget
-	local.spottargetorigin = level.spottarget.origin
-	
+	local.spottarget = self.spottgt
+	local.spottargetorigin = self.spottgt.origin
+
 //	if (level.spot
 	if (vector_length(self.spotlight.origin - local.spottargetorigin) < self.lightdist){
 		local.vect = trace self.spotlight.origin local.spottargetorigin 1
@@ -712,7 +717,7 @@ aimspot:{
 			}
 			
 			//[200] chrissstrahl - handle for player (sp/coop)
-			if(level.spottarget.classname == "Player"){
+			if(self.spottgt.classname == "Player"){
 				if(level.gametype == 0){
 					if($player.is_disguised){
 						local.break = 1
@@ -720,11 +725,11 @@ aimspot:{
 				}else{
 					//[200] Smithy - has_disguise and is_disguise are different and both are used. 
 					//[200] Smithy - but we use a coop flag to check for disguise now, so replace it with that...
-					if( level.spottarget == NULL ||
-						level.spottarget.flags["coop_isDisguised"] ||
-						level.spottarget.health <= 0 ||
-						level.spottarget.dmteam == "spectator" ||
-						level.spottarget.flags["coop_isActive"] != 1 )
+					if( self.spottgt == NULL ||
+						self.spottgt.flags["coop_isDisguised"] ||
+						self.spottgt.health <= 0 ||
+						self.spottgt.dmteam == "spectator" ||
+						self.spottgt.flags["coop_isActive"] != 1 )
 					{
 						local.break = 1
 					}
@@ -806,19 +811,41 @@ search:{
 
 		//[200] chrissstrahl - wait a moment and then continue
 		//this was wrong and also not commented
-		if(self.search.origin == NIL || level.spottarget == NULL){
+		if(self.search.origin == NIL){
 			waitframe
 			//println("::search loop continue") //[200] chrissstrahl - debug
 			continue
 		}
 		
-		if (level.spotplayer[self.set] == 1){
+		if (level.spotplayer[self.set] == 1 && self.spottgt != NULL && self.coopHunt == 1){
+			//[bug-4011] DETECTED: swing onto the player at a believable speed (eased, capped), every frame
+			self.fastcheck = 1
+			local.dt = level.time - self.coopStepT
+			if( local.dt > 0.1 ){ local.dt = 0.1 }
+			if( local.dt < 0 ){ local.dt = 0 }
+			self.coopStepT = level.time
+			local.org = self.search.origin
+			local.dest = self.spottgt.origin
+			local.diff = local.dest - local.org
+			local.len = vector_length local.diff
+			local.speed = 260 + ( local.len * 1.1 )
+			if( local.speed > 900 ){ local.speed = 900 }
+			local.step = local.speed * local.dt
+			if( local.step >= local.len ){
+				local.org = local.dest
+			}
+			else{
+				local.dir = vector_normalize local.diff
+				local.org = local.org + ( local.dir * local.step )
+			}
+			self.search.origin = local.org
+		}
+		else if (level.spotplayer[self.set] == 1 && self.spottgt != NULL){
 			if (self.found_target == 1){
 				if (self.on_target == 1){
 					self.fastcheck = 1
 					local.org = self.search.origin
-					//[200] chrissstrahl - fixed using wrong entity
-					local.dest = level.spottarget.origin
+					local.dest = self.spottgt.origin
 					local.trans = 0.1
 					for (local.i=0;local.i<3;local.i++){
 						local.org[local.i] = (local.org[local.i] * (1 - local.trans)) + (local.dest[local.i] * local.trans)
@@ -839,8 +866,7 @@ search:{
 			else{
 				self.fastcheck = 1
 				local.org = self.search.origin
-				//[200] chrissstrahl - fixed using wrong entity
-				local.dest = level.spottarget.origin
+				local.dest = self.spottgt.origin
 				local.trans = 0.1
 				for (local.i=0;local.i<3;local.i++){
 					local.org[local.i] = (local.org[local.i] * (1 - local.trans)) + (local.dest[local.i] * local.trans)
@@ -1110,6 +1136,178 @@ flame:
 //============================================================================
 	exec global/model.scr self.origin models/fx/fx_spotlighthit
 end
+
+//============================================================================
+spot_valid local.p:{
+//============================================================================
+	//[bug-4011] a player a searchlight may pick: alive, in play, not a spectator, not noclip, NOT disguised
+	local.ok = 0
+	if( local.p != NULL && local.p != NIL ){
+		if( local.p.health > 0 && local.p.dmteam != "spectator" && local.p.flags["coop_isActive"] == 1 && local.p.flags["coopDevNoclip"] == NIL ){
+			if( local.p.flags["coop_isDisguised"] != 1 && local.p.is_disguised != 1 ){
+				local.ok = 1
+			}
+		}
+	}
+}end local.ok
+
+//============================================================================
+spot_validAI local.a:{
+//============================================================================
+	//[bug-4011] an allied combatant a light may hunt: alive, genuinely on our side (paradrop troopers, ally squad,
+	//escorted friendlies, converted Germans). NEVER vanilla-sequence scene actors, disabled AI, or anyone held
+	//invulnerable by a script (keepInvulnerable health) - those must survive their scene.
+	local.ok = 0
+	if( local.a != NULL && local.a != NIL ){
+		if( isAlive local.a && local.a.classname != "Player" && local.a.team == "american" ){
+			if( local.a.flags["coop_sceneActor"] != 1 && local.a.coop_aiDisabled != 1 && local.a.health < 100000 ){
+				local.ok = 1
+			}
+		}
+	}
+}end local.ok
+
+//============================================================================
+spot_detected:{
+//============================================================================
+	//[bug-4011] 1 when the players are NOT undetected: alarm live, or a German within 2200u of this light
+	//has a (non-disguised) player as enemy. Disguised players never count.
+	self.coopWhy = "none"
+	if( level.coop_alarmLive == 1 ){ self.coopWhy = "coop_alarmLive" ; end 1 }
+	if( level.alarm == 1 ){ self.coopWhy = "level.alarm" ; end 1 }
+	local.arr = level.coop_actorArray["german"]
+	if( local.arr == NIL || local.arr == NULL ){ end 0 }
+	local.hit = 0
+	for( local.i = 1; local.i <= local.arr.size && local.hit == 0; local.i++ ){
+		local.a = local.arr[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !isAlive local.a ){ continue }
+		local.e = local.a.enemy
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.e.classname == "Player" ){
+			if( local.e.is_disguised == 1 || local.e.flags["coop_isDisguised"] == 1 ){ continue }
+		}
+		else{
+			local.eok = waitthread spot_validAI local.e
+			if( local.eok != 1 ){ continue }
+		}
+		if( vector_length( local.a.origin - self.origin ) < 2200 ){ local.hit = 1 ; self.coopWhy = "german ent" + local.a.entnum + " enemy=" + local.e.classname }
+	}
+}end local.hit
+
+//============================================================================
+spot_pick:{
+//============================================================================
+	//[bug-4011] per-light target. In SP: the old level.spottarget. In coop: undetected -> only a beam-catch
+	//candidate (scripted friendly, else nearest player) and the light keeps its vanilla sweep; detected ->
+	//the nearest player this light can SEE (sighttrace from the bulb), tracked at a capped turn speed,
+	//switched when lost/dead, and released to the sweep 12 s after the last detection.
+	self.coopAlertUntil = 0
+	while( (self.checkdeath == 0) || (isalive $(self.spotter)) ){
+		wait 0.4
+		if( level.gametype == 0 ){
+			self.spottgt = level.spottarget
+			continue
+		}
+		local.alert = waitthread spot_detected
+		if( local.alert != self.coopLastAlert ){
+			self.coopLastAlert = local.alert
+			println( "^~^~^ SPOTLIGHT detect=" + local.alert + " set=" + self.set + " group=" + self.group + " why=" + self.coopWhy )
+		}
+		if( local.alert == 1 ){ self.coopAlertUntil = level.time + 12 }
+		local.hunting = 0
+		if( level.time < self.coopAlertUntil ){ local.hunting = 1 }
+		local.eye = self.origin + ( 0 0 40 )
+		local.best = NULL
+		local.bd = 2600
+		local.bestAny = NULL
+		local.bad = 999999
+		local.bestAI = NULL
+		local.aid = 2600
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			local.ok = waitthread spot_valid local.p
+			if( local.ok != 1 ){ continue }
+			local.tp = local.p.origin + ( 0 0 40 )
+			local.d = vector_length( local.tp - local.eye )
+			if( local.d < local.bad ){ local.bad = local.d; local.bestAny = local.p }
+			if( local.d >= local.bd ){ continue }
+			local.v = trace local.eye local.tp 1
+			if( local.v[0] == local.tp[0] && local.v[1] == local.tp[1] && local.v[2] == local.tp[2] ){
+				local.bd = local.d
+				local.best = local.p
+			}
+		}
+		local.aarr = level.coop_actorArray["american"]
+		if( local.aarr != NIL && local.aarr != NULL ){
+			for( local.i = 1; local.i <= local.aarr.size; local.i++ ){
+				local.q = local.aarr[local.i]
+				local.qok = waitthread spot_validAI local.q
+				if( local.qok != 1 ){ continue }
+				local.qtp = local.q.origin + ( 0 0 40 )
+				local.qd = vector_length( local.qtp - local.eye )
+				if( local.qd >= local.aid ){ continue }
+				local.qv = trace local.eye local.qtp 1
+				if( local.qv[0] == local.qtp[0] && local.qv[1] == local.qtp[1] && local.qv[2] == local.qtp[2] ){
+					local.aid = local.qd
+					local.bestAI = local.q
+				}
+			}
+		}
+		//players first: an AI only wins when clearly (30 percent) closer than the best visible player
+		if( local.bestAI != NULL ){
+			if( local.best == NULL ){ local.best = local.bestAI }
+			else if( local.aid < ( local.bd * 0.7 ) ){ local.best = local.bestAI }
+		}
+		if( local.hunting == 1 ){
+			//keep the current mark while it is still visible and valid (no ping-pong between two players)
+			local.cur = self.spottgt
+			if( local.cur != NULL && local.cur != NIL ){
+				if( local.cur.classname == "Player" ){ local.cok = waitthread spot_valid local.cur }
+				else{ local.cok = waitthread spot_validAI local.cur }
+				if( local.cur.classname != "Player" && local.best != NULL && local.best.classname == "Player" ){ local.cok = 0 }
+				if( local.cok == 1 && local.best != NULL ){
+					local.ctp = local.cur.origin + ( 0 0 40 )
+					local.cv = trace local.eye local.ctp 1
+					if( local.cv[0] == local.ctp[0] && local.cv[1] == local.ctp[1] && local.cv[2] == local.ctp[2] && vector_length( local.ctp - local.eye ) < 2600 ){
+						local.best = local.cur
+					}
+				}
+			}
+			if( local.best != NULL ){
+				if( self.spottgt != local.best ){ println( "^~^~^ SPOTLIGHT hunt set=" + self.set + " group=" + self.group + " target=" + local.best.targetname + "/" + local.best.classname ) }
+				self.spottgt = local.best
+				self.coopHunt = 1
+				level.spotplayer[self.set] = 1
+				level.spotplayertime[self.set] = level.time + 6
+				self.spotplayer = 1
+				self.searchtime = level.time + 3
+				if( self.currentaim != self.search ){
+					self.search.origin = self.spotlight.origin
+					self.currentaim = self.search
+				}
+			}
+			else{
+				//lost: stop hunting; the vanilla search/return-to-sweep logic takes over
+				if( self.coopHunt == 1 ){ println( "^~^~^ SPOTLIGHT lost set=" + self.set + " group=" + self.group ) }
+				self.coopHunt = 0
+				self.spottgt = NULL
+			}
+		}
+		else{
+			if( self.coopHunt == 1 ){ println( "^~^~^ SPOTLIGHT calm set=" + self.set + " group=" + self.group + " -> sweep" ) }
+			self.coopHunt = 0
+			//undetected: scripted friendly (m1l2a) else nearest player, for the vanilla beam-catch only
+			local.t = level.spottarget
+			if( local.t != NULL && local.t != NIL && local.t.classname != "Player" && isalive local.t ){
+				self.spottgt = local.t
+			}
+			else{
+				self.spottgt = local.bestAny
+			}
+		}
+	}
+}end
 
 //============================================================================
 player_closest_to_spotlight:{
