@@ -5769,11 +5769,39 @@ coop_squad_surrender local.actor:{
 				local.ni++
 			}
 			if( local.near == 1 ){ continue }
+			//[user 2026-10-18, surrender-next] REAL CONDITIONS, not just "last man + a coin flip". Every gate
+			//below is cheap and re-evaluated each second until the roll is finally taken (the roll is
+			//one-shot, so it is spent only when the moment is right):
+			//  - map cap (coop_aiSurrenderMax) and global cooldown (coop_aiSurrenderCooldown s)
+			//  - he is actually hurt: real hp <= coop_aiSurrenderHpPct % of his max
+			//  - a player is close (coop_aiSurrenderPlayerRange u): giving up needs someone to give up TO
+			//  - no live officer within coop_aiSurrenderOfficerRange u (the boss keeps his men in line)
+			if( level.coop_surrCount == NIL ){ level.coop_surrCount = 0 }
+			local.cvMax = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderMax" 3
+			if( level.coop_surrCount >= local.cvMax ){ end }
+			if( level.coop_surrNext != NIL && level.time < level.coop_surrNext ){ continue }
+			local.hpNow = local.actor.flags["coop_actorActualHealth"]
+			local.hpMax = local.actor.flags["coop_woundedMaxHp"]
+			if( local.hpNow == NIL || local.hpMax == NIL || local.hpMax <= 0 ){ continue }
+			local.cvHp = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderHpPct" 60
+			local.hpLim = local.hpMax * local.cvHp
+			local.hpCur = local.hpNow * 100
+			if( local.hpCur > local.hpLim ){ continue }
+			local.sp = waitthread coop_mod/replace.scr::player_closestTo local.actor
+			if( local.actor == NULL || !isAlive local.actor ){ end }
+			if( local.sp == NULL || !isAlive local.sp ){ continue }
+			local.cvPr = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderPlayerRange" 1000
+			if( vector_length( local.sp.origin - local.actor.origin ) > local.cvPr ){ continue }
+			if( level.coop_officer != NULL && level.coop_officer != NIL && isAlive level.coop_officer ){
+				local.cvOr = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderOfficerRange" 1500
+				if( vector_length( level.coop_officer.origin - local.actor.origin ) < local.cvOr ){ continue }
+			}
 			//[user 2026-10-11, bug-3469] a MAP can switch surrender off (level.coop_noSurrender = 1):
 			//where the way out is gated on every counted defender being DEAD, a man who gives up
 			//instead holds the gate shut. m2l2b sets it.
 			if( level.coop_noSurrender == 1 ){ end }
-			if( (randomint 100) >= (int(getcvar "coop_aiSurrenderChance") + 0) ){ end }
+			local.cvCh = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderChance" 12
+			if( (randomint 100) >= local.cvCh ){ end }
 			if( local.actor.flags["coop_surrendered"] == 1 ){ end }
 			//[bug-2976] the last man on a mounted MG42 fights on it - anim_scripted scientist_surrender
 			//would release the turret exactly as the suppression dive did
@@ -5783,7 +5811,17 @@ coop_squad_surrender local.actor:{
 			}
 			//[bug-2037] nor an actor the MAP disabled - that is a scripted scene, not a combatant
 			if( local.actor.coop_aiDisabled == 1 ){ end }
+			//[user 2026-10-18, surrender-next] book the slot BEFORE any wait so two men cannot both take the last one
+			level.coop_surrCount = level.coop_surrCount + 1
+			local.cvCd = waitthread coop_mod/surrender.scr::srvCvar "coop_aiSurrenderCooldown" 60
+			level.coop_surrNext = level.time + local.cvCd
+			println( "^~^~^ SURRENDER ent=" + local.actor.entnum + " n=" + level.coop_surrCount + " t=" + level.time )
 			local.actor.flags["coop_surrendered"] = 1
+			//[user 2026-10-18, surrender-next] FRIENDLY AI MUST IGNORE HIM. enableEnemy 0 only stops HIM
+			//seeking enemies; allied actors still picked him as a target and shot or grenaded him. The
+			//engine's own ignore flag is THREATBIAS_IGNOREME: actorenemy.cpp drops any candidate with it
+			//(and evicts him from existing enemy lists), and players can still shoot him. convert resets it.
+			local.actor threatbias ignoreme
 			//[user 2026-08-21] "Still need the allied icon to pop up (same as paratroopers) over
 			//their head once they surrender and it should stay until they die." Same wire trick
 			//as the officer eagle: +coopboss turns the overhead icon ON, and
@@ -5800,7 +5838,14 @@ coop_squad_surrender local.actor:{
 			//[bug-1958] remember his real gun BEFORE the holster - holstering can leave
 			//binoculars as the active item, so a later unholster restores the WRONG thing;
 			//the recruit path re-gives this explicitly.
+			//[user 2026-10-18, surrender-next] STOP THE SHOOT STATE BEFORE HOLSTERING. Holstering mid-shot left him
+			//weapongroup "unarmed" while motionblend still ran his "<group>_shoot" action: Script Error unknown animation
+			//unarmed_shoot at the moment of surrender. Same order as the officer-poser exit: idle anim first, a short wait for
+			//the shoot action to end, THEN holster. The gun is read before the idle so the recruit path still re-gives it.
 			local.actor.coop_preSurrenderGun = local.actor.weapon
+			local.actor anim "idle"
+			wait 0.4
+			if( local.actor == NULL || !isAlive local.actor ){ end }
 			local.actor holster
 			wait 0.8
 			if( local.actor == NULL || !isAlive local.actor ){ end }
