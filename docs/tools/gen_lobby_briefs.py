@@ -13,8 +13,8 @@ The generated label  lobbybrief.scr::briefLines <map>  fills level.coop_briefN /
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-WRAP = 40
-MAXLINES = 6
+WRAP = 34
+MAXLINES = 8
 CALL = re.compile(r'(?:add_objectives|addobjective|exec\s+global/obj\.scr)\s+(\S+)\s+(\S+)\s+("([^"]*)"|level\.\w+)')
 ASSIGN = re.compile(r'level\.(\w+)\s*=\s*"([^"]*)"')
 
@@ -75,14 +75,26 @@ def main():
         texts = collect(m)
         if not texts:
             continue
-        lines = []
-        for i, t in enumerate(texts):
+        blocks_t = []
+        for t in texts:
             w = wrap(t)
             w[0] = "- " + w[0]
-            for extra in w[1:]:
-                pass
-            lines += [w[0]] + ["  " + x for x in w[1:]]
-        lines = lines[:MAXLINES]
+            blocks_t.append([w[0]] + ["  " + x for x in w[1:]])
+        total = sum(len(b) for b in blocks_t)
+        lines, shown = [], 0
+        if total <= MAXLINES:
+            for b in blocks_t:
+                lines += b
+                shown += 1
+        else:
+            for b in blocks_t:            # whole objectives only, one line kept for "+N more"
+                if len(lines) + len(b) > MAXLINES - 1:
+                    break
+                lines += b
+                shown += 1
+            lines.append("+%d more" % (len(blocks_t) - shown))
+        if not lines:
+            continue
         n_maps += 1
         body = "\n".join('\t\tlevel.coop_briefT[%d] = "%s"' % (i + 1, l.replace('"', "'")) for i, l in enumerate(lines))
         blocks.append('\tif( local.m == "%s" ){\n\t\tlevel.coop_briefN = %d\n%s\n\t\tend\n\t}\n' % (m, len(lines), body))
