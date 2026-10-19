@@ -1,0 +1,643 @@
+//=========================================================================
+// coop_mod/alarmveh.scr - ALARM VEHICLE ARRIVAL (docs/proposals/alarm_halftrack_2026-10-18/FEASIBILITY.md)
+//
+// While a live alarm runs, an Axis vehicle drives in along a stored route and stops near the squad:
+//   truck     Opel troop truck, 3-5 infantry dismount (vehicles_thinkers::truck_load / truck_unload), no gun
+//   halftrack Sd.Kfz. 251 with an MG42 gunner, only on routes that ship a rocket crate (proven maps)
+// Started by ONE call from alarm.scr::alm_start (`thread coop_mod/alarmveh.scr::av_pull`). Off unless coop_alarmVeh 1.
+//
+// RULES (user, 2026-10-18)
+//   - the vehicle arrives about 50-70 s after the pull (coop_alarmVehDelay 50 + 0..20 s) and never in the first 60 s of a map
+//   - a fixed rocket crate (atsupply.scr::coop_atSupply_place) is placed and announced AT ALARM START
+//   - it is NEVER created where a living player could see it: the route's entry (and its next two nodes) must be out of
+//     solid-world sight of every living player's eye and >= 1800 u from them (reinf.scr::rnf_entry's trace), else the
+//     vehicle waits (retries for 20 s) and then is SKIPPED. It is created hidden, re-tested, then shown.
+//   - hp / crew scale with the squad: 1-2 players: halftrack 300 / truck 600 / 3 men; 3-4: 450 / 900 / 4; 5+: 600 / 1200 / 5
+//   - it withdraws coop_alarmVehWithdraw (150) s after it arrived, or at once when the alarm ends
+// Routes: coop_mod/alarmveh_routes.scr (GENERATED from docs/tools/alarm_vehicle_routes.json). A map without a route is vehicle-off.
+// Debug: coop_alarmVehDebug 1 prints ^~^~^ ALMVEH lines.
+//=========================================================================
+
+av_log local.t:{
+	if( getcvar( "coop_alarmVehDebug" ) == "1" ){ println ( "^~^~^ ALMVEH " + local.t ) }
+}end
+
+
+av_cvar local.name local.def:{
+	local.v = getcvar( local.name )
+	if( local.v == "" ){ end local.def }
+}end ( int( local.v ) )
+
+
+// trace down to the floor under a point; the point itself when there is none
+av_ground local.p:{
+	local.t = traced ( local.p + ( 0 0 60 ) ) ( local.p + ( 0 0 -400 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+	if( local.t["startSolid"] == 1 || local.t["fraction"] >= 1.0 ){ end local.p }
+	local.g = local.t["endpos"]
+}end local.g
+
+
+// is the alarm of this pull still live?
+av_still local.pull:{
+	if( level.coop_alarmLive != 1 ){ end 0 }
+	if( level.coop_alarmPulls != local.pull ){ end 0 }
+}end 1
+
+
+// 1 when any living player has a solid-world line to local.pt (pt is a chest-height point)
+av_seen local.pt:{
+	if( $player == NULL || $player == NIL ){ end 0 }
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.flags["coop_isActive"] != 1 ){ continue }
+		if( local.p.dmteam == "spectator" ){ continue }
+		if( !isAlive local.p ){ continue }
+		local.tr = traced ( local.p.origin + ( 0 0 60 ) ) local.pt 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+		if( local.tr["fraction"] >= 1.0 ){ end 1 }
+	}
+}end 0
+
+
+// "" when route local.ri's entry is clear, else the reason. Entry node 1 and nodes 2..3 must have no eye line from any
+// living player (traced at roof and wheel height, mask 1 = solid world as reinf.scr::rnf_entry), node 1 must be 1800+ u
+// from every living player and the hull box at node 1 must be free of solid.
+av_entry_ok local.ri:{
+	local.base = local.ri * 100
+	local.n = level.av_n[local.ri]
+	local.pn = 0
+	if( $player != NULL && $player != NIL ){
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.flags["coop_isActive"] != 1 ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			local.pn++
+		}
+	}
+	if( local.pn < 1 ){ end "noplayers" }
+	local.lim = 3
+	if( local.n < 3 ){ local.lim = local.n }
+	for( local.k = 1; local.k <= local.lim; local.k++ ){
+		local.pt = level.av_p[local.base + local.k]
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.flags["coop_isActive"] != 1 ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			if( !isAlive local.p ){ continue }
+			if( local.k == 1 ){
+				if( vector_length( local.p.origin - local.pt ) < 1800 ){ end "near" }
+			}
+			local.eye = local.p.origin + ( 0 0 60 )
+			local.t1 = traced local.eye ( local.pt + ( 0 0 70 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.t1["fraction"] >= 1.0 ){ end "seen" }
+			local.t2 = traced local.eye ( local.pt + ( 0 0 12 ) ) 1023 ( 0 0 0 ) ( 0 0 0 ) 1
+			if( local.t2["fraction"] >= 1.0 ){ end "seen" }
+		}
+	}
+	local.gp = waitthread av_ground level.av_p[local.base + 1]
+	local.q = local.gp + ( 0 0 18 )
+	local.th = traced local.q ( local.q + ( 0 0 1 ) ) 1023 ( -110 -80 0 ) ( 110 80 90 ) 466945
+	if( local.th["startSolid"] == 1 || local.th["allSolid"] == 1 ){ end "blocked" }
+}end ""
+
+
+// crate for route local.ri, once per map. Returns 1 when it stands (or already stood).
+av_crate local.ri:{
+	if( level.av_crateOk[local.ri] == 1 ){ end 1 }
+	if( level.av_crateTried[local.ri] == 1 ){ end 0 }
+	level.av_crateTried[local.ri] = 1
+	local.kind = "bazooka"
+	if( level.coop_mapname == "m3l3" ){ local.kind = "panzerschreck" }
+	local.n0 = level.coop_atSupplyN
+	if( local.n0 == NIL ){ local.n0 = 0 }
+	waitthread coop_mod/atsupply.scr::coop_atSupply_place level.av_crate[local.ri] level.av_cyaw[local.ri] local.kind ( "alarmveh_" + level.coop_mapname + local.ri ) 3
+	if( level.coop_atSupplyN > local.n0 ){
+		level.av_crateOk[local.ri] = 1
+		waitthread av_log ( "crate ok route " + local.ri + " kind=" + local.kind + " at=" + level.av_crate[local.ri] )
+		end 1
+	}
+	waitthread av_log ( "crate FAILED route " + local.ri + " at=" + level.av_crate[local.ri] )
+}end 0
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the pull hook: ONE call from alarm.scr::alm_start. Everything below is self-contained and cancels when the alarm ends.
+// ---------------------------------------------------------------------------------------------------------------------
+av_pull:{
+	if( getcvar( "coop_alarmVeh" ) != "1" ){ end }
+	local.pull = level.coop_alarmPulls
+	if( level.av_pullDone == local.pull ){ end }
+	level.av_pullDone = local.pull
+	waitthread coop_mod/alarmveh_routes.scr::av_data level.coop_mapname
+	if( level.av_rn == NIL || level.av_rn < 1 ){
+		waitthread av_log ( "pull " + local.pull + ": no routes on " + level.coop_mapname + " - vehicle off" )
+		end
+	}
+	// the rocket crate is marked at alarm start
+	local.marked = 0
+	for( local.ri = 1; local.ri <= level.av_rn; local.ri++ ){
+		if( level.av_crate[local.ri] == NIL ){ continue }
+		if( ( waitthread av_crate local.ri ) == 1 ){ local.marked = 1 }
+	}
+	if( local.marked == 1 ){
+		waitthread coop_mod/feed.scr::feed_all 0 "av_crate" "Rocket crate marked - a vehicle is coming"
+	}
+	if( level.av_live == 1 ){
+		waitthread av_log "skip: a vehicle is still out"
+		end
+	}
+	// timing: about 50-70 s after the pull, never in the first 60 s of the map
+	local.delay = ( waitthread av_cvar "coop_alarmVehDelay" 50 ) + ( randomint 21 )
+	waitthread av_log ( "pull " + local.pull + ": vehicle due in " + local.delay + " s" )
+	local.mint = waitthread av_cvar "coop_alarmVehMinTime" 60
+	while( local.delay > 0 || level.time < local.mint ){
+		wait 1
+		local.delay = local.delay - 1
+		if( ( waitthread av_still local.pull ) != 1 ){
+			waitthread av_log "alarm ended before the vehicle was due"
+			end
+		}
+	}
+	// pick a route whose entry is hidden; retry for 20 s, then skip (never spawn in view)
+	local.ri = 0
+	local.why = "none"
+	for( local.try = 0; local.try < 10; local.try++ ){
+		if( ( waitthread av_still local.pull ) != 1 ){
+			waitthread av_log "alarm ended while waiting for a hidden entry"
+			end
+		}
+		local.s = randomint level.av_rn
+		for( local.j = 0; local.j < level.av_rn; local.j++ ){
+			local.c = 1 + ( ( local.s + local.j ) - ( int( ( local.s + local.j ) / level.av_rn ) * level.av_rn ) )
+			if( level.av_kind[local.c] == "halftrack" && level.av_crateOk[local.c] != 1 ){ local.why = "no crate"; continue }
+			local.why = waitthread av_entry_ok local.c
+			if( local.why == "" ){ local.ri = local.c; break }
+		}
+		if( local.ri > 0 ){ break }
+		wait 2
+	}
+	if( local.ri < 1 ){
+		waitthread av_log ( "SKIP: no hidden entry, reason " + local.why )
+		end
+	}
+	waitthread av_launch local.ri local.pull
+}end
+
+
+// create, test, show and send the vehicle of route local.ri
+av_launch local.ri local.pull:{
+	local.pc = waitthread coop_mod/coop_counter.scr::counter_players
+	if( local.pc < 1 ){ end }
+	local.kind = level.av_kind[local.ri]
+	local.hp = 600
+	local.pax = 3
+	if( local.kind == "halftrack" ){ local.hp = 300 }
+	if( local.pc >= 3 ){
+		local.pax = 4
+		if( local.kind == "halftrack" ){ local.hp = 450 } else { local.hp = 900 }
+	}
+	if( local.pc >= 5 ){
+		local.pax = 5
+		if( local.kind == "halftrack" ){ local.hp = 600 } else { local.hp = 1200 }
+	}
+	local.hc = getcvar( "coop_alarmVehHp" )
+	if( local.hc != "" && local.hc != "0" ){ local.hp = int( local.hc ) }
+	local.base = local.ri * 100
+	local.p1 = level.av_p[local.base + 1]
+	local.p2 = level.av_p[local.base + 2]
+	local.ang0 = vector_toangles ( local.p2 - local.p1 )
+	local.yaw = local.ang0[1]
+	local.gp = waitthread av_ground local.p1
+	if( level.av_serial == NIL ){ level.av_serial = 0 }
+	level.av_serial++
+	local.tn = ( "avveh" + level.av_serial )
+	local.v = spawn DrivableVehicle model level.av_model[local.ri] targetname local.tn origin ( local.gp + ( 0 0 18 ) ) angles ( 0 local.yaw 0 )
+	if( local.v == NULL || local.v == NIL ){
+		waitthread av_log ( "SKIP: spawn failed " + level.av_model[local.ri] )
+		end
+	}
+	// never visible while it is made: hidden + not solid until the entry is re-tested
+	local.v hide
+	local.v notsolid
+	level.av_live = 1
+	level.av_ent = local.v
+	local.v.av_kind = local.kind
+	local.v.av_ri = local.ri
+	local.v.av_pull = local.pull
+	local.v.health = local.hp
+	local.v rendereffects "-shadow"
+	if( local.kind == "truck" ){
+		local.v thread global/vehicles_thinkers.scr::truck_INIT
+		local.gt = exec coop_mod/officer.scr::coop_model_for "infantry"
+		local.v waitthread global/vehicles_thinkers.scr::truck_load local.pax local.gt NIL NIL NIL
+		waitthread av_tag_crew local.v local.pax
+	} else {
+		waitthread av_halftrack_setup local.v local.hp
+	}
+	wait 0.3
+	// the second, authoritative test with the vehicle sitting on the ground (players move during setup)
+	local.why = waitthread av_entry_ok local.ri
+	if( local.why != "" || ( waitthread av_still local.pull ) != 1 ){
+		waitthread av_log ( "SKIP at show: " + local.why )
+		waitthread av_cleanup local.v
+		end
+	}
+	local.v show
+	local.v solid
+	local.v takedamage
+	local.v removeondeath 0
+	waitthread av_log ( "ARRIVING " + local.kind + " route=" + local.ri + " " + level.av_name[local.ri] + " hp=" + local.hp + " pax=" + local.pax + " players=" + local.pc + " entry=" + local.p1 )
+	thread av_death local.v
+	local.first = waitthread av_chain local.v local.ri 0
+	local.sp = 250
+	if( local.kind == "halftrack" ){ local.sp = 160 }
+	local.v drive local.first local.sp 100 40 128
+	local.v thread av_wait_drive
+	if( local.kind == "halftrack" ){ thread av_gun local.v }
+	if( getcvar( "coop_alarmVehLoop" ) == "1" ){ thread av_loop local.v }
+	thread av_flow local.v local.pull
+}end
+
+
+// tag the crew as alarm men so coop_counter's cap / counters see them
+av_tag_crew local.v local.n:{
+	for( local.s = 1; local.s <= local.n; local.s++ ){
+		local.g = local.v.passenger[local.s]
+		if( local.g == NULL || local.g == NIL ){ continue }
+		local.g.coop_xpClass = "reinf"
+		local.g.flags["coop_waveSrc"] = "alarm"
+		local.g.health = 120
+		local.g.accuracy = 65
+		if( level.coop_counterN == NIL ){ level.coop_counterN = 0 }
+		level.coop_counterN++
+		level.coop_counterActors[level.coop_counterN] = local.g
+	}
+}end
+
+
+// halftrack: MG in turret slot 0 (PROBE-1), an AI-disabled gunner on passenger slot 1 (m3l3 / halftrack.scr recipe)
+av_halftrack_setup local.v local.hp:{
+	local.g = local.v queryturretslotentity 0
+	if( local.g == NULL || local.g == NIL ){
+		local.v spawnturret 0 "models/vehicles/sdkfz_mg42.tik"
+		wait 0.5
+		local.g = local.v queryturretslotentity 0
+	}
+	local.v.av_gun = local.g
+	local.v immune bullet
+	local.v immune fast_bullet
+	local.v immune grenade
+	local.v.health = local.hp
+	local.gm = exec coop_mod/officer.scr::coop_model_for "infantry"
+	local.gr = spawn local.gm
+	if( local.gr != NULL && local.gr != NIL ){
+		local.gr exec global/disable_ai.scr
+		local.gr holster
+		local.gr rendereffects "-shadow"
+		local.gr.coop_xpClass = "reinf"
+		local.gr.flags["coop_waveSrc"] = "alarm"
+		local.v AttachPassengerSlot 1 local.gr
+		local.gr nodamage
+		local.v.av_gunner = local.gr
+		if( level.coop_counterN == NIL ){ level.coop_counterN = 0 }
+		level.coop_counterN++
+		level.coop_counterActors[level.coop_counterN] = local.gr
+	}
+	waitthread av_log ( "halftrack gun=" + local.g + " gunner=" + local.gr )
+}end
+
+
+// a chain of info_waypoints for the route (rev = 1: stop -> entry). Returns the head. Entities are remembered for cleanup.
+av_chain local.v local.ri local.rev:{
+	local.k = level.av_n[local.ri]
+	local.base = local.ri * 100
+	if( level.av_serial2 == NIL ){ level.av_serial2 = 0 }
+	level.av_serial2++
+	local.tag = ( "avwp" + level.av_serial2 )
+	local.first = NULL
+	for( local.i = local.k; local.i >= 1; local.i-- ){
+		local.idx = local.i
+		if( local.rev == 1 ){ local.idx = ( local.k - local.i ) + 1 }
+		local.pt = level.av_p[local.base + local.idx]
+		if( local.i == local.k ){
+			local.w = spawn info_waypoint targetname ( local.tag + "_" + local.i ) origin local.pt
+		} else {
+			local.w = spawn info_waypoint targetname ( local.tag + "_" + local.i ) origin local.pt target ( local.tag + "_" + ( local.i + 1 ) )
+		}
+		if( level.av_wpN == NIL ){ level.av_wpN = 0 }
+		level.av_wpN++
+		level.av_wpL[level.av_wpN] = local.w
+		local.first = local.w
+	}
+}end local.first
+
+
+av_wait_drive:{
+	self waittill drive
+	self.av_arrived = 1
+}end
+
+
+// optional loop-sound fallback for the engine's vehicle sound state machine (DECISIONS.md: autotruck's own loopsounds)
+av_loop local.v:{
+	local.al = "opeltruck_snd_run"
+	if( local.v.av_kind == "halftrack" ){ local.al = "sdkfz_snd_run" }
+	local.s = spawn script_model
+	local.s model "models/fx/dummy.tik"
+	local.s notsolid
+	local.s.origin = local.v.origin
+	local.s loopsound local.al
+	while( local.v != NULL && isAlive local.v && local.v.av_leaving != 1 ){
+		local.s.origin = local.v.origin
+		waitframe
+	}
+	local.s stoploopsound
+	local.s remove
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// life cycle
+// ---------------------------------------------------------------------------------------------------------------------
+av_flow local.v local.pull:{
+	local.t0 = level.time
+	local.last = local.v.origin
+	local.lastT = level.time
+	local.wd = waitthread av_cvar "coop_alarmVehWithdraw" 150
+	while( 1 ){
+		wait 1
+		if( local.v == NULL || local.v == NIL ){ end }
+		if( !isAlive local.v ){ end }
+		if( local.v.av_leaving == 1 ){ end }
+		if( local.v.av_arrT == NIL ){
+			// driving in
+			if( local.v.av_arrived == 1 ){
+				waitthread av_arrive local.v
+			} else {
+				if( vector_length( local.v.origin - local.last ) > 30 ){
+					local.last = local.v.origin
+					local.lastT = level.time
+				} else if( ( level.time - local.lastT ) > 12 ){
+					waitthread av_log ( "stuck at " + local.v.origin + ": treated as arrived" )
+					waitthread av_arrive local.v
+				}
+			}
+			if( local.v.av_arrT == NIL && ( waitthread av_still local.pull ) != 1 ){
+				waitthread av_withdraw local.v "alarm ended"
+				end
+			}
+		} else {
+			if( ( level.time - local.v.av_arrT ) >= local.wd ){
+				waitthread av_withdraw local.v ( "" + local.wd + " s" )
+				end
+			}
+			if( ( waitthread av_still local.pull ) != 1 ){
+				waitthread av_withdraw local.v "alarm ended"
+				end
+			}
+		}
+	}
+}end
+
+
+av_arrive local.v:{
+	if( local.v.av_arrT != NIL ){ end }
+	local.v.av_arrT = level.time
+	waitthread av_log ( "ARRIVED " + local.v.av_kind + " at " + local.v.origin )
+	local.v disconnect_paths
+	if( local.v.av_kind == "truck" ){
+		local.v fullstop
+		local.v thread global/vehicles_thinkers.scr::truck_unload 1
+		waitthread av_log "unloading"
+	}
+	// a player must not drive it away
+	local.v lock
+}end
+
+
+// the vehicle left or is leaving: reverse route, then removal once no player can see it
+av_withdraw local.v local.why:{
+	if( local.v == NULL || local.v == NIL ){ end }
+	if( local.v.av_leaving == 1 ){ end }
+	local.v.av_leaving = 1
+	waitthread av_log ( "WITHDRAW, reason " + local.why + ": " + local.v.av_kind + " at " + local.v.origin )
+	local.ri = local.v.av_ri
+	if( local.v.av_kind == "truck" ){
+		// the truck stays long enough to finish unloading
+		local.w = 0
+		while( local.v.done_unloading != 1 && local.w < 12 ){ wait 1; local.w++ }
+	}
+	local.first = waitthread av_chain local.v local.ri 1
+	local.v unlock
+	local.v drive local.first 250 100 40 128
+	local.v.av_arrived = 0
+	local.v thread av_wait_drive
+	local.t = 0
+	local.last = local.v.origin
+	local.stuck = 0
+	while( local.t < 90 && local.v.av_arrived != 1 ){
+		wait 1
+		local.t++
+		if( local.v == NULL || local.v == NIL ){ end }
+		if( vector_length( local.v.origin - local.last ) < 20 ){ local.stuck++ } else { local.stuck = 0; local.last = local.v.origin }
+		if( local.stuck > 15 ){ break }
+	}
+	// removed only while nobody can see it
+	local.w = 0
+	while( local.w < 120 ){
+		if( local.v == NULL || local.v == NIL ){ end }
+		if( ( waitthread av_seen ( local.v.origin + ( 0 0 50 ) ) ) != 1 ){ break }
+		wait 1
+		local.w++
+	}
+	waitthread av_log ( "withdrawn and removed after " + local.t + " s" )
+	waitthread av_cleanup local.v
+}end
+
+
+// remove a vehicle with its crew, gunner, waypoints
+av_cleanup local.v:{
+	level.av_live = 0
+	if( local.v == NULL || local.v == NIL ){ end }
+	local.v.av_leaving = 1
+	local.g = local.v.av_gun
+	if( local.g != NULL && local.g != NIL ){
+		local.g stopfiring
+		local.g remove
+	}
+	local.gr = local.v.av_gunner
+	if( local.gr != NULL && local.gr != NIL ){ local.gr remove }
+	if( local.v.av_kind == "truck" ){
+		for( local.s = 1; local.s <= 6; local.s++ ){
+			local.e = local.v queryPassengerSlotEntity local.s
+			if( local.e != NULL && local.e != NIL && local.v.done_unloading != 1 && isAlive local.e ){ local.e remove }
+		}
+	}
+	if( local.v.av_wob != NULL && local.v.av_wob != NIL ){ local.v.av_wob remove }
+	local.v remove
+	if( level.av_wpN != NIL ){
+		for( local.i = 1; local.i <= level.av_wpN; local.i++ ){
+			local.w = level.av_wpL[local.i]
+			if( local.w != NULL && local.w != NIL ){ local.w remove }
+		}
+		level.av_wpN = 0
+	}
+}end
+
+
+// the vehicle was destroyed
+av_death local.v:{
+	local.v waittill death
+	if( local.v == NULL || local.v == NIL ){ level.av_live = 0; end }
+	local.v.av_leaving = 1
+	local.org = local.v.origin
+	local.ang = local.v.angles
+	local.kind = local.v.av_kind
+	waitthread av_log ( "DESTROYED " + local.kind + " at " + local.org )
+	waitthread coop_mod/feed.scr::feed_all 0 "av_dead" "Enemy vehicle destroyed"
+	local.v stop
+	local.v playsound explode_tank
+	local.fx = spawn script_model model "models/fx/fx_tank_explosion.tik"
+	if( local.fx != NULL ){
+		local.fx.origin = local.org + ( 0 0 40 )
+		local.fx notsolid
+		local.fx anim start
+		local.fx thread av_remove_after 8
+	}
+	radiusdamage ( local.org + ( 0 0 60 ) ) 250 100
+	// crew dies with it
+	local.gr = local.v.av_gunner
+	if( local.gr != NULL && local.gr != NIL ){
+		local.v DetachPassengerSlot 1 local.gr.origin
+		local.gr bedead
+		local.gr hide
+		local.gr notsolid
+	}
+	if( local.kind == "truck" ){
+		for( local.s = 1; local.s <= 6; local.s++ ){
+			local.e = local.v queryPassengerSlotEntity local.s
+			if( local.e != NULL && local.e != NIL && isAlive local.e ){
+				local.v DetachPassengerSlot local.s local.e.origin
+				local.e notsolid
+				local.e bedead
+			}
+		}
+		if( local.v.driver != NULL && local.v.driver != NIL && local.v.driving != 0 ){ local.v.driver delete }
+	}
+	local.g = local.v.av_gun
+	if( local.g != NULL && local.g != NIL ){
+		local.v DetachTurretSlot 0
+		local.g stopfiring
+		local.g remove
+	}
+	local.wm = "models/vehicles/sdkfz_green_d.tik"
+	local.mod = level.av_model[local.v.av_ri]
+	if( waitthread coop_mod/main.scr::containsText local.mod "winter" 0 ){ local.wm = "models/vehicles/halftrack_winter_d.tik" }
+	if( local.kind == "truck" ){
+		local.wm = "models/vehicles/opeltruck_d.tik"
+		if( waitthread coop_mod/main.scr::containsText local.mod "green" 0 ){ local.wm = "models/vehicles/opeltruckgreen_d.tik" }
+	}
+	local.v hide
+	local.v notsolid
+	local.wr = spawn script_model model local.wm
+	if( local.wr != NULL ){
+		local.wr.origin = local.org
+		local.wr.angles = local.ang
+		local.wr notsolid
+		local.wr thread av_remove_after 90
+	}
+	level.av_live = 0
+	wait 3
+	if( local.v != NULL ){ waitthread av_cleanup local.v }
+	level.av_live = 0
+}end
+
+
+av_remove_after local.s:{
+	wait local.s
+	if( self != NULL ){ self remove }
+}end
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// the halftrack's MG: m3l3's profile (maps/M3L3.scr::halftrack_mg_targeting) - bursts at a wandering aim point, spread 110,
+// damage 50, breathing pauses; the gunner is AI-disabled and attached, the burst is scripted.
+// ---------------------------------------------------------------------------------------------------------------------
+av_jit local.pl:{
+	local.off = 130
+	local.c = getcvar( "coop_htAimOff" )
+	if( local.c != "" && local.c != "0" ){ local.off = int( local.c ) }
+	local.rng = vector_length( local.pl.origin - self.origin ) / 1000
+	if( local.rng < 0.35 ){ local.rng = 0.35 }
+	local.sx = ( randomint 200 ) - 100
+	local.sy = ( randomint 200 ) - 100
+	local.sz = ( randomint 100 ) - 50
+	local.jx = ( local.sx * local.off ) / 100
+	local.jy = ( local.sy * local.off ) / 100
+	local.jz = ( local.sz * local.off ) / 100
+	local.jit = ( local.jx local.jy local.jz )
+	local.jit = local.jit * local.rng
+	local.pt = local.pl.origin + ( 0 0 40 ) + local.jit
+}end local.pt
+
+
+av_gun local.v:{
+	local.g = local.v.av_gun
+	local.gr = local.v.av_gunner
+	if( local.g == NULL || local.g == NIL || local.gr == NULL || local.gr == NIL ){
+		waitthread av_log "halftrack has no gun/gunner: silent"
+		end
+	}
+	local.wob = spawn script_origin
+	local.wob.origin = local.v.origin
+	local.v.av_wob = local.wob
+	local.spread = 110
+	local.hs = getcvar( "coop_htSpread" )
+	if( local.hs != "" && local.hs != "0" ){ local.spread = int( local.hs ) }
+	local.pc = waitthread coop_mod/coop_counter.scr::counter_players
+	local.pause = 1.5
+	if( local.pc < 3 ){ local.pause = 2.5 }
+	local.g maxyawoffset 55
+	local.g pitchcaps ( -25 25 0 )
+	local.g firedelay 0.1
+	while( local.v != NULL && isAlive local.v && local.v.av_leaving != 1 ){
+		local.pl = local.gr exec coop_mod/replace.scr::canseeGetClosest 200 3750
+		if( local.pl == NULL || local.pl == NIL ){
+			local.g stopfiring
+			wait 1
+			continue
+		}
+		local.gr lookat local.pl
+		local.gr turnto local.pl
+		if( vector_length( local.pl.origin - local.v.origin ) < 1400 ){
+			local.g bulletdamage 60
+			local.g bulletspread 65 65
+		} else {
+			local.g bulletdamage 50
+			local.g bulletspread local.spread local.spread
+		}
+		local.apt = local.v exec coop_mod/alarmveh.scr::av_jit local.pl
+		local.wob.origin = local.apt
+		local.g setaimtarget local.wob
+		local.g startfiring
+		if( local.v.av_firstShot == NIL ){
+			local.v.av_firstShot = 1
+			waitthread av_log "FIRING"
+		}
+		for( local.i = 0; local.i < 14; local.i++ ){
+			wait 0.25
+			if( local.v == NULL || !isAlive local.v ){ break }
+			if( local.pl == NULL || !isAlive local.pl ){ break }
+			if( ( local.i - ( int( local.i / 4 ) * 4 ) ) == 3 ){
+				local.apt = local.v exec coop_mod/alarmveh.scr::av_jit local.pl
+				local.wob.origin = local.apt
+			}
+		}
+		if( local.g != NULL ){ local.g stopfiring }
+		wait local.pause
+	}
+	if( local.wob != NULL ){ local.wob remove }
+}end
