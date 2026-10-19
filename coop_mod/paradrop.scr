@@ -127,6 +127,8 @@ coop_paradrop_main local.smoke_pos:{
 	level.coop_paradrop_squad[3] = NIL
 	level.coop_paradrop_squad[4] = NIL
 	level.coop_paradrop_squad[5] = NIL
+	level.coop_paradrop_squad[6] = NIL		//[mortar] the two extra men, when the stick carries them
+	level.coop_paradrop_squad[7] = NIL
 
 	//[user 2026-10-04] SQUAD BRAIN (coop_mod/parasquad.scr): local.sid is made before the flight now (a man
 	//bailing out of a stricken C-47 joins it).
@@ -138,13 +140,20 @@ coop_paradrop_main local.smoke_pos:{
 	local.pk[3] = 2
 	local.pk[4] = 2
 	local.pk[5] = 3
+	local.pk[6] = 2
+	local.pk[7] = 3
+	local.nmen = 5
+	//[mortar] on a listed map the stick may carry two EXTRA men - a mortar gunner and a spotter (mortar.scr)
+	if( ( waitthread coop_mod/mortar.scr::mz_para_roll ) == 1 ){ local.nmen = 7 }
 	local.wave[1] = 1
 	local.wave[2] = 3
 	local.wave[3] = 1
 	local.wave[4] = 3
 	local.wave[5] = 2
+	local.wave[6] = 3
+	local.wave[7] = 3
 	for( local.w = 1; local.w <= 3; local.w++ ){
-		for( local.i = 1; local.i <= 5; local.i++ ){
+		for( local.i = 1; local.i <= local.nmen; local.i++ ){
 			if( local.wave[local.i] != local.w ){ continue }
 			// the flak victim's stick is lost (bar the man who bailed out early)
 			if( local.lostPlane != 0 && local.pk[local.i] == local.lostPlane ){ continue }
@@ -178,6 +187,7 @@ coop_paradrop_main local.smoke_pos:{
 		if( local.w < 3 ){ wait 0.4 }
 	}
 	thread coop_mod/parasquad.scr::brain local.sid
+	if( local.nmen == 7 ){ thread coop_mod/mortar.scr::mz_para_team local.sid level.coop_smoke_player }
 
 	// Monitor squad survival
 	wait 12
@@ -246,7 +256,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	local.actor = NIL
 	if( local.wtype == 5 ){
 		local.actor = spawn "models/human/dday_ranger_medic.tik"
-	} else if( local.wtype == 2 || local.wtype == 4 ){
+	} else if( local.wtype == 2 || local.wtype == 4 || local.wtype == 6 ){
 		local.actor = spawn "models/human/allied_airborne_soldier.tik"
 	} else {
 		local.actor = spawn "models/human/allied_usa_c47-paratrooper1.tik"
@@ -257,7 +267,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	thread coop_mod/xp.scr::xp_para_register local.actor level.coop_smoke_player
 	local.actor notsolid
 	local.actor.enableEnemy = 0
-	local.actor.health = 550	// base paratrooper HP (was 350; raised again per user)
+	local.actor.health = waitthread coop_mod/mortar.scr::mz_hp 550	// base paratrooper HP (was 350; raised again per user), x coop_paraHealthPct (default 80)
 	local.actor immune crush	//[user 07-20] paratroopers can no longer be squashed by our own convoy/crab tanks (e1l2 escort maps)
 	local.actor immune vehicle	//[user 07-20 round 2] the ACTUAL run-over damage type: engine vehicle collision deals MOD_VEHICLE (vehicle.cpp RunOverEntity health*2 hits), NOT crush - the first immunity was aimed at the wrong MOD
 	local.actor dontdropweapons
@@ -406,7 +416,7 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	// AI only to tend a patient, then resumes moving/fighting.
 	if( local.wtype == 5 ){
 		local.actor.enableEnemy = 1
-		local.actor.health = 1000	// medic HP (raised again per user - must survive to revive/heal)
+		local.actor.health = waitthread coop_mod/mortar.scr::mz_hp 1000	// medic HP (raised again per user - must survive to revive/heal), x coop_paraHealthPct
 	}
 
 	// Weapon assignment - American kit (no more German Mausers on allied troopers).
@@ -428,6 +438,11 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	} else if( local.wtype == 4 ){
 		local.actor gun "springfield '03 sniper"
 		local.actor.accuracy = 90
+	} else if( local.wtype == 6 ){
+		//[mortar] the mortar gunner carries the Thompson, the spotter the Garand
+		local.actor gun "thompson"
+	} else if( local.wtype == 7 ){
+		local.actor gun "m1 garand"
 	} else if( local.wtype == 5 ){
 		//[bug-3306] dday_ranger_medic has no init weapon and only `case weapon` "colt 45"/"none": "m1 garand"
 		//matched no case and the medic dropped as a floating head and hands. "none" builds his body,
@@ -480,7 +495,12 @@ coop_paradrop_actor local.drop_pos local.wtype local.base_z local.sid local.vel 
 	//stance via anim/attack.scr, no native grenades) and latches coop_personality_set so no
 	//global pass re-rolls him. The squad brain (parasquad.scr::brain) replaces the old per-actor
 	//follow / combatant runto loops: formation, bounding, cover, grenades, room clearing, .30 cal.
-	local.actor waitthread coop_mod/parasquad.scr::member local.wtype local.sid
+	if( local.wtype >= 6 ){
+		//[mortar] the two mortar men are driven by mortar.scr::mz_para_team, not by the squad brain
+		local.actor waitthread coop_mod/mortar.scr::mz_para_member local.wtype local.sid
+	} else {
+		local.actor waitthread coop_mod/parasquad.scr::member local.wtype local.sid
+	}
 
 	// Special medic behavior (its own loop: tend patients, otherwise advance with the squad)
 	if( local.wtype == 5 ){
