@@ -271,7 +271,8 @@ state COVER_PEEK_TORSO
 
 	entrycommands
 	{
-		viewmodelanim idle
+		// [ads 2026-10-19] the same aim pose as the AIM state (charge), so a peek shows the ADS hands and the cgame ADS clips
+		viewmodelanim charge
 	}
 
 	// HZM coop [224] - while peeked, hold a TRUE shouldered AIM on the upper body: the AI aiming
