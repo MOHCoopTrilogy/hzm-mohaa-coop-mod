@@ -97,6 +97,7 @@ counter_wavesize local.pc:{
 	local.n = 4
 	if( local.pc >= 3 ){ local.n = 6 }
 	if( local.pc >= 5 ){ local.n = 8 }
+	local.n = local.n + ( waitthread coop_mod/carry.scr::carry_pen )	//[alarmplace] carried loss: +1 man per wave
 }end local.n
 
 
@@ -178,6 +179,7 @@ counter_wave local.wave:{
 	local.cap = 14
 	if( getcvar( "coop_counterCap" ) != "" ){ local.cap = int( getcvar( "coop_counterCap" ) ) }
 	if( local.cap < 1 ){ local.cap = 14 }
+	local.cap = local.cap + ( 2 * ( waitthread coop_mod/carry.scr::carry_pen ) )	//[alarmplace] carried loss: cap +2
 	local.alive = waitthread counter_alive
 	if( ( local.alive + local.n ) > local.cap ){ local.n = local.cap - local.alive }
 	if( local.n < 1 ){
@@ -202,6 +204,290 @@ counter_wave local.wave:{
 }end local.made
 
 
+//=========================================================================
+// DEFEND ZONE (2026-10-18). The squad must HOLD a place for the whole window, not just survive anywhere.
+//   zone      : the vetted zone nearest the squad when the objective completes (coop_counter_zones.scr, BSP-traced by
+//               docs/tools/gen_counter_zones.py: walkable floor, room for 4, reachable pathnode body, no vent/ladder top);
+//               a map with none near gets a runtime zone traced at the squad (counter_zone_fallback).
+//   marker    : compass objective diamond (set_objective_pos, the KOTH/CTF mechanism) + a faint dashed ground ring at the zone edge (func_beam
+//               dashes, shown only while a defender is near / outside the edge) + a "Defend: <place>" feed line at the start.
+//   clock     : counts down ONLY while a living, non-downed player is inside. Empty: it pauses; after coop_counterGrace s
+//               (10) it winds BACK at 1 s per s; empty with enemies inside for coop_counterLoseTime s (30) = zone lost, the
+//               defence restarts from full time (no mission fail). A player who leaves gets "Return to the defence zone".
+//   The clock is driven by level.time deltas, never by counting wait 1 loops: the old loop added one second per
+//   iteration while every wave spawn (a frame per man + the entry search) ate real time between ticks, so the native
+//   stopwatch (real time) hit 0 before the loop finished.
+//=========================================================================
+
+// player counts as defending: alive, active, not spectating, not downed
+counter_eligible local.p:{
+	if( local.p == NULL || local.p == NIL ){ end 0 }
+	if( local.p.flags["coop_isActive"] != 1 ){ end 0 }
+	if( local.p.dmteam == "spectator" ){ end 0 }
+	if( !isAlive local.p ){ end 0 }
+	if( local.p.flags["coop_dbno_active"] == 1 ){ end 0 }
+}end 1
+
+
+// 1 when local.pos is inside the zone (xy radius, 110 u of height)
+counter_inzone local.pos:{
+	local.d = local.pos - level.coop_czSel
+	local.h = local.d[2]
+	local.d[2] = 0
+	if( local.h < 0 ){ local.h = 0 - local.h }
+	if( local.h > 110 ){ end 0 }
+	if( ( vector_length local.d ) > level.coop_czSelR ){ end 0 }
+}end 1
+
+
+counter_inside:{
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( ( waitthread counter_eligible local.p ) != 1 ){ continue }
+		if( ( waitthread counter_inzone local.p.origin ) == 1 ){ local.n++ }
+	}
+}end local.n
+
+
+// wave men alive inside the zone
+counter_foes_inzone:{
+	local.n = 0
+	if( level.coop_counterN == NIL ){ end 0 }
+	for( local.i = 1; local.i <= level.coop_counterN; local.i++ ){
+		local.a = level.coop_counterActors[local.i]
+		if( local.a == NULL || local.a == NIL ){ continue }
+		if( !( isAlive local.a ) ){ continue }
+		if( ( waitthread counter_inzone local.a.origin ) == 1 ){ local.n++ }
+	}
+}end local.n
+
+
+// no vetted zone near: trace one at the squad (walkable ground under the player nearest the squad's centre; radius from 12 chest rays)
+counter_zone_fallback local.cen:{
+	local.best = NIL
+	local.bd = 999999
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( ( waitthread counter_eligible local.p ) != 1 ){ continue }
+		local.d = vector_length ( local.p.origin - local.cen )
+		if( local.d < local.bd ){ local.bd = local.d; local.best = local.p }
+	}
+	if( local.best == NIL ){ end NIL }
+	local.g = waitthread coop_mod/officer.scr::coop_find_ground ( local.best.origin + ( 0 0 8 ) )
+	if( local.g == NIL ){ local.g = local.best.origin }
+	local.sum = 0
+	for( local.k = 0; local.k < 12; local.k++ ){
+		local.dir = angles_toforward ( 0 ( local.k * 30 ) 0 )
+		local.tr = traced ( local.g + ( 0 0 48 ) ) ( local.g + ( 0 0 48 ) + ( vector_scale local.dir 600 ) )
+		local.f = local.tr["fraction"]
+		local.sum = local.sum + ( local.f * 600 )
+	}
+	local.rad = ( local.sum / 12 ) * 0.9
+	if( local.rad < 260 ){ local.rad = 260 }
+	if( local.rad > 520 ){ local.rad = 520 }
+	level.coop_czSel = local.g
+	level.coop_czSelR = local.rad
+	level.coop_czSelName = "this position"
+	local.up = traced ( local.g + ( 0 0 8 ) ) ( local.g + ( 0 0 600 ) )
+	if( local.up["fraction"] >= 1.0 ){ level.coop_czSelName = "this open ground" }
+}end 1
+
+
+// choose the zone: vetted zone nearest the squad (within 1400 u and 128 of height), else the runtime one
+counter_zone_pick:{
+	local.cen = ( 0 0 0 )
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( ( waitthread counter_eligible local.p ) != 1 ){ continue }
+		local.cen = local.cen + local.p.origin
+		local.n++
+	}
+	if( local.n < 1 ){ end 0 }
+	local.cen = vector_scale local.cen ( 1.0 / local.n )
+	local.cnt = waitthread coop_mod/coop_counter_zones.scr::zones level.coop_mapname
+	local.bi = 0
+	local.bd = 1400
+	for( local.i = 1; local.i <= local.cnt; local.i++ ){
+		local.zp = level.coop_czPos[local.i]
+		local.dz = local.zp[2] - local.cen[2]
+		if( local.dz < 0 ){ local.dz = 0 - local.dz }
+		if( local.dz > 128 ){ continue }
+		local.d2 = local.zp - local.cen
+		local.d2[2] = 0
+		local.d = vector_length local.d2
+		if( local.d < local.bd ){ local.bd = local.d; local.bi = local.i }
+	}
+	if( local.bi > 0 ){
+		level.coop_czSel = level.coop_czPos[local.bi]
+		level.coop_czSelR = level.coop_czRad[local.bi]
+		level.coop_czSelName = level.coop_czName[local.bi]
+		level.coop_czSrc = "vetted"
+		end 1
+	}
+	level.coop_czSrc = "traced"
+	waitthread counter_zone_fallback local.cen
+}end 1
+
+
+// the zone marker: the compass objective diamond + a faint DASHED RING on the ground at the zone's edge (stock func_beam dashes, the
+// ladder.scr::beam recipe, draped on the ground). The ring is only shown while somebody is near or outside the edge (counter_ring_set),
+// so the inside of the zone stays clear.
+counter_marker_start:{
+	set_objective_pos level.coop_czSel
+	level.coop_czMarkN = 0
+	level.coop_czRingOn = 1
+	for( local.k = 0; local.k < 40; local.k++ ){
+		local.d0 = angles_toforward ( 0 ( local.k * 9 ) 0 )
+		local.d1 = angles_toforward ( 0 ( ( local.k * 9 ) + 5.5 ) 0 )
+		local.q0 = level.coop_czSel + ( vector_scale local.d0 level.coop_czSelR ) + ( 0 0 48 )
+		local.q1 = level.coop_czSel + ( vector_scale local.d1 level.coop_czSelR ) + ( 0 0 48 )
+		local.g0 = waitthread coop_mod/officer.scr::coop_find_ground local.q0
+		local.g1 = waitthread coop_mod/officer.scr::coop_find_ground local.q1
+		if( local.g0 == NIL || local.g1 == NIL ){ continue }
+		local.z0 = local.g0[2] - level.coop_czSel[2]
+		local.z1 = local.g1[2] - level.coop_czSel[2]
+		if( local.z0 < 0 ){ local.z0 = 0 - local.z0 }
+		if( local.z1 < 0 ){ local.z1 = 0 - local.z1 }
+		if( local.z0 > 110 || local.z1 > 110 ){ continue }
+		local.b = spawn func_beam targetname "coop_czring"
+		if( local.b == NULL || local.b == NIL ){ continue }
+		local.b minoffset 0.0
+		local.b maxoffset 0.0
+		local.b numsegments 1
+		local.b life 0
+		local.b color ( 0.55 1 0.55 )
+		local.b alpha 0.55
+		local.b scale 5
+		local.b alwaysdraw
+		local.b activate
+		local.b notsolid
+		local.b.origin = local.g0 + ( 0 0 4 )
+		local.b endpoint ( local.g1 + ( 0 0 4 ) )
+		level.coop_czMarkN++
+		level.coop_czMark[level.coop_czMarkN] = local.b
+	}
+	println ( "^~^~^ COUNTER ring dashes=" + level.coop_czMarkN )
+}end
+
+
+counter_marker_stop:{
+	if( level.coop_czMarkN == NIL ){ end }
+	for( local.i = 1; local.i <= level.coop_czMarkN; local.i++ ){
+		local.e = level.coop_czMark[local.i]
+		if( local.e != NULL && local.e != NIL ){ local.e remove }
+	}
+	level.coop_czMarkN = 0
+}end
+
+
+// show / hide the ring (only on a change)
+counter_ring_set local.on:{
+	if( level.coop_czRingOn == local.on ){ end }
+	level.coop_czRingOn = local.on
+	for( local.i = 1; local.i <= level.coop_czMarkN; local.i++ ){
+		local.e = level.coop_czMark[local.i]
+		if( local.e == NULL || local.e == NIL ){ continue }
+		if( local.on == 1 ){ local.e show } else { local.e hide }
+	}
+}end
+
+
+// 1 when a defender stands within 150 u of the edge or outside it
+counter_edge_near:{
+	local.n = 0
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( ( waitthread counter_eligible local.p ) != 1 ){ continue }
+		local.d = local.p.origin - level.coop_czSel
+		local.d[2] = 0
+		if( ( vector_length local.d ) >= ( level.coop_czSelR - 150 ) ){ local.n = 1 }
+	}
+}end local.n
+
+
+// the ring pulses (flickers) for ~3 s: players left the zone, or it was lost; it ends shown
+counter_marker_pulse:{
+	if( level.coop_czPulsing == 1 ){ end }
+	level.coop_czPulsing = 1
+	for( local.r = 0; local.r < 4; local.r++ ){
+		level.coop_czRingOn = 0
+		for( local.i = 1; local.i <= level.coop_czMarkN; local.i++ ){
+			local.e = level.coop_czMark[local.i]
+			if( local.e != NULL && local.e != NIL ){ local.e hide }
+		}
+		wait 0.35
+		level.coop_czRingOn = 1
+		for( local.i = 1; local.i <= level.coop_czMarkN; local.i++ ){
+			local.e = level.coop_czMark[local.i]
+			if( local.e != NULL && local.e != NIL ){ local.e show }
+		}
+		wait 0.35
+	}
+	level.coop_czPulsing = 0
+}end
+
+
+// "DEFEND  2:14" (top centre, slot 114) + a status line (slot 115). Strings only change when the text does.
+counter_hud local.p local.t1 local.t2 local.r local.g local.b:{
+	if( local.p == NULL || local.p == NIL ){ end }
+	if( local.p.flags["coop_czHud"] != 1 ){
+		local.p.flags["coop_czHud"] = 1
+		waitthread coop_mod/hudresend.scr::claim local.p 114 115
+		ihuddraw_virtualsize local.p 114 1
+		ihuddraw_align local.p 114 center top
+		ihuddraw_rect local.p 114 235 70 170 0
+		ihuddraw_font local.p 114 "facfont-20"
+		ihuddraw_virtualsize local.p 115 1
+		ihuddraw_align local.p 115 center top
+		ihuddraw_rect local.p 115 195 100 250 0
+		ihuddraw_font local.p 115 "verdana-12"
+	}
+	if( local.p.flags["coop_czT1"] != local.t1 ){
+		local.p.flags["coop_czT1"] = local.t1
+		ihuddraw_string local.p 114 local.t1
+	}
+	if( local.p.flags["coop_czT2"] != local.t2 ){
+		local.p.flags["coop_czT2"] = local.t2
+		ihuddraw_string local.p 115 local.t2
+	}
+	ihuddraw_color local.p 114 local.r local.g local.b
+	ihuddraw_color local.p 115 local.r local.g local.b
+	ihuddraw_alpha local.p 114 1
+	ihuddraw_alpha local.p 115 1
+}end
+
+
+counter_hud_off:{
+	for( local.i = 1; local.i <= $player.size; local.i++ ){
+		local.p = $player[local.i]
+		if( local.p == NULL || local.p == NIL ){ continue }
+		if( local.p.flags["coop_czHud"] == 1 ){
+			ihuddraw_alpha local.p 114 0
+			ihuddraw_alpha local.p 115 0
+			ihuddraw_string local.p 114 ""
+			ihuddraw_string local.p 115 ""
+			local.p.flags["coop_czHud"] = NIL
+			local.p.flags["coop_czT1"] = NIL
+			local.p.flags["coop_czT2"] = NIL
+		}
+	}
+}end
+
+
+// m:ss of a (float) number of seconds, rounded UP so the clock reads 0:00 only when it is really over
+counter_clock local.sec:{
+	local.s = int( local.sec + 0.999 )
+	if( local.s < 0 ){ local.s = 0 }
+	local.m = int( local.s / 60 )
+	local.r = local.s - ( local.m * 60 )
+	local.txt = "" + local.m + ":"
+	if( local.r < 10 ){ local.txt = local.txt + "0" }
+	local.txt = local.txt + local.r
+}end local.txt
+
+
 // the whole event. Returns when the window is over; the caller (missioncomplete.scr) carries on to the debrief.
 counter_run local.nextlevel:{
 	local.gate = waitthread counter_gate level.coop_mapname local.nextlevel
@@ -217,10 +503,26 @@ counter_run local.nextlevel:{
 	local.gap = 30
 	if( getcvar( "coop_counterWaveGap" ) != "" ){ local.gap = int( getcvar( "coop_counterWaveGap" ) ) }
 	if( local.gap < 5 ){ local.gap = 5 }
+	local.gap = int( local.gap * ( waitthread coop_mod/carry.scr::carry_gap ) )	//[alarmplace] carried loss: gaps 20 percent shorter
+	local.emptyGrace = 10
+	if( getcvar( "coop_counterGrace" ) != "" ){ local.emptyGrace = int( getcvar( "coop_counterGrace" ) ) }
+	if( local.emptyGrace < 1 ){ local.emptyGrace = 1 }
+	local.loseTime = 30
+	if( getcvar( "coop_counterLoseTime" ) != "" ){ local.loseTime = int( getcvar( "coop_counterLoseTime" ) ) }
+	if( local.loseTime < 3 ){ local.loseTime = 3 }
 	local.grace = 15
 	println( "^~^~^ COUNTER start map=" + level.coop_mapname + " secs=" + local.secs + " gap=" + local.gap + " players=" + ( waitthread counter_players ) )
 
-	waitthread coop_mod/feed.scr::feed_all 0 "counter" "Hold the position - counter-attack incoming"
+	// the defend zone + its marker
+	waitthread counter_zone_pick
+	if( level.coop_czSel == NIL ){
+		println "^~^~^ COUNTER zone none (no eligible player) - ending"
+		level.coop_counterActive = 0
+		end
+	}
+	println( "^~^~^ COUNTER zone src=" + level.coop_czSrc + " name=" + level.coop_czSelName + " at=" + level.coop_czSel + " r=" + level.coop_czSelR )
+	thread counter_marker_start
+	waitthread coop_mod/feed.scr::feed_all 0 "counter" ( "Hold the position - counter-attack incoming. Defend: " + level.coop_czSelName )
 	for( local.i = 1; local.i <= $player.size; local.i++ ){
 		local.p = $player[local.i]
 		if( local.p == NULL || local.p == NIL ){ continue }
@@ -233,24 +535,115 @@ counter_run local.nextlevel:{
 		if( local.p == NULL || local.p == NIL ){ continue }
 		local.p playsound local.rsnd
 	}
-	exec coop_mod/replace.scr::stopwatch ( local.secs + local.grace )
 
-	// grace, one second at a time so a wiped squad ends the event
-	local.t = 0
-	local.wave = 0
-	local.nextwave = local.grace
+	// the clock: an accumulator driven by level.time deltas (see the header)
 	local.total = local.secs + local.grace
+	local.remaining = local.total
+	local.t0 = level.time
+	local.last = level.time
+	local.nextwave = level.time + local.grace
+	local.wave = 0
+	local.emptyT = 0
+	local.loseT = 0
 	local.dead = 0
-	while( local.t < local.total ){
-		if( local.t >= local.nextwave && local.t < ( local.total - 10 ) ){
+	local.nextlog = level.time
+	local.state = "hold"
+	local.lostN = 0
+	while( local.remaining > 0 ){
+		wait 0.25
+		// waves run on the REAL clock (they keep coming while the zone is empty). The tick's dt is taken AFTER the wave, so the spawn
+		// time is on the clock in the same tick.
+		if( level.time >= local.nextwave && local.remaining > 10 ){
 			local.wave++
 			waitthread counter_wave local.wave
-			local.nextwave = local.t + local.gap + ( randomint 11 )
+			local.nextwave = level.time + local.gap + ( randomint 11 )
 		}
-		wait 1
-		local.t++
+		local.now = level.time
+		local.dt = local.now - local.last
+		local.last = local.now
+
+		local.inside = waitthread counter_inside
+		local.prev = local.state
+		if( local.inside > 0 ){
+			local.emptyT = 0
+			local.loseT = 0
+			local.remaining = local.remaining - local.dt
+			local.state = "hold"
+		} else {
+			local.emptyT = local.emptyT + local.dt
+			if( local.emptyT < local.emptyGrace ){
+				local.state = "paused"
+			} else {
+				local.state = "rewind"
+				local.remaining = local.remaining + local.dt
+				if( local.remaining > local.total ){ local.remaining = local.total }
+			}
+			if( ( waitthread counter_foes_inzone ) > 0 ){
+				local.loseT = local.loseT + local.dt
+			}
+			if( local.loseT >= local.loseTime ){
+				local.lostN++
+				local.remaining = local.total
+				local.emptyT = 0
+				local.loseT = 0
+				local.state = "lost"
+				local.nextwave = level.time + 10
+				waitthread coop_mod/feed.scr::feed_all 0 "cz_lost" "Defence zone lost - the enemy took the position. Retake it: the defence starts over. The next mission will be harder"
+				waitthread coop_mod/carry.scr::carry_set level.coop_czSelName
+				thread counter_marker_pulse
+				println( "^~^~^ COUNTER zone LOST (#" + local.lostN + ") - restart from " + local.total + " t=" + level.time )
+			}
+		}
+		if( local.state != local.prev ){
+			println( "^~^~^ COUNTER state " + local.prev + " -> " + local.state + " remaining=" + local.remaining + " inside=" + local.inside + " empty=" + local.emptyT + " t=" + level.time )
+		}
+
+		// the ring shows for the first 8 s of the defence and whenever a defender is near / outside the edge
+		if( level.coop_czPulsing != 1 ){
+			if( ( level.time - local.t0 ) < 8 ){
+				waitthread counter_ring_set 1
+			} else {
+				waitthread counter_ring_set ( waitthread counter_edge_near )
+			}
+		}
+
+		// per-player warning + HUD
+		local.txt = waitthread counter_clock local.remaining
+		for( local.i = 1; local.i <= $player.size; local.i++ ){
+			local.p = $player[local.i]
+			if( local.p == NULL || local.p == NIL ){ continue }
+			if( local.p.dmteam == "spectator" ){ continue }
+			local.mine = 1
+			if( ( waitthread counter_eligible local.p ) == 1 ){
+				if( ( waitthread counter_inzone local.p.origin ) != 1 ){ local.mine = 0 }
+			}
+			if( local.mine == 1 ){
+				local.p.flags["coop_czOut"] = NIL
+				if( local.state == "rewind" ){
+					waitthread counter_hud local.p ( "DEFEND  " + local.txt ) "Zone empty - the clock is winding back" 1 0.45 0.2
+				} else if( local.state == "paused" ){
+					waitthread counter_hud local.p ( "DEFEND  " + local.txt ) "Zone empty - clock paused" 1 0.8 0.2
+				} else {
+					waitthread counter_hud local.p ( "DEFEND  " + local.txt ) ( "Hold: " + level.coop_czSelName ) 0.6 1 0.6
+				}
+			} else {
+				waitthread counter_hud local.p ( "DEFEND  " + local.txt ) "RETURN TO THE DEFENCE ZONE" 1 0.3 0.2
+				if( local.p.flags["coop_czOut"] == NIL || level.time >= local.p.flags["coop_czOut"] ){
+					waitthread coop_mod/feed.scr::feed_player local.p 0 "cz_return" "Return to the defence zone"
+					local.p.flags["coop_czOut"] = level.time + 8
+					thread counter_marker_pulse
+					println( "^~^~^ COUNTER warn " + local.p.netname + " outside t=" + level.time )
+				}
+			}
+		}
+
+		if( level.time >= local.nextlog ){
+			println( "^~^~^ COUNTER tick t=" + level.time + " elapsed=" + ( level.time - local.t0 ) + " remaining=" + local.remaining + " state=" + local.state + " inside=" + local.inside + " empty=" + local.emptyT + " lose=" + local.loseT + " waves=" + local.wave )
+			local.nextlog = level.time + 5
+		}
+
 		if( ( waitthread counter_players ) < 1 ){
-			local.dead++
+			local.dead = local.dead + local.dt
 			if( local.dead >= 5 ){
 				waitthread counter_log "squad down, ending early"
 				break
@@ -264,17 +657,23 @@ counter_run local.nextlevel:{
 			local.al5 = local.al * 5
 			if( local.al5 <= level.coop_counterN ){
 				waitthread counter_log ( "early finish: alive " + local.al + " of " + level.coop_counterN )
+				local.remaining = 0
 				break
 			}
 		}
 	}
+	if( local.remaining <= 0 ){
+		println( "^~^~^ COUNTER clock 0:00 t=" + level.time + " elapsed=" + ( level.time - local.t0 ) )
+	}
+	waitthread counter_hud_off
 	exec coop_mod/replace.scr::stopwatch 0
+	waitthread counter_marker_stop
 	// the squad is frozen for the debrief that follows: whoever is left stands down (alive, but no longer hunting)
 	for( local.i = 1; local.i <= level.coop_counterN; local.i++ ){
 		local.a = level.coop_counterActors[local.i]
 		if( local.a == NULL || local.a == NIL ){ continue }
 		if( isAlive local.a ){ local.a.enableEnemy = 0 }
 	}
-	println( "^~^~^ COUNTER end waves=" + local.wave + " sent=" + level.coop_counterN + " alive=" + ( waitthread counter_alive ) + " t=" + local.t )
+	println( "^~^~^ COUNTER end waves=" + local.wave + " sent=" + level.coop_counterN + " alive=" + ( waitthread counter_alive ) + " lost=" + local.lostN + " t=" + level.time )
 	level.coop_counterActive = 0
 }end
