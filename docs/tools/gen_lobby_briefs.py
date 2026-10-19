@@ -14,7 +14,7 @@ import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WRAP = 40
-MAXLINES = 9
+MAXLINES = 6
 CALL = re.compile(r'(?:add_objectives|addobjective|exec\s+global/obj\.scr)\s+(\S+)\s+(\S+)\s+("([^"]*)"|level\.\w+)')
 ASSIGN = re.compile(r'level\.(\w+)\s*=\s*"([^"]*)"')
 
