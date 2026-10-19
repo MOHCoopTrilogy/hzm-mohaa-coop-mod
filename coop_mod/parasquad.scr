@@ -2544,6 +2544,8 @@ mgHold local.a local.gun local.sid:{
 
 mgPackup local.a:{
 	if( local.a == NULL ){ end }
+	if( local.a.coop_psqPacking == 1 ){ end }	// mgWatch's pack-up and the gunner thread's must not both run
+	local.a.coop_psqPacking = 1
 	local.a.coop_psqBusy = 1
 	local.pg = local.a.coop_psqGun
 	if( local.pg != NIL && local.pg != NULL ){ local.pg.coop_psqPivot = 0 }
@@ -2582,12 +2584,13 @@ mgPackup local.a:{
 	local.a.coop_psqSup = NIL
 	local.a.coop_psqBag = NIL
 	if( isAlive local.a ){
-		local.a unholster
+		waitthread mgRearm local.a
 		local.a.enableEnemy = 1
 		local.a forceactivate
 		waitthread post local.a local.a.origin 200
 	}
 	local.a.coop_psqBusy = 0
+	local.a.coop_psqPacking = 0
 	waitthread dbg "mg packup k=1"
 }end
 
@@ -2600,6 +2603,68 @@ mgOff local.a:{
 	local.a type_grenade local.a.coop_psqT4
 	local.a physics_on
 	local.a.coop_psqMounted = 0
+}end
+
+
+// HIS OWN PRIMARY BACK IN HIS HANDS (gunner-rearm, bug-4005). Actor::Begin_MachineGunner holsters him and
+// Actor::End_MachineGunner hands back inventory slot 0 - the BINOCULARS on a paratrooper - and Actor::Unholster does
+// nothing at all while anything is in his hand, so `unholster` after a dismount left him on the binoculars, standing
+// there, for as long as nothing made him pick a weapon of his own. coop_psqPrim is the name the weapon getter gave
+// before the mount (mgMount). vanilla's recipe for the same job (aihandler.scr::leaveTurretUnholstered): `use <name>`
+// then `activatenewweapon`; `unholster` stays as the fallback for a man whose primary was never read.
+mgRearm local.a:{
+	if( local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	local.p = local.a.coop_psqPrim
+	local.w = local.a.weapon
+	if( local.p != NIL && local.p != "" && local.w != local.p ){
+		local.a use local.p
+		local.a activatenewweapon
+	}
+	local.a unholster
+	// the change is not instant (the binoculars are lowered first): look again, and ask once more if it did not take
+	wait 0.6
+	if( local.a == NULL ){ end }
+	if( !isAlive local.a ){ end }
+	if( local.p != NIL && local.p != "" && local.a.weapon != local.p ){
+		local.a use local.p
+		local.a activatenewweapon
+		local.a unholster
+	}
+	local.ps = "none"
+	if( local.p != NIL ){ local.ps = local.p }
+	waitthread dbg ( "mg rearm k=" + local.a.coop_psqK + " prim=" + local.ps + " weapon=" + local.a.weapon )
+}end
+
+
+// THE ENGINE TOOK HIM OFF THE GUN. Anything that ends his machinegunner think without this script - an anim_scripted
+// reaction, a pain state, a gun that was removed, a push - runs End_MachineGunner, which un-holsters him (onto the
+// binoculars) but leaves coop_psqMounted at 1 and his type_* at "machinegunner": the gunner thread then tended a gun
+// nobody was on, and he stood about with nothing to shoot. A man who is really on the gun holds NOTHING (Begin_
+// MachineGunner holsters him; measured: weapon="" for the whole time he is mounted), so a hand with something in it
+// while he is "mounted" is the tell. He gets his primary back at once, and then the gun is packed up the ordinary way
+// (the gunner thread's mgPackup: type_* restored, the gun / mount / bags / can taken away, a new site looked for).
+mgWatch local.a local.gun local.sid:{
+	wait 2
+	local.n = 0
+	while( local.a != NULL && local.gun != NULL ){
+		if( !isAlive local.a ){ end }
+		if( local.a.coop_psqMounted != 1 || local.a.coop_psqGun != local.gun ){ end }
+		local.w = local.a.weapon
+		if( local.w != NIL && local.w != "" ){ local.n++ } else { local.n = 0 }
+		if( local.n >= 2 ){
+			waitthread dbg ( "mg off the gun (engine) weapon=" + local.w )
+			local.a.coop_psqMounted = 0
+			local.a.coop_psqBusy = 1		// (the gunner thread must not plan a new site over the old gun)
+			waitthread mgRearm local.a
+			local.a.enableEnemy = 1
+			local.a forceactivate
+			waitthread mgPackup local.a
+			local.a.coop_psqMgBad = 0
+			end
+		}
+		wait 0.25
+	}
 }end
 
 
@@ -2656,6 +2721,10 @@ mgMount local.a local.gun local.sid:{
 	// onto the seat the engine will hold him on: it sweeps his hull down from 18u over his FEET, so
 	// a seat on ground a little higher than where he stopped would never take him
 	local.a.origin = local.a.coop_psqMgStand
+	// his own primary, by name, BEFORE the engine holsters it: Actor::Unholster hands back inventory slot 0, which on
+	// a paratrooper is the binoculars (gunner-rearm, bug-4005). mgRearm puts this one back in his hands.
+	local.w = local.a.weapon
+	if( local.w != NIL && local.w != "" && local.w != "binoculars" ){ local.a.coop_psqPrim = local.w }
 	local.a turret local.gun
 	local.a type_idle "machinegunner"
 	local.a type_attack "machinegunner"
@@ -2671,6 +2740,7 @@ mgMount local.a local.gun local.sid:{
 	local.rp = local.gun.coop_psqRest
 	waitthread mgRestSet local.gun local.rp
 	thread mgHold local.a local.gun local.sid
+	thread mgWatch local.a local.gun local.sid
 	// is he AT the gun? Where the engine cannot seat him it leaves him where he stopped, hands on
 	// nothing. Then there is no gun.
 	wait 0.6
@@ -2876,7 +2946,7 @@ mgFlee local.a local.gun local.sid local.nade:{
 	wait 0.25		// hands off the gun
 	if( local.a == NULL ){ end }
 	if( !isAlive local.a ){ end }
-	local.a unholster
+	thread mgRearm local.a		// (a thread: he runs while the weapon changes)
 	if( local.to != NIL ){
 		local.left = waitthread mgLeg local.a local.to 1 24 3.5
 	} else {
@@ -2990,7 +3060,7 @@ mgGiveUp local.a local.gun:{
 	local.a.coop_psqBag = NIL
 	local.a.coop_psqBeltOut = 1
 	if( isAlive local.a ){
-		local.a unholster
+		waitthread mgRearm local.a
 		local.a.enableEnemy = 1
 		local.a forceactivate
 		waitthread post local.a local.a.origin 200
