@@ -75,14 +75,24 @@ def main():
         texts = collect(m)
         if not texts:
             continue
-        lines = []
-        for i, t in enumerate(texts):
+        blocks_t = []
+        for t in texts:
             w = wrap(t)
             w[0] = "- " + w[0]
-            block = [w[0]] + ["  " + x for x in w[1:]]
-            if len(lines) + len(block) > MAXLINES:
-                break          # whole objectives only - never a half-cut one
-            lines += block
+            blocks_t.append([w[0]] + ["  " + x for x in w[1:]])
+        total = sum(len(b) for b in blocks_t)
+        lines, shown = [], 0
+        if total <= MAXLINES:
+            for b in blocks_t:
+                lines += b
+                shown += 1
+        else:
+            for b in blocks_t:            # whole objectives only, one line kept for "+N more"
+                if len(lines) + len(b) > MAXLINES - 1:
+                    break
+                lines += b
+                shown += 1
+            lines.append("+%d more" % (len(blocks_t) - shown))
         if not lines:
             continue
         n_maps += 1
