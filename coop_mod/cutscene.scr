@@ -8,10 +8,16 @@
 //   waitthread coop_mod/cutscene.scr::cut_unlock                under black, where the scene ends
 //
 // WHAT A LOCK IS (all of it per player, re-asserted every 0.25s by cut_watch):
+//   freezeplayer       the vanilla recipe (level.playerfrozen): PMF_FROZEN for everyone and the
+//                      weapon-class keys (1-6) go dead (Player::EventUseWeaponClass).
 //   freezecontrols 1   no move / look / FIRE / use. Player::CondAttackPrimary and the secondary
 //                      and button conditionals all return false while m_bFrozen is set, so the
 //                      trigger is dead and nothing needs stripping. m_bFrozen resets on a coop
 //                      respawn, which is why this is a loop and not a one-shot.
+//   weapon pin         weapnext / weapprev (mouse wheel) are NOT gated by either freeze, so the
+//                      weapon held at lock time is recorded and re-selected whenever it changes
+//                      (the bust.scr recipe: use + activatenewweapon). The view is a camera, so
+//                      the 0.25s of flicker is never on screen. Restored exactly at unlock.
 //   coop_cineHud 5     the engine's NON-ARCHIVED, SELF-EXPIRING hold (cg_drawtools.cpp): hides the
 //                      crosshair, brace pip, hit marker, bleed ring, loot icons, compass, health
 //                      frame and the event feed. A 5s hold re-armed every 0.25s: if this thread
@@ -22,6 +28,10 @@
 //   nodamage           nobody dies in their own cutscene. Only players WE put into it are put
 //                      back (takedamage), and an admin-god player is left alone.
 //   cuecamera <cam>    late joiners and respawned players are re-cued to the CURRENT camera.
+//
+// KNOWN GAP: the script-drawn ihuddraw layer (rank star, carried-item icons) is not gated by
+// PMF_NO_HUD or by coop_cineHud and has no read-back to restore from, so it stays on screen. The
+// clean fix is one engine line (CG_HudDrawElements honouring CG_CoopCineHudActive).
 //
 // LATE JOINERS / RESPAWNS: cut_watch walks $player every pass, so a player who connects, or whose
 // body is rebuilt, mid-scene is locked within 0.25s.
@@ -42,6 +52,7 @@ cut_lock local.maxsec:{
 	level.coop_cutSeq = level.coop_cutSeq + 1
 	level.coop_cutT0 = level.time
 	println( "^~^~^ CUTLOCK on max=" + local.maxsec )
+	freezeplayer
 	waitthread cut_pass
 	thread cut_watch level.coop_cutSeq local.maxsec
 }end
@@ -73,6 +84,28 @@ cut_watch local.seq local.maxsec:{
 	}
 }end
 
+//the model of the weapon in the player's hands, or "none" for empty hands ("" is not trusted: it can read back as NIL)
+cut_heldModel local.p:{
+	local.nm = "none"
+	local.w = waitthread coop_mod/itemhandler.scr::returnActiveWeapon local.p
+	if( local.w != NULL && local.w != NIL ){ local.nm = local.w.model }
+}end local.nm
+
+//put the recorded weapon back in the player's hands if something (a wheel scroll) changed it
+cut_pinWeapon local.p:{
+	if( !isAlive local.p ){ end }
+	local.want = local.p.flags["coop_cutWeap"]
+	if( local.want == NIL ){ end }
+	local.have = waitthread cut_heldModel local.p
+	if( local.have == local.want ){ end }
+	if( local.want == "none" ){
+		local.p safeholster 1
+	}else{
+		local.p use local.want
+		local.p activatenewweapon "dual"
+	}
+}end
+
 //one idempotent sweep over every connected player
 cut_pass:{
 	if( level.coop_cutLocked != 1 ){ end }
@@ -83,14 +116,19 @@ cut_pass:{
 		if( local.p.dmteam == "spectator" ){ continue }
 		if( local.p.flags["coop_cutLocked"] != 1 ){
 			local.p.flags["coop_cutLocked"] = 1
+			if( isAlive local.p ){
+				local.hm = waitthread cut_heldModel local.p
+				local.p.flags["coop_cutWeap"] = local.hm
+			}
 			if( local.p.flags["coop_adminGod"] != 1 ){
 				local.p nodamage
 				local.p.flags["coop_cutNoDmg"] = 1
 			}
-			println( "^~^~^ CUTLOCK player e" + local.p.entnum + " locked" )
+			println( "^~^~^ CUTLOCK player e" + local.p.entnum + " locked weap=[" + local.p.flags["coop_cutWeap"] + "]" )
 		}
 		local.p freezecontrols 1
 		local.p stufftext "coop_cineHud 5"
+		waitthread cut_pinWeapon local.p
 		if( level.coop_cutCam != NULL && level.coop_cutCam != NIL ){
 			if( local.p.flags["coop_cutCamSeq"] != level.coop_cutCamSeq ){
 				local.p.flags["coop_cutCamSeq"] = level.coop_cutCamSeq
@@ -106,6 +144,7 @@ cut_unlock:{
 	if( level.coop_cutDepth > 0 ){ end }
 	level.coop_cutLocked = 0
 	level.coop_cutCam = NIL
+	releaseplayer
 	for( local.i = 1; local.i <= $player.size; local.i++ ){
 		local.p = $player[local.i]
 		if( local.p == NULL || local.p == NIL ){ continue }
@@ -113,11 +152,13 @@ cut_unlock:{
 		//costs nothing, a lock that is never released is a soft-lock
 		local.p stufftext "coop_cineHud 0"
 		if( local.p.flags["coop_cutLocked"] == 1 ){
+			waitthread cut_pinWeapon local.p
 			local.p freezecontrols 0
 			if( local.p.flags["coop_cutNoDmg"] == 1 ){ local.p takedamage }
 			local.p.flags["coop_cutLocked"] = 0
 			local.p.flags["coop_cutNoDmg"] = 0
 			local.p.flags["coop_cutCamSeq"] = 0
+			local.p.flags["coop_cutWeap"] = NIL
 		}
 	}
 	drawhud 1
