@@ -3391,6 +3391,25 @@ coop_hasOpenSky local.pos:{
 	end 0
 }end
 
+// [bug-4012] Nearest point with open sky overhead, searched in rings (150..750 u, 8 directions) round a covered target, or NIL.
+coop_binoc_opensky local.pos:{
+	local.r = 150
+	while( local.r <= 750 ){
+		local.k = 0
+		while( local.k < 8 ){
+			local.d = angles_toforward ( 0 ( local.k * 45 ) 0 )
+			local.q = local.pos + ( vector_scale local.d local.r )
+			if( (exec coop_mod/officer.scr::coop_hasOpenSky local.q) == 1 ){
+				local.g = exec coop_mod/officer.scr::coop_find_ground local.q
+				if( local.g == NIL ){ local.g = local.q }
+				if( (exec coop_mod/officer.scr::coop_hasOpenSky local.g) == 1 ){ end local.g }
+			}
+			local.k++
+		}
+		local.r = local.r + 150
+	}
+}end NIL
+
 // Returns a player the officer can SEE *and* who is OUTDOORS (open sky overhead), else NIL.
 // NO nearest/last-resort fallback -- top-down strikes must never target a player the
 // officer can't see, and never fire when everyone seen is under a roof.
@@ -4275,6 +4294,36 @@ coop_officer_death_drops local.dead_pos:{
 	local.do_binoc = 1
 	if( level.coop_feature_binoc == 0 ){ local.do_binoc = 0 }
 
+	//[bug-4005 rewards] ONE reward per officer, never both: a coin flip between the binoculars (airstrike) and the
+	//signal smoke (paradrop). A map with one of them switched off simply drops the other. A fully INDOOR map (no
+	//usable sky for either - coop_mod/indoor_maps.scr, generated from the BSPs) drops neither: it gets the
+	//indoorReward instead (one function, so the item can be swapped later).
+	local.indoor = exec coop_mod/indoor_maps.scr::isIndoor level.coop_mapname
+	local.pick = "none"
+	if( local.indoor == 1 ){
+		local.do_para = 0
+		local.do_binoc = 0
+		local.pick = "indoor"
+	} else if( local.do_para == 1 && local.do_binoc == 1 ){
+		local.coin = ( randomint 2 )
+		if( local.coin == 0 ){
+			local.do_binoc = 0
+			local.pick = "smoke"
+		} else {
+			local.do_para = 0
+			local.pick = "binoc"
+		}
+	} else if( local.do_para == 1 ){
+		local.pick = "smoke"
+	} else if( local.do_binoc == 1 ){
+		local.pick = "binoc"
+	}
+	println( "^~^~^ OFFICER_DROP map=" + level.coop_mapname + " indoor=" + local.indoor + " pick=" + local.pick )
+	if( local.indoor == 1 ){
+		thread indoorReward local.dead_pos
+		end
+	}
+
 	if( local.do_para == 1 && local.do_binoc == 1 ){
 		waitthread coop_mod/feed.scr::feed_all 1 "off_drop" "The Officer dropped a Signal Smoke Grenade and Binoculars"
 	} else if( local.do_para == 1 ){
@@ -4332,6 +4381,151 @@ coop_officer_death_drops local.dead_pos:{
 }end
 
 
+// Nearest clear floor spot for the cache: rings of 8 directions (0..360 u) round the drop point, each candidate must pass the
+// reward drop's own ground + headroom rule (coop_reward_validate) and a crate-sized box trace must not touch a wall / rail.
+coop_cache_clearspot local.sp:{
+	local.r = 0
+	while( local.r <= 360 ){
+		local.k = 0
+		while( local.k < 8 ){
+			local.d = angles_toforward ( 0 ( local.k * 45 ) 0 )
+			local.q = local.sp + ( vector_scale local.d local.r )
+			local.v = exec coop_mod/officer.scr::coop_reward_validate local.q
+			if( local.v != NIL ){
+				local.a = local.v + ( 0 0 6 )
+				local.b = local.v + ( 0 0 7 )
+				local.tr = traced ( local.a ) ( local.b ) 0 ( -62 -62 0 ) ( 62 62 100 )
+				if( local.tr["startSolid"] != 1 && local.tr["allSolid"] != 1 && local.tr["fraction"] >= 1.0 ){
+					if( local.r > 0 ){ println( "^~^~^ INDOOR_CACHE nudged " + local.sp + " -> " + local.v ) }
+					end local.v
+				}
+			}
+			if( local.r == 0 ){ break }
+			local.k++
+		}
+		if( local.r == 0 ){ local.r = 60 } else { local.r = local.r + 60 }
+	}
+	println( "^~^~^ INDOOR_CACHE no clear spot, kept " + local.sp )
+}end local.sp
+
+// === INDOOR REWARD: AMMO + HEALTH CACHE [bug-4005] ===
+// What an officer drops on a map with no usable sky (indoor_maps.scr). One crate (the ammo box's 50cal crate) with the
+// medkit model on top, a walk-over trigger. EACH player can use it ONCE: full ammo for every pool, health to full.
+// A second walk-over by the same player is refused (feed line, throttled). Keyed by entnum like the ammo box.
+indoorReward local.dead_pos:{
+	local.sp = exec coop_mod/officer.scr::coop_reward_validate local.dead_pos
+	if( local.sp == NIL ){ local.sp = local.dead_pos }
+	local.sp = exec coop_mod/officer.scr::coop_cache_clearspot local.sp
+	local.trig = spawn trigger_multiple
+	if( local.trig == NULL ){ end }	// entity pool exhausted
+	local.trig.origin = local.sp
+	local.trig setsize ( -56 -56 0) (56 56 72)
+	local.crate = spawn script_model
+	if( local.crate != NULL ){
+		local.crate model "models/static/50cal_crate.tik"
+		local.crate scale 3.4
+		local.crate.origin = local.sp
+		local.crate notsolid
+	}
+	// script cannot read a script_model's bounds (.mins/.maxs are NIL), so the lid height is the MEASURED seat of this
+	// model pair at these scales: the medkit's origin sits 37 u above the crate's floor point (measured in the harness
+	// against the lid, 2026-10-18; the 46 first used floated 9 u clear).
+	local.kit = spawn script_model
+	if( local.kit != NULL ){
+		local.kit model "models/items/item_50_healthbox.tik"
+		local.kit scale 2.2
+		local.kit.origin = local.sp + (0 0 37)
+		local.kit notsolid
+		local.kit rendereffects "+fullbright"
+	}
+	local.glow = spawn script_model
+	if( local.glow != NULL ){
+		local.glow model "models/fx/dummy.tik"
+		local.glow.origin = local.sp + (0 0 12)
+		local.glow light (0.3 1 0.4)
+		local.glow lightRadius 240
+		local.glow lightOn
+		local.glow notsolid
+	}
+	level.coop_cacheTrig = local.trig
+	println( "^~^~^ INDOOR_CACHE spawn pos=" + local.sp )
+	waitthread coop_mod/feed.scr::feed_all 1 "off_cache" "The Officer dropped an Ammo and Health Cache - everyone can use it once"
+	waitthread coop_mod/feed.scr::feed_hint_all "cache" "Ammo and Health Cache: walk over it once for full ammo and full health"
+	thread coop_cache_wait local.trig
+}end
+
+coop_cache_wait local.trig:{
+	while( local.trig != NULL ){
+		local.trig waittill trigger
+		local.who = parm.other
+		if( local.who == NULL ){ continue }
+		if( local.who.classname != "Player" ){ continue }
+		if( !isAlive local.who ){ continue }
+		if( local.who.flags["coop_dbno_active"] == 1 ){ continue }
+		waitthread coop_cache_use local.who
+	}
+}end
+
+// One use per player. Returns 1 if it served the player, 0 if refused.
+coop_cache_use local.player local.slot:{
+	if( local.player == NULL ){ end 0 }
+	local.key = local.player.entnum
+	if( local.slot != NIL ){ local.key = local.slot }	//test seam only: a stand-in client slot (the harness has one real player)
+	if( level.coop_cacheUsed[local.key] == 1 ){
+		// refused - but do not spam the feed while he stands on it
+		if( local.player.flags["coop_cacheNag"] == NIL || ( level.time - local.player.flags["coop_cacheNag"] ) > 4 ){
+			local.player.flags["coop_cacheNag"] = level.time
+			waitthread coop_mod/feed.scr::feed_player local.player 2 "cache" "You already used the Ammo and Health Cache"
+		}
+		println( "^~^~^ INDOOR_CACHE refused p=" + local.player.netname + " (already used)" )
+		end 0
+	}
+	level.coop_cacheUsed[local.key] = 1
+	waitthread coop_cache_restock local.player
+	waitthread coop_cache_heal local.player
+	waitthread coop_mod/feed.scr::feed_player local.player 2 "cache" "Ammo and health restored"
+	local.ar = local.player getammo rifle
+	local.as = local.player getammo smg
+	local.ap = local.player getammo pistol
+	println( "^~^~^ INDOOR_CACHE used p=" + local.player.netname + " hp=" + local.player.health + " rifle=" + local.ar + " smg=" + local.as + " pistol=" + local.ap )
+}end 1
+
+// Full ammo: every pool the player HAS (an ammo entry exists, getammo >= 0) is topped up to its loadout default - the
+// amounts the kit hands out at spawn (measured: rifle 80, smg 120, mg 100, pistol 81). A pool already above the default
+// (picked-up ammo) is left alone; a pool the player does not carry is not created.
+coop_cache_restock local.player:{
+	local.t[1] = "pistol"
+	local.t[2] = "rifle"
+	local.t[3] = "smg"
+	local.t[4] = "mg"
+	local.t[5] = "heavy"
+	local.t[6] = "grenade"
+	local.t[7] = "shotgun"
+	local.full[1] = 81
+	local.full[2] = 80
+	local.full[3] = 120
+	local.full[4] = 100
+	local.full[5] = 6
+	local.full[6] = 4
+	local.full[7] = 24
+	local.i = 1
+	while( local.i <= 7 ){
+		local.ty = local.t[local.i]
+		local.have = local.player getammo local.ty
+		local.fa = local.full[local.i]
+		if( local.have >= 0 && local.have < local.fa ){ local.player setammo local.ty local.fa }
+		local.i++
+	}
+}end
+
+// Health to the coop maximum. healthonly (not health): health also rewrites max_health (bug-1243).
+coop_cache_heal local.player:{
+	local.hp = local.player.max_health
+	if( level.coop_health != NIL && level.coop_health > local.hp ){ local.hp = level.coop_health }
+	local.player healthonly local.hp
+}end
+
+
 // Fired when a player presses Use on the smoke pickup trigger (trigger_use, like the binoculars).
 //
 // ROOT CAUSE of the "German grenades vanish" bug:
@@ -4364,6 +4558,7 @@ coop_smoke_reward_pickup local.trig local.vis:{
 	local.trig.flags["coop_smoke_taken"] = 1
 	local.trig remove
 	if( local.vis != NULL ){ local.vis delete }
+	local.player.flags["coop_smokeUsed"] = NIL	//[bug-4005] a fresh pickup is a fresh smoke
 	local.player item models/weapons/coop_smoke_grenade.tik
 	level.coop_paradrop_armed = 1
 	level.coop_smoke_player = local.player
@@ -4403,7 +4598,7 @@ coop_binoc_wait_pickup local.binoc local.binoc_vis:{
 coop_binoc_grant local.player:{
 	if( local.player == NULL ){ end }
 	local.firstPickup = 0
-	if( level.coop_binoc_uses == NIL ){
+	if( level.coop_binoc_uses == NIL || level.coop_binoc_uses <= 0 ){	//[bug-4005] 0 left = the last pair was SPENT; a grant is a fresh pair, never 0 strikes
 		local.firstPickup = 1
 		level.coop_binoc_uses = 1
 	}
@@ -4489,6 +4684,15 @@ binoculars_fired local.player local.target:{
 	// coop_binoc_skyCheck 0 = allow strikes ANYWHERE (skip the open-sky requirement). Handy on bridge / urban
 	// maps like t1l2 where most aim points have structure (bridge deck, roofs) overhead so the honest trace
 	// correctly reports "no clear sky" - set it 0 there to bomb freely.
+	if( getcvar "coop_binoc_skyCheck" != "0" && (exec coop_mod/officer.scr::coop_hasOpenSky local.target) != 1 ){
+		//[bug-4012] under cover (a roof, a doorway): move the fire mission to the nearest open-sky point instead of denying it
+		local.alt = exec coop_mod/officer.scr::coop_binoc_opensky local.target
+		if( local.alt != NIL ){
+			println( "^~^~^ BINOC retarget " + local.target + " -> " + local.alt )
+			local.target = local.alt
+			waitthread coop_mod/feed.scr::feed_player local.player 0 "strike_move" "Target is under cover - fire mission moved to the nearest open sky."
+		}
+	}
 	if( getcvar "coop_binoc_skyCheck" != "0" && (exec coop_mod/officer.scr::coop_hasOpenSky local.target) != 1 ){
 		thread coop_radio_all "coop_radio_standby"
 		waitthread coop_mod/feed.scr::feed_player local.player 0 "strike_deny" "Negative - no clear sky above target coordinates. Strike request denied."	//[user 2026-10-05] caller only (was a broadcast); [bug-3952] event feed
@@ -4979,6 +5183,7 @@ coop_reward_redrop_wait local.kind local.trig:{
 	if( local.glow != NULL ){ local.glow delete }
 	println( "^~^~^ REWARD_PICKUP kind=" + local.kind + " by=" + local.player.netname )
 	if( local.kind == "smoke" ){
+		local.player.flags["coop_smokeUsed"] = NIL	//[bug-4005] a fresh pickup is a fresh smoke
 		local.player item models/weapons/coop_smoke_grenade.tik
 		level.coop_paradrop_armed = 1
 		level.coop_smoke_player = local.player
@@ -5038,6 +5243,20 @@ coop_binoc_spawn_pickup local.pos:{
 	thread coop_reward_spawn_drop "binoc" local.sp local.sp
 }end
 
+// [bug-4005] The signal smoke has been THROWN: it is spent for that player, for good. Called by paradrop.scr::smokeDropZone.
+// coop_smoke_player stays set for the rest of the call-in (xp, squad, landing zones read it), so the key-item guardian
+// (keyitems.scr) used to see "owner without a smoke in hand" and re-give it - the smoke came back, armed == 0, and a
+// second throw called nothing. The consumed mark is what every re-give path now respects.
+coop_smoke_consume local.player:{
+	if( local.player == NULL ){ end }
+	local.player.flags["coop_smokeUsed"] = 1
+	level.coop_smoke_spent[local.player.entnum] = 1
+	local.player take "Signal Smoke Grenade"
+	local.player setammo smokegrenade 0
+	thread coop_smoke_hud_clear
+	println( "^~^~^ SMOKE_CONSUMED p=" + local.player.netname )
+}end
+
 // Watches the smoke owner; drop the smoke again if he dies BEFORE throwing it (paradrop armed).
 coop_smoke_owner_watch local.player:{
 	if( local.player == NULL ){ end }
@@ -5087,6 +5306,7 @@ coop_smoke_redrop_pickup local.trig local.vis:{
 	if( level.coop_smoke_player != NULL ){ end }	// already recovered by someone else
 	local.trig remove
 	if( local.vis != NULL ){ local.vis delete }
+	local.player.flags["coop_smokeUsed"] = NIL	//[bug-4005] a fresh pickup is a fresh smoke
 	local.player item models/weapons/coop_smoke_grenade.tik
 	level.coop_paradrop_armed = 1
 	level.coop_smoke_player = local.player
