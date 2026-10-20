@@ -2707,6 +2707,7 @@ state RELOAD_MG
 		//upright, shown together with the gun's own magazine 1.32-1.65 s). coop_reload_fg42 matches
 		//DaRKaNGeL's 2.34 s hands and carries the FG42's own magazine on the hand's away window.
 		coop_reload_fg42		      : IS_WEAPON_ACTIVE "mainhand" "FG 42"
+		coop_reload_fg42		      : IS_WEAPON_ACTIVE "mainhand" "FG 42 Irons"	// HZM coop [heavy lane 2026-10-13, patch_fg42irons_state.py] the iron-sight FG 42: the same reload
 		//[reload audit 2026-10-05] the Breda's own TA torso (whole-reload hand swap, 5.73 s) existed
 		//in anims_breda.txt but was never selected: mg_reload cut its hands clip at 57 %.
 		breda_reload			      : IS_WEAPON_ACTIVE "mainhand" "Breda"
