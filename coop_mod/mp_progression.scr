@@ -121,6 +121,7 @@ init:{
 	//slice 2/3 self-test (gated on the test cvar): proves mp_sign/mp_verify and the split round-trip
 	//deterministically each MP boot in test mode, independent of a human reconnect.
 	if( getcvar( "coop_mpProgCreditBots" ) == "1" ){ thread selftest }
+	if( getcvar( "coop_mpProgGunTest" ) == "1" ){ thread selftest_gun }	//[killchal-next 2026-10-20] dev harness only, seeded nowhere
 	if( getcvar( "coop_mpStPromo" ) == "1" ){ thread stPromo }	//[2026-09-27, bug-3076] promotion capture, dev harness only
 }end
 
@@ -220,6 +221,76 @@ selftest:{
 
 
 //=========================================================================
+// [killchal-next 2026-10-20] DEV-ONLY per-gun self-test (coop_mpProgGunTest 1, seeded nowhere). Drives credit() / the carried blob / the legacy
+// snapshot on BOTS, then lets real bot-vs-bot kills fill the counters (coop_mpProgCreditBots 1). Every result prints ^~^~^ MPPROGTEST gun ...
+//=========================================================================
+selftest_gun:{
+	wait 25
+	if( $player == NULL || $player.size < 3 ){ println( "^~^~^ MPPROGTEST gun abort=need3players size=" + $player.size ); end }
+	local.a = $player[1]
+	local.b = $player[2]
+	local.c = $player[3]
+	waitthread coop_mod/mp_finish_map.scr::mpfin_init
+	local.mp40 = "models/weapons/mp40.tik"
+	local.i40 = level.coop_mpFinIdx[local.mp40]
+	println( "^~^~^ MPPROGTEST gun init n=" + level.coop_mpFinIdxN + " mp40idx=" + local.i40 )
+
+	//A - the ladder on a standard gun: 24 kills = nothing open, the 25th opens BLUED, WOODLAND waits for 50
+	for( local.k = 0; local.k < 24; local.k++ ){ waitthread credit local.a "smg" local.mp40 0 }
+	local.o24 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.a local.mp40 "blued"
+	waitthread credit local.a "smg" local.mp40 0
+	local.o25 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.a local.mp40 "blued"
+	local.w25 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.a local.mp40 "camo_woodland"
+	local.cnt = waitthread coop_mod/mp_finish_map.scr::mpfin_count local.a local.i40
+	local.pg = waitthread coop_mod/mp_finish_map.scr::mpfin_prog local.a local.mp40 "camo_woodland"
+	println( "^~^~^ MPPROGTEST gun mp40 count=" + local.cnt + " blued@24=" + local.o24 + " (want 0) blued@25=" + local.o25 + " (want 1) woodland@25=" + local.w25 + " (want 0) prog=[" + local.pg + "] master=" + local.a.flags["coop_mpMasterStr"] )
+
+	//B - a finished gun is still that gun
+	local.vb = waitthread mpBaseModel "models/weapons/mp40_gold.tik"
+	local.vi = waitthread mpBaseModel "models/weapons/colt45.tik"
+	println( "^~^~^ MPPROGTEST gun base mp40_gold->" + local.vb + " (want mp40.tik) colt45->" + local.vi + " (want itself)" )
+
+	//C - the carried blob: encode a, decode into b, same count; the body keeps its length budget
+	local.enc = waitthread gunCountsEncode local.a
+	waitthread gunCountsDecode local.b local.enc
+	local.cb = waitthread coop_mod/mp_finish_map.scr::mpfin_count local.b local.i40
+	local.body = waitthread buildBody local.a
+	println( "^~^~^ MPPROGTEST gun blob enc.size=" + local.enc.size + " (want " + ( level.coop_mpFinIdxN * 2 ) + ") roundtrip=" + local.cb + " (want 25) body.size=" + local.body.size + " body=" + local.body )
+
+	//D - launchers climb the SLOW ladder (25 / 40 / 60 / 90 / 125 / 175 / 250)
+	local.bz = "models/weapons/bazooka.tik"
+	local.ib = level.coop_mpFinIdx[local.bz]
+	for( local.k = 0; local.k < 40; local.k++ ){ waitthread credit local.a "rocket" local.bz 0 }
+	local.bw = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.a local.bz "camo_woodland"
+	local.bd = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.a local.bz "camo_winter"
+	local.bcnt = waitthread coop_mod/mp_finish_map.scr::mpfin_count local.a local.ib
+	println( "^~^~^ MPPROGTEST gun bazooka idx=" + local.ib + " count=" + local.bcnt + " woodland@40=" + local.bw + " (want 1) winter@40=" + local.bd + " (want 0)" )
+
+	//E - the legacy snapshot: a player who held GOLD under the old rule keeps it on a MASTERED gun only
+	local.c.flags["coop_mpUnlocks"] = "|fin:gold|"
+	waitthread mpfin_snapshot local.c
+	local.g0 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.c local.mp40 "gold"
+	waitthread setMasterBit local.c local.i40
+	local.g1 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.c local.mp40 "gold"
+	local.g2 = waitthread coop_mod/mp_finish_map.scr::mpfin_open local.c local.mp40 "chrome"
+	println( "^~^~^ MPPROGTEST gun legacy snap=" + local.c.flags["coop_mpFinLeg"] + " gold(unmastered)=" + local.g0 + " (want 0) gold(mastered)=" + local.g1 + " (want 1) chrome(mastered)=" + local.g2 + " (want 0)" )
+
+	//F - real bot kills fill the counters for ~100 s; then every non-zero gun count of every bot
+	wait 100
+	for( local.p = 1; local.p <= $player.size; local.p++ ){
+		local.q = $player[local.p]
+		if( local.q != NULL ){
+			for( local.j = 0; local.j < level.coop_mpFinIdxN; local.j++ ){
+				local.n = local.q.flags[( "coop_mpGC" + local.j )]
+				if( local.n != NIL && local.n > 0 ){ println( "^~^~^ MPPROGTEST gun final e" + local.q.entnum + " idx=" + local.j + " " + level.coop_mpFinBaseOf[local.j] + " count=" + local.n + " total=" + local.q.flags["coop_mpProgKills"] ) }
+			}
+		}
+	}
+	println( "^~^~^ MPPROGTEST gun done" )
+}end
+
+
+//=========================================================================
 // THE KILL CALLBACK. self = the victim (the player that died). The 11 delegate args, in order:
 //   local.attacker  entity  - who dealt the killing blow (may be world/AI/another player)
 //   local.dmg       float   - damage of the killing blow
@@ -284,11 +355,7 @@ onKill local.attacker local.dmg local.inflictor local.pos local.dir local.norm l
 	if( local.model == NIL ){ local.model = "" }
 	//[killchal-next 2026-10-20] A gun with a FINISH on it is still that gun: map the variant tik back to its base before the class lookup
 	//and the credit, or every kill made with a finished gun counted nothing at all (the class map and the per-gun table know bases only).
-	if( local.model != "" ){
-		waitthread coop_mod/mp_finish_map.scr::mpfin_init
-		local.bm = level.coop_mpFinBase[local.model]
-		if( local.bm != NIL && local.bm != "" ){ local.model = local.bm }
-	}
+	local.model = waitthread mpBaseModel local.model
 
 	local.class = ""
 	if( local.model != "" ){ local.class = waitthread coop_mod/mp_prog_wpnmap.scr::classOf local.model }
@@ -716,6 +783,14 @@ ensureLoaded local.p:{
 	waitthread gunCountsFloor local.p
 }end
 
+
+//A finished gun is still that gun: a variant tik maps back to its base tik (identity for everything else, "" stays "").
+mpBaseModel local.m:{
+	if( local.m == NIL || local.m == "" ){ end "" }
+	waitthread coop_mod/mp_finish_map.scr::mpfin_init
+	local.bm = level.coop_mpFinBase[local.m]
+	if( local.bm != NIL && local.bm != "" ){ end local.bm }
+}end local.m
 
 //=========================================================================
 // [killchal-next 2026-10-20] PER-GUN KILL COUNTS in the carried blob. gun index = mp_finish_map.scr::coop_mpFinIdx; flag coop_mpGC<idx>; 2 base36 chars each
