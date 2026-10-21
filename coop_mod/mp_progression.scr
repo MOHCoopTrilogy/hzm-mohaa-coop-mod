@@ -109,7 +109,7 @@ init:{
 	level.coop_mpStat[23] = "win_buildabase"
 	level.coop_mpStat[24] = "win_prophunt"
 	level.coop_mpStatN = 25
-	level.coop_mpBlobVer = 2
+	level.coop_mpBlobVer = 4
 	//map the 8 class-kill names so mp_statVal routes them to the v1 coop_mpProgC_ store.
 	for( local.ci = 0; local.ci < 8; local.ci++ ){ level.coop_mpClassStat[level.coop_mpProgClasses[local.ci]] = 1 }
 
@@ -282,6 +282,13 @@ onKill local.attacker local.dmg local.inflictor local.pos local.dir local.norm l
 	local.model = ""
 	if( local.wpn != NULL ){ local.model = local.wpn.model }
 	if( local.model == NIL ){ local.model = "" }
+	//[killchal-next 2026-10-20] A gun with a FINISH on it is still that gun: map the variant tik back to its base before the class lookup
+	//and the credit, or every kill made with a finished gun counted nothing at all (the class map and the per-gun table know bases only).
+	if( local.model != "" ){
+		waitthread coop_mod/mp_finish_map.scr::mpfin_init
+		local.bm = level.coop_mpFinBase[local.model]
+		if( local.bm != NIL && local.bm != "" ){ local.model = local.bm }
+	}
 
 	local.class = ""
 	if( local.model != "" ){ local.class = waitthread coop_mod/mp_prog_wpnmap.scr::classOf local.model }
@@ -456,9 +463,19 @@ credit local.p local.class local.model local.mod:{
 		if( local.p == NULL ){ end }
 		local.mi = level.coop_mpFinIdx[local.model]
 		if( local.mi != NIL ){
+			//[killchal-next 2026-10-20] PER-GUN KILLS, PERSISTED (blob v4): this gun's own count. Mastery and every finish rung read it, so a
+			//kill counts the same wherever it was made (the coop twin is challenges.scr wpn_<wid>). The session tally above is no longer the gate.
+			local.gk = ( "coop_mpGC" + local.mi )
+			local.gc = local.p.flags[local.gk]
+			if( local.gc == NIL ){ local.gc = 0 }
+			local.gc = ( local.gc + 1 )
+			if( local.gc > 1295 ){ local.gc = 1295 }
+			local.p.flags[local.gk] = local.gc
 			local.thr = level.coop_mpWpnMasterKills
 			if( local.thr == NIL || local.thr <= 0 ){ local.thr = 25 }
-			if( local.wk >= local.thr ){ waitthread setMasterBit local.p local.mi }
+			if( local.gc >= local.thr ){ waitthread setMasterBit local.p local.mi }
+			if( local.p == NULL ){ end }
+			waitthread coop_mod/mp_finish_map.scr::mpfin_crossed local.p local.mi local.gc
 			if( local.p == NULL ){ end }
 		}
 	}
@@ -513,14 +530,15 @@ setMasterBit local.p local.idx:{
 }end
 
 
-//Assemble the signed body (without the tag) from the player's current in-memory counters. v3 =
+//Assemble the signed body (without the tag) from the player's current in-memory counters. v4 = v3 + the legacy finish snapshot + the per-gun kill
+//counts (inserted before the mastery bitstring, which stays last); v3 =
 //"3;<total>;<8 class counts>;<coop_mpStatN stat counts>;<masterStr>" (v2 = same without the trailing master
 //bitstring; v1 = first 10 fields only). Older blobs still load (mask/stats read as empty/0). The master
 //bitstring is ALWAYS the LAST body field, so it is read position-independently of the stat-vector length.
 buildBody local.p:{
 	local.tot = local.p.flags["coop_mpProgKills"]
 	if( local.tot == NIL ){ local.tot = 0 }
-	local.b = ( "3;" + local.tot )
+	local.b = ( "4;" + local.tot )
 	for( local.i = 0; local.i < 8; local.i++ ){
 		local.c = level.coop_mpProgClasses[local.i]
 		local.b = ( local.b + ";" + waitthread cnt local.p local.c )
@@ -530,6 +548,13 @@ buildBody local.p:{
 		if( local.sv == NIL ){ local.sv = 0 }
 		local.b = ( local.b + ";" + local.sv )
 	}
+	//[killchal-next 2026-10-20] v4: the LEGACY finish snapshot (7 chars, 1 = held when per-gun ladders began) then the per-gun kill counts
+	//(2 base36 chars per gun, mp_finish_map.scr index order), BEFORE the mastery bitstring - which stays the LAST body field.
+	local.lg = local.p.flags["coop_mpFinLeg"]
+	if( local.lg == NIL ){ local.lg = "" }
+	local.b = ( local.b + ";" + local.lg )
+	local.gcs = waitthread gunCountsEncode local.p
+	local.b = ( local.b + ";" + local.gcs )
 	//[bug-2770] v3: the weapon-mastery bitstring is the LAST body field (empty until the first gun is mastered).
 	local.ms = local.p.flags["coop_mpMasterStr"]
 	if( local.ms == NIL ){ local.ms = "" }
@@ -660,7 +685,7 @@ ensureLoaded local.p:{
 				local.p.flags[( "coop_mpProgC_" + level.coop_mpProgClasses[local.i] )] = int( local.f[( local.i + 2 )] )
 			}
 			//[MP CHALLENGES] v2/v3 blobs carry the stat vector after the 10 v1 fields (start index 10).
-			if( local.f[0] == "2" || local.f[0] == "3" ){
+			if( local.f[0] == "2" || local.f[0] == "3" || local.f[0] == "4" ){
 				for( local.i = 0; local.i < level.coop_mpStatN; local.i++ ){
 					local.fi = ( 10 + local.i )
 					if( local.fi < local.f.size ){
@@ -670,14 +695,106 @@ ensureLoaded local.p:{
 			}
 			//[bug-2770] v3 also carries the weapon-mastery bitstring as the LAST body field (read
 			//position-independently of the stat-vector length). v1/v2 blobs have none -> mastered set stays empty.
-			if( local.f[0] == "3" ){
+			if( local.f[0] == "3" || local.f[0] == "4" ){
 				local.p.flags["coop_mpMasterStr"] = local.f[( local.f.size - 1 )]
+			}
+			//[killchal-next 2026-10-20] v4: field 35 = legacy finish snapshot, field 36 = per-gun kill counts
+			if( local.f[0] == "4" && local.f.size >= 38 ){
+				local.p.flags["coop_mpFinLeg"] = local.f[35]
+				local.gcs = local.f[36]
+				waitthread gunCountsDecode local.p local.gcs
 			}
 		}
 	}
 
 	//[slice 4] push the initial unlock + rank state to this player's client (armory padlocks, HUD rank).
 	waitthread applyUnlocks local.p
+	if( local.p == NULL ){ end }
+	//[killchal-next 2026-10-20] first load of a profile that has no v4 snapshot yet: take it (once), and give every gun it was already
+	//MASTERED on at least the mastery count, so a pre-v4 record does not start every gun's ladder from zero.
+	if( local.p.flags["coop_mpFinLeg"] == NIL ){ waitthread mpfin_snapshot local.p }
+	waitthread gunCountsFloor local.p
+}end
+
+
+//=========================================================================
+// [killchal-next 2026-10-20] PER-GUN KILL COUNTS in the carried blob. gun index = mp_finish_map.scr::coop_mpFinIdx; flag coop_mpGC<idx>; 2 base36 chars each
+// (0..1295). The string is coop_mpFinIdxN pairs long; a short string (an older roster) decodes the guns it has and leaves the rest 0.
+//=========================================================================
+gunCountsEncode local.p:{
+	waitthread coop_mod/mp_finish_map.scr::mpfin_init
+	local.al = "0123456789abcdefghijklmnopqrstuvwxyz"
+	local.s = ""
+	for( local.i = 0; local.i < level.coop_mpFinIdxN; local.i++ ){
+		local.c = local.p.flags[( "coop_mpGC" + local.i )]
+		if( local.c == NIL ){ local.c = 0 }
+		if( local.c > 1295 ){ local.c = 1295 }
+		local.hi = int( local.c / 36 )
+		local.lo = ( local.c - ( local.hi * 36 ) )
+		local.s = ( local.s + local.al[local.hi] + local.al[local.lo] )
+	}
+}end local.s
+
+b36val local.ch:{
+	local.al = "0123456789abcdefghijklmnopqrstuvwxyz"
+	for( local.k = 0; local.k < 36; local.k++ ){
+		if( local.al[local.k] == local.ch ){ end local.k }
+	}
+}end 0
+
+gunCountsDecode local.p local.s:{
+	if( local.p == NULL ){ end }
+	if( local.s == NIL ){ end }
+	waitthread coop_mod/mp_finish_map.scr::mpfin_init
+	local.n = ( local.s.size / 2 )
+	if( local.n > level.coop_mpFinIdxN ){ local.n = level.coop_mpFinIdxN }
+	for( local.i = 0; local.i < local.n; local.i++ ){
+		local.c1 = local.s[( local.i * 2 )]
+		local.c2 = local.s[( ( local.i * 2 ) + 1 )]
+		local.hi = waitthread b36val local.c1
+		local.lo = waitthread b36val local.c2
+		local.p.flags[( "coop_mpGC" + local.i )] = ( ( local.hi * 36 ) + local.lo )
+	}
+}end
+
+//A gun the player MASTERED (its bit in coop_mpMasterStr) has had at least the mastery count of kills, whatever an older blob recorded.
+gunCountsFloor local.p:{
+	if( local.p == NULL ){ end }
+	waitthread coop_mod/mp_finish_map.scr::mpfin_init
+	local.ms = local.p.flags["coop_mpMasterStr"]
+	if( local.ms == NIL || local.ms == "" ){ end }
+	local.thr = level.coop_mpWpnMasterKills
+	if( local.thr == NIL || local.thr <= 0 ){ local.thr = 25 }
+	for( local.i = 0; local.i < level.coop_mpFinIdxN; local.i++ ){
+		if( local.i < local.ms.size ){
+			if( local.ms[local.i] == "1" ){
+				local.c = local.p.flags[( "coop_mpGC" + local.i )]
+				if( local.c == NIL || local.c < local.thr ){ local.p.flags[( "coop_mpGC" + local.i )] = local.thr }
+			}
+		}
+	}
+}end
+
+//The LEGACY finish snapshot: which of the 7 finishes (gold chrome blued bloody camo_woodland camo_winter camo_desert) this player holds NOW under the old
+//account-wide rule (mp_challenges.scr::finUnlocked = the fin:<finish> challenge OR the career-kill fallback). Taken once per profile; mp_finish_map.scr::mpfin_open
+//keeps honouring it on every mastered gun, so nothing already earned is re-locked. A finish challenge completed AFTER this opens nothing by itself.
+mpfin_snapshot local.p:{
+	if( local.p == NULL ){ end }
+	local.s = ""
+	local.names[0] = "gold"
+	local.names[1] = "chrome"
+	local.names[2] = "blued"
+	local.names[3] = "bloody"
+	local.names[4] = "camo_woodland"
+	local.names[5] = "camo_winter"
+	local.names[6] = "camo_desert"
+	for( local.i = 0; local.i < 7; local.i++ ){
+		local.u = waitthread coop_mod/mp_challenges.scr::finUnlocked local.p local.names[local.i]
+		local.s = ( local.s + local.u )
+	}
+	local.p.flags["coop_mpFinLeg"] = local.s
+	local.p.flags["coop_mpProgDirty"] = 1
+	println( "^~^~^ MPPROG finsnap e" + local.p.entnum + " legacy=" + local.s )
 }end
 
 
