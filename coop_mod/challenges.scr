@@ -203,6 +203,9 @@ chal_init:{
 	waitthread chal_def "kt_melee"      "combat" "Cold Steel" "Get 15 melee kills"                             "melee"      15  "perk_quickbash"
 	waitthread chal_def "kt_melee_e"    "combat" "Knuckle and Blade"  "Get 45 melee kills"                             "melee"      45  "models/weapons/welrod.tik"
 
+	//[user 2026-10-19, killchal-next] PER-GUN FINISHES now: kills with a gun unlock that gun's finishes (finchal_gen.scr, docs/tools/finish_challenges.py,
+	//25 / 50 / 100 / 175 / 250 / 350 / 500). The seven ACCOUNT-WIDE challenges below are kept byte-for-byte (the Service Record pages are baked from them and the
+	//texture pak is frozen) but they no longer open a finish by themselves: loadout_finOpen honours only the finleg_* snapshot of tokens held BEFORE this update.
 	//[user 2026-08-18] WEAPON FINISHES - each unlocks a skin finish ACCOUNT-WIDE (the reward
 	//string lands in the same pipe store as weapon unlocks; the armory strip and the spawn
 	//resolver both probe it). Applying a finish to a G U N additionally needs that gun's own
@@ -630,15 +633,21 @@ chal_init:{
 	//stamp counts a challenge list the pages do not contain.
 	waitthread coop_mod/mvchal_gen.scr::main
 
+	//[user 2026-10-19, killchal-next] The Service Record pages (and coop_uiB<i>, the stamp below, the medals tally) cover THESE rows only: the per-gun finish
+	//challenges that follow are tracked in the armory (their progress is pushed per slot), not in the baked pages - a new row would change the frozen texture pak.
+	level.coop_chal_srCount = level.coop_chal_count
+	//PER-GUN FINISH LADDERS (finish_challenges.py).
+	waitthread coop_mod/finchal_gen.scr::main
+
 	//[user 2026-08-18] DEPLOYED-TRUTH SELF-TEST: the generated stamp was compiled from the same
 	//challenge list as the Service Record pages. If the live count disagrees, the RUNNING game is
 	//serving a mixed deployment (stale pk3, shadowing pak, partial copy) - a state no tree-level
 	//build gate can see. Machine-parseable so the boot harness fails on it.
 	waitthread coop_mod/gen_sr_stamp.scr::main
-	if( level.coop_srRowsBaked != NIL && level.coop_srRowsBaked != level.coop_chal_count ){
-		println( "^~^~^ SELFTEST FAIL: challenges live " + level.coop_chal_count + " vs SR pages baked " + level.coop_srRowsBaked + " - MIXED DEPLOYMENT" )
+	if( level.coop_srRowsBaked != NIL && level.coop_srRowsBaked != level.coop_chal_srCount ){
+		println( "^~^~^ SELFTEST FAIL: challenges live " + level.coop_chal_srCount + " vs SR pages baked " + level.coop_srRowsBaked + " - MIXED DEPLOYMENT" )
 	}else{
-		println( "^~^~^ SELFTEST OK: SR stamp " + level.coop_srGenBaked + " rows " + level.coop_chal_count )
+		println( "^~^~^ SELFTEST OK: SR stamp " + level.coop_srGenBaked + " rows " + level.coop_chal_srCount + " (+" + ( level.coop_chal_count - level.coop_chal_srCount ) + " per-gun finish challenges)" )
 	}
 
 	// category display order + labels for the review printout
@@ -853,6 +862,12 @@ chal_ensure local.player:{
 		local.player.flags["coop_unlockPend"] = ""
 	}
 
+	//[user 2026-10-19, killchal-next] LEGACY FINISH SNAPSHOT (once per profile, marker fingf1): an account finish token held NOW becomes finleg_<fid>,
+	//which loadout_finOpen keeps honouring on every mastered gun (nothing already earned is re-locked). A finish_* token earned AFTER this point opens
+	//nothing by itself - the per-gun ladder (finchal_gen.scr) is the way in. Silent: no toast, no NEW UNLOCKS entry.
+	waitthread chal_finSnapshot local.player local.id
+	waitthread chal_finSeed local.player
+
 	// mark done flags for anything already complete (silent, no toast/regrant)
 	local.i = 0
 	while( local.i < level.coop_chal_count ){
@@ -898,6 +913,56 @@ chal_ensure local.player:{
 	// (chal_flush every 30s) refreshes them safely during play, once the client is interactive. So
 	// the join push was both the crash source AND redundant - removed.
 	// local.player thread chal_ui_export   // <- REMOVED (join-time reliable-command flood)
+}end
+
+
+//=========================================================================
+// [killchal-next] Seed the per-gun finish challenges from the kills the profile already has with that gun (silent: the done flags are set by the pass after).
+// The challenges on one wpn_<wid> stat each count every kill since the profile began, so the largest progress among them is the true count up to its own target.
+//=========================================================================
+chal_finSeed local.player:{
+	if( local.player == NULL ){ end }
+	local.i = level.coop_chal_srCount
+	while( local.i < level.coop_chal_count ){
+		local.cid = level.coop_chal_id[local.i]
+		if( level.coop_finIs[local.cid] == 1 && local.player.flags["coop_chalP_" + local.cid] == NIL ){
+			local.stat = level.coop_chal_stat[local.i]
+			local.m = 0
+			local.cnt = level.coop_chal_statN[local.stat]
+			for( local.k = 0; local.k < local.cnt; local.k++ ){
+				local.j = level.coop_chal_statIdx[local.stat][local.k]
+				local.pj = local.player.flags["coop_chalP_" + level.coop_chal_id[local.j]]
+				if( local.pj != NIL && local.pj > local.m ){ local.m = local.pj }
+			}
+			if( local.m > level.coop_chal_target[local.i] ){ local.m = level.coop_chal_target[local.i] }
+			if( local.m > 0 ){ local.player.flags["coop_chalP_" + local.cid] = local.m }
+		}
+		local.i++
+	}
+}end
+
+
+//=========================================================================
+// [killchal-next] Once per profile: copy the account finish tokens held now to finleg_<fid>, then set the marker fingf1.
+//=========================================================================
+chal_finSnapshot local.player local.id:{
+	if( local.player == NULL ){ end }
+	local.u = local.player.flags["coop_chal_unlocks"]
+	if( local.u == NIL ){ local.u = "" }
+	local.hay = "|" + local.u + "|"
+	if( waitthread coop_mod/main.scr::containsText local.hay "|fingf1|" 0 ){ end }
+	waitthread coop_mod/loadoutskins.scr::skin_init
+	for( local.f = 1; local.f <= 7; local.f++ ){
+		if( waitthread coop_mod/main.scr::containsText local.hay ( "|" + level.coop_skinFinStat[local.f] + "|" ) 0 ){
+			if( local.u == "" ){ local.u = "finleg_" + local.f } else { local.u = local.u + "|finleg_" + local.f }
+		}
+	}
+	if( local.u == "" ){ local.u = "fingf1" } else { local.u = local.u + "|fingf1" }
+	local.player.flags["coop_chal_unlocks"] = local.u
+	if( local.id != NIL && local.id != "" ){
+		setcvar ( "coop_unlocks_" + local.id ) local.u
+		fs_write_content ( "coop_mod/save/unlocks_" + local.id + ".dat" ) local.u
+	}
 }end
 
 
@@ -1025,7 +1090,7 @@ chal_ui_export:{
 	local.i = 0
 	local.pace = 0
 	local.sent = 0
-	while( local.i < level.coop_chal_count && self != NULL ){
+	while( local.i < level.coop_chal_srCount && self != NULL ){
 		local.n = waitthread chal_ui_writeOne self local.i
 		if( local.n == NIL ){ local.n = 0 }
 		local.sent = local.sent + local.n
@@ -1185,6 +1250,8 @@ chal_grant local.player local.idx:{
 		thread chal_notify local.player ("Variant unlocked: " + local.mv)
 	}
 
+	//[user 2026-10-19, killchal-next] a per-gun FINISH has no reward token (nothing for loadout_ui_exportUnlocks to refresh), so re-push the slot chip locks directly
+	if( level.coop_finIs[local.cid] == 1 ){ thread coop_mod/loadoutpick.scr::loadout_slotLocksExport local.player }
 	//[401] HZM MEDALS - a completed challenge may just have finished its whole category
 	thread coop_mod/medals.scr::medal_checkAll local.player
 	//[user 07-16] a just-earned weapon lights up the armory without a reconnect
@@ -1370,6 +1437,7 @@ chal_widFromModel local.m:{
 	//token that happens to appear in the path. Verified neither path contains any of the other
 	//45 tokens, but position is the cheap guarantee.
 	if( waitthread coop_mod/main.scr::containsText local.m "mauser_c96" 0 ){ local.wid = "c96" }
+	else if( waitthread coop_mod/main.scr::containsText local.m "fg42" 0 ){ local.wid = "fg42" }	//[killchal 2026-10-20] FG 42 + its Iron Sights variant count on ONE stat (wpn_fg42); finishes ride it
 	else if( waitthread coop_mod/main.scr::containsText local.m "dp28" 0 ){ local.wid = "dp28" }
 	else if( waitthread coop_mod/main.scr::containsText local.m "m10_revolver" 0 ){ local.wid = "m10" }
 	else if( waitthread coop_mod/main.scr::containsText local.m "johnson" 0 ){ local.wid = "johnson" }
