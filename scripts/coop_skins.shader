@@ -9255,9 +9255,9 @@ coop_skin_thompsonsmg_bloody_1
 
 coop_skin_thompsonsmg_bloody_0
 {
-	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_bloody.jpg
+	qer_editorimage textures/models/weapons/ThompsonSMG/thompsite.tga
 	{
-		map textures/coop_skins/thompsonsmg/thompsite_bloody.jpg
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 }
@@ -9273,9 +9273,9 @@ coop_skin_thompsonsmg_camo_woodland_1
 
 coop_skin_thompsonsmg_camo_woodland_0
 {
-	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_woodland.jpg
+	qer_editorimage textures/models/weapons/ThompsonSMG/thompsite.tga
 	{
-		map textures/coop_skins/thompsonsmg/thompsite_camo_woodland.jpg
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 }
@@ -9291,9 +9291,9 @@ coop_skin_thompsonsmg_camo_winter_1
 
 coop_skin_thompsonsmg_camo_winter_0
 {
-	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_winter.jpg
+	qer_editorimage textures/models/weapons/ThompsonSMG/thompsite.tga
 	{
-		map textures/coop_skins/thompsonsmg/thompsite_camo_winter.jpg
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 }
@@ -9309,9 +9309,9 @@ coop_skin_thompsonsmg_camo_desert_1
 
 coop_skin_thompsonsmg_camo_desert_0
 {
-	qer_editorimage textures/coop_skins/thompsonsmg/thompsite_camo_desert.jpg
+	qer_editorimage textures/models/weapons/ThompsonSMG/thompsite.tga
 	{
-		map textures/coop_skins/thompsonsmg/thompsite_camo_desert.jpg
+		map textures/models/weapons/ThompsonSMG/thompsite.tga
 		rgbGen lightingSpherical
 	}
 }
