@@ -2,21 +2,23 @@
 // alarm.scr - HZM coop ALARM STATE (2026-10-15, docs/proposals/alarm_counterattack_2026-10-15)
 //
 // A guard who has fought a player for 2 s runs to a nearby alarm switch (the run is visible, killing him cancels the pull),
-// pulls it, a siren sounds map-wide and planned waves (counter_squad via rnf_entry) arrive until a switch or siren is shot
-// or 90 s pass with nobody seeing a player. Max coop_alarmMaxPulls (2) pulls a mission, none in the first 60 s.
+// pulls it, a siren sounds map-wide and planned waves (counter_squad via rnf_entry) arrive until a player DEACTIVATES it (look at a
+// switch or siren, hold USE for coop_alarmHoldSec, 3 s; [alarmhold 2026-10-21] replaces shooting the panel) or 90 s pass with nobody
+// seeing a player. Max coop_alarmMaxPulls (2) pulls a mission, none in the first 60 s.
 //
 //   coop_alarm 0/1            master switch, DEFAULT 0 (off until the playtest proves it)
 //   coop_alarmMaxPulls 2      pulls per mission
 //   coop_alarmWaveGap 40      seconds between alarm waves (first one 10 s after the pull)
 //   coop_alarmCap 8           most alarm-wave men alive at once
 //   coop_alarmDebug 1         greppable ^~^~^ ALARM lines
+//   coop_alarmHoldSec 3       seconds the USE key is held at a switch / siren to deactivate the live alarm
 //   coop_alarmMg 1            each pull also brings ONE MG42 team (reinf_mg.scr, hidden entry) in wave 1 or 2; 0 = off
 //
 // Two sources of switches:
 //   placed  : coop_mod/alarmpoints.scr::place <map> spawns the switch (+ siren bell) models authored with coop_build
 //             (docs/tools/alarm_points.json -> gen_alarm_points.py). level.coop_alarmMap = 1 when a map has points.
 //   adopted : m4l3 keeps its vanilla global/alarmer.scr (guard runs, bell, alarmspawner men); this file only adds the waves and
-//             the shoot-it-to-silence rule on the vanilla $alarm switches.
+//             the hold-USE deactivate on the vanilla $alarm switches.
 //
 // HARD BLOCKS (the module never starts, no ^~^~^ ALARM line): level.coop_stealthMap, level.coop_enableDisguises,
 // maps that own an alarm (m1l2a m2l3 m6l1c m6l2a m6l3a e1l4 m2l2a), MP arena runs, map-tester runs, lobbies / briefings.
@@ -232,16 +234,6 @@ alm_emit local.pos local.wide:{
 }end
 
 
-// make an entity shootable (rnf_radio_shootable recipe: health + small hull + takedamage; the damage is read off its health)
-alm_shootable local.ent:{
-	if( local.ent == NULL || local.ent == NIL ){ end }
-	local.ent.health = 1000
-	local.ent setsize ( -12 -12 -4 ) ( 12 12 28 )
-	local.ent solid
-	local.ent takedamage
-}end
-
-
 // the alarm goes live
 alm_start local.sw:{
 	level.coop_alarmLive = 1
@@ -251,7 +243,7 @@ alm_start local.sw:{
 	level.alarm = 1
 	if( local.sw != NULL && local.sw != NIL ){ local.sw anim turnon }
 	waitthread alm_log ( "LIVE pull " + level.coop_alarmPulls + " switches=" + level.coop_alarmSwN )
-	waitthread coop_mod/feed.scr::feed_all 0 "alarm_on" "ALARM - reinforcements are coming: shoot the siren or the switch"
+	waitthread coop_mod/feed.scr::feed_all 0 "alarm_on" "ALARM - reinforcements are coming: hold USE at an alarm switch to deactivate it"
 	if( level.coop_alarmAdopt != 1 ){
 		// siren: one levelwide bed + a positional emitter at every switch and bell
 		local.so = local.sw.origin
@@ -271,17 +263,10 @@ alm_start local.sw:{
 			}
 		}
 	}
-	for( local.i = 1; local.i <= level.coop_alarmSwN; local.i++ ){
-		local.es = level.coop_alarmSw[local.i]
-		waitthread alm_shootable local.es
-	}
-	for( local.i = 1; local.i <= level.coop_alarmBellN; local.i++ ){
-		local.es = level.coop_alarmBell[local.i]
-		waitthread alm_shootable local.es
-	}
 	thread coop_mod/alarmsnipers.scr::asn_alarm level.coop_alarmPulls	//[alarm snipers 2026-10-18] high-position snipers for this pull (gated by coop_alarmSnipers)
 	thread alm_wake local.sw
 	thread alm_waves
+	thread alm_hold_watch
 	thread coop_mod/alarmveh.scr::av_pull
 	thread alm_watch_off
 }end
@@ -390,31 +375,11 @@ alm_liveswitch:{
 }end local.o
 
 
-// shut-off: a shot switch / bell, 90 s with no guard seeing a player, or no one left alive
+// shut-off (besides a player's hold-USE deactivate, alm_deactivate): 90 s with no guard seeing a player, or no one left alive
 alm_watch_off:{
 	local.pull = level.coop_alarmPulls
 	while( level.coop_alarmLive == 1 && level.coop_alarmPulls == local.pull ){
 		wait 0.5
-		for( local.i = 1; local.i <= level.coop_alarmSwN; local.i++ ){
-			local.e = level.coop_alarmSw[local.i]
-			if( local.e == NULL || local.e == NIL ){ continue }
-			if( local.e.coop_almDead == 1 ){ continue }
-			if( local.e.health < 700 ){
-				waitthread alm_destroy local.e "switch"
-				waitthread alm_off "switch shot"
-				end
-			}
-		}
-		for( local.i = 1; local.i <= level.coop_alarmBellN; local.i++ ){
-			local.e = level.coop_alarmBell[local.i]
-			if( local.e == NULL || local.e == NIL ){ continue }
-			if( local.e.coop_almDead == 1 ){ continue }
-			if( local.e.health < 700 ){
-				waitthread alm_destroy local.e "bell"
-				waitthread alm_off "siren shot"
-				end
-			}
-		}
 		if( level.coop_alarmAdopt == 1 && level.alarm_on != 1 ){
 			waitthread alm_off "switched off with USE"
 			end
@@ -431,23 +396,163 @@ alm_watch_off:{
 }end
 
 
-// a shot switch / bell goes up in a small blast and stays dead
-alm_destroy local.e local.what:{
-	local.e.coop_almDead = 1
-	local.pos = local.e.origin
-	local.fx = spawn "models/emitters/explosion_bombwall.tik"
-	local.fx.origin = local.pos
-	local.fx notsolid
-	local.fx anim start
-	if( level.coop_alarmAdopt == 1 ){
-		// the vanilla switches are referenced by global/alarmer.scr: leave the entity, just make it harmless
-		local.e nodamage
-		local.e notsolid
-		local.e.health = 1000
-	} else {
-		local.e remove
+//=========================================================================
+// DEACTIVATE BY HOLDING USE  [alarmhold 2026-10-21, user: "instead of blowing up the alarm, an action button to deactivate it that you hold down"]
+// Recipe copied from cover.scr (sandbag remove): look at a switch or siren within reach -> actprompt icon "alarmoff:hold" (the cgame draws the
+// icon, the bound USE key or pad glyph, and the HD ring from coop_actH); holding USE fills the ring (huddraw pair coop_hold_track + coop_hold_use,
+// slots 190 / 191, fraction only) over coop_alarmHoldSec (3 s). Release, damage, leaving reach, going down, or somebody else finishing first
+// cancels. Completing = alm_off, the ONE shut-off every consumer already reads (waves, snipers, vehicle, challenges, carry), so it counts exactly
+// as the old shot panel did. Any living player can do it; the ring is the holder's own, everybody gets the "silenced by <name>" feed line.
+//=========================================================================
+
+// distance of a switch / siren from the player when it is within reach AND roughly in view, else 99999
+alm_aimdist local.e local.eye local.fwd local.reach:{
+	local.r = 99999
+	if( local.e == NULL || local.e == NIL ){ end local.r }
+	local.v = local.e.origin - local.eye
+	local.d = vector_length local.v
+	if( local.d > local.reach ){ end local.r }
+	local.dot = ( local.v[0] * local.fwd[0] ) + ( local.v[1] * local.fwd[1] ) + ( local.v[2] * local.fwd[2] )
+	if( local.dot <= 0 ){ end local.r }
+	local.perp2 = ( local.d * local.d ) - ( local.dot * local.dot )
+	if( local.perp2 > 2500 ){ end local.r }
+	local.r = local.d
+}end local.r
+
+
+// the nearest switch / siren the player is at, else NIL
+alm_aimed local.p local.reach:{
+	local.best = NIL
+	local.bd = 99998
+	local.eye = local.p.origin + ( 0 0 56 )
+	local.fwd = angles_toforward local.p.viewangles
+	for( local.i = 1; local.i <= level.coop_alarmSwN; local.i++ ){
+		local.e = level.coop_alarmSw[local.i]
+		local.d = waitthread alm_aimdist local.e local.eye local.fwd local.reach
+		if( local.d < local.bd ){
+			local.bd = local.d
+			local.best = local.e
+		}
 	}
-	waitthread alm_log ( "destroyed " + local.what + " at " + local.pos )
+	for( local.i = 1; local.i <= level.coop_alarmBellN; local.i++ ){
+		local.e = level.coop_alarmBell[local.i]
+		local.d = waitthread alm_aimdist local.e local.eye local.fwd local.reach
+		if( local.d < local.bd ){
+			local.bd = local.d
+			local.best = local.e
+		}
+	}
+}end local.best
+
+
+// one player's monitor for one pull
+alm_hold_mon local.p local.pull:{
+	local.sec = 3
+	if( getcvar( "coop_alarmHoldSec" ) != "" ){ local.sec = float( getcvar( "coop_alarmHoldSec" ) ) }
+	if( local.sec < 0.5 ){ local.sec = 0.5 }
+	local.shown = 0
+	ihuddraw_virtualsize local.p 190 1
+	ihuddraw_align       local.p 190 center bottom
+	ihuddraw_shader      local.p 190 "textures/hud/coop_hold_track"
+	ihuddraw_rect        local.p 190 -60 -38 120 8
+	ihuddraw_alpha       local.p 190 0
+	ihuddraw_virtualsize local.p 191 1
+	ihuddraw_align       local.p 191 center bottom
+	ihuddraw_shader      local.p 191 "textures/hud/coop_hold_use"
+	ihuddraw_rect        local.p 191 -60 -38 0 8
+	ihuddraw_alpha       local.p 191 0
+	while( local.p != NULL && level.coop_alarmLive == 1 && level.coop_alarmPulls == local.pull ){
+		wait 0.15
+		if( local.p == NULL ){ end }
+		if( local.p.flags["coop_isActive"] != 1 || !isAlive local.p || local.p.flags["coop_dbno_active"] == 1 ){
+			if( local.shown ){
+				waitthread coop_mod/actprompt.scr::hide local.p "alarmhold"
+				local.shown = 0
+			}
+			continue
+		}
+		local.fx = waitthread alm_aimed local.p 100
+		if( local.fx == NIL ){
+			if( local.shown ){
+				waitthread coop_mod/actprompt.scr::hide local.p "alarmhold"
+				local.shown = 0
+			}
+			continue
+		}
+		if( !local.shown ){
+			waitthread coop_mod/actprompt.scr::show local.p "alarmhold" "alarmoff:hold"
+			local.shown = 1
+		}
+		if( local.p.useheld != 1 || local.p.flags["coop_medkit_in_use"] == 1 ){ continue }
+		// the hold
+		local.h0 = local.p.health
+		local.t0 = level.time
+		local.res = "done"
+		waitthread coop_mod/hudresend.scr::claim local.p 190 191
+		ihuddraw_alpha local.p 190 0.8
+		ihuddraw_alpha local.p 191 0.9
+		waitthread coop_mod/actprompt.scr::hold local.p ( local.sec * 1000 )
+		waitthread alm_log ( "hold start E" + local.p.entnum )
+		while( ( level.time - local.t0 ) < local.sec ){
+			waitframe
+			if( local.p == NULL ){ end }
+			if( level.coop_alarmLive != 1 || level.coop_alarmPulls != local.pull ){ local.res = "alarm already off"; break }
+			if( local.p.flags["coop_isActive"] != 1 || !isAlive local.p || local.p.flags["coop_dbno_active"] == 1 ){ local.res = "down"; break }
+			if( local.p.useheld != 1 ){ local.res = "released"; break }
+			if( local.p.health < local.h0 ){ local.res = "damaged"; break }
+			if( ( waitthread alm_aimed local.p 120 ) == NIL ){ local.res = "out of reach"; break }
+			ihuddraw_rect local.p 191 -60 -38 ( 120 * ( level.time - local.t0 ) / local.sec ) 8
+		}
+		if( local.p == NULL ){ end }
+		waitthread coop_mod/actprompt.scr::holdend local.p
+		ihuddraw_alpha local.p 190 0
+		ihuddraw_alpha local.p 191 0
+		ihuddraw_rect  local.p 191 -60 -38 0 8
+		thread coop_mod/hudresend.scr::resend local.p 190 191 0
+		if( local.res == "done" ){
+			waitthread alm_deactivate local.p local.fx
+			waitthread coop_mod/actprompt.scr::hide local.p "alarmhold"
+			local.shown = 0
+		} else {
+			waitthread alm_log ( "hold cancelled E" + local.p.entnum + ": " + local.res )
+		}
+	}
+	if( local.p != NULL ){
+		waitthread coop_mod/actprompt.scr::hide local.p "alarmhold"
+		ihuddraw_alpha local.p 190 0
+		ihuddraw_alpha local.p 191 0
+		thread coop_mod/hudresend.scr::resend local.p 190 191 0
+		local.p.flags["coop_almHM"] = 0
+	}
+}end
+
+
+// started with each live alarm: a monitor for every active player, including ones who join mid-alarm
+alm_hold_watch:{
+	local.pull = level.coop_alarmPulls
+	while( level.coop_alarmLive == 1 && level.coop_alarmPulls == local.pull ){
+		if( $player != NULL && $player != NIL ){
+			for( local.i = 1; local.i <= $player.size; local.i++ ){
+				local.p = $player[local.i]
+				if( local.p == NULL || local.p == NIL ){ continue }
+				if( local.p.flags["coop_isActive"] != 1 ){ continue }
+				if( local.p.flags["coop_almHM"] == local.pull ){ continue }
+				local.p.flags["coop_almHM"] = local.pull
+				thread alm_hold_mon local.p local.pull
+			}
+		}
+		wait 1
+	}
+}end
+
+
+// the hold completed: click, then the one shut-off
+alm_deactivate local.p local.e:{
+	if( level.coop_alarmLive != 1 ){ end }
+	if( local.e != NULL && local.e != NIL ){ local.e playsound alarm_switch }
+	level.coop_alarmBy = local.p.netname
+	waitthread alm_log ( "DEACTIVATED by E" + local.p.entnum + " (" + local.p.netname + ")" )
+	waitthread alm_off "deactivated by a player (hold USE)"
 }end
 
 
@@ -481,11 +586,14 @@ alm_off local.why:{
 		level.alarm_on = 0
 		if( level.alarm_sound != NULL && level.alarm_sound != NIL ){ level.alarm_sound stoploopsound }
 	}
-	waitthread coop_mod/feed.scr::feed_all 0 "alarm_off" "The alarm has been silenced"
+	local.ft = "The alarm has been silenced"
+	if( level.coop_alarmBy != NIL && level.coop_alarmBy != "" ){ local.ft = local.ft + " by " + level.coop_alarmBy }
+	level.coop_alarmBy = ""
+	waitthread coop_mod/feed.scr::feed_all 0 "alarm_off" local.ft
 }end
 
 
-// ADOPTED MODE (m4l3): the vanilla alarmer raises the alarm; this adds the waves and the shoot-to-silence rule
+// ADOPTED MODE (m4l3): the vanilla alarmer raises the alarm; this adds the waves and the hold-USE deactivate
 alm_adopt_watch:{
 	local.maxp = 2
 	if( getcvar( "coop_alarmMaxPulls" ) != "" ){ local.maxp = int( getcvar( "coop_alarmMaxPulls" ) ) }
